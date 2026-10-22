@@ -537,6 +537,78 @@ var (
 			},
 		},
 	}
+	// AgentLifecycleCursorsColumns holds the columns for the "agent_lifecycle_cursors" table.
+	AgentLifecycleCursorsColumns = []*schema.Column{
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "transition_revision", Type: field.TypeInt64, Default: 0},
+		{Name: "metadata_revision", Type: field.TypeInt64, Default: 0},
+		{Name: "metadata_digest", Type: field.TypeString, Default: ""},
+		{Name: "last_fingerprint", Type: field.TypeString, Default: ""},
+		{Name: "last_deleted", Type: field.TypeBool, Default: false},
+		{Name: "open_run", Type: field.TypeString, Default: ""},
+		{Name: "open_run_generation", Type: field.TypeString, Default: ""},
+		{Name: "open_run_metadata_revision", Type: field.TypeInt64, Default: 0},
+		{Name: "pending_run_change_at", Type: field.TypeTime, Nullable: true},
+		{Name: "reincarnation_base_run_id", Type: field.TypeString, Default: ""},
+		{Name: "pending_adopted_from", Type: field.TypeString, Default: ""},
+		{Name: "pending_adopted_at", Type: field.TypeTime, Nullable: true},
+		{Name: "pending_adoption_source", Type: field.TypeString, Default: ""},
+		{Name: "creator_principal_type", Type: field.TypeString, Default: ""},
+		{Name: "creator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// AgentLifecycleCursorsTable holds the schema information for the "agent_lifecycle_cursors" table.
+	AgentLifecycleCursorsTable = &schema.Table{
+		Name:       "agent_lifecycle_cursors",
+		Columns:    AgentLifecycleCursorsColumns,
+		PrimaryKey: []*schema.Column{AgentLifecycleCursorsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentlifecyclecursor_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentLifecycleCursorsColumns[1]},
+			},
+		},
+	}
+	// AgentLifecycleOutboxColumns holds the columns for the "agent_lifecycle_outbox" table.
+	AgentLifecycleOutboxColumns = []*schema.Column{
+		{Name: "seq", Type: field.TypeInt64, Increment: true},
+		{Name: "event_id", Type: field.TypeString, Unique: true},
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "transition_revision", Type: field.TypeInt64},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "permanent_failures", Type: field.TypeInt, Default: 0},
+		{Name: "next_attempt_at", Type: field.TypeTime},
+		{Name: "lease_owner", Type: field.TypeString, Default: ""},
+		{Name: "lease_until", Type: field.TypeTime, Nullable: true},
+		{Name: "last_error", Type: field.TypeString, Size: 256, Default: ""},
+	}
+	// AgentLifecycleOutboxTable holds the schema information for the "agent_lifecycle_outbox" table.
+	AgentLifecycleOutboxTable = &schema.Table{
+		Name:       "agent_lifecycle_outbox",
+		Columns:    AgentLifecycleOutboxColumns,
+		PrimaryKey: []*schema.Column{AgentLifecycleOutboxColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentlifecycleoutbox_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentLifecycleOutboxColumns[2]},
+			},
+			{
+				Name:    "agentlifecycleoutbox_next_attempt_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentLifecycleOutboxColumns[8]},
+			},
+			{
+				Name:    "agentlifecycleoutbox_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentLifecycleOutboxColumns[5]},
+			},
+		},
+	}
 	// AgentRecoveriesColumns holds the columns for the "agent_recoveries" table.
 	AgentRecoveriesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
@@ -3220,6 +3292,8 @@ var (
 		AgentDelegationGrantsTable,
 		AgentHoldsTable,
 		AgentIdentityKeysTable,
+		AgentLifecycleCursorsTable,
+		AgentLifecycleOutboxTable,
 		AgentRecoveriesTable,
 		AgentReincarnationsTable,
 		AgentServiceAccountAssignmentsTable,
@@ -3322,6 +3396,12 @@ func init() {
 	AgentHoldsTable.ForeignKeys[0].RefTable = AgentsTable
 	AgentHoldsTable.Annotation = &entsql.Annotation{
 		Table: "agent_holds",
+	}
+	AgentLifecycleCursorsTable.Annotation = &entsql.Annotation{
+		Table: "agent_lifecycle_cursors",
+	}
+	AgentLifecycleOutboxTable.Annotation = &entsql.Annotation{
+		Table: "agent_lifecycle_outbox",
 	}
 	AgentSessionMetricsTable.Annotation = &entsql.Annotation{
 		Table: "agent_session_metrics",

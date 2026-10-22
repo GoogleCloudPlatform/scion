@@ -21,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -165,6 +167,8 @@ func checkColumn(t, c string) error {
 			agentdelegationgrant.Table:          agentdelegationgrant.ValidColumn,
 			agenthold.Table:                     agenthold.ValidColumn,
 			agentidentitykey.Table:              agentidentitykey.ValidColumn,
+			agentlifecyclecursor.Table:          agentlifecyclecursor.ValidColumn,
+			agentlifecycleoutbox.Table:          agentlifecycleoutbox.ValidColumn,
 			agentrecovery.Table:                 agentrecovery.ValidColumn,
 			agentreincarnation.Table:            agentreincarnation.ValidColumn,
 			agentserviceaccountassignment.Table: agentserviceaccountassignment.ValidColumn,

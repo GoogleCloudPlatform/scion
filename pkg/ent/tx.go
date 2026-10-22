@@ -30,6 +30,10 @@ type Tx struct {
 	AgentHold *AgentHoldClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
 	AgentIdentityKey *AgentIdentityKeyClient
+	// AgentLifecycleCursor is the client for interacting with the AgentLifecycleCursor builders.
+	AgentLifecycleCursor *AgentLifecycleCursorClient
+	// AgentLifecycleOutbox is the client for interacting with the AgentLifecycleOutbox builders.
+	AgentLifecycleOutbox *AgentLifecycleOutboxClient
 	// AgentRecovery is the client for interacting with the AgentRecovery builders.
 	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
@@ -320,6 +324,8 @@ func (tx *Tx) init() {
 	tx.AgentDelegationGrant = NewAgentDelegationGrantClient(tx.config)
 	tx.AgentHold = NewAgentHoldClient(tx.config)
 	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
+	tx.AgentLifecycleCursor = NewAgentLifecycleCursorClient(tx.config)
+	tx.AgentLifecycleOutbox = NewAgentLifecycleOutboxClient(tx.config)
 	tx.AgentRecovery = NewAgentRecoveryClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
 	tx.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(tx.config)

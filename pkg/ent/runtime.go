@@ -15,6 +15,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -519,6 +521,86 @@ func init() {
 	agentidentitykeyDescID := agentidentitykeyFields[0].Descriptor()
 	// agentidentitykey.DefaultID holds the default value on creation for the id field.
 	agentidentitykey.DefaultID = agentidentitykeyDescID.Default.(func() uuid.UUID)
+	agentlifecyclecursorFields := schema.AgentLifecycleCursor{}.Fields()
+	_ = agentlifecyclecursorFields
+	// agentlifecyclecursorDescTransitionRevision is the schema descriptor for transition_revision field.
+	agentlifecyclecursorDescTransitionRevision := agentlifecyclecursorFields[2].Descriptor()
+	// agentlifecyclecursor.DefaultTransitionRevision holds the default value on creation for the transition_revision field.
+	agentlifecyclecursor.DefaultTransitionRevision = agentlifecyclecursorDescTransitionRevision.Default.(int64)
+	// agentlifecyclecursorDescMetadataRevision is the schema descriptor for metadata_revision field.
+	agentlifecyclecursorDescMetadataRevision := agentlifecyclecursorFields[3].Descriptor()
+	// agentlifecyclecursor.DefaultMetadataRevision holds the default value on creation for the metadata_revision field.
+	agentlifecyclecursor.DefaultMetadataRevision = agentlifecyclecursorDescMetadataRevision.Default.(int64)
+	// agentlifecyclecursorDescMetadataDigest is the schema descriptor for metadata_digest field.
+	agentlifecyclecursorDescMetadataDigest := agentlifecyclecursorFields[4].Descriptor()
+	// agentlifecyclecursor.DefaultMetadataDigest holds the default value on creation for the metadata_digest field.
+	agentlifecyclecursor.DefaultMetadataDigest = agentlifecyclecursorDescMetadataDigest.Default.(string)
+	// agentlifecyclecursorDescLastFingerprint is the schema descriptor for last_fingerprint field.
+	agentlifecyclecursorDescLastFingerprint := agentlifecyclecursorFields[5].Descriptor()
+	// agentlifecyclecursor.DefaultLastFingerprint holds the default value on creation for the last_fingerprint field.
+	agentlifecyclecursor.DefaultLastFingerprint = agentlifecyclecursorDescLastFingerprint.Default.(string)
+	// agentlifecyclecursorDescLastDeleted is the schema descriptor for last_deleted field.
+	agentlifecyclecursorDescLastDeleted := agentlifecyclecursorFields[6].Descriptor()
+	// agentlifecyclecursor.DefaultLastDeleted holds the default value on creation for the last_deleted field.
+	agentlifecyclecursor.DefaultLastDeleted = agentlifecyclecursorDescLastDeleted.Default.(bool)
+	// agentlifecyclecursorDescOpenRun is the schema descriptor for open_run field.
+	agentlifecyclecursorDescOpenRun := agentlifecyclecursorFields[7].Descriptor()
+	// agentlifecyclecursor.DefaultOpenRun holds the default value on creation for the open_run field.
+	agentlifecyclecursor.DefaultOpenRun = agentlifecyclecursorDescOpenRun.Default.(string)
+	// agentlifecyclecursorDescOpenRunGeneration is the schema descriptor for open_run_generation field.
+	agentlifecyclecursorDescOpenRunGeneration := agentlifecyclecursorFields[8].Descriptor()
+	// agentlifecyclecursor.DefaultOpenRunGeneration holds the default value on creation for the open_run_generation field.
+	agentlifecyclecursor.DefaultOpenRunGeneration = agentlifecyclecursorDescOpenRunGeneration.Default.(string)
+	// agentlifecyclecursorDescOpenRunMetadataRevision is the schema descriptor for open_run_metadata_revision field.
+	agentlifecyclecursorDescOpenRunMetadataRevision := agentlifecyclecursorFields[9].Descriptor()
+	// agentlifecyclecursor.DefaultOpenRunMetadataRevision holds the default value on creation for the open_run_metadata_revision field.
+	agentlifecyclecursor.DefaultOpenRunMetadataRevision = agentlifecyclecursorDescOpenRunMetadataRevision.Default.(int64)
+	// agentlifecyclecursorDescReincarnationBaseRunID is the schema descriptor for reincarnation_base_run_id field.
+	agentlifecyclecursorDescReincarnationBaseRunID := agentlifecyclecursorFields[11].Descriptor()
+	// agentlifecyclecursor.DefaultReincarnationBaseRunID holds the default value on creation for the reincarnation_base_run_id field.
+	agentlifecyclecursor.DefaultReincarnationBaseRunID = agentlifecyclecursorDescReincarnationBaseRunID.Default.(string)
+	// agentlifecyclecursorDescPendingAdoptedFrom is the schema descriptor for pending_adopted_from field.
+	agentlifecyclecursorDescPendingAdoptedFrom := agentlifecyclecursorFields[12].Descriptor()
+	// agentlifecyclecursor.DefaultPendingAdoptedFrom holds the default value on creation for the pending_adopted_from field.
+	agentlifecyclecursor.DefaultPendingAdoptedFrom = agentlifecyclecursorDescPendingAdoptedFrom.Default.(string)
+	// agentlifecyclecursorDescPendingAdoptionSource is the schema descriptor for pending_adoption_source field.
+	agentlifecyclecursorDescPendingAdoptionSource := agentlifecyclecursorFields[14].Descriptor()
+	// agentlifecyclecursor.DefaultPendingAdoptionSource holds the default value on creation for the pending_adoption_source field.
+	agentlifecyclecursor.DefaultPendingAdoptionSource = agentlifecyclecursorDescPendingAdoptionSource.Default.(string)
+	// agentlifecyclecursorDescCreatorPrincipalType is the schema descriptor for creator_principal_type field.
+	agentlifecyclecursorDescCreatorPrincipalType := agentlifecyclecursorFields[15].Descriptor()
+	// agentlifecyclecursor.DefaultCreatorPrincipalType holds the default value on creation for the creator_principal_type field.
+	agentlifecyclecursor.DefaultCreatorPrincipalType = agentlifecyclecursorDescCreatorPrincipalType.Default.(string)
+	// agentlifecyclecursorDescCreatorPrincipalID is the schema descriptor for creator_principal_id field.
+	agentlifecyclecursorDescCreatorPrincipalID := agentlifecyclecursorFields[16].Descriptor()
+	// agentlifecyclecursor.DefaultCreatorPrincipalID holds the default value on creation for the creator_principal_id field.
+	agentlifecyclecursor.DefaultCreatorPrincipalID = agentlifecyclecursorDescCreatorPrincipalID.Default.(string)
+	// agentlifecyclecursorDescUpdatedAt is the schema descriptor for updated_at field.
+	agentlifecyclecursorDescUpdatedAt := agentlifecyclecursorFields[17].Descriptor()
+	// agentlifecyclecursor.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	agentlifecyclecursor.DefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.Default.(func() time.Time)
+	// agentlifecyclecursor.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	agentlifecyclecursor.UpdateDefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.UpdateDefault.(func() time.Time)
+	agentlifecycleoutboxFields := schema.AgentLifecycleOutbox{}.Fields()
+	_ = agentlifecycleoutboxFields
+	// agentlifecycleoutboxDescAttempts is the schema descriptor for attempts field.
+	agentlifecycleoutboxDescAttempts := agentlifecycleoutboxFields[6].Descriptor()
+	// agentlifecycleoutbox.DefaultAttempts holds the default value on creation for the attempts field.
+	agentlifecycleoutbox.DefaultAttempts = agentlifecycleoutboxDescAttempts.Default.(int)
+	// agentlifecycleoutboxDescPermanentFailures is the schema descriptor for permanent_failures field.
+	agentlifecycleoutboxDescPermanentFailures := agentlifecycleoutboxFields[7].Descriptor()
+	// agentlifecycleoutbox.DefaultPermanentFailures holds the default value on creation for the permanent_failures field.
+	agentlifecycleoutbox.DefaultPermanentFailures = agentlifecycleoutboxDescPermanentFailures.Default.(int)
+	// agentlifecycleoutboxDescLeaseOwner is the schema descriptor for lease_owner field.
+	agentlifecycleoutboxDescLeaseOwner := agentlifecycleoutboxFields[9].Descriptor()
+	// agentlifecycleoutbox.DefaultLeaseOwner holds the default value on creation for the lease_owner field.
+	agentlifecycleoutbox.DefaultLeaseOwner = agentlifecycleoutboxDescLeaseOwner.Default.(string)
+	// agentlifecycleoutboxDescLastError is the schema descriptor for last_error field.
+	agentlifecycleoutboxDescLastError := agentlifecycleoutboxFields[11].Descriptor()
+	// agentlifecycleoutbox.DefaultLastError holds the default value on creation for the last_error field.
+	agentlifecycleoutbox.DefaultLastError = agentlifecycleoutboxDescLastError.Default.(string)
+	// agentlifecycleoutbox.LastErrorValidator is a validator for the "last_error" field. It is called by the builders before save.
+	agentlifecycleoutbox.LastErrorValidator = agentlifecycleoutboxDescLastError.Validators[0].(func(string) error)
 	agentrecoveryFields := schema.AgentRecovery{}.Fields()
 	_ = agentrecoveryFields
 	// agentrecoveryDescBrokerID is the schema descriptor for broker_id field.

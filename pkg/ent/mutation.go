@@ -21,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecycleoutbox"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
@@ -120,6 +122,8 @@ const (
 	TypeAgentDelegationGrant          = "AgentDelegationGrant"
 	TypeAgentHold                     = "AgentHold"
 	TypeAgentIdentityKey              = "AgentIdentityKey"
+	TypeAgentLifecycleCursor          = "AgentLifecycleCursor"
+	TypeAgentLifecycleOutbox          = "AgentLifecycleOutbox"
 	TypeAgentRecovery                 = "AgentRecovery"
 	TypeAgentReincarnation            = "AgentReincarnation"
 	TypeAgentServiceAccountAssignment = "AgentServiceAccountAssignment"
@@ -17310,6 +17314,2341 @@ func (m *AgentIdentityKeyMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentIdentityKeyMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AgentIdentityKey edge %s", name)
+}
+
+// AgentLifecycleCursorMutation represents an operation that mutates the AgentLifecycleCursor nodes in the graph.
+type AgentLifecycleCursorMutation struct {
+	config
+	op                            Op
+	typ                           string
+	id                            *uuid.UUID
+	project_id                    *uuid.UUID
+	transition_revision           *int64
+	addtransition_revision        *int64
+	metadata_revision             *int64
+	addmetadata_revision          *int64
+	metadata_digest               *string
+	last_fingerprint              *string
+	last_deleted                  *bool
+	open_run                      *string
+	open_run_generation           *string
+	open_run_metadata_revision    *int64
+	addopen_run_metadata_revision *int64
+	pending_run_change_at         *time.Time
+	reincarnation_base_run_id     *string
+	pending_adopted_from          *string
+	pending_adopted_at            *time.Time
+	pending_adoption_source       *string
+	creator_principal_type        *string
+	creator_principal_id          *string
+	updated_at                    *time.Time
+	clearedFields                 map[string]struct{}
+	done                          bool
+	oldValue                      func(context.Context) (*AgentLifecycleCursor, error)
+	predicates                    []predicate.AgentLifecycleCursor
+}
+
+var _ ent.Mutation = (*AgentLifecycleCursorMutation)(nil)
+
+// agentlifecyclecursorOption allows management of the mutation configuration using functional options.
+type agentlifecyclecursorOption func(*AgentLifecycleCursorMutation)
+
+// newAgentLifecycleCursorMutation creates new mutation for the AgentLifecycleCursor entity.
+func newAgentLifecycleCursorMutation(c config, op Op, opts ...agentlifecyclecursorOption) *AgentLifecycleCursorMutation {
+	m := &AgentLifecycleCursorMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentLifecycleCursor,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentLifecycleCursorID sets the ID field of the mutation.
+func withAgentLifecycleCursorID(id uuid.UUID) agentlifecyclecursorOption {
+	return func(m *AgentLifecycleCursorMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentLifecycleCursor
+		)
+		m.oldValue = func(ctx context.Context) (*AgentLifecycleCursor, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentLifecycleCursor.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentLifecycleCursor sets the old AgentLifecycleCursor of the mutation.
+func withAgentLifecycleCursor(node *AgentLifecycleCursor) agentlifecyclecursorOption {
+	return func(m *AgentLifecycleCursorMutation) {
+		m.oldValue = func(context.Context) (*AgentLifecycleCursor, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentLifecycleCursorMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentLifecycleCursorMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentLifecycleCursor entities.
+func (m *AgentLifecycleCursorMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentLifecycleCursorMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentLifecycleCursorMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentLifecycleCursor.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *AgentLifecycleCursorMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *AgentLifecycleCursorMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *AgentLifecycleCursorMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetTransitionRevision sets the "transition_revision" field.
+func (m *AgentLifecycleCursorMutation) SetTransitionRevision(i int64) {
+	m.transition_revision = &i
+	m.addtransition_revision = nil
+}
+
+// TransitionRevision returns the value of the "transition_revision" field in the mutation.
+func (m *AgentLifecycleCursorMutation) TransitionRevision() (r int64, exists bool) {
+	v := m.transition_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTransitionRevision returns the old "transition_revision" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldTransitionRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTransitionRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTransitionRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTransitionRevision: %w", err)
+	}
+	return oldValue.TransitionRevision, nil
+}
+
+// AddTransitionRevision adds i to the "transition_revision" field.
+func (m *AgentLifecycleCursorMutation) AddTransitionRevision(i int64) {
+	if m.addtransition_revision != nil {
+		*m.addtransition_revision += i
+	} else {
+		m.addtransition_revision = &i
+	}
+}
+
+// AddedTransitionRevision returns the value that was added to the "transition_revision" field in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedTransitionRevision() (r int64, exists bool) {
+	v := m.addtransition_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTransitionRevision resets all changes to the "transition_revision" field.
+func (m *AgentLifecycleCursorMutation) ResetTransitionRevision() {
+	m.transition_revision = nil
+	m.addtransition_revision = nil
+}
+
+// SetMetadataRevision sets the "metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) SetMetadataRevision(i int64) {
+	m.metadata_revision = &i
+	m.addmetadata_revision = nil
+}
+
+// MetadataRevision returns the value of the "metadata_revision" field in the mutation.
+func (m *AgentLifecycleCursorMutation) MetadataRevision() (r int64, exists bool) {
+	v := m.metadata_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMetadataRevision returns the old "metadata_revision" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldMetadataRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMetadataRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMetadataRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMetadataRevision: %w", err)
+	}
+	return oldValue.MetadataRevision, nil
+}
+
+// AddMetadataRevision adds i to the "metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) AddMetadataRevision(i int64) {
+	if m.addmetadata_revision != nil {
+		*m.addmetadata_revision += i
+	} else {
+		m.addmetadata_revision = &i
+	}
+}
+
+// AddedMetadataRevision returns the value that was added to the "metadata_revision" field in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedMetadataRevision() (r int64, exists bool) {
+	v := m.addmetadata_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMetadataRevision resets all changes to the "metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) ResetMetadataRevision() {
+	m.metadata_revision = nil
+	m.addmetadata_revision = nil
+}
+
+// SetMetadataDigest sets the "metadata_digest" field.
+func (m *AgentLifecycleCursorMutation) SetMetadataDigest(s string) {
+	m.metadata_digest = &s
+}
+
+// MetadataDigest returns the value of the "metadata_digest" field in the mutation.
+func (m *AgentLifecycleCursorMutation) MetadataDigest() (r string, exists bool) {
+	v := m.metadata_digest
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMetadataDigest returns the old "metadata_digest" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldMetadataDigest(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMetadataDigest is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMetadataDigest requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMetadataDigest: %w", err)
+	}
+	return oldValue.MetadataDigest, nil
+}
+
+// ResetMetadataDigest resets all changes to the "metadata_digest" field.
+func (m *AgentLifecycleCursorMutation) ResetMetadataDigest() {
+	m.metadata_digest = nil
+}
+
+// SetLastFingerprint sets the "last_fingerprint" field.
+func (m *AgentLifecycleCursorMutation) SetLastFingerprint(s string) {
+	m.last_fingerprint = &s
+}
+
+// LastFingerprint returns the value of the "last_fingerprint" field in the mutation.
+func (m *AgentLifecycleCursorMutation) LastFingerprint() (r string, exists bool) {
+	v := m.last_fingerprint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastFingerprint returns the old "last_fingerprint" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldLastFingerprint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastFingerprint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastFingerprint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastFingerprint: %w", err)
+	}
+	return oldValue.LastFingerprint, nil
+}
+
+// ResetLastFingerprint resets all changes to the "last_fingerprint" field.
+func (m *AgentLifecycleCursorMutation) ResetLastFingerprint() {
+	m.last_fingerprint = nil
+}
+
+// SetLastDeleted sets the "last_deleted" field.
+func (m *AgentLifecycleCursorMutation) SetLastDeleted(b bool) {
+	m.last_deleted = &b
+}
+
+// LastDeleted returns the value of the "last_deleted" field in the mutation.
+func (m *AgentLifecycleCursorMutation) LastDeleted() (r bool, exists bool) {
+	v := m.last_deleted
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastDeleted returns the old "last_deleted" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldLastDeleted(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastDeleted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastDeleted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastDeleted: %w", err)
+	}
+	return oldValue.LastDeleted, nil
+}
+
+// ResetLastDeleted resets all changes to the "last_deleted" field.
+func (m *AgentLifecycleCursorMutation) ResetLastDeleted() {
+	m.last_deleted = nil
+}
+
+// SetOpenRun sets the "open_run" field.
+func (m *AgentLifecycleCursorMutation) SetOpenRun(s string) {
+	m.open_run = &s
+}
+
+// OpenRun returns the value of the "open_run" field in the mutation.
+func (m *AgentLifecycleCursorMutation) OpenRun() (r string, exists bool) {
+	v := m.open_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOpenRun returns the old "open_run" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldOpenRun(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOpenRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOpenRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOpenRun: %w", err)
+	}
+	return oldValue.OpenRun, nil
+}
+
+// ResetOpenRun resets all changes to the "open_run" field.
+func (m *AgentLifecycleCursorMutation) ResetOpenRun() {
+	m.open_run = nil
+}
+
+// SetOpenRunGeneration sets the "open_run_generation" field.
+func (m *AgentLifecycleCursorMutation) SetOpenRunGeneration(s string) {
+	m.open_run_generation = &s
+}
+
+// OpenRunGeneration returns the value of the "open_run_generation" field in the mutation.
+func (m *AgentLifecycleCursorMutation) OpenRunGeneration() (r string, exists bool) {
+	v := m.open_run_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOpenRunGeneration returns the old "open_run_generation" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldOpenRunGeneration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOpenRunGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOpenRunGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOpenRunGeneration: %w", err)
+	}
+	return oldValue.OpenRunGeneration, nil
+}
+
+// ResetOpenRunGeneration resets all changes to the "open_run_generation" field.
+func (m *AgentLifecycleCursorMutation) ResetOpenRunGeneration() {
+	m.open_run_generation = nil
+}
+
+// SetOpenRunMetadataRevision sets the "open_run_metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) SetOpenRunMetadataRevision(i int64) {
+	m.open_run_metadata_revision = &i
+	m.addopen_run_metadata_revision = nil
+}
+
+// OpenRunMetadataRevision returns the value of the "open_run_metadata_revision" field in the mutation.
+func (m *AgentLifecycleCursorMutation) OpenRunMetadataRevision() (r int64, exists bool) {
+	v := m.open_run_metadata_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOpenRunMetadataRevision returns the old "open_run_metadata_revision" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldOpenRunMetadataRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOpenRunMetadataRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOpenRunMetadataRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOpenRunMetadataRevision: %w", err)
+	}
+	return oldValue.OpenRunMetadataRevision, nil
+}
+
+// AddOpenRunMetadataRevision adds i to the "open_run_metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) AddOpenRunMetadataRevision(i int64) {
+	if m.addopen_run_metadata_revision != nil {
+		*m.addopen_run_metadata_revision += i
+	} else {
+		m.addopen_run_metadata_revision = &i
+	}
+}
+
+// AddedOpenRunMetadataRevision returns the value that was added to the "open_run_metadata_revision" field in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedOpenRunMetadataRevision() (r int64, exists bool) {
+	v := m.addopen_run_metadata_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOpenRunMetadataRevision resets all changes to the "open_run_metadata_revision" field.
+func (m *AgentLifecycleCursorMutation) ResetOpenRunMetadataRevision() {
+	m.open_run_metadata_revision = nil
+	m.addopen_run_metadata_revision = nil
+}
+
+// SetPendingRunChangeAt sets the "pending_run_change_at" field.
+func (m *AgentLifecycleCursorMutation) SetPendingRunChangeAt(t time.Time) {
+	m.pending_run_change_at = &t
+}
+
+// PendingRunChangeAt returns the value of the "pending_run_change_at" field in the mutation.
+func (m *AgentLifecycleCursorMutation) PendingRunChangeAt() (r time.Time, exists bool) {
+	v := m.pending_run_change_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingRunChangeAt returns the old "pending_run_change_at" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldPendingRunChangeAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingRunChangeAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingRunChangeAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingRunChangeAt: %w", err)
+	}
+	return oldValue.PendingRunChangeAt, nil
+}
+
+// ClearPendingRunChangeAt clears the value of the "pending_run_change_at" field.
+func (m *AgentLifecycleCursorMutation) ClearPendingRunChangeAt() {
+	m.pending_run_change_at = nil
+	m.clearedFields[agentlifecyclecursor.FieldPendingRunChangeAt] = struct{}{}
+}
+
+// PendingRunChangeAtCleared returns if the "pending_run_change_at" field was cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) PendingRunChangeAtCleared() bool {
+	_, ok := m.clearedFields[agentlifecyclecursor.FieldPendingRunChangeAt]
+	return ok
+}
+
+// ResetPendingRunChangeAt resets all changes to the "pending_run_change_at" field.
+func (m *AgentLifecycleCursorMutation) ResetPendingRunChangeAt() {
+	m.pending_run_change_at = nil
+	delete(m.clearedFields, agentlifecyclecursor.FieldPendingRunChangeAt)
+}
+
+// SetReincarnationBaseRunID sets the "reincarnation_base_run_id" field.
+func (m *AgentLifecycleCursorMutation) SetReincarnationBaseRunID(s string) {
+	m.reincarnation_base_run_id = &s
+}
+
+// ReincarnationBaseRunID returns the value of the "reincarnation_base_run_id" field in the mutation.
+func (m *AgentLifecycleCursorMutation) ReincarnationBaseRunID() (r string, exists bool) {
+	v := m.reincarnation_base_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReincarnationBaseRunID returns the old "reincarnation_base_run_id" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldReincarnationBaseRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReincarnationBaseRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReincarnationBaseRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReincarnationBaseRunID: %w", err)
+	}
+	return oldValue.ReincarnationBaseRunID, nil
+}
+
+// ResetReincarnationBaseRunID resets all changes to the "reincarnation_base_run_id" field.
+func (m *AgentLifecycleCursorMutation) ResetReincarnationBaseRunID() {
+	m.reincarnation_base_run_id = nil
+}
+
+// SetPendingAdoptedFrom sets the "pending_adopted_from" field.
+func (m *AgentLifecycleCursorMutation) SetPendingAdoptedFrom(s string) {
+	m.pending_adopted_from = &s
+}
+
+// PendingAdoptedFrom returns the value of the "pending_adopted_from" field in the mutation.
+func (m *AgentLifecycleCursorMutation) PendingAdoptedFrom() (r string, exists bool) {
+	v := m.pending_adopted_from
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingAdoptedFrom returns the old "pending_adopted_from" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldPendingAdoptedFrom(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingAdoptedFrom is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingAdoptedFrom requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingAdoptedFrom: %w", err)
+	}
+	return oldValue.PendingAdoptedFrom, nil
+}
+
+// ResetPendingAdoptedFrom resets all changes to the "pending_adopted_from" field.
+func (m *AgentLifecycleCursorMutation) ResetPendingAdoptedFrom() {
+	m.pending_adopted_from = nil
+}
+
+// SetPendingAdoptedAt sets the "pending_adopted_at" field.
+func (m *AgentLifecycleCursorMutation) SetPendingAdoptedAt(t time.Time) {
+	m.pending_adopted_at = &t
+}
+
+// PendingAdoptedAt returns the value of the "pending_adopted_at" field in the mutation.
+func (m *AgentLifecycleCursorMutation) PendingAdoptedAt() (r time.Time, exists bool) {
+	v := m.pending_adopted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingAdoptedAt returns the old "pending_adopted_at" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldPendingAdoptedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingAdoptedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingAdoptedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingAdoptedAt: %w", err)
+	}
+	return oldValue.PendingAdoptedAt, nil
+}
+
+// ClearPendingAdoptedAt clears the value of the "pending_adopted_at" field.
+func (m *AgentLifecycleCursorMutation) ClearPendingAdoptedAt() {
+	m.pending_adopted_at = nil
+	m.clearedFields[agentlifecyclecursor.FieldPendingAdoptedAt] = struct{}{}
+}
+
+// PendingAdoptedAtCleared returns if the "pending_adopted_at" field was cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) PendingAdoptedAtCleared() bool {
+	_, ok := m.clearedFields[agentlifecyclecursor.FieldPendingAdoptedAt]
+	return ok
+}
+
+// ResetPendingAdoptedAt resets all changes to the "pending_adopted_at" field.
+func (m *AgentLifecycleCursorMutation) ResetPendingAdoptedAt() {
+	m.pending_adopted_at = nil
+	delete(m.clearedFields, agentlifecyclecursor.FieldPendingAdoptedAt)
+}
+
+// SetPendingAdoptionSource sets the "pending_adoption_source" field.
+func (m *AgentLifecycleCursorMutation) SetPendingAdoptionSource(s string) {
+	m.pending_adoption_source = &s
+}
+
+// PendingAdoptionSource returns the value of the "pending_adoption_source" field in the mutation.
+func (m *AgentLifecycleCursorMutation) PendingAdoptionSource() (r string, exists bool) {
+	v := m.pending_adoption_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingAdoptionSource returns the old "pending_adoption_source" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldPendingAdoptionSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingAdoptionSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingAdoptionSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingAdoptionSource: %w", err)
+	}
+	return oldValue.PendingAdoptionSource, nil
+}
+
+// ResetPendingAdoptionSource resets all changes to the "pending_adoption_source" field.
+func (m *AgentLifecycleCursorMutation) ResetPendingAdoptionSource() {
+	m.pending_adoption_source = nil
+}
+
+// SetCreatorPrincipalType sets the "creator_principal_type" field.
+func (m *AgentLifecycleCursorMutation) SetCreatorPrincipalType(s string) {
+	m.creator_principal_type = &s
+}
+
+// CreatorPrincipalType returns the value of the "creator_principal_type" field in the mutation.
+func (m *AgentLifecycleCursorMutation) CreatorPrincipalType() (r string, exists bool) {
+	v := m.creator_principal_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatorPrincipalType returns the old "creator_principal_type" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldCreatorPrincipalType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatorPrincipalType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatorPrincipalType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatorPrincipalType: %w", err)
+	}
+	return oldValue.CreatorPrincipalType, nil
+}
+
+// ResetCreatorPrincipalType resets all changes to the "creator_principal_type" field.
+func (m *AgentLifecycleCursorMutation) ResetCreatorPrincipalType() {
+	m.creator_principal_type = nil
+}
+
+// SetCreatorPrincipalID sets the "creator_principal_id" field.
+func (m *AgentLifecycleCursorMutation) SetCreatorPrincipalID(s string) {
+	m.creator_principal_id = &s
+}
+
+// CreatorPrincipalID returns the value of the "creator_principal_id" field in the mutation.
+func (m *AgentLifecycleCursorMutation) CreatorPrincipalID() (r string, exists bool) {
+	v := m.creator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatorPrincipalID returns the old "creator_principal_id" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldCreatorPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatorPrincipalID: %w", err)
+	}
+	return oldValue.CreatorPrincipalID, nil
+}
+
+// ResetCreatorPrincipalID resets all changes to the "creator_principal_id" field.
+func (m *AgentLifecycleCursorMutation) ResetCreatorPrincipalID() {
+	m.creator_principal_id = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *AgentLifecycleCursorMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *AgentLifecycleCursorMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *AgentLifecycleCursorMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the AgentLifecycleCursorMutation builder.
+func (m *AgentLifecycleCursorMutation) Where(ps ...predicate.AgentLifecycleCursor) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentLifecycleCursorMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentLifecycleCursorMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentLifecycleCursor, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentLifecycleCursorMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentLifecycleCursorMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentLifecycleCursor).
+func (m *AgentLifecycleCursorMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentLifecycleCursorMutation) Fields() []string {
+	fields := make([]string, 0, 17)
+	if m.project_id != nil {
+		fields = append(fields, agentlifecyclecursor.FieldProjectID)
+	}
+	if m.transition_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldTransitionRevision)
+	}
+	if m.metadata_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldMetadataRevision)
+	}
+	if m.metadata_digest != nil {
+		fields = append(fields, agentlifecyclecursor.FieldMetadataDigest)
+	}
+	if m.last_fingerprint != nil {
+		fields = append(fields, agentlifecyclecursor.FieldLastFingerprint)
+	}
+	if m.last_deleted != nil {
+		fields = append(fields, agentlifecyclecursor.FieldLastDeleted)
+	}
+	if m.open_run != nil {
+		fields = append(fields, agentlifecyclecursor.FieldOpenRun)
+	}
+	if m.open_run_generation != nil {
+		fields = append(fields, agentlifecyclecursor.FieldOpenRunGeneration)
+	}
+	if m.open_run_metadata_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldOpenRunMetadataRevision)
+	}
+	if m.pending_run_change_at != nil {
+		fields = append(fields, agentlifecyclecursor.FieldPendingRunChangeAt)
+	}
+	if m.reincarnation_base_run_id != nil {
+		fields = append(fields, agentlifecyclecursor.FieldReincarnationBaseRunID)
+	}
+	if m.pending_adopted_from != nil {
+		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptedFrom)
+	}
+	if m.pending_adopted_at != nil {
+		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptedAt)
+	}
+	if m.pending_adoption_source != nil {
+		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptionSource)
+	}
+	if m.creator_principal_type != nil {
+		fields = append(fields, agentlifecyclecursor.FieldCreatorPrincipalType)
+	}
+	if m.creator_principal_id != nil {
+		fields = append(fields, agentlifecyclecursor.FieldCreatorPrincipalID)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, agentlifecyclecursor.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentLifecycleCursorMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentlifecyclecursor.FieldProjectID:
+		return m.ProjectID()
+	case agentlifecyclecursor.FieldTransitionRevision:
+		return m.TransitionRevision()
+	case agentlifecyclecursor.FieldMetadataRevision:
+		return m.MetadataRevision()
+	case agentlifecyclecursor.FieldMetadataDigest:
+		return m.MetadataDigest()
+	case agentlifecyclecursor.FieldLastFingerprint:
+		return m.LastFingerprint()
+	case agentlifecyclecursor.FieldLastDeleted:
+		return m.LastDeleted()
+	case agentlifecyclecursor.FieldOpenRun:
+		return m.OpenRun()
+	case agentlifecyclecursor.FieldOpenRunGeneration:
+		return m.OpenRunGeneration()
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		return m.OpenRunMetadataRevision()
+	case agentlifecyclecursor.FieldPendingRunChangeAt:
+		return m.PendingRunChangeAt()
+	case agentlifecyclecursor.FieldReincarnationBaseRunID:
+		return m.ReincarnationBaseRunID()
+	case agentlifecyclecursor.FieldPendingAdoptedFrom:
+		return m.PendingAdoptedFrom()
+	case agentlifecyclecursor.FieldPendingAdoptedAt:
+		return m.PendingAdoptedAt()
+	case agentlifecyclecursor.FieldPendingAdoptionSource:
+		return m.PendingAdoptionSource()
+	case agentlifecyclecursor.FieldCreatorPrincipalType:
+		return m.CreatorPrincipalType()
+	case agentlifecyclecursor.FieldCreatorPrincipalID:
+		return m.CreatorPrincipalID()
+	case agentlifecyclecursor.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentLifecycleCursorMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentlifecyclecursor.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case agentlifecyclecursor.FieldTransitionRevision:
+		return m.OldTransitionRevision(ctx)
+	case agentlifecyclecursor.FieldMetadataRevision:
+		return m.OldMetadataRevision(ctx)
+	case agentlifecyclecursor.FieldMetadataDigest:
+		return m.OldMetadataDigest(ctx)
+	case agentlifecyclecursor.FieldLastFingerprint:
+		return m.OldLastFingerprint(ctx)
+	case agentlifecyclecursor.FieldLastDeleted:
+		return m.OldLastDeleted(ctx)
+	case agentlifecyclecursor.FieldOpenRun:
+		return m.OldOpenRun(ctx)
+	case agentlifecyclecursor.FieldOpenRunGeneration:
+		return m.OldOpenRunGeneration(ctx)
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		return m.OldOpenRunMetadataRevision(ctx)
+	case agentlifecyclecursor.FieldPendingRunChangeAt:
+		return m.OldPendingRunChangeAt(ctx)
+	case agentlifecyclecursor.FieldReincarnationBaseRunID:
+		return m.OldReincarnationBaseRunID(ctx)
+	case agentlifecyclecursor.FieldPendingAdoptedFrom:
+		return m.OldPendingAdoptedFrom(ctx)
+	case agentlifecyclecursor.FieldPendingAdoptedAt:
+		return m.OldPendingAdoptedAt(ctx)
+	case agentlifecyclecursor.FieldPendingAdoptionSource:
+		return m.OldPendingAdoptionSource(ctx)
+	case agentlifecyclecursor.FieldCreatorPrincipalType:
+		return m.OldCreatorPrincipalType(ctx)
+	case agentlifecyclecursor.FieldCreatorPrincipalID:
+		return m.OldCreatorPrincipalID(ctx)
+	case agentlifecyclecursor.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentLifecycleCursor field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentLifecycleCursorMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentlifecyclecursor.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case agentlifecyclecursor.FieldTransitionRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTransitionRevision(v)
+		return nil
+	case agentlifecyclecursor.FieldMetadataRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMetadataRevision(v)
+		return nil
+	case agentlifecyclecursor.FieldMetadataDigest:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMetadataDigest(v)
+		return nil
+	case agentlifecyclecursor.FieldLastFingerprint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastFingerprint(v)
+		return nil
+	case agentlifecyclecursor.FieldLastDeleted:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastDeleted(v)
+		return nil
+	case agentlifecyclecursor.FieldOpenRun:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOpenRun(v)
+		return nil
+	case agentlifecyclecursor.FieldOpenRunGeneration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOpenRunGeneration(v)
+		return nil
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOpenRunMetadataRevision(v)
+		return nil
+	case agentlifecyclecursor.FieldPendingRunChangeAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingRunChangeAt(v)
+		return nil
+	case agentlifecyclecursor.FieldReincarnationBaseRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReincarnationBaseRunID(v)
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedFrom:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingAdoptedFrom(v)
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingAdoptedAt(v)
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptionSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingAdoptionSource(v)
+		return nil
+	case agentlifecyclecursor.FieldCreatorPrincipalType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatorPrincipalType(v)
+		return nil
+	case agentlifecyclecursor.FieldCreatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatorPrincipalID(v)
+		return nil
+	case agentlifecyclecursor.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleCursor field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentLifecycleCursorMutation) AddedFields() []string {
+	var fields []string
+	if m.addtransition_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldTransitionRevision)
+	}
+	if m.addmetadata_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldMetadataRevision)
+	}
+	if m.addopen_run_metadata_revision != nil {
+		fields = append(fields, agentlifecyclecursor.FieldOpenRunMetadataRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentLifecycleCursorMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case agentlifecyclecursor.FieldTransitionRevision:
+		return m.AddedTransitionRevision()
+	case agentlifecyclecursor.FieldMetadataRevision:
+		return m.AddedMetadataRevision()
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		return m.AddedOpenRunMetadataRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentLifecycleCursorMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case agentlifecyclecursor.FieldTransitionRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTransitionRevision(v)
+		return nil
+	case agentlifecyclecursor.FieldMetadataRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMetadataRevision(v)
+		return nil
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOpenRunMetadataRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleCursor numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentLifecycleCursorMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(agentlifecyclecursor.FieldPendingRunChangeAt) {
+		fields = append(fields, agentlifecyclecursor.FieldPendingRunChangeAt)
+	}
+	if m.FieldCleared(agentlifecyclecursor.FieldPendingAdoptedAt) {
+		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentLifecycleCursorMutation) ClearField(name string) error {
+	switch name {
+	case agentlifecyclecursor.FieldPendingRunChangeAt:
+		m.ClearPendingRunChangeAt()
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedAt:
+		m.ClearPendingAdoptedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleCursor nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentLifecycleCursorMutation) ResetField(name string) error {
+	switch name {
+	case agentlifecyclecursor.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case agentlifecyclecursor.FieldTransitionRevision:
+		m.ResetTransitionRevision()
+		return nil
+	case agentlifecyclecursor.FieldMetadataRevision:
+		m.ResetMetadataRevision()
+		return nil
+	case agentlifecyclecursor.FieldMetadataDigest:
+		m.ResetMetadataDigest()
+		return nil
+	case agentlifecyclecursor.FieldLastFingerprint:
+		m.ResetLastFingerprint()
+		return nil
+	case agentlifecyclecursor.FieldLastDeleted:
+		m.ResetLastDeleted()
+		return nil
+	case agentlifecyclecursor.FieldOpenRun:
+		m.ResetOpenRun()
+		return nil
+	case agentlifecyclecursor.FieldOpenRunGeneration:
+		m.ResetOpenRunGeneration()
+		return nil
+	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		m.ResetOpenRunMetadataRevision()
+		return nil
+	case agentlifecyclecursor.FieldPendingRunChangeAt:
+		m.ResetPendingRunChangeAt()
+		return nil
+	case agentlifecyclecursor.FieldReincarnationBaseRunID:
+		m.ResetReincarnationBaseRunID()
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedFrom:
+		m.ResetPendingAdoptedFrom()
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedAt:
+		m.ResetPendingAdoptedAt()
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptionSource:
+		m.ResetPendingAdoptionSource()
+		return nil
+	case agentlifecyclecursor.FieldCreatorPrincipalType:
+		m.ResetCreatorPrincipalType()
+		return nil
+	case agentlifecyclecursor.FieldCreatorPrincipalID:
+		m.ResetCreatorPrincipalID()
+		return nil
+	case agentlifecyclecursor.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleCursor field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentLifecycleCursorMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentLifecycleCursorMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentLifecycleCursorMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AgentLifecycleCursor unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentLifecycleCursorMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AgentLifecycleCursor edge %s", name)
+}
+
+// AgentLifecycleOutboxMutation represents an operation that mutates the AgentLifecycleOutbox nodes in the graph.
+type AgentLifecycleOutboxMutation struct {
+	config
+	op                     Op
+	typ                    string
+	id                     *int64
+	event_id               *string
+	agent_id               *uuid.UUID
+	transition_revision    *int64
+	addtransition_revision *int64
+	payload                *string
+	created_at             *time.Time
+	attempts               *int
+	addattempts            *int
+	permanent_failures     *int
+	addpermanent_failures  *int
+	next_attempt_at        *time.Time
+	lease_owner            *string
+	lease_until            *time.Time
+	last_error             *string
+	clearedFields          map[string]struct{}
+	done                   bool
+	oldValue               func(context.Context) (*AgentLifecycleOutbox, error)
+	predicates             []predicate.AgentLifecycleOutbox
+}
+
+var _ ent.Mutation = (*AgentLifecycleOutboxMutation)(nil)
+
+// agentlifecycleoutboxOption allows management of the mutation configuration using functional options.
+type agentlifecycleoutboxOption func(*AgentLifecycleOutboxMutation)
+
+// newAgentLifecycleOutboxMutation creates new mutation for the AgentLifecycleOutbox entity.
+func newAgentLifecycleOutboxMutation(c config, op Op, opts ...agentlifecycleoutboxOption) *AgentLifecycleOutboxMutation {
+	m := &AgentLifecycleOutboxMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentLifecycleOutbox,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentLifecycleOutboxID sets the ID field of the mutation.
+func withAgentLifecycleOutboxID(id int64) agentlifecycleoutboxOption {
+	return func(m *AgentLifecycleOutboxMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentLifecycleOutbox
+		)
+		m.oldValue = func(ctx context.Context) (*AgentLifecycleOutbox, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentLifecycleOutbox.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentLifecycleOutbox sets the old AgentLifecycleOutbox of the mutation.
+func withAgentLifecycleOutbox(node *AgentLifecycleOutbox) agentlifecycleoutboxOption {
+	return func(m *AgentLifecycleOutboxMutation) {
+		m.oldValue = func(context.Context) (*AgentLifecycleOutbox, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentLifecycleOutboxMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentLifecycleOutboxMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentLifecycleOutbox entities.
+func (m *AgentLifecycleOutboxMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentLifecycleOutboxMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentLifecycleOutboxMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentLifecycleOutbox.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetEventID sets the "event_id" field.
+func (m *AgentLifecycleOutboxMutation) SetEventID(s string) {
+	m.event_id = &s
+}
+
+// EventID returns the value of the "event_id" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) EventID() (r string, exists bool) {
+	v := m.event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEventID returns the old "event_id" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldEventID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEventID: %w", err)
+	}
+	return oldValue.EventID, nil
+}
+
+// ResetEventID resets all changes to the "event_id" field.
+func (m *AgentLifecycleOutboxMutation) ResetEventID() {
+	m.event_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *AgentLifecycleOutboxMutation) SetAgentID(u uuid.UUID) {
+	m.agent_id = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *AgentLifecycleOutboxMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetTransitionRevision sets the "transition_revision" field.
+func (m *AgentLifecycleOutboxMutation) SetTransitionRevision(i int64) {
+	m.transition_revision = &i
+	m.addtransition_revision = nil
+}
+
+// TransitionRevision returns the value of the "transition_revision" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) TransitionRevision() (r int64, exists bool) {
+	v := m.transition_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTransitionRevision returns the old "transition_revision" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldTransitionRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTransitionRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTransitionRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTransitionRevision: %w", err)
+	}
+	return oldValue.TransitionRevision, nil
+}
+
+// AddTransitionRevision adds i to the "transition_revision" field.
+func (m *AgentLifecycleOutboxMutation) AddTransitionRevision(i int64) {
+	if m.addtransition_revision != nil {
+		*m.addtransition_revision += i
+	} else {
+		m.addtransition_revision = &i
+	}
+}
+
+// AddedTransitionRevision returns the value that was added to the "transition_revision" field in this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedTransitionRevision() (r int64, exists bool) {
+	v := m.addtransition_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTransitionRevision resets all changes to the "transition_revision" field.
+func (m *AgentLifecycleOutboxMutation) ResetTransitionRevision() {
+	m.transition_revision = nil
+	m.addtransition_revision = nil
+}
+
+// SetPayload sets the "payload" field.
+func (m *AgentLifecycleOutboxMutation) SetPayload(s string) {
+	m.payload = &s
+}
+
+// Payload returns the value of the "payload" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) Payload() (r string, exists bool) {
+	v := m.payload
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPayload returns the old "payload" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldPayload(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPayload is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPayload requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPayload: %w", err)
+	}
+	return oldValue.Payload, nil
+}
+
+// ResetPayload resets all changes to the "payload" field.
+func (m *AgentLifecycleOutboxMutation) ResetPayload() {
+	m.payload = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *AgentLifecycleOutboxMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *AgentLifecycleOutboxMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetAttempts sets the "attempts" field.
+func (m *AgentLifecycleOutboxMutation) SetAttempts(i int) {
+	m.attempts = &i
+	m.addattempts = nil
+}
+
+// Attempts returns the value of the "attempts" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) Attempts() (r int, exists bool) {
+	v := m.attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttempts returns the old "attempts" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttempts: %w", err)
+	}
+	return oldValue.Attempts, nil
+}
+
+// AddAttempts adds i to the "attempts" field.
+func (m *AgentLifecycleOutboxMutation) AddAttempts(i int) {
+	if m.addattempts != nil {
+		*m.addattempts += i
+	} else {
+		m.addattempts = &i
+	}
+}
+
+// AddedAttempts returns the value that was added to the "attempts" field in this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedAttempts() (r int, exists bool) {
+	v := m.addattempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttempts resets all changes to the "attempts" field.
+func (m *AgentLifecycleOutboxMutation) ResetAttempts() {
+	m.attempts = nil
+	m.addattempts = nil
+}
+
+// SetPermanentFailures sets the "permanent_failures" field.
+func (m *AgentLifecycleOutboxMutation) SetPermanentFailures(i int) {
+	m.permanent_failures = &i
+	m.addpermanent_failures = nil
+}
+
+// PermanentFailures returns the value of the "permanent_failures" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) PermanentFailures() (r int, exists bool) {
+	v := m.permanent_failures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPermanentFailures returns the old "permanent_failures" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldPermanentFailures(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPermanentFailures is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPermanentFailures requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPermanentFailures: %w", err)
+	}
+	return oldValue.PermanentFailures, nil
+}
+
+// AddPermanentFailures adds i to the "permanent_failures" field.
+func (m *AgentLifecycleOutboxMutation) AddPermanentFailures(i int) {
+	if m.addpermanent_failures != nil {
+		*m.addpermanent_failures += i
+	} else {
+		m.addpermanent_failures = &i
+	}
+}
+
+// AddedPermanentFailures returns the value that was added to the "permanent_failures" field in this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedPermanentFailures() (r int, exists bool) {
+	v := m.addpermanent_failures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPermanentFailures resets all changes to the "permanent_failures" field.
+func (m *AgentLifecycleOutboxMutation) ResetPermanentFailures() {
+	m.permanent_failures = nil
+	m.addpermanent_failures = nil
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (m *AgentLifecycleOutboxMutation) SetNextAttemptAt(t time.Time) {
+	m.next_attempt_at = &t
+}
+
+// NextAttemptAt returns the value of the "next_attempt_at" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) NextAttemptAt() (r time.Time, exists bool) {
+	v := m.next_attempt_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNextAttemptAt returns the old "next_attempt_at" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldNextAttemptAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNextAttemptAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNextAttemptAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNextAttemptAt: %w", err)
+	}
+	return oldValue.NextAttemptAt, nil
+}
+
+// ResetNextAttemptAt resets all changes to the "next_attempt_at" field.
+func (m *AgentLifecycleOutboxMutation) ResetNextAttemptAt() {
+	m.next_attempt_at = nil
+}
+
+// SetLeaseOwner sets the "lease_owner" field.
+func (m *AgentLifecycleOutboxMutation) SetLeaseOwner(s string) {
+	m.lease_owner = &s
+}
+
+// LeaseOwner returns the value of the "lease_owner" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) LeaseOwner() (r string, exists bool) {
+	v := m.lease_owner
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseOwner returns the old "lease_owner" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldLeaseOwner(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseOwner is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseOwner requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseOwner: %w", err)
+	}
+	return oldValue.LeaseOwner, nil
+}
+
+// ResetLeaseOwner resets all changes to the "lease_owner" field.
+func (m *AgentLifecycleOutboxMutation) ResetLeaseOwner() {
+	m.lease_owner = nil
+}
+
+// SetLeaseUntil sets the "lease_until" field.
+func (m *AgentLifecycleOutboxMutation) SetLeaseUntil(t time.Time) {
+	m.lease_until = &t
+}
+
+// LeaseUntil returns the value of the "lease_until" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) LeaseUntil() (r time.Time, exists bool) {
+	v := m.lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseUntil returns the old "lease_until" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldLeaseUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseUntil: %w", err)
+	}
+	return oldValue.LeaseUntil, nil
+}
+
+// ClearLeaseUntil clears the value of the "lease_until" field.
+func (m *AgentLifecycleOutboxMutation) ClearLeaseUntil() {
+	m.lease_until = nil
+	m.clearedFields[agentlifecycleoutbox.FieldLeaseUntil] = struct{}{}
+}
+
+// LeaseUntilCleared returns if the "lease_until" field was cleared in this mutation.
+func (m *AgentLifecycleOutboxMutation) LeaseUntilCleared() bool {
+	_, ok := m.clearedFields[agentlifecycleoutbox.FieldLeaseUntil]
+	return ok
+}
+
+// ResetLeaseUntil resets all changes to the "lease_until" field.
+func (m *AgentLifecycleOutboxMutation) ResetLeaseUntil() {
+	m.lease_until = nil
+	delete(m.clearedFields, agentlifecycleoutbox.FieldLeaseUntil)
+}
+
+// SetLastError sets the "last_error" field.
+func (m *AgentLifecycleOutboxMutation) SetLastError(s string) {
+	m.last_error = &s
+}
+
+// LastError returns the value of the "last_error" field in the mutation.
+func (m *AgentLifecycleOutboxMutation) LastError() (r string, exists bool) {
+	v := m.last_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastError returns the old "last_error" field's value of the AgentLifecycleOutbox entity.
+// If the AgentLifecycleOutbox object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleOutboxMutation) OldLastError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastError: %w", err)
+	}
+	return oldValue.LastError, nil
+}
+
+// ResetLastError resets all changes to the "last_error" field.
+func (m *AgentLifecycleOutboxMutation) ResetLastError() {
+	m.last_error = nil
+}
+
+// Where appends a list predicates to the AgentLifecycleOutboxMutation builder.
+func (m *AgentLifecycleOutboxMutation) Where(ps ...predicate.AgentLifecycleOutbox) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentLifecycleOutboxMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentLifecycleOutboxMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentLifecycleOutbox, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentLifecycleOutboxMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentLifecycleOutboxMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentLifecycleOutbox).
+func (m *AgentLifecycleOutboxMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentLifecycleOutboxMutation) Fields() []string {
+	fields := make([]string, 0, 11)
+	if m.event_id != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldEventID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldAgentID)
+	}
+	if m.transition_revision != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldTransitionRevision)
+	}
+	if m.payload != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldPayload)
+	}
+	if m.created_at != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldCreatedAt)
+	}
+	if m.attempts != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldAttempts)
+	}
+	if m.permanent_failures != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldPermanentFailures)
+	}
+	if m.next_attempt_at != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldNextAttemptAt)
+	}
+	if m.lease_owner != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldLeaseOwner)
+	}
+	if m.lease_until != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldLeaseUntil)
+	}
+	if m.last_error != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldLastError)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentLifecycleOutboxMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentlifecycleoutbox.FieldEventID:
+		return m.EventID()
+	case agentlifecycleoutbox.FieldAgentID:
+		return m.AgentID()
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		return m.TransitionRevision()
+	case agentlifecycleoutbox.FieldPayload:
+		return m.Payload()
+	case agentlifecycleoutbox.FieldCreatedAt:
+		return m.CreatedAt()
+	case agentlifecycleoutbox.FieldAttempts:
+		return m.Attempts()
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		return m.PermanentFailures()
+	case agentlifecycleoutbox.FieldNextAttemptAt:
+		return m.NextAttemptAt()
+	case agentlifecycleoutbox.FieldLeaseOwner:
+		return m.LeaseOwner()
+	case agentlifecycleoutbox.FieldLeaseUntil:
+		return m.LeaseUntil()
+	case agentlifecycleoutbox.FieldLastError:
+		return m.LastError()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentLifecycleOutboxMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentlifecycleoutbox.FieldEventID:
+		return m.OldEventID(ctx)
+	case agentlifecycleoutbox.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		return m.OldTransitionRevision(ctx)
+	case agentlifecycleoutbox.FieldPayload:
+		return m.OldPayload(ctx)
+	case agentlifecycleoutbox.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case agentlifecycleoutbox.FieldAttempts:
+		return m.OldAttempts(ctx)
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		return m.OldPermanentFailures(ctx)
+	case agentlifecycleoutbox.FieldNextAttemptAt:
+		return m.OldNextAttemptAt(ctx)
+	case agentlifecycleoutbox.FieldLeaseOwner:
+		return m.OldLeaseOwner(ctx)
+	case agentlifecycleoutbox.FieldLeaseUntil:
+		return m.OldLeaseUntil(ctx)
+	case agentlifecycleoutbox.FieldLastError:
+		return m.OldLastError(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentLifecycleOutbox field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentLifecycleOutboxMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentlifecycleoutbox.FieldEventID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEventID(v)
+		return nil
+	case agentlifecycleoutbox.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTransitionRevision(v)
+		return nil
+	case agentlifecycleoutbox.FieldPayload:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPayload(v)
+		return nil
+	case agentlifecycleoutbox.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case agentlifecycleoutbox.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttempts(v)
+		return nil
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPermanentFailures(v)
+		return nil
+	case agentlifecycleoutbox.FieldNextAttemptAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNextAttemptAt(v)
+		return nil
+	case agentlifecycleoutbox.FieldLeaseOwner:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseOwner(v)
+		return nil
+	case agentlifecycleoutbox.FieldLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseUntil(v)
+		return nil
+	case agentlifecycleoutbox.FieldLastError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastError(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleOutbox field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedFields() []string {
+	var fields []string
+	if m.addtransition_revision != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldTransitionRevision)
+	}
+	if m.addattempts != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldAttempts)
+	}
+	if m.addpermanent_failures != nil {
+		fields = append(fields, agentlifecycleoutbox.FieldPermanentFailures)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentLifecycleOutboxMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		return m.AddedTransitionRevision()
+	case agentlifecycleoutbox.FieldAttempts:
+		return m.AddedAttempts()
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		return m.AddedPermanentFailures()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentLifecycleOutboxMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTransitionRevision(v)
+		return nil
+	case agentlifecycleoutbox.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttempts(v)
+		return nil
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPermanentFailures(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleOutbox numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentLifecycleOutboxMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(agentlifecycleoutbox.FieldLeaseUntil) {
+		fields = append(fields, agentlifecycleoutbox.FieldLeaseUntil)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentLifecycleOutboxMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentLifecycleOutboxMutation) ClearField(name string) error {
+	switch name {
+	case agentlifecycleoutbox.FieldLeaseUntil:
+		m.ClearLeaseUntil()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleOutbox nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentLifecycleOutboxMutation) ResetField(name string) error {
+	switch name {
+	case agentlifecycleoutbox.FieldEventID:
+		m.ResetEventID()
+		return nil
+	case agentlifecycleoutbox.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case agentlifecycleoutbox.FieldTransitionRevision:
+		m.ResetTransitionRevision()
+		return nil
+	case agentlifecycleoutbox.FieldPayload:
+		m.ResetPayload()
+		return nil
+	case agentlifecycleoutbox.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case agentlifecycleoutbox.FieldAttempts:
+		m.ResetAttempts()
+		return nil
+	case agentlifecycleoutbox.FieldPermanentFailures:
+		m.ResetPermanentFailures()
+		return nil
+	case agentlifecycleoutbox.FieldNextAttemptAt:
+		m.ResetNextAttemptAt()
+		return nil
+	case agentlifecycleoutbox.FieldLeaseOwner:
+		m.ResetLeaseOwner()
+		return nil
+	case agentlifecycleoutbox.FieldLeaseUntil:
+		m.ResetLeaseUntil()
+		return nil
+	case agentlifecycleoutbox.FieldLastError:
+		m.ResetLastError()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentLifecycleOutbox field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentLifecycleOutboxMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentLifecycleOutboxMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentLifecycleOutboxMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentLifecycleOutboxMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentLifecycleOutboxMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentLifecycleOutboxMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AgentLifecycleOutbox unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentLifecycleOutboxMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AgentLifecycleOutbox edge %s", name)
 }
 
 // AgentRecoveryMutation represents an operation that mutates the AgentRecovery nodes in the graph.
