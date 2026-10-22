@@ -997,3 +997,64 @@ func TestAgentPortProxyBareURLRedirectWire(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentPortProxyBareURLWebSocketUnchanged (ptone/scion#5566): on the
+// legacy tunnel path, an admitted WebSocket upgrade to the bare .../proxy
+// URL is not redirected; it keeps the answer it had before, the same as
+// the trailing-slash form (WebSocket is not supported there).
+func TestAgentPortProxyBareURLWebSocketUnchanged(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	send := func(path, tok string, upgrade bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Scion-Agent-Token", tok)
+		if upgrade {
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	base := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy"
+	bare, slash := send(base, token, true), send(base+"/", token, true)
+	assert.Equal(t, http.StatusNotImplemented, bare.Code, bare.Body.String())
+	assert.Equal(t, slash.Code, bare.Code)
+	assert.Equal(t, slash.Body.String(), bare.Body.String())
+	assert.Empty(t, bare.Header().Get("Location"))
+
+	// A caller without access is refused before the upgrade is looked at:
+	// the upgrade gets exactly the answer a plain request gets.
+	t.Run("caller_without_access", func(t *testing.T) {
+		ctx := context.Background()
+		other := &store.Agent{
+			ID:        tid("pf-ws-other-agent"),
+			Slug:      "pf-ws-other-agent",
+			Name:      "PF WS Other Agent",
+			ProjectID: agent.ProjectID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, other))
+		otherToken, err := srv.GetAgentTokenService().GenerateAgentToken(other.ID, agent.ProjectID,
+			[]AgentTokenScope{ScopeAgentPortForward}, nil)
+		require.NoError(t, err)
+
+		up, plain := send(base, otherToken, true), send(base, otherToken, false)
+		assert.Equal(t, http.StatusForbidden, up.Code, up.Body.String())
+		assert.Equal(t, plain.Code, up.Code)
+		assert.Equal(t, plain.Body.Bytes(), up.Body.Bytes())
+		// X-Request-ID is per request; every other header must match.
+		upHeader, plainHeader := up.Header().Clone(), plain.Header().Clone()
+		upHeader.Del("X-Request-ID")
+		plainHeader.Del("X-Request-ID")
+		assert.Equal(t, plainHeader, upHeader)
+		assert.Empty(t, up.Header().Get("Location"))
+	})
+}

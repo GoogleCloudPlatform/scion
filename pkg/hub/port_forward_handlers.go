@@ -409,8 +409,12 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// redirect to .../proxy/, so the page's relative URLs resolve inside
 	// the proxy path. Only GET and HEAD, and only after the checks above,
 	// so a caller without access, or for a port that is not exposed, gets
-	// the same answer as before.
-	if proxyPath == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+	// the same answer as before. WebSocket upgrades are not redirected
+	// (WebSocket clients do not follow redirects) and are proxied as
+	// before. The upgrade check only decides whether the redirect is sent:
+	// it reads request headers the client chooses, so no access decision
+	// may depend on it; access was decided above.
+	if proxyPath == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) && !isWebSocketUpgrade(r) {
 		redirectToProxyRoot(w, r)
 		return
 	}
