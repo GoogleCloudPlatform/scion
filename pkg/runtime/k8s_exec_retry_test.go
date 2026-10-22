@@ -19,14 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -327,8 +325,8 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newFakeExecReadyClock(t)
-			rt := newExecReadyTestRuntime(clock)
-			clientset := rt.Client.Clientset
+			rt, clientset, _ := newTestK8sRuntime()
+			rt.execReadyClock = execReadyClock{now: clock.Now, sleep: clock.Sleep}
 			rt.podReadyPollInterval = 5 * time.Millisecond
 			rt.execProbe = func(context.Context, string, string) error { return nil }
 			var mu sync.Mutex
@@ -356,38 +354,7 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 			config.ResolvedAuth.Files = nil
 			config.HomeDir = t.TempDir()
 
-			errChan := make(chan error, 1)
-			go func() {
-				_, err := rt.Run(context.Background(), config)
-				errChan <- err
-			}()
-			var pod *corev1.Pod
-			for i := 0; i < 100; i++ {
-				p, err := clientset.CoreV1().Pods("default").Get(context.Background(), "gate-agent", metav1.GetOptions{})
-				if err == nil {
-					pod = p
-					break
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			if pod == nil {
-				t.Fatal("pod was not created")
-			}
-			pod.Status.Phase = corev1.PodRunning
-			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-				Name: agentContainerName, Ready: true,
-				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-			}}
-			if _, err := clientset.CoreV1().Pods("default").Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			var runErr error
-			select {
-			case runErr = <-errChan:
-			case <-time.After(15 * time.Second):
-				t.Fatal("Run did not return")
-			}
+			runErr := startFakeK8sPod(t, rt, clientset, config)
 			mu.Lock()
 			defer mu.Unlock()
 			if tc.wantErr != (runErr != nil) {
@@ -401,6 +368,72 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 			}
 			if !slices.Equal(clock.slept, tc.wantSlept) {
 				t.Errorf("slept = %v, want %v", clock.slept, tc.wantSlept)
+			}
+		})
+	}
+}
+
+// The start's workspace sync leaves the in-project agents root out when the
+// workspace is the repo root and holds a .scion directory, and leaves
+// nothing out otherwise. The fixture clears the host's SCION_* variables
+// (then pins SCION_K8S_NAMESPACE to "default", where startFakeK8sPod looks
+// for the pod), HOME and PATH, so the result does not depend on them.
+func TestRun_StartSyncPassesAgentsExcludes(t *testing.T) {
+	shared := sharedRepoWithScionDir(t)
+	plain := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		repo string
+		want []string
+	}{
+		{"shared workspace with .scion", shared, []string{".scion/agents"}},
+		{"workspace without .scion", plain, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kv := range os.Environ() {
+				if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "SCION_") {
+					t.Setenv(k, "")
+				}
+			}
+			t.Setenv("SCION_K8S_NAMESPACE", "default")
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("PATH", t.TempDir())
+
+			clock := newFakeExecReadyClock(t)
+			rt, clientset, _ := newTestK8sRuntime()
+			rt.execReadyClock = execReadyClock{now: clock.Now, sleep: clock.Sleep}
+			rt.podReadyPollInterval = 5 * time.Millisecond
+			rt.execProbe = func(context.Context, string, string) error { return nil }
+			rt.podExec = func(context.Context, string, string, []string) (string, error) { return "", nil }
+			rt.homeSync = func(context.Context, string, string, string, string, []string) error { return nil }
+			var mu sync.Mutex
+			var workspaceSyncs [][]string
+			rt.syncTransfer = func(_ context.Context, _, _, _, dest string, toPod bool, excludes []string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				if toPod && dest == "/workspace" {
+					workspaceSyncs = append(workspaceSyncs, excludes)
+				}
+				return nil
+			}
+
+			config := homeFileConfig()
+			config.Name = "sync-agent"
+			config.Harness = &MockHarness{}
+			config.ResolvedAuth.Files = nil
+			config.HomeDir = t.TempDir()
+			config.RepoRoot, config.Workspace = tc.repo, tc.repo
+
+			if err := startFakeK8sPod(t, rt, clientset, config); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(workspaceSyncs) != 1 {
+				t.Fatalf("workspace syncs = %d, want 1", len(workspaceSyncs))
+			}
+			if got := workspaceSyncs[0]; !slices.Equal(got, tc.want) {
+				t.Errorf("workspace sync excludes = %q, want %q", got, tc.want)
 			}
 		})
 	}
