@@ -74,6 +74,8 @@ Things to know before you publish:
 
 Open a project, go to its **Files** area and choose the **Artifacts** view. **New artifact** uploads a file, or a folder with a chosen entry file, with a title, an optional key and an optional note. The new artifact is homed in that project.
 
+You can also start from the **Artifacts** item in the sidebar. Its **New artifact** asks which project to home the artifact in. It offers only the projects where you may publish, and preselects the Hub's global project when you are a member of it and may publish there. If you may not publish in any project, the button is disabled and says so. After publishing, the new artifact's page opens.
+
 You can also start from chat: in a conversation that belongs to a project, when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
 
 ## Publish new versions and get an artifact
