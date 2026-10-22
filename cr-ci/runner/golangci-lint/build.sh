@@ -33,7 +33,10 @@
 # toolchain download), git (to apply the patch), sha256sum, and network access
 # to the Go module proxy unless the module cache already holds the modules.
 # The caller's GOCACHE and GOMODCACHE are used; point them elsewhere to keep
-# this build out of another cache.
+# this build out of another cache. The caller's GOFLAGS are NOT used (an
+# inherited -mod or -gcflags could change the build); to pass build flags such
+# as -p=1 on a constrained host, set GOLANGCI_LINT_BUILD_GOFLAGS, which becomes
+# GOFLAGS for every go command here. It is part of the stamp.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -53,8 +56,9 @@ esac
 patch="$here/go-tools-1839.patch"
 
 # A clean, predictable Go environment: no workspace, no inherited -mod or
-# -gcflags, and no silent toolchain switch.
-export GOWORK=off GOFLAGS='' GOTOOLCHAIN=local
+# -gcflags (only the explicit GOLANGCI_LINT_BUILD_GOFLAGS), and no silent
+# toolchain switch.
+export GOWORK=off GOFLAGS="${GOLANGCI_LINT_BUILD_GOFLAGS:-}" GOTOOLCHAIN=local
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -66,6 +70,7 @@ stamp_key=$(
     sha256sum "$here/build.sh" "$here/VERSIONS" "$patch" | cut -d' ' -f1
     go version
     go env GOOS GOARCH
+    echo "GOFLAGS=$GOFLAGS"
   } | sha256sum | cut -d' ' -f1
 )
 if [ -x "$out" ] && [ -f "$out.stamp" ] && [ "$(cat "$out.stamp")" = "$stamp_key" ]; then
