@@ -63,6 +63,8 @@ function mockFetch(
     holdList?: boolean;
     /** The paged list answers with this error status. */
     listStatus?: number;
+    /** With listStatus, the error answers only once this resolves. */
+    listGate?: Promise<void>;
     /** canCreate checks of these ids answer 500. */
     failScope?: Set<string>;
     /** Global's canCreate check answers only once this resolves. */
@@ -94,8 +96,9 @@ function mockFetch(
         }
         if (opts.holdList) return new Promise<Response>(() => {});
         if (opts.listStatus) {
-          return Promise.resolve(
-            json({ error: { code: 'internal', message: 'list boom' } }, opts.listStatus)
+          const status = opts.listStatus;
+          return (opts.listGate ?? Promise.resolve()).then(() =>
+            json({ error: { code: 'internal', message: 'list boom' } }, status)
           );
         }
         return Promise.resolve(json({ projects, nextCursor: opts.nextCursor }));
@@ -324,6 +327,21 @@ describe('publish dialog project picker', () => {
     release();
     await settle(el);
     expect(picker(el)).toBeNull();
+    expect((el as unknown as { chosen: string }).chosen).toBe('');
+    await fillFile(el);
+    expect(disabled(publishButton(el))).toBe(true);
+  });
+
+  it('clears a preselected global when the list fails afterwards, so Publish stays off', async () => {
+    let failList: () => void = () => {};
+    const listGate = new Promise<void>((r) => (failList = r));
+    mockFetch([GLOBAL, WEB], new Set(['g-1', 'w-1']), 200, { listStatus: 500, listGate });
+    const el = await openDialog();
+    // Global passed first and is preselected while the list is pending.
+    expect(picker(el).value).toBe('g-1');
+    failList();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.project sl-alert')!.textContent).toContain('list boom');
     expect((el as unknown as { chosen: string }).chosen).toBe('');
     await fillFile(el);
     expect(disabled(publishButton(el))).toBe(true);
