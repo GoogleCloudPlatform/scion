@@ -926,3 +926,129 @@ func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
 	assert.Equal(t, []string{"config.model"}, keys)
 	assert.Equal(t, pendingFoldTriggerStart, trigger)
 }
+
+// TestAgentPendingConfig_HeldSystemPromptOnRerenderingBroker: on a broker
+// that re-renders provision-rendered keys at start (changedFields,
+// ptone/scion#3982), a system prompt edit saved while the agent runs is
+// held, and the next start applies it: the dispatch carries it and lists
+// it in changed_fields, and the pending config is cleared. On a broker
+// without changedFields it stays pending, with the start warning.
+func TestAgentPendingConfig_HeldSystemPromptOnRerenderingBroker(t *testing.T) {
+	t.Run("broker re-renders at start", func(t *testing.T) {
+		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		broker, err := s.GetRuntimeBroker(context.Background(), agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		setRerenderingBroker(t, s, broker)
+
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{"system_prompt": "be brief"},
+		})
+		assert.Equal(t, []string{"config.system_prompt"}, resp.Disposition.Held, "applied by the next start")
+		assert.Empty(t, resp.Disposition.HeldForReincarnate)
+		assert.Empty(t, resp.Warnings)
+		require.NotNil(t, resp.PendingConfig)
+		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig))
+		ed := getAgentEditability(t, srv, nil, agent.ID)
+		assert.Equal(t, EditHeld, ed.Fields["config.system_prompt"].Disposition)
+		assert.Equal(t, EditReincarnate, ed.Fields["config.secrets"].Disposition, "secrets are not re-rendered at start")
+
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		for _, w := range warnings {
+			assert.NotContains(t, w, heldReincarnateWarningPrefix)
+		}
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.Equal(t, "be brief", starts[0].inline.SystemPrompt)
+		assert.Contains(t, starts[0].inline.ChangedFields, "system_prompt", "the start asks the broker to re-render it")
+		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig, "the pending config is cleared")
+		applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
+		keys, _ := pendingAuditSummary(t, applied[0])
+		assert.Equal(t, []string{"config.system_prompt"}, keys)
+	})
+
+	t.Run("broker without changedFields", func(t *testing.T) {
+		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{"system_prompt": "be brief"},
+		})
+		assert.Empty(t, resp.Disposition.Held)
+		assert.Equal(t, []string{"config.system_prompt"}, resp.Disposition.HeldForReincarnate)
+
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.system_prompt"}))
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.Empty(t, starts[0].inline.SystemPrompt)
+		assert.NotContains(t, starts[0].inline.ChangedFields, "system_prompt")
+		after := pendingReloadAgent(t, s, agent.ID)
+		require.NotNil(t, after.PendingConfig)
+		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(after.PendingConfig), "it stays pending")
+	})
+}
+
+// agentUpdateOutcome is what a config PATCH reported and stored, for
+// comparing the held-edits flag on and off.
+type agentUpdateOutcome struct {
+	Disposition   AgentUpdateDisposition
+	Warnings      []string
+	ChangedFields []string
+	ClearedFields []string
+	Pending       []string
+}
+
+// patchOutcome runs a PATCH on a fresh stopped agent (with the broker's
+// caps set by caps and held edits on or off) and returns what it reported
+// and stored.
+func patchOutcome(t *testing.T, heldOn bool, caps *store.BrokerCapabilities, body map[string]interface{}) agentUpdateOutcome {
+	t.Helper()
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setHeldEditsExperiment(t, srv, heldOn)
+	setBrokerCaps(t, s, broker, caps)
+	agent := newT2EditAgent(t, s, project, broker)
+	resp := patchPending(t, srv, agent.ID, body)
+	stored := pendingReloadAgent(t, s, agent.ID)
+	return agentUpdateOutcome{
+		Disposition:   resp.Disposition,
+		Warnings:      resp.Warnings,
+		ChangedFields: stored.AppliedConfig.InlineConfig.ChangedFields,
+		ClearedFields: stored.AppliedConfig.InlineConfig.ClearedFields,
+		Pending:       pendingConfigKeys(stored.PendingConfig),
+	}
+}
+
+// TestAgentPendingConfig_FlagOffMatchesRerenderBehaviour: with held edits
+// off, a provision-rendered edit of an agent with no container behaves as
+// re-render at start (ptone/scion#3982) defines it: on a re-rendering
+// broker it is applied with changed_fields and no warning; on an older
+// broker it is held for reincarnation with the reincarnation warning and
+// changed_fields still recorded. With held edits on, the re-rendering
+// broker's outcome is identical (written now, nothing pending).
+func TestAgentPendingConfig_FlagOffMatchesRerenderBehaviour(t *testing.T) {
+	rerender := &store.BrokerCapabilities{Reprovision: true, ChangedFields: true, ClearedFields: true}
+	older := &store.BrokerCapabilities{Reprovision: true}
+	body := map[string]interface{}{"config": map[string]interface{}{
+		"system_prompt": "be brief", "agent_instructions": "run the tests first",
+	}}
+
+	off := patchOutcome(t, false, rerender, body)
+	assert.Equal(t, []string{"config.agent_instructions", "config.system_prompt"}, off.Disposition.Applied)
+	assert.Empty(t, off.Disposition.HeldForReincarnate)
+	assert.Empty(t, off.Warnings)
+	assert.Contains(t, off.ChangedFields, "system_prompt")
+	assert.Contains(t, off.ChangedFields, "agent_instructions")
+	assert.Empty(t, off.Pending)
+
+	on := patchOutcome(t, true, rerender, body)
+	assert.Equal(t, off, on, "held edits on: a re-rendering broker's no-container edit is written now, exactly as with the flag off")
+
+	offOlder := patchOutcome(t, false, older, body)
+	assert.Empty(t, offOlder.Disposition.Applied)
+	assert.Equal(t, []string{"config.agent_instructions", "config.system_prompt"}, offOlder.Disposition.HeldForReincarnate)
+	require.Len(t, offOlder.Warnings, 1, "%v", offOlder.Warnings)
+	assert.Contains(t, offOlder.Warnings[0], "rendered at the next reincarnation")
+	assert.Contains(t, offOlder.ChangedFields, "system_prompt", "recorded for a broker upgraded later")
+	assert.Empty(t, offOlder.Pending)
+}
