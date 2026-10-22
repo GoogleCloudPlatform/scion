@@ -1293,3 +1293,24 @@ func collectRequiredSkillURIs(skills []api.SkillReference) []string {
 	}
 	return uris
 }
+
+// platformSkillScheme is the scheme of the display-only entries the Hub
+// seeds for its platform (binary-embedded) skills. NOTE: this must be kept
+// in sync with platformSkillURIPrefix in pkg/hub/platform_skills_seed.go.
+const platformSkillScheme = "scion-platform"
+
+// resolvableSkillRefs returns skills without the optional display-only
+// platform entries (scheme scion-platform). Those entries only list the
+// platform skills; provisioning installs them separately, and no resolver
+// serves the scheme. A required entry is kept, so it still fails closed.
+// skills itself is not modified.
+func resolvableSkillRefs(skills []api.SkillReference) []api.SkillReference {
+	out := make([]api.SkillReference, 0, len(skills))
+	for _, s := range skills {
+		if s.Optional && detectScheme(s.URI) == platformSkillScheme {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
