@@ -76,11 +76,12 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	return &Observer{cfg: cfg}, nil
 }
 
-// rowState is one row's snapshot and digest.
+// rowState is one row's snapshot and digests.
 type rowState struct {
-	row    *store.Agent
-	meta   telemetrycontract.LifecycleMetadata
-	digest string
+	row          *store.Agent
+	meta         telemetrycontract.LifecycleMetadata
+	digest       string
+	configDigest string
 }
 
 // ObserveAgentWrite implements store.AgentWriteObserver. It returns an
@@ -130,16 +131,24 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 
 	facts := Facts{
 		Op:        w.Op,
+		Kind:      w.Hints.Kind,
 		HasBefore: before != nil,
 		HasAfter:  after != nil,
 		Cause:     cause,
+		Now:       w.Now,
 	}
 	if before != nil {
 		facts.BeforeLive = before.row.DeletedAt.IsZero()
+		facts.BeforePhase, facts.BeforeRunID, facts.BeforeGeneration = before.row.Phase, before.row.RunID, before.row.Generation
+		facts.BeforeDigest, facts.BeforeConfigDigest = before.digest, before.configDigest
 	}
 	if after != nil {
 		facts.AfterDeleted = !after.row.DeletedAt.IsZero()
+		facts.AfterPhase, facts.AfterRunID, facts.AfterGeneration = after.row.Phase, after.row.RunID, after.row.Generation
+		facts.AfterReincarnationInFlight = store.ReincarnationInFlight(after.row.ReincarnationState)
+		facts.AfterDigest, facts.AfterConfigDigest = after.digest, after.configDigest
 	}
+	writeFacts(ctx, w, &facts)
 	// A create never inherits a cursor: one left behind (an orphan the
 	// sweep has not reached) is replaced.
 	staleCursor := w.Op == store.AgentWriteCreate && cursor != nil
@@ -151,6 +160,8 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 			Exists:      true,
 			LastDeleted: cursor.LastDeleted,
 			OpenRun:     cursor.OpenRun,
+			Run:         cursor.RunState(),
+			Digest:      cursor.MetadataDigest,
 		}
 		if before != nil {
 			facts.Cursor.FingerprintMatches = Fingerprint(before.row, before.digest) == cursor.LastFingerprint
@@ -165,22 +176,9 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		return before
 	}
 
-	// Every metadata revision has a snapshot: a write that changes the
-	// digest without a snapshot transition of the committed row gets
-	// metadata_changed (design section 4).
 	metaRev, digest := int64(0), ""
 	if cursor != nil {
 		metaRev, digest = cursor.MetadataRevision, cursor.MetadataDigest
-	}
-	cur := digest
-	for _, p := range plan.Events {
-		if telemetrycontract.IsSnapshotTransition(p.Transition) && rowOf(p.Row) != nil {
-			cur = rowOf(p.Row).digest
-		}
-	}
-	if after != nil && !plan.DeleteCursor && after.digest != cur {
-		plan.Events = append(plan.Events, Planned{Transition: telemetrycontract.TransitionMetadataChanged, Row: RowAfter})
-		sortPlanned(plan.Events)
 	}
 
 	// Build every event with its final revisions before anything is
@@ -250,6 +248,11 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		}
 	}
 
+	run := plan.Run
+	if plan.FreezeSegment {
+		run.OpenRunMetadataRevision = metaRev
+	}
+
 	// Move the cursor.
 	switch {
 	case w.After == nil || plan.DeleteCursor:
@@ -266,10 +269,11 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 			LastFingerprint:  Fingerprint(after.row, after.digest),
 			LastDeleted:      facts.AfterDeleted,
 			Now:              w.Now,
+			Run:              run,
 		}
 		unchanged := cursor != nil && n == 0 && upd.LastFingerprint == cursor.LastFingerprint &&
 			upd.LastDeleted == cursor.LastDeleted && upd.MetadataRevision == cursor.MetadataRevision &&
-			upd.MetadataDigest == cursor.MetadataDigest
+			upd.MetadataDigest == cursor.MetadataDigest && run.Equal(cursor.RunState())
 		if !unchanged {
 			if staleCursor {
 				if err := tx.DeleteLifecycleCursor(ctx, agentID); err != nil {
@@ -297,6 +301,27 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		if err := tx.InsertLifecycleOutbox(ctx, rows); err != nil {
 			return fmt.Errorf("insert lifecycle outbox: %w", err)
 		}
+	}
+	ambiguous, unconfirmed := plan.Ambiguous, plan.UnconfirmedStart
+	if ambiguous != "" || unconfirmed {
+		counters, logger := o.cfg.Counters, o.cfg.Logger
+		row := w.After
+		if row == nil {
+			row = w.Before
+		}
+		agent, runID, now := row.ID, row.RunID, w.Now
+		tx.AfterCommit(func() {
+			if ambiguous != "" {
+				counters.AmbiguousTransition(ambiguous)
+				logger.Info("lifecycle: ambiguous transition counted, no event",
+					"agent_id", agent, "run_id", runID, "kind", ambiguous, "at", now)
+			}
+			if unconfirmed {
+				counters.UnconfirmedStart()
+				logger.Info("lifecycle: start outcome unconfirmed; no event until it settles",
+					"agent_id", agent, "run_id", runID, "at", now)
+			}
+		})
 	}
 	if len(rows) > 0 || len(resyncCauses) > 0 {
 		counters, wake := o.cfg.Counters, o.cfg.OnEnqueued
@@ -328,7 +353,11 @@ func newRowState(a *store.Agent, creator Creator) (*rowState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rowState{row: a, meta: m, digest: d}, nil
+	cd, err := ConfigDigest(m)
+	if err != nil {
+		return nil, err
+	}
+	return &rowState{row: a, meta: m, digest: d, configDigest: cd}, nil
 }
 
 // buildFailed logs a derivation or serialization failure and counts it
@@ -339,4 +368,65 @@ func (o *Observer) buildFailed(tx store.LifecycleTx, w store.AgentWrite, err err
 		"agent_id", w.AgentID(), "op", string(w.Op), "reason", reason, "error", err)
 	counters := o.cfg.Counters
 	tx.AfterCommit(func() { counters.BuildFailure(reason) })
+}
+
+// writeFacts fills the write kind, evidence and hints from the writer's
+// hints and the context annotations (design 2.4a inputs K, H, E).
+func writeFacts(ctx context.Context, w store.AgentWrite, f *Facts) {
+	h := w.Hints
+	f.AdoptionSource = h.AdoptionSource
+	f.LaunchAccepted, f.LaunchOwner = h.LaunchAccepted, h.LaunchOwner
+	afterRun := f.AfterRunID
+	switch w.Op {
+	case store.AgentWriteStatus:
+		switch {
+		case h.StartWrite:
+			f.Evidence = EvidenceStartWrite
+		case h.AgentReport && h.ReportRunID != "" && h.ReportRunID == afterRun:
+			f.Evidence = EvidenceReportRun
+		case h.AgentReport && h.ReportRunID == "":
+			f.Evidence = EvidenceReportNoRun
+		}
+		switch StartOutcomeFrom(ctx) {
+		case StartOutcomeRestartFailed:
+			f.Hint = Hint{Kind: HintRestartFailed}
+		case StartOutcomeUnconfirmed:
+			if h.Restore {
+				f.Hint = Hint{Kind: HintRestoreUnconfirmed}
+			}
+		default:
+			if h.Restore {
+				f.Hint = Hint{Kind: HintRestore}
+			}
+		}
+	case store.AgentWriteUpdate:
+		if r, ok := DispatchResultFrom(ctx); ok {
+			f.ConfigResolution = true
+			switch {
+			case r.RunID == "" || r.RunID != afterRun:
+				f.Evidence = EvidenceDispatchStale
+				f.ConfigResolution = false
+			case r.BrokerEvidence:
+				f.Evidence = EvidenceDispatchResult
+			case r.NoBrokerRun:
+				f.Evidence = EvidenceDispatchNoBrokerRun
+			default:
+				f.Evidence = EvidenceDispatchNotRunning
+			}
+		}
+	case store.AgentWriteLaunch:
+		if h.LaunchReport {
+			f.Evidence = EvidenceLaunchReport
+			f.ConfigResolution = true
+		}
+	case store.AgentWriteRestartStopLeg:
+		f.Hint = Hint{Kind: HintRestartStopLeg, StopLegRunID: h.StopLegRunID}
+	}
+	if h.LaunchEnd != nil {
+		f.Hint = Hint{Kind: HintLaunchEnd, EndReason: h.LaunchEnd.Reason, ErrorCode: h.LaunchEnd.Code,
+			Cause: h.LaunchEnd.Cause, OmitLaunchID: h.LaunchEnd.OmitLaunchID, SkipIfOpen: h.LaunchEnd.SkipIfOpen}
+	}
+	if ConfigResolutionFrom(ctx) {
+		f.ConfigResolution = true
+	}
 }

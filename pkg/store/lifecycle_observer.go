@@ -43,7 +43,100 @@ const (
 	// AgentWritePurge: the retention purge of a soft-deleted row. After
 	// is nil.
 	AgentWritePurge AgentWriteOp = "purge"
+
+	// AgentWriteUpdate: UpdateAgent (a whole-row CAS write).
+	AgentWriteUpdate AgentWriteOp = "update"
+	// AgentWriteStatus: UpdateAgentStatus, every branch.
+	AgentWriteStatus AgentWriteOp = "status"
+	// AgentWriteContainerMissing: MarkAgentContainerMissing(IfUnchanged).
+	AgentWriteContainerMissing AgentWriteOp = "container_missing"
+	// AgentWriteRunID: a run-ID write (SetAgentRunID, CompareAndSwap,
+	// Revert, Adopt); Hints.Kind says which.
+	AgentWriteRunID AgentWriteOp = "run_id"
+	// AgentWriteLaunch: a launch-store write (BeginLaunch, MarkLaunchAccepted,
+	// EndLaunch, a launch report, a reaper reap).
+	AgentWriteLaunch AgentWriteOp = "launch"
+	// AgentWriteDeletion: UpdateAgentDeletion (delete claim, progress,
+	// rollback).
+	AgentWriteDeletion AgentWriteOp = "deletion"
+	// AgentWriteReincarnationClaim: ClaimAgentReincarnation.
+	AgentWriteReincarnationClaim AgentWriteOp = "reincarnation_claim"
+	// AgentWriteRestartStopLeg: RecordRestartStopLeg. It writes no agents
+	// column, so Before and After are the same locked row.
+	AgentWriteRestartStopLeg AgentWriteOp = "restart_stop_leg"
 )
+
+// AgentWriteKind is the write kind K of WP1 design 2.4a.
+type AgentWriteKind string
+
+const (
+	WriteKindOther AgentWriteKind = ""
+	// WriteKindStatusHeartbeat: a broker heartbeat through UpdateAgentStatus.
+	WriteKindStatusHeartbeat AgentWriteKind = "status_heartbeat"
+	// WriteKindStopRecord: UpdateAgentStatus with IfRunID (recordStopStatus).
+	WriteKindStopRecord AgentWriteKind = "stop_record"
+	// WriteKindRunMint: SetAgentRunID.
+	WriteKindRunMint AgentWriteKind = "run_mint"
+	// WriteKindRunRevert: RevertAgentRunID.
+	WriteKindRunRevert AgentWriteKind = "run_revert"
+	// WriteKindRunAdopt: CompareAndSwapAgentRunID or AdoptAgentRunID.
+	WriteKindRunAdopt AgentWriteKind = "run_adopt"
+	// WriteKindDeletion: UpdateAgentDeletion.
+	WriteKindDeletion AgentWriteKind = "deletion_write"
+)
+
+// Adoption sources of a run_adopt write (adoption_source on the wire).
+const (
+	AdoptionSourceCAS       = "cas"
+	AdoptionSourceHeartbeat = "heartbeat_adopt"
+)
+
+// AgentWriteHints are the facts of a write the row pair alone does not
+// carry, set by the writer that knows them (WP1 design 2.4a inputs K, H, E).
+type AgentWriteHints struct {
+	Kind AgentWriteKind
+	// AdoptionSource is set on a run_adopt write.
+	AdoptionSource string
+
+	// Status writes (UpdateAgentStatus).
+	// StartWrite mirrors AgentStatusUpdate.StartWrite (evidence E(i)).
+	StartWrite bool
+	// AgentReport: the write is a status report (ReportSource set).
+	AgentReport bool
+	// ReportRunID is the report's run identity, "" when it names none.
+	ReportRunID string
+	// Restore mirrors AgentStatusUpdate.Restore (a start rollback).
+	Restore bool
+
+	// Launch writes.
+	// LaunchAccepted: MarkLaunchAccepted accepted the launch.
+	LaunchAccepted bool
+	LaunchOwner    string
+	// LaunchEnd is set when the write ends an async launch as failed
+	// (a coded EndLaunch, a failed report, a reaper reap).
+	LaunchEnd *LaunchEndHint
+	// LaunchReport: a succeeded or failed launch report for the row's
+	// launch (evidence E(iii)); it is also a config-resolution write.
+	LaunchReport bool
+
+	// StopLegRunID is the run RecordRestartStopLeg confirmed stopped.
+	StopLegRunID string
+}
+
+// LaunchEndHint describes a failed launch end.
+type LaunchEndHint struct {
+	// Reason is the wire end_reason (timed_out, lost, failed, not_launched,
+	// cancelled).
+	Reason string
+	// Code is the error code (launch_error), Cause the broker cause code.
+	Code, Cause string
+	// OmitLaunchID: the attempt never reached running (a cancelled
+	// wind-down), so the event names no run.
+	OmitLaunchID bool
+	// SkipIfOpen: emit nothing when the row's run segment is open (a
+	// wind-down of a run that already started; the stop closes it).
+	SkipIfOpen bool
+}
 
 // AgentWrite is one observed agent write.
 type AgentWrite struct {
@@ -54,6 +147,8 @@ type AgentWrite struct {
 	Before, After *Agent
 	// Now is the writer's commit-time clock, the transition's event time.
 	Now time.Time
+	// Hints are the write's facts beyond the row pair (slice 2).
+	Hints AgentWriteHints
 }
 
 // AgentID returns the written agent's ID.
@@ -112,7 +207,7 @@ type LifecycleCursor struct {
 	// went unobserved (review r6 N2).
 	LastDeleted bool
 
-	// Run-segment state. Created in slice 1 and written only by slice 2.
+	// Run-segment state (design 2.4a), written by every bump (slice 2).
 	OpenRun                 string
 	OpenRunGeneration       string
 	OpenRunMetadataRevision int64
@@ -143,4 +238,50 @@ type LifecycleCursorUpdate struct {
 	CreatorPrincipalType string
 	CreatorPrincipalID   string
 	Now                  time.Time
+	// Run is the run-segment state after this write; every bump writes it
+	// whole (design 2.4a cursor run state).
+	Run LifecycleRunState
+}
+
+// LifecycleRunState is the cursor's run-segment state (design 2.4a).
+type LifecycleRunState struct {
+	OpenRun                 string
+	OpenRunGeneration       string
+	OpenRunMetadataRevision int64
+	PendingRunChangeAt      *time.Time
+	ReincarnationBaseRunID  string
+	PendingAdoptedFrom      string
+	PendingAdoptedAt        *time.Time
+	PendingAdoptionSource   string
+}
+
+// RunState returns the cursor's run-segment state.
+func (c *LifecycleCursor) RunState() LifecycleRunState {
+	if c == nil {
+		return LifecycleRunState{}
+	}
+	return LifecycleRunState{
+		OpenRun:                 c.OpenRun,
+		OpenRunGeneration:       c.OpenRunGeneration,
+		OpenRunMetadataRevision: c.OpenRunMetadataRevision,
+		PendingRunChangeAt:      c.PendingRunChangeAt,
+		ReincarnationBaseRunID:  c.ReincarnationBaseRunID,
+		PendingAdoptedFrom:      c.PendingAdoptedFrom,
+		PendingAdoptedAt:        c.PendingAdoptedAt,
+		PendingAdoptionSource:   c.PendingAdoptionSource,
+	}
+}
+
+// Equal reports whether two run states are the same.
+func (r LifecycleRunState) Equal(o LifecycleRunState) bool {
+	eqT := func(a, b *time.Time) bool {
+		if a == nil || b == nil {
+			return a == nil && b == nil
+		}
+		return a.Equal(*b)
+	}
+	return r.OpenRun == o.OpenRun && r.OpenRunGeneration == o.OpenRunGeneration &&
+		r.OpenRunMetadataRevision == o.OpenRunMetadataRevision && eqT(r.PendingRunChangeAt, o.PendingRunChangeAt) &&
+		r.ReincarnationBaseRunID == o.ReincarnationBaseRunID && r.PendingAdoptedFrom == o.PendingAdoptedFrom &&
+		eqT(r.PendingAdoptedAt, o.PendingAdoptedAt) && r.PendingAdoptionSource == o.PendingAdoptionSource
 }

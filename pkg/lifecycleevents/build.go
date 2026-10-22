@@ -81,6 +81,22 @@ func MetadataDigest(m telemetrycontract.LifecycleMetadata) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ConfigDigest is the SHA-256 of the snapshot's configuration fields only
+// (requested template, model, harness, harness config, profile, runtime
+// and the effective fields): the identity and user metadata (name, slug,
+// labels, creator, parent) are cleared first. A config-resolution write
+// that changes it emits configured (design 2.2, slice 2 ruling Q1).
+func ConfigDigest(m telemetrycontract.LifecycleMetadata) (string, error) {
+	m.Name, m.Slug, m.Labels = "", "", nil
+	m.CreatorPrincipalType, m.CreatorPrincipalID, m.ParentAgentID = "", "", ""
+	data, err := json.Marshal(m)
+	if err != nil {
+		return "", fmt.Errorf("config digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // Fingerprint is the SHA-256 over the derive-relevant fields of a row
 // (design section 4, B3): phase, launch state, the async launch ID column,
 // generation, deleted_at and the metadata digest. The run ID is excluded
@@ -148,17 +164,24 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 		Cause:              p.Cause,
 		StopKind:           p.StopKind,
 		DeleteMode:         p.DeleteMode,
+		LaunchOwner:        p.LaunchOwner,
 	}
 	ev.HubID = in.HubID
 	ev.ProjectID = a.ProjectID
 	ev.AgentID = a.ID
 	ev.BrokerID = a.RuntimeBrokerID
 	ev.ProducerBuild = in.ProducerBuild
-	if a.Generation > 0 {
-		ev.IncarnationID = strconv.Itoa(a.Generation)
+	gen := a.Generation
+	if p.NextGeneration {
+		gen++
 	}
-	ev.LaunchID = a.RunID
-	if p.Transition == telemetrycontract.TransitionLaunchFailed {
+	if gen > 0 {
+		ev.IncarnationID = strconv.Itoa(gen)
+	}
+	if !p.OmitLaunchID {
+		ev.LaunchID = a.RunID
+	}
+	if p.AsyncLaunch {
 		ev.AsyncLaunchID = a.LaunchID
 	}
 	if p.Gap {
@@ -186,6 +209,18 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 		if c.OpenRunGeneration != "" {
 			ev.IncarnationID = c.OpenRunGeneration
 		}
+		if p.StopKind == telemetrycontract.StopKindSuperseded && c.PendingRunChangeAt != nil {
+			ev.RunChangedAt = telemetrycontract.FormatTS(*c.PendingRunChangeAt)
+		}
+	}
+	if p.CarriesAdoption {
+		c := in.Cursor
+		if c == nil || c.PendingAdoptedFrom == "" || c.PendingAdoptedAt == nil {
+			return nil, fmt.Errorf("build %s: carries an adoption but the cursor has none", p.Transition)
+		}
+		ev.AdoptedFromLaunchID = c.PendingAdoptedFrom
+		ev.AdoptedAt = telemetrycontract.FormatTS(*c.PendingAdoptedAt)
+		ev.AdoptionSource = c.PendingAdoptionSource
 	}
 	if err := ev.Validate(); err != nil {
 		return nil, err

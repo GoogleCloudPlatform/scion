@@ -45,6 +45,10 @@ const (
 	MetricSeqDeliveredMax = "lifecycle_outbox_seq_delivered_max" // gauge; lag only, not loss
 	MetricObserverState   = "lifecycle_observer_state"           // gauge {state}
 	MetricDrainerState    = "lifecycle_drainer_state"            // gauge {state}
+	MetricSinkKind        = "lifecycle_sink_kind"                // gauge {kind=cloud_logging|stdout|none}
+	MetricAmbiguous       = "lifecycle_ambiguous_transitions"    // {kind}
+	MetricUnconfirmed     = "lifecycle_unconfirmed_starts"       //
+	attrKind              = "kind"
 	attrTransition        = "transition"
 	attrReason            = "reason"
 	attrCause             = "cause"
@@ -74,6 +78,15 @@ const (
 
 var drainerStates = []string{DrainerStateRunning, DrainerStateBacklogOnly, DrainerStateIdleDisabled}
 
+// Sink kinds for MetricSinkKind (design section 22 item 4, condition b).
+const (
+	SinkKindCloudLogging = "cloud_logging"
+	SinkKindStdout       = "stdout"
+	SinkKindNone         = "none"
+)
+
+var sinkKinds = []string{SinkKindCloudLogging, SinkKindStdout, SinkKindNone}
+
 // OutboxGauges is one sample of the outbox gauges.
 type OutboxGauges struct {
 	Pending          int64
@@ -98,6 +111,13 @@ type LifecycleCounters interface {
 	Outbox(g OutboxGauges)
 	ObserverState(state string)
 	DrainerState(state string)
+	// SinkKind records which sink this replica delivers to.
+	SinkKind(kind string)
+	// AmbiguousTransition counts a transition derived as ambiguous and
+	// not emitted (design 2.4a P5b, P9).
+	AmbiguousTransition(kind string)
+	// UnconfirmedStart counts a start rollback with an unknown outcome.
+	UnconfirmedStart()
 }
 
 // NopCounters discards everything.
@@ -114,6 +134,15 @@ func (NopCounters) SinkBlocked(string, bool) {}
 func (NopCounters) Outbox(OutboxGauges)      {}
 func (NopCounters) ObserverState(string)     {}
 func (NopCounters) DrainerState(string)      {}
+
+// SinkKind implements LifecycleCounters.
+func (NopCounters) SinkKind(string) {}
+
+// AmbiguousTransition implements LifecycleCounters.
+func (NopCounters) AmbiguousTransition(string) {}
+
+// UnconfirmedStart implements LifecycleCounters.
+func (NopCounters) UnconfirmedStart() {}
 
 // MemoryCounters keeps values in memory, for tests. Get reads a value by
 // metric name and attribute value ("" for none).
@@ -202,6 +231,24 @@ func (m *MemoryCounters) DrainerState(state string) {
 		m.set(MetricDrainerState, s, v)
 	}
 }
+
+// SinkKind implements LifecycleCounters.
+func (m *MemoryCounters) SinkKind(kind string) {
+	for _, k := range sinkKinds {
+		v := int64(0)
+		if k == kind {
+			v = 1
+		}
+		m.set(MetricSinkKind, k, v)
+	}
+}
+
+// AmbiguousTransition implements LifecycleCounters.
+func (m *MemoryCounters) AmbiguousTransition(kind string) { m.add(MetricAmbiguous, kind, 1) }
+
+// UnconfirmedStart implements LifecycleCounters.
+func (m *MemoryCounters) UnconfirmedStart() { m.add(MetricUnconfirmed, "", 1) }
+
 func (m *MemoryCounters) ObserverState(state string) {
 	for _, s := range observerStates {
 		v := int64(0)
@@ -218,7 +265,8 @@ func (m *MemoryCounters) ObserverState(state string) {
 type OTelCounters struct {
 	enqueued, buildFailures, resyncs, emitAttempts, emitFailures, delivered, dropped metric.Int64Counter
 	sinkBlocked, pending, oldestAge, seqAllocated, seqDelivered, observerState       metric.Int64Gauge
-	drainerState                                                                     metric.Int64Gauge
+	drainerState, sinkKind                                                           metric.Int64Gauge
+	ambiguous, unconfirmed                                                           metric.Int64Counter
 }
 
 // NewOTelCounters creates the instruments on mp's meter named scope.
@@ -253,6 +301,9 @@ func NewOTelCounters(mp metric.MeterProvider, scope string) (*OTelCounters, erro
 		seqDelivered:  gauge(MetricSeqDeliveredMax),
 		observerState: gauge(MetricObserverState),
 		drainerState:  gauge(MetricDrainerState),
+		sinkKind:      gauge(MetricSinkKind),
+		ambiguous:     counter(MetricAmbiguous),
+		unconfirmed:   counter(MetricUnconfirmed),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -305,3 +356,22 @@ func (c *OTelCounters) DrainerState(state string) {
 		c.drainerState.Record(bg, v, attr(attrState, s))
 	}
 }
+
+// SinkKind implements LifecycleCounters.
+func (c *OTelCounters) SinkKind(kind string) {
+	for _, k := range sinkKinds {
+		v := int64(0)
+		if k == kind {
+			v = 1
+		}
+		c.sinkKind.Record(bg, v, attr(attrKind, k))
+	}
+}
+
+// AmbiguousTransition implements LifecycleCounters.
+func (c *OTelCounters) AmbiguousTransition(kind string) {
+	c.ambiguous.Add(bg, 1, attr(attrKind, kind))
+}
+
+// UnconfirmedStart implements LifecycleCounters.
+func (c *OTelCounters) UnconfirmedStart() { c.unconfirmed.Add(bg, 1) }

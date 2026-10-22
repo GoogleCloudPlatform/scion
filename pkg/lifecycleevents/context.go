@@ -66,3 +66,73 @@ func CauseFrom(ctx context.Context) (Cause, bool) {
 	c, ok := ctx.Value(causeKey{}).(Cause)
 	return c, ok && c.Kind != ""
 }
+
+// DispatchResult is the sync dispatch result a dispatch-result write
+// carries (WP1 design 2.4a E(iv), r7 N1/N2): the run the Hub dispatched,
+// and what the broker's answer said about it.
+type DispatchResult struct {
+	// RunID is the run the dispatch result belongs to (the row's run
+	// after adoptBrokerRunID). The evidence holds only while the row
+	// still records it.
+	RunID string
+	// BrokerEvidence: the broker's answer named RunID and reported
+	// running (brokerNamedRun && brokerPhaseRunning).
+	BrokerEvidence bool
+	// NoBrokerRun: the broker's answer named no run (a legacy broker).
+	NoBrokerRun bool
+}
+
+type dispatchResultKey struct{}
+
+// WithDispatchResult marks the writes made with ctx as the sync dispatch
+// result r. Only an UpdateAgent write honours it.
+func WithDispatchResult(ctx context.Context, r DispatchResult) context.Context {
+	return context.WithValue(ctx, dispatchResultKey{}, r)
+}
+
+// DispatchResultFrom returns the dispatch result attached to ctx.
+func DispatchResultFrom(ctx context.Context) (DispatchResult, bool) {
+	r, ok := ctx.Value(dispatchResultKey{}).(DispatchResult)
+	return r, ok
+}
+
+type configResolutionKey struct{}
+
+// WithConfigResolution marks the writes made with ctx as config-resolution
+// writes: a configuration change they commit is configured, not
+// metadata_changed (persistAcceptedLaunch, the reincarnation reprovision
+// step). The dispatch result and launch reports are config resolution
+// without this marker.
+func WithConfigResolution(ctx context.Context) context.Context {
+	return context.WithValue(ctx, configResolutionKey{}, true)
+}
+
+// ConfigResolutionFrom reports whether ctx carries WithConfigResolution.
+func ConfigResolutionFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(configResolutionKey{}).(bool)
+	return v
+}
+
+// Start-outcome annotations of a status write (design 2.4a step 3).
+const (
+	// StartOutcomeRestartFailed: recordRestartStopped, after a confirmed
+	// stop leg whose start leg failed.
+	StartOutcomeRestartFailed = "restart_failed"
+	// StartOutcomeUnconfirmed: the start rollback of a start whose outcome
+	// is unknown (keepForUnknownOutcome).
+	StartOutcomeUnconfirmed = "unconfirmed"
+)
+
+type startOutcomeKey struct{}
+
+// WithStartOutcome annotates the writes made with ctx with a start outcome
+// (StartOutcomeRestartFailed or StartOutcomeUnconfirmed).
+func WithStartOutcome(ctx context.Context, outcome string) context.Context {
+	return context.WithValue(ctx, startOutcomeKey{}, outcome)
+}
+
+// StartOutcomeFrom returns the start outcome attached to ctx, or "".
+func StartOutcomeFrom(ctx context.Context) string {
+	v, _ := ctx.Value(startOutcomeKey{}).(string)
+	return v
+}
