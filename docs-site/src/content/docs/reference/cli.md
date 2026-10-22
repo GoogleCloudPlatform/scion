@@ -1698,7 +1698,7 @@ like `error`:
 | `state` | `reason` | When |
 |---|---|---|
 | `skipped` | `no_hub_endpoint` | No Hub endpoint is configured. |
-| `skipped` | `hub_unreachable` | The Hub did not answer `/healthz` (connection refused, DNS, TLS or timeout). |
+| `skipped` | `hub_unreachable` | The Hub did not answer `/healthz` (connection refused, DNS, TLS or timeout), or answered it with an HTTP error. |
 | `skipped` | `client_unavailable` | Doctor could not set up a Hub client. |
 | `skipped` | `permission_denied` | HTTP 403: the caller lacks `hub.health.read`, or is not a user identity (an agent token). |
 | `skipped` | `not_supported` | HTTP 404: the Hub predates the health summary. |
@@ -1731,8 +1731,11 @@ The text output shows the same source as the `hub-credential` line of Hub Health
 | `checks` (runtime checks) | `runtime.checks` |
 | `healthSummary` re-indented | `healthSummary` exactly as the Hub sent it |
 | - | new: `formatVersion`, `generatedAt`, `hub` |
+| - | new `hubHealth` check `hub-credential` (also in the text output) |
 
-`status`, the exit status, the text output and the check names are unchanged.
+`status` and the exit status are unchanged. The text output and the check names are unchanged
+except for the new `hub-credential` line in Hub Health, and the Hub endpoint is shown without
+user info, query or fragment.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an

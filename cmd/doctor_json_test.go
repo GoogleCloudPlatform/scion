@@ -346,6 +346,10 @@ func TestDoctorDisplayEndpoint(t *testing.T) {
 		"https://hub.example.com:8443/scion/":                        "https://hub.example.com:8443/scion/",
 		"https://alice:pa55word@hub.example.com/p?token=s3cr3t#frag": "https://hub.example.com/p",
 		"https://alice@hub.example.com?access_token=s3cr3t":          "https://hub.example.com",
+		// Endpoints that do not parse as an absolute URL fail closed.
+		"https://alice:pw@hub.example.com:80a/p?k=s3cr3t-tok#frag": "https://hub.example.com:80a/p",
+		"alice:pw@hub.example.com/p?k=s3cr3t-tok#frag":             "hub.example.com/p",
+		"alice:pw@%zz?k=s3cr3t-tok#frag":                           "%zz",
 	}
 	for in, want := range tests {
 		assert.Equal(t, want, doctorDisplayEndpoint(in), in)
@@ -399,6 +403,38 @@ func TestDoctorHubEndpointCredentialsNeverShown(t *testing.T) {
 		out, _ := runDoctorJSON(t, ep, client, "")
 		assertNoEndpointCredentials(t, string(out))
 	})
+}
+
+// malformedEndpoints do not parse as absolute URLs; each carries user
+// info, a query and a fragment.
+var malformedEndpoints = map[string]string{
+	"bad port":  "https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag",
+	"no scheme": "alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"garbage":   "alice:pa55word@%zz?k=s3cr3t-tok#frag",
+}
+
+func TestDoctorHubEndpointCredentialsNeverShown_MalformedEndpoint(t *testing.T) {
+	for name, ep := range malformedEndpoints {
+		t.Run(name, func(t *testing.T) {
+			client := newDoctorTestClient(t, ep)
+
+			var text bytes.Buffer
+			r := &doctorReport{stdout: &text}
+			r.platformHealthSection(r.hubChecks(ep, client, ""))
+			assertNoEndpointCredentials(t, text.String())
+
+			out, doc := runDoctorJSON(t, ep, client, "")
+			assertNoEndpointCredentials(t, string(out))
+			assert.JSONEq(t, `"`+doctorDisplayEndpoint(ep)+`"`, string(hubObject(t, doc)["endpoint"]))
+		})
+	}
+}
+
+func TestScrubDoctorHubURLs_MalformedEndpoint(t *testing.T) {
+	ep := "https://alice:pw@hub.example.com:80a/?k=SECRET#f"
+	in := `parse "https://alice:pw@hub.example.com:80a/?k=SECRET#f/healthz": invalid port ":80a" after host`
+	got := scrubDoctorHubURLs(in, ep)
+	assert.Equal(t, `parse "https://hub.example.com:80a/": invalid port ":80a" after host`, got)
 }
 
 func TestScrubDoctorHubURLs(t *testing.T) {

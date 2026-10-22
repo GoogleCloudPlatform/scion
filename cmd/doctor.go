@@ -195,9 +195,10 @@ type doctorJSONHub struct {
 
 // doctorJSONHubAuth describes the Hub credential without revealing it.
 type doctorJSONHubAuth struct {
-	// Source is a hubAuthSource value: stored_login, agent_token_file,
-	// env_auth_token, env_hub_token, dev or none (hub_profile is not
-	// reachable: doctor is refused with a hub profile selected).
+	// Source is a hubAuthSource value: hub_profile, stored_login,
+	// agent_token_file, env_auth_token, env_hub_token, dev or none.
+	// Doctor is refused with a hub profile selected, so it does not
+	// report hub_profile today.
 	Source string `json:"source"`
 }
 
@@ -392,39 +393,131 @@ func (r *doctorReport) overallStatus() string {
 // up to white space or a quote.
 var doctorURLRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
 
-// scrubDoctorHubURLs rewrites every URL in text whose host is the Hub
-// endpoint's host the way doctorDisplayEndpoint does, dropping its user
-// info, query and fragment. Errors from the Hub client quote the request
-// URL, which is built from the configured endpoint and so can carry its
-// credentials. Other URLs are left to config.RedactURLsIn.
+// doctorTokenRe matches a run of text up to white space or a quote.
+var doctorTokenRe = regexp.MustCompile(`[^\s"'<>]+`)
+
+// doctorTrailingPunct is punctuation that ends a sentence, not a URL.
+const doctorTrailingPunct = ".,;:!?)]}"
+
+// scrubDoctorHubURLs removes the Hub endpoint's credentials from text, so
+// errors from the Hub client, which quote the request URL built from the
+// configured endpoint, never show them. It fails closed:
+//   - every run of text (up to white space or a quote) that contains the
+//     endpoint up to its query or fragment, or its host and path, is shown
+//     as doctorDisplayEndpoint shows it, whether or not the endpoint
+//     parses;
+//   - when the endpoint parses, every URL on its host is shown that way
+//     too;
+//   - any remaining copy of the endpoint's user name or password (3
+//     characters or more) becomes "xxxxx".
+//
+// Other URLs are left to config.RedactURLsIn.
 func scrubDoctorHubURLs(text, hubEP string) string {
-	hub, err := url.Parse(hubEP)
-	if hubEP == "" || err != nil || hub.Hostname() == "" {
+	if hubEP == "" {
 		return text
 	}
-	return doctorURLRe.ReplaceAllStringFunc(text, func(m string) string {
-		// Punctuation that ends a sentence is not part of the URL.
-		trimmed := strings.TrimRight(m, ".,;:!?)]}")
-		u, err := url.Parse(trimmed)
-		if err != nil || !strings.EqualFold(u.Hostname(), hub.Hostname()) {
-			return m
+	// Keys: the endpoint up to its query or fragment, and its host and
+	// path alone, since the client can rewrite the user info it quotes.
+	hostPath := doctorDisplayEndpoint(hubEP)
+	if i := strings.Index(hostPath, "://"); i >= 0 {
+		hostPath = hostPath[i+3:]
+	}
+	var keys []string
+	for _, k := range []string{cutDoctorQueryFragment(hubEP), hostPath} {
+		if k = strings.TrimRight(k, "/"); k != "" {
+			keys = append(keys, k)
 		}
-		return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
+	}
+	text = doctorTokenRe.ReplaceAllStringFunc(text, func(m string) string {
+		for _, key := range keys {
+			if strings.Contains(m, key) {
+				trimmed := strings.TrimRight(m, doctorTrailingPunct)
+				return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
+			}
+		}
+		return m
 	})
+	if hub, err := url.Parse(hubEP); err == nil && hub.Hostname() != "" {
+		text = doctorURLRe.ReplaceAllStringFunc(text, func(m string) string {
+			trimmed := strings.TrimRight(m, doctorTrailingPunct)
+			u, err := url.Parse(trimmed)
+			if err != nil || !strings.EqualFold(u.Hostname(), hub.Hostname()) {
+				return m
+			}
+			return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
+		})
+	}
+	// Last, the user name and password wherever they are left on their
+	// own: an endpoint without a scheme ("alice:pw@host") makes the client
+	// quote "alice" as an unsupported scheme.
+	for _, part := range doctorEndpointUserinfo(hubEP) {
+		text = strings.ReplaceAll(text, part, "xxxxx")
+	}
+	return text
 }
 
 // doctorDisplayEndpoint is hubEP as doctor shows it, in text and JSON:
 // scheme, host, port and path only. User info, query and fragment are
-// dropped, so a credential in the endpoint never reaches the output. An
-// endpoint that does not parse as an absolute URL is shown redacted.
+// dropped, so a credential in the endpoint never reaches the output. It
+// fails closed: an endpoint that does not parse as an absolute URL (no
+// scheme, a bad port, garbage) is cut at its first "?" or "#", and
+// anything up to the last "@" of its authority is dropped, by string
+// handling.
 func doctorDisplayEndpoint(hubEP string) string {
-	u, err := url.Parse(hubEP)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return config.RedactURL(hubEP)
+	if u, err := url.Parse(hubEP); err == nil && u.Scheme != "" && u.Host != "" {
+		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+		// Path parameters (";jsessionid=...") can carry credentials too.
+		return config.RedactURL(clean.String())
 	}
-	clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
-	// Path parameters (";jsessionid=...") can carry credentials too.
-	return config.RedactURL(clean.String())
+	s := cutDoctorQueryFragment(hubEP)
+	prefix, rest := "", s
+	if i := strings.Index(s, "://"); i >= 0 {
+		prefix, rest = s[:i+3], s[i+3:]
+	}
+	authority, path := rest, ""
+	if i := strings.Index(rest, "/"); i >= 0 {
+		authority, path = rest[:i], rest[i:]
+	}
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		authority = authority[i+1:]
+	}
+	return config.RedactURL(prefix + authority + path)
+}
+
+// doctorEndpointUserinfo returns the user name and password of hubEP's
+// user info, found by string handling as in doctorDisplayEndpoint's
+// fallback, skipping parts shorter than 3 characters (too short to find
+// safely in free text).
+func doctorEndpointUserinfo(hubEP string) []string {
+	rest := cutDoctorQueryFragment(hubEP)
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	i := strings.LastIndex(rest, "@")
+	if i < 0 {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.SplitN(rest[:i], ":", 2) {
+		if len(part) >= 3 {
+			out = append(out, part)
+		}
+		if u, err := url.PathUnescape(part); err == nil && u != part && len(u) >= 3 {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// cutDoctorQueryFragment returns s up to its first "?" or "#".
+func cutDoctorQueryFragment(s string) string {
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func runDoctor() error {
@@ -609,11 +702,8 @@ func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 
 	state := doctorJSONPlatformHealth{State: ph.state, Reason: ph.reason, HTTPStatus: ph.httpStatus}
 	if ph.summary != nil {
-		state = doctorJSONPlatformHealth{State: doctorPHStateOK}
-		// The headline line carries the summary's verdict.
-		if len(r.PlatformHealth) > 0 {
-			state.Status = r.PlatformHealth[0].Status
-		}
+		// The summary's verdict, as the headline line shows it.
+		state = doctorJSONPlatformHealth{State: doctorPHStateOK, Status: healthSummaryHeadline(ph.summary).Status}
 	} else if len(r.PlatformHealth) > 0 {
 		state.Message = singleLine(r.PlatformHealth[0].Message)
 	}

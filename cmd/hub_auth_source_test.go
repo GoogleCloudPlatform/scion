@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,7 +84,14 @@ func TestHubClientAuthSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
-			for _, v := range []string{"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_AGENT_ID", "SCION_LAUNCH_ID", hubprofile.EnvHubProfile} {
+			for _, v := range []string{
+				"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
+				"SCION_AGENT_ID", "SCION_LAUNCH_ID", hubprofile.EnvHubProfile,
+				"SCION_HUB_ENDPOINT", "SCION_HUB_URL",
+				// Transport auth would wrap the client and add its own credential.
+				transportauth.EnvTransportMode, transportauth.EnvTransportToken, transportauth.EnvTransportTokenFile,
+				transportauth.EnvTransportAudience, transportauth.EnvHubOIDCAudience, transportauth.EnvMetadataMode,
+			} {
 				t.Setenv(v, "")
 			}
 			if tt.setup.storedLogin {
@@ -127,6 +135,29 @@ func TestHubClientAuthSource(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (hubClientForEndpoint)")
 			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (hubClientForEndpoint)")
+
+			// Through the invocation's hub (SCION_HUB_ENDPOINT, no profile):
+			// getHubClientWithAuthSource reports the same source, and
+			// getHubClient, its wrapper, sends the same credential.
+			origEP, origSrc, origProfile := hubEndpoint, hubSource, hubProfileFlag
+			hubEndpoint, hubProfileFlag = "", ""
+			t.Cleanup(func() { hubEndpoint, hubSource, hubProfileFlag = origEP, origSrc, origProfile })
+			t.Setenv("SCION_HUB_ENDPOINT", tt.endpoint)
+			rec.bearer, rec.agentToken = "", ""
+			c3, source3, err := getHubClientWithAuthSource(nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSource, source3, "getHubClientWithAuthSource")
+			_, err = c3.Health(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (getHubClientWithAuthSource)")
+			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (getHubClientWithAuthSource)")
+			rec.bearer, rec.agentToken = "", ""
+			c4, err := getHubClient(nil)
+			require.NoError(t, err)
+			_, err = c4.Health(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (getHubClient)")
+			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (getHubClient)")
 		})
 	}
 }

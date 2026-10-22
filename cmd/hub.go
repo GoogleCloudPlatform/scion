@@ -594,16 +594,8 @@ func scopeDevAuth(info authInfo, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
-	// With a hub profile selected, the client comes only from the profile:
-	// none of the credentials below is read, and there is no fallback.
-	if hubProfileSelected() {
-		return openHubProfileClient()
-	}
-	endpoint := invocationHubEndpoint()
-	if endpoint == "" {
-		return nil, errHubNotConfigured
-	}
-	return hubClientForEndpoint(settings, endpoint)
+	c, _, err := getHubClientWithAuthSource(settings)
+	return c, err
 }
 
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
@@ -613,7 +605,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	return c, err
 }
 
-// Hub credential sources, as "scion doctor" reports them (hub.authSource
+// Hub credential sources, as "scion doctor" reports them (hub.auth.source
 // in its JSON output). Each names where the credential came from, never
 // the credential itself.
 const (
@@ -629,6 +621,8 @@ const (
 // getHubClientWithAuthSource is getHubClient that also names the source
 // of the credential the client sends (a hubAuthSource value).
 func getHubClientWithAuthSource(settings *config.Settings) (hubclient.Client, string, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
 	if hubProfileSelected() {
 		c, err := openHubProfileClient()
 		return c, hubAuthSourceHubProfile, err
