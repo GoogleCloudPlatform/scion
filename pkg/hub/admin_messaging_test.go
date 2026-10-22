@@ -533,3 +533,71 @@ func TestHandleAdminMessaging_PutOffloadThresholdRunes_NegativeRejected(t *testi
 		t.Fatalf("expected 400 for a negative offload_threshold_runes, got %d: %s", putRR.Code, putRR.Body.String())
 	}
 }
+
+// --- ptone/scion#4596: attachment delivery settings ---
+
+// putMessaging PUTs body to the admin messaging endpoint and returns the
+// recorder.
+func putMessaging(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.handleAdminMessaging(rr, adminContext(req))
+	return rr
+}
+
+func TestHandleAdminMessaging_AttachmentDeliverySettings(t *testing.T) {
+	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
+	ops := srv.GetOperationalSettings()
+	if got := ops.AttachmentDeliveryMaxBytes(); got != DefaultAttachmentDeliveryMaxBytes {
+		t.Fatalf("default attachment_delivery_max_bytes = %d", got)
+	}
+	if got := ops.AttachmentInboxRetentionDays(); got != DefaultAttachmentInboxRetentionDays {
+		t.Fatalf("default attachment_inbox_retention_days = %d", got)
+	}
+
+	rr := putMessaging(t, srv, `{"attachment_delivery_max_bytes": 1024, "attachment_inbox_retention_days": 3}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp messagingResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.AttachmentDeliveryMaxBytes == nil || *resp.AttachmentDeliveryMaxBytes != 1024 ||
+		resp.AttachmentInboxRetentionDays == nil || *resp.AttachmentInboxRetentionDays != 3 {
+		t.Fatalf("PUT response = %+v", resp)
+	}
+	if ops.AttachmentDeliveryMaxBytes() != 1024 || ops.AttachmentInboxRetentionDays() != 3 {
+		t.Fatal("the settings are read back")
+	}
+
+	// A PUT of another field keeps them.
+	if rr := putMessaging(t, srv, `{"offload_threshold_runes": 10}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ops.AttachmentDeliveryMaxBytes() != 1024 || ops.AttachmentInboxRetentionDays() != 3 {
+		t.Fatal("a PUT of another field keeps the attachment settings")
+	}
+
+	// 0 turns delivery off; null resets to the compiled default.
+	if rr := putMessaging(t, srv, `{"attachment_delivery_max_bytes": 0}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT 0 expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ops.AttachmentDeliveryMaxBytes() != 0 {
+		t.Fatal("0 is kept: delivery off")
+	}
+	if rr := putMessaging(t, srv, `{"attachment_delivery_max_bytes": null, "attachment_inbox_retention_days": null}`); rr.Code != http.StatusOK {
+		t.Fatalf("PUT null expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ops.AttachmentDeliveryMaxBytes() != DefaultAttachmentDeliveryMaxBytes || ops.AttachmentInboxRetentionDays() != DefaultAttachmentInboxRetentionDays {
+		t.Fatal("null resets to the compiled defaults")
+	}
+
+	for _, bad := range []string{`{"attachment_delivery_max_bytes": -1}`, `{"attachment_inbox_retention_days": 0}`} {
+		if rr := putMessaging(t, srv, bad); rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d", bad, rr.Code)
+		}
+	}
+}

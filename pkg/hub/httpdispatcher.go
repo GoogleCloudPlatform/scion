@@ -174,6 +174,10 @@ type HTTPAgentDispatcher struct {
 	debug             bool
 	log               *slog.Logger
 
+	// attachmentIssuer issues the attachment delivery capabilities of a
+	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
+	attachmentIssuer AttachmentIssuer
+
 	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
 	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
 	// the dispatcher writes durable intent + signals the owning node + waits
@@ -4220,6 +4224,18 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 	return nil
 }
 
+// AttachmentIssuer issues the download capabilities of a message's attachment
+// plan for one dispatch attempt to recipient on broker brokerID
+// (ptone/scion#4596). The hub's attachmentDelivery implements it.
+type AttachmentIssuer interface {
+	Issue(ctx context.Context, recipient *store.Agent, brokerID string, plan []messages.AttachmentPlanEntry) []messages.WireAttachment
+}
+
+// SetAttachmentIssuer installs the attachment capability issuer.
+func (d *HTTPAgentDispatcher) SetAttachmentIssuer(i AttachmentIssuer) {
+	d.attachmentIssuer = i
+}
+
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -4231,6 +4247,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
+
+	// Fresh capabilities on every attempt, retries included, from the plan
+	// the render site stored on the message (ptone/scion#4596).
+	// Under the legacy envelope (no rendered text) the plan is applied to
+	// the copy sent, never to the caller's message.
+	structuredMsg = legacyAttachmentCopy(structuredMsg)
+	if d.attachmentIssuer != nil && structuredMsg != nil && len(structuredMsg.AttachmentPlan) > 0 {
+		ctx = withDispatchAttachments(ctx, d.attachmentIssuer.Issue(ctx, agent, agent.RuntimeBrokerID, structuredMsg.AttachmentPlan))
+		if r, ok := d.attachmentIssuer.(interface{ InboxRetentionDays() int }); ok {
+			ctx = withDispatchRetention(ctx, r.InboxRetentionDays())
+		}
+	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
