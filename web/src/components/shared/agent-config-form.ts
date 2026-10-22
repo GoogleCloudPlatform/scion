@@ -167,6 +167,13 @@ export interface AgentConfigEditValues {
   agentRole?: string | undefined;
   /** The agent's live env (AppliedConfig.Env). */
   env?: Record<string, string> | undefined;
+  /**
+   * False when the hub withheld the agent's env from the caller (it is
+   * returned only with attach access). The env fields are then locked: a
+   * PATCH env replaces the whole env, so an edit made without seeing it
+   * would drop the keys the caller cannot see.
+   */
+  envVisible?: boolean | undefined;
   /** Display values of the fixed fields, by field key (projectId, template, branch, ...). */
   fixed?: Record<string, string> | undefined;
   /** The agent's detail page, linked from read-only fields. */
@@ -600,6 +607,10 @@ const AUTO_EXPOSE_ENV_KEYS: ReadonlySet<string> = new Set([
  */
 const TZ_ENV_KEY = 'TZ';
 
+/** Why the env fields are locked for a caller the hub does not show the env to. */
+export const ENV_HIDDEN_REASON =
+  "You cannot see this agent's environment, so it cannot be edited here.";
+
 /** The sections of the by-tier grouping, in display order. */
 export type AgentTierSection = 'container' | 'reincarnate' | 'immediate' | 'fixed';
 
@@ -991,6 +1002,14 @@ export class ScionAgentConfigForm extends LitElement {
             disposition: 'locked',
             reason: 'The hub did not report whether this field can be edited.',
           });
+    if (
+      this.mode === 'edit' &&
+      this.editValues.envVisible === false &&
+      (f.control === 'env' || f.control === 'auto-expose') &&
+      st.disposition !== 'locked'
+    ) {
+      st = { ...st, disposition: 'locked', reason: ENV_HIDDEN_REASON };
+    }
     const cap =
       f.capability && this.harnessCapabilities ? f.capability(this.harnessCapabilities) : undefined;
     if (cap?.support === 'no' && st.disposition !== 'locked') {
@@ -1151,7 +1170,8 @@ export class ScionAgentConfigForm extends LitElement {
     return Object.keys(spec).length > 0 ? spec : null;
   }
 
-  private applyText(): string {
+  private applyText(st: AgentFieldEditState): string {
+    if (st.disposition === 'immediate') return 'Takes effect immediately';
     const phase = this.editability?.phase;
     if (this.mode === 'create' || phase === 'created') return 'Applies at first start';
     if (phase === 'suspended') return 'Applies at resume';
@@ -1230,7 +1250,7 @@ export class ScionAgentConfigForm extends LitElement {
             : nothing;
         const help = f.help ? `${f.help} ` : '';
         return html`<div class="status help">
-          <span>${help}${this.applyText()}${session}.</span>${clearNote}
+          <span>${help}${this.applyText(st)}${session}.</span>${clearNote}
         </div>`;
       }
     }

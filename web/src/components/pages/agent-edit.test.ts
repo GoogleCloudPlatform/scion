@@ -86,7 +86,7 @@ function makeAgent(phase: string, stateVersion: number, extra: Partial<Agent> = 
       inlineConfig: { max_turns: 20 },
     },
     editability: hubEditability(phase),
-    _capabilities: { actions: ['read', 'update', 'lifecycle'] },
+    _capabilities: { actions: ['read', 'update', 'lifecycle', 'attach'] },
     ...extra,
   } as unknown as Agent;
 }
@@ -436,6 +436,14 @@ describe('agent edit page in every phase', () => {
       { stateVersion: 4, name: 'renamed-agent', labels: { team: 'web' } },
     ]);
     expect(posts()).toEqual([]);
+  });
+
+  it('locks the env fields for a caller without attach access, who cannot see the env', async () => {
+    const el = await mount(
+      makeAgent('stopped', 1, { _capabilities: { actions: ['read', 'update', 'lifecycle'] } })
+    );
+    const f = formOf(el)!.shadowRoot!.querySelector('.field[data-key="config.env"]') as HTMLElement;
+    expect(f.dataset.disposition).toBe('locked');
   });
 
   it('has no Delete, and Back goes to the agent page', async () => {

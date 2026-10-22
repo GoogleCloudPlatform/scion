@@ -48,6 +48,7 @@ import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import { showToast } from '../../utils/toast.js';
+import { can } from '../../shared/types.js';
 import type {
   Agent,
   AgentInlineConfig,
@@ -166,6 +167,8 @@ export function agentEditTopValues(agent: Agent): AgentConfigEditValues {
     messageMode: agent.messageMode,
     agentRole: applied?.agentRole,
     env: applied?.env,
+    // The hub returns the env only to a caller with attach access.
+    envVisible: can(agent._capabilities, 'attach'),
     detailHref: `/agents/${encodeURIComponent(agent.id)}`,
     fixed: {
       projectId: agent.project || agent.projectSlug || agent.projectId,

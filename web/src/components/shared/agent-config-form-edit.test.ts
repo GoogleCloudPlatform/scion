@@ -293,6 +293,15 @@ describe('name and labels apply immediately in every phase', () => {
     });
   }
 
+  it('says name and labels take effect immediately, not at the next start', async () => {
+    const el = await mount('stopped');
+    for (const key of ['name', 'labels']) {
+      const text = field(el, key).querySelector('.status')!.textContent!;
+      expect(text).toContain('Takes effect immediately');
+      expect(text).not.toContain('next start');
+    }
+  });
+
   it('shows the stored name and labels, and an untouched form sends neither', async () => {
     const el = await mount('stopped');
     expect(field(el, 'name').querySelector('sl-input')!).toHaveProperty('value', 'agent-1');
@@ -377,6 +386,20 @@ describe('environment in edit mode', () => {
         SCION_AUTO_EXPOSE_INTERVAL: '5s',
       },
     });
+  });
+});
+
+describe('environment hidden from the caller', () => {
+  it('locks env and auto-expose with the reason, and sends neither', async () => {
+    const el = await mount('stopped', {
+      editValues: { ...EDIT_VALUES, env: undefined, envVisible: false },
+    });
+    for (const key of ['config.env', 'autoExpose']) {
+      expect(field(el, key).dataset.disposition).toBe('locked');
+      expect(field(el, key).textContent).toContain(mod.ENV_HIDDEN_REASON);
+    }
+    expect(field(el, 'config.env').querySelector('scion-env-editor')).toBeNull();
+    expect(el.collectConfigPatch()).toEqual({});
   });
 });
 

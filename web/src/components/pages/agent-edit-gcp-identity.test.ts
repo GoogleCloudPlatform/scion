@@ -82,7 +82,7 @@ function makeAgent(opts: AgentOpts = {}) {
       ...(opts.gcpIdentity ? { gcpIdentity: opts.gcpIdentity } : {}),
     },
     editability: hubEditability(phase),
-    _capabilities: { actions: ['read', 'update', 'lifecycle'] },
+    _capabilities: { actions: ['read', 'update', 'lifecycle', 'attach'] },
   };
 }
 
