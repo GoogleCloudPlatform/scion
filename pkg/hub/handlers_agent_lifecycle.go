@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -207,7 +208,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
-			s.events.PublishAgentStatus(ctx, agent)
+			pubCtx := ctx
+			if statusUpdateIsHeartbeatOnly(status) {
+				// Counted as trigger=heartbeat (ptone/scion#5228); the
+				// publish itself is unchanged.
+				pubCtx = eventstreams.WithHeartbeatTrigger(ctx)
+			}
+			s.events.PublishAgentStatus(pubCtx, agent)
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
@@ -282,6 +289,18 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
 		!su.ClearTerminalRemnants
+}
+
+// statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
+// and nothing else statusUpdateIsEmpty counts: the agent's periodic
+// heartbeat report. Its status event counts as trigger=heartbeat on
+// scion.hub.events.published (ptone/scion#5228).
+func statusUpdateIsHeartbeatOnly(su store.AgentStatusUpdate) bool {
+	if !su.Heartbeat {
+		return false
+	}
+	su.Heartbeat = false
+	return statusUpdateIsEmpty(su)
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:

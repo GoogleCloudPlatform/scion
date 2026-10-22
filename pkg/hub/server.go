@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2156,6 +2157,10 @@ type Server struct {
 	// called; the reaper tick handler nil-checks before recording, matching
 	// dbMetrics/dispatchMetrics.
 	reaperMetrics reapermetrics.Recorder
+
+	// eventStreamMetrics counts scion.hub.events.published on the event
+	// publisher (event_streams.go); nil until SetEventStreamMetrics.
+	eventStreamMetrics ssemetrics.Recorder
 
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
@@ -4678,7 +4683,11 @@ func (s *Server) SetGCPProjectID(projectID string) {
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
 	s.events = ep
+	rec := s.eventStreamMetrics
 	s.mu.Unlock()
+	if p, ok := ep.(publishMetricsSetter); ok && rec != nil {
+		p.SetPublishMetrics(rec)
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
