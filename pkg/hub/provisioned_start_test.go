@@ -157,9 +157,14 @@ func TestProvisionedStart_FailedCreateRowThatCannotBeRemoved(t *testing.T) {
 func TestProvisionedStart_StartedButStatusWriteFailedKeepsIntent(t *testing.T) {
 	f, _, _ := newClaimFixture(t)
 	a := f.addAgent("started-unrecorded", "created", "")
+	// The fixture and addAgent only write through the raw store, before any
+	// audited setup.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) failRunningStatusStore {
+		return failRunningStatusStore{Store: inner, agentID: a.ID, fault: sw}
+	})
 	_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped)
 	require.NoError(t, err)
-	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	fault.Arm()
 	err = f.srv.startAgentCore(context.Background(), getAgent(t, f.s, a.ID), StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, errStartedStatusWrite)
 	got := getAgent(t, f.s, a.ID)
