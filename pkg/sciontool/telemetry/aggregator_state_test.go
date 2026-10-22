@@ -27,8 +27,8 @@ import (
 func TestAggregator_StateRoundTrip(t *testing.T) {
 	a := NewAggregator()
 	a.ObserveSession("s1") // implicit open
-	a.RecordToolEnd("Bash", "")
-	a.RecordToolEnd("Bash", "boom")
+	a.RecordToolEnd("Bash", ToolSucceeded)
+	a.RecordToolEnd("Bash", ToolFailed)
 	a.RecordModelEnd(10, 3, 2, 1)
 	a.RecordTurn()
 
@@ -74,7 +74,7 @@ func TestAggregator_RestoreStateCopiesToolCalls(t *testing.T) {
 	st := AggregatorState{Open: true, SessionID: "s1", ToolCalls: map[string]ToolCallStats{"Bash": {Calls: 1, Success: 1}}}
 	a := NewAggregator()
 	a.RestoreState(st)
-	a.RecordToolEnd("Bash", "")
+	a.RecordToolEnd("Bash", ToolSucceeded)
 	if st.ToolCalls["Bash"].Calls != 1 {
 		t.Errorf("state mutated through restored aggregator: %+v", st.ToolCalls)
 	}

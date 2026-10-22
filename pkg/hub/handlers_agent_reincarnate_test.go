@@ -4803,7 +4803,7 @@ func TestReincarnateAgent_SweepCASRespectsStalenessCutoff(t *testing.T) {
 	cutoff := r.UpdatedAt.Add(-time.Minute) // r is NOT stale relative to this cutoff
 	require.True(t, r.UpdatedAt.After(cutoff))
 
-	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", cutoff)
+	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", store.EdgeDeactivationReincarnateStaleSwept, cutoff)
 
 	got, err := s.GetAgentReincarnation(ctx, r.ID)
 	require.NoError(t, err)

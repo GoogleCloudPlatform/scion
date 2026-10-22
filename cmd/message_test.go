@@ -898,7 +898,9 @@ func TestAttachFlagValidation_NonExistentFile(t *testing.T) {
 	msgAttach = []string{"/workspace/this-file-does-not-exist-xyz.go"}
 	defer func() { msgAttach = nil }()
 
-	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	// Today's path checks run once the hub's probe answers "legacy"
+	// (or refuses it); they are tested directly.
+	err := validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "this-file-does-not-exist-xyz.go")
 	assert.Contains(t, err.Error(), "attachment")
@@ -911,7 +913,7 @@ func TestAttachFlagValidation_OutsideAllowedRoots(t *testing.T) {
 	msgAttach = []string{"/etc/passwd"}
 	defer func() { msgAttach = nil }()
 
-	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	err := validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside allowed roots")
 }
@@ -934,7 +936,7 @@ func TestAttachFlagValidation_Directory(t *testing.T) {
 	msgAttach = []string{testDir}
 	defer func() { msgAttach = nil }()
 
-	err = messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	err = validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is a directory, not a regular file")
 }

@@ -16,6 +16,7 @@ package config
 
 import (
 	"math/rand"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -244,6 +245,45 @@ func TestURLRedactRules_ApiclientCopyIdentical(t *testing.T) {
 	if got != want {
 		t.Errorf("pkg/apiclient/redact.go's copy of the URL redaction rules differs from pkg/config/url_redact.go")
 	}
+
+	// The copied rules include undelimitedUserInfo and maskWholeURL; both
+	// entry points must start with them, so neither returns a URL whose
+	// user info cannot be delimited.
+	for _, c := range []struct{ file, fn, rule string }{
+		{"cli_context_hubs.go", "func RedactURL(", "userInfoRe"},
+		{filepath.Join("..", "apiclient", "redact.go"), "func redactURLCredentials(", "urlUserInfoRe"},
+	} {
+		src, err := os.ReadFile(c.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, ok := funcBody(string(src), c.fn)
+		if !ok {
+			t.Fatalf("%s: %s not found", c.file, c.fn)
+		}
+		guard := " {\n\tif undelimitedUserInfo(raw, " + c.rule + ") {\n\t\treturn maskWholeURL(raw)\n\t}\n"
+		if !strings.Contains(body, guard) || strings.Index(body, guard) != strings.Index(body, " {\n") {
+			t.Errorf("%s: %s does not start with the guard %q", c.file, c.fn, guard)
+		}
+	}
+	// And the behaviour: pkg/apiclient's TestRedactURLCredentials_Unparsed
+	// runs the same table on its copy.
+	checkUnparsedURLCases(t, "RedactURL", RedactURL)
+}
+
+// funcBody returns the text of src from the line starting with decl to the
+// first line that is a lone "}".
+func funcBody(src, decl string) (string, bool) {
+	i := strings.Index(src, "\n"+decl)
+	if i < 0 {
+		return "", false
+	}
+	rest := src[i+1:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		return "", false
+	}
+	return rest[:end+2], true
 }
 
 // redactPropertyAlphabet is the junk the property tests build URLs from:
@@ -305,6 +345,7 @@ func TestRedactURL_PropertyNestedURL(t *testing.T) {
 		}
 		return b.String()
 	}
+	masked := 0
 	for i := 0; i < 5000; i++ {
 		// The outer path is delimiter-free too: a "?" and "=" in it would
 		// make next=... itself a nested value, and its query the second
@@ -314,9 +355,22 @@ func TestRedactURL_PropertyNestedURL(t *testing.T) {
 		if strings.Contains(got, "S3CRETVALUE") {
 			t.Fatalf("RedactURL(%q) = %q, shows the token", in, got)
 		}
+		// A URL that does not parse and has an '@' (from the trailing
+		// junk) where the user info rule cannot find it shows only its
+		// scheme; every other input keeps its destination readable.
+		if _, err := url.Parse(in); err != nil && strings.Contains(in, "@") {
+			if got != "https://xxxxx" {
+				t.Fatalf("RedactURL(%q) = %q, want only the scheme", in, got)
+			}
+			masked++
+			continue
+		}
 		if !strings.Contains(got, "next=https://app.example.com/") {
 			t.Fatalf("RedactURL(%q) = %q, lost the nested destination", in, got)
 		}
+	}
+	if masked > 2500 {
+		t.Errorf("%d of 5000 inputs masked whole; the readable destination is barely checked", masked)
 	}
 }
 

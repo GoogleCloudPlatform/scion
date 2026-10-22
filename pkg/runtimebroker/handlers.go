@@ -310,6 +310,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Provision-rendered keys listed in changed_fields are
+			// re-rendered at start (ptone/scion#3982).
+			ChangedFields: true,
+			// cleared_fields is applied at start (ptone/scion#4890).
+			ClearedFields: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
@@ -1874,7 +1879,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
-				} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+				} else if _, cleanupErr := agent.DeleteAgentFilesForHubProject(opts.Name, opts.ProjectPath, opts.HubProjectID, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 				} else {
@@ -2951,7 +2956,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
-	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// The request's project ID is the Hub project ID the agent was started
+	// with (opts.HubProjectID); file deletion resolves the agent's state
+	// directory with it, as lookup does. Without one, nothing changes.
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, projectID), target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
@@ -3587,6 +3595,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
+	// The provision-rendered keys the hub changed or cleared since
+	// provisioning: the start renders their files again
+	// (ptone/scion#3982).
+	opts.RerenderKeys = api.RerenderConfigKeys(startReq.InlineConfig)
 
 	// The hub is the source of truth for resume intent: when it sets
 	// req.Resume the harness must continue its prior session. We still fall
@@ -3799,11 +3811,14 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	// the agent. Remove the paths the Hub lists as cleared, after the merge
 	// and before anything reads the config at start (ptone/scion#3906).
 	// MergeScionConfig itself stays non-zero-wins: provisioning and
-	// template layering depend on it. The list is never written to disk.
+	// template layering depend on it. Neither the cleared list nor the
+	// changed list (read by the start, StartOptions.RerenderKeys) is
+	// written to disk.
 	if inlineConfig != nil {
 		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
+	merged.ChangedFields = nil
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -4980,7 +4995,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			go s.reportMessageFailure(connName, f)
 		})
 	}
+	// Attachments (ptone/scion#4596): their capabilities are redeemed now,
+	// at receipt, on a context detached from this request; the files are
+	// written into the agent's home right before the text is delivered.
+	inbox := s.startInboxDelivery(r.Header.Get("X-Scion-Hub-Connection"), id, req.MessageID, req.AttachmentRetentionDays, req.Attachments)
+	if inbox != nil {
+		msgCtx = agent.WithPreDelivery(msgCtx, inbox)
+	}
 	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
+		if inbox != nil {
+			inbox.Discard()
+		}
 		if strings.Contains(err.Error(), "not found") {
 			span.SetStatus(codes.Error, err.Error())
 			NotFound(w, "Agent")

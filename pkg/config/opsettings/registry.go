@@ -551,6 +551,8 @@ func compileSchemas() {
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},
