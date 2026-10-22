@@ -582,7 +582,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		c := complete
 		resp.Complete = &c
 	}
-	writeAgentList(w, p.view, resp)
+	s.writeAgentList(ctx, w, p.view, resp)
 }
 
 // isSortedModeRequest reports whether query requests sorted mode: any

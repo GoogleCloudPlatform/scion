@@ -848,6 +848,18 @@ func NormalizeModelAlias(model string) string {
 	return model
 }
 
+// ModelSizeAlias returns the canonical size alias (small, medium, large or
+// extra-large) that model names, accepting the short forms s, m, l and xl
+// in any case. It returns "" for an empty model or a concrete model ID.
+// It recognizes exactly the values ResolveModelAlias treats as aliases.
+func ModelSizeAlias(model string) string {
+	alias := NormalizeModelAlias(model)
+	if !KnownModelAliases[alias] {
+		return ""
+	}
+	return alias
+}
+
 // ResolveModelAlias resolves a model size alias to a concrete model name
 // using the given alias map. If the model is not a known alias or the alias
 // map does not contain a mapping, the model string is returned unchanged.

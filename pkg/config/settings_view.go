@@ -67,7 +67,47 @@ func loadSettingsView(projectPath string, ignoreEnvProjectID bool) (*Settings, e
 	if err != nil {
 		return nil, err
 	}
-	return settingsViewOf(vs, res, ignoreEnvProjectID), nil
+	return settingsViewOf(vs, res, viewOptions{ignoreEnvProjectID: ignoreEnvProjectID}), nil
+}
+
+// loadSingleDirSettingsView is the Settings view of dir's own settings
+// file alone: no embedded defaults, no global or other project layer, no
+// project-id file and no environment variable. The file is read through
+// the same layer conversion as the settings loaders (a legacy-format file
+// becomes the v1 shape), so the view's fields mean what they mean in
+// LoadSettings. A missing file is an empty view.
+func loadSingleDirSettingsView(dir string) (*Settings, error) {
+	k := koanf.New(".")
+	legacy := &legacyLayerState{}
+	if _, err := loadSettingsFileConverting(k, dir, legacy); err != nil {
+		return nil, err
+	}
+	res := &versionedLoadResult{
+		k:                         k,
+		fileHubProjectID:          k.String(projectkeys.ConfigHubProjectIDKey),
+		fileHubProjectIDFromCamel: legacy.hubIDFromCamel,
+		legacyWarnings:            dedupeStrings(legacy.warnings),
+	}
+	vs := &VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+	if err := unmarshalVersionedSettings(k, vs); err != nil {
+		return nil, err
+	}
+	return settingsViewOf(vs, res, viewOptions{fileOnly: true}), nil
+}
+
+// viewOptions are settingsViewOf's environment rules.
+type viewOptions struct {
+	// ignoreEnvProjectID leaves out SCION_HUB_PROJECT_ID and the project-ID
+	// override warning (see LoadSettingsIgnoringEnvProjectID).
+	ignoreEnvProjectID bool
+	// fileOnly reads no environment variable at all (implies
+	// ignoreEnvProjectID): the view holds what the settings file says
+	// (see loadSingleDirSettingsView).
+	fileOnly bool
 }
 
 // settingsViewOf builds the legacy Settings view of vs. Every field a caller
@@ -84,7 +124,8 @@ func loadSettingsView(projectPath string, ignoreEnvProjectID bool) (*Settings, e
 //   - Hub.ProjectID (GetHubProjectID) is the hub project ID recorded in the
 //     settings files, not the project-id file. SCION_HUB_PROJECT_ID replaces
 //     it only when the files record one.
-func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, ignoreEnvProjectID bool) *Settings {
+func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, opts viewOptions) *Settings {
+	ignoreEnvProjectID := opts.ignoreEnvProjectID || opts.fileOnly
 	s := convertVersionedToLegacy(vs)
 	if s.Runtimes == nil {
 		s.Runtimes = make(map[string]RuntimeConfig)
@@ -133,6 +174,9 @@ func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, ignoreEnvPr
 	// environment only. A hub.token or hub.apiKey key in a settings file is
 	// not read (the write policy refuses it).
 	token, apiKey := os.Getenv("SCION_HUB_TOKEN"), os.Getenv("SCION_HUB_API_KEY")
+	if opts.fileOnly {
+		token, apiKey = "", ""
+	}
 	if token != "" || apiKey != "" {
 		if s.Hub == nil {
 			s.Hub = &HubClientConfig{}
@@ -409,6 +453,9 @@ type versionedLoadOptions struct {
 	// trackSources records which layer set each key
 	// (versionedLoadResult.sources).
 	trackSources bool
+	// skipEnv names SCION_* environment variables the load leaves out
+	// (see ResolveSettingValueIgnoringEnv).
+	skipEnv map[string]bool
 }
 
 // versionedLoadResult is what loadVersionedLayers found besides the merged

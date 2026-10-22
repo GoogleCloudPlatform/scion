@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/spf13/cobra"
 )
 
@@ -365,7 +366,7 @@ Examples:
 		if convRef != nil && convRef.Kind == messaging.RefConversation &&
 			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			ownProjectSlug := os.Getenv("SCION_PROJECT")
-			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 				(ownProjectID != "" && projectPath == ownProjectID)
 			if !isSameProject {

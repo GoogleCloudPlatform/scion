@@ -230,7 +230,7 @@ existing value.
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
 | `SCION_HARNESS` | harness name | **Guarded** — defers to an existing value |
-| `SCION_MODEL` | resolved model | **Guarded** — defers to an existing value |
+| `SCION_MODEL` | resolved model; also the harness's `--model` argument | **Guarded** — defers to an existing value (the hub-resolved model, or an explicit `--env`); a size alias in it is resolved |
 | `SCION_THINKING_LEVEL` | resolved thinking level | **Guarded** — defers to an existing value |
 | `SCION_CREATOR` | OS user who created the agent | **Guarded** — defers to an existing value |
 
@@ -801,6 +801,31 @@ through the harness-config's `model_aliases` and injects the result as `SCION_MO
 gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
 default itself: it resolves only an explicit tier.
 
+The model reaches the harness through one channel. When the hub resolved a model (any tier from
+the request down to the hub default), it sends it as `SCION_MODEL`, and the broker uses that value
+over its own config, the harness-config default included. The broker passes the same value to the
+harness as `--model`, so the environment and the command line never disagree. A size alias the hub
+could not resolve is resolved on the broker through the harness-config's `model_aliases` (or the
+harness's built-in table), never replaced by the broker's own model. An explicit `SCION_MODEL` in
+the request env (`--env`) also wins and reaches the command line.
+
+Because the hub `agent_defaults.default_model` now reaches the harness command line, it must be a
+model every harness that can use it accepts. A size alias (`small`, `medium`, `large`,
+`extra-large`) is portable; a concrete model ID of one vendor (for example a Claude model on a
+gemini-cli agent) makes that agent fail at launch.
+
+#### `Changed in this release` — argv `--model` follows the hub-resolved model
+
+**Before:** the broker built the harness's `--model` argument from its own config (the request's
+inline model, else its template or the harness-config default), while `SCION_MODEL` carried the
+hub-resolved model. A project or hub default model was therefore shown and exported as
+`SCION_MODEL` while the harness ran with the harness-config default (for example the `medium`
+model for codex and gemini-cli), and a size alias the hub could not resolve was replaced by the
+broker's own model.
+**After:** both carry one effective model: `SCION_MODEL` when set (hub-resolved or explicit),
+else the broker's own config model, with any alias resolved
+([ptone/scion#3914](https://github.com/ptone/scion/issues/3914)).
+
 #### `Changed in this release` — hub default model and thinking level sit below the template
 
 **Before:** the hub stamped `agent_defaults.default_model` and `default_thinking_level` into the
@@ -900,12 +925,6 @@ keep it at or above the CPU request.
 ### `Known gap` — `ScionConfig.Secrets` is inert
 
 The `secrets` field on `ScionConfig` is accepted and persisted but is not acted on.
-
-### `Known gap` — `default-model` and the argv path
-
-The project `scion.io/default-model` annotation and `InlineConfig.Model` do not reach the argv
-path for all harnesses. A model set this way can be persisted and displayed while the harness is
-launched without it.
 
 ### Container image and Kubernetes image pull policy — a separate chain from B1
 

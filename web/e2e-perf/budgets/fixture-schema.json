@@ -36,7 +36,6 @@
       "fields": [
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
-        "experiments.hub.chat_thread_groups:boolean",
         "experiments.hub.flat_runtime_brokers:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
@@ -110,6 +109,7 @@
         "agents[].detached:boolean",
         "agents[].generation:number",
         "agents[].harnessConfig:string",
+        "agents[].harnessVendor:string",
         "agents[].id:string",
         "agents[].labels.bench-seq:string",
         "agents[].labels.bench-tier:string",
@@ -170,6 +170,7 @@
         "agents[].detached:boolean",
         "agents[].generation:number",
         "agents[].harnessConfig:string",
+        "agents[].harnessVendor:string",
         "agents[].id:string",
         "agents[].labels.bench-seq:string",
         "agents[].labels.bench-tier:string",

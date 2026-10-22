@@ -228,6 +228,29 @@ func TestConfigUnset_EnvPinnedAndRefusedKey(t *testing.T) {
 	assert.ErrorIs(t, err, config.ErrSettingNotWritable)
 }
 
+// The documented way back from agent mode (SCION_CLI_MODE=human scion
+// config unset cli.mode) prints a one-line note saying what cli.mode is
+// without the variable, not the still-set warning (ptone/scion#5483).
+func TestConfigUnset_CLIModeEnvNote(t *testing.T) {
+	_, globalDir := configTestProject(t, "schema_version: \"1\"\ncli:\n  mode: agent\n", "schema_version: \"1\"\ncli:\n  mode: agent\n")
+	outputFormat = ""
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	_, stderr, err := runConfigUnset(t, false, "cli.mode")
+	require.NoError(t, err)
+	assert.NotContains(t, stderr, "still set by")
+	want := "Note: SCION_CLI_MODE sets cli.mode for this command; without it, cli.mode is now agent (global " +
+		filepath.Join(globalDir, "settings.yaml") + ").\n"
+	assert.Contains(t, stderr, want)
+	assert.Equal(t, 1, strings.Count(stderr, "Note: SCION_CLI_MODE"), "stderr: %s", stderr)
+
+	// With the global setting removed too, nothing sets it.
+	_, stderr, err = runConfigUnset(t, true, "cli.mode")
+	require.NoError(t, err)
+	assert.NotContains(t, stderr, "still set by")
+	assert.Contains(t, stderr, "Note: SCION_CLI_MODE sets cli.mode for this command; without it, cli.mode is now <unset>.\n")
+}
+
 // resetConfigUnsetFlags restores config unset's --global flag after a real
 // rootCmd execution, since pflag keeps values across Execute calls.
 func resetConfigUnsetFlags(t *testing.T) {

@@ -439,10 +439,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	fullRepoRootMounted := false
-	// sharedWorkspaceAgentsMasked is set when the shared workspace mount
-	// (workspace == repo root) contains a .scion directory, whose agents/
-	// subdirectory is shadowed with a tmpfs below.
-	sharedWorkspaceAgentsMasked := false
+	// sharedWorkspaceAgentsMask is the container path of the in-project
+	// agents root of a shared workspace mount, shadowed with a tmpfs below
+	// (sharedWorkspaceAgentsMaskTarget); empty when no mask applies.
+	sharedWorkspaceAgentsMask := ""
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
 		// cloned repo is visible on the host for debugging and persistence.
@@ -495,13 +495,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Agent state for shared-workspace projects is always resolved
 			// from the broker-side agent dir (pkg/agent agentStateDir), never
 			// from the in-project agents root under this mount; that is the
-			// control on every runtime. On Docker/Podman the in-project
-			// agents root is additionally shadowed with a tmpfs (below) when
-			// <workspace>/.scion is a directory.
+			// control on every runtime. The in-project agents root is
+			// additionally kept out of the container's view (below):
+			// Docker/Podman shadow it with a tmpfs when <workspace>/.scion
+			// is a directory. Apple does so only when the agents dir
+			// already exists, since a mount point the Apple runtime
+			// created would land in the host checkout.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
-			if info, err := os.Stat(filepath.Join(config.Workspace, ".scion")); err == nil && info.IsDir() {
-				sharedWorkspaceAgentsMasked = true
+			requireAgentsDir := config.RuntimeName == appleContainerRuntimeName
+			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", requireAgentsDir); ok {
+				sharedWorkspaceAgentsMask = target
 			}
 		} else {
 			// Fallback if workspace is outside repo root or relative path is not straightforward.
@@ -682,13 +686,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if fullRepoRootMounted {
 		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
 	}
-	// Docker/Podman: shadow the in-project agents root of a shared workspace
-	// mount the same way, so it is empty in the container. The Apple runtime
-	// drops --mount arguments (stripUnsupportedAppleFlags), and Kubernetes and
-	// Cloud Run build their own mounts; for those, agent state resolving only
-	// from the broker-side agent dir is the control.
-	if sharedWorkspaceAgentsMasked {
-		addArg("--mount", "type=tmpfs,destination=/workspace/.scion/agents")
+	// Shadow the in-project agents root of a shared workspace mount with a
+	// tmpfs, so it is empty in the container. The Apple runtime drops
+	// --mount arguments (stripUnsupportedAppleFlags), so it gets the
+	// equivalent --tmpfs flag. Kubernetes keeps the path out of its pods
+	// itself (k8sWorkspaceAgentsExcluded).
+	if sharedWorkspaceAgentsMask != "" {
+		if config.RuntimeName == appleContainerRuntimeName {
+			addArg("--tmpfs", sharedWorkspaceAgentsMask)
+		} else {
+			addArg("--mount", "type=tmpfs,destination="+sharedWorkspaceAgentsMask)
+		}
 	}
 
 	// Add NET_ADMIN capability for iptables-based metadata server interception
