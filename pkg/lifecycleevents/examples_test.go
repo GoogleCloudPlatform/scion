@@ -45,11 +45,16 @@ func TestLifecycleExamplesSlice2(t *testing.T) {
 	// in production, where observed_ts is taken after the write (review r2 N2).
 	at := func(s int) time.Time { return t0.Add(-time.Minute + time.Duration(s)*time.Second) }
 	ctx := context.Background()
+	// create commits a create at at(0), before every later write.
+	create := func(a *store.Agent) {
+		cctx := WithCreateContext(ctx, CreateContext{CreatorType: "user", CreatorID: "u1"})
+		h.write(cctx, store.AgentWrite{Op: store.AgentWriteCreate, After: clone(a), Now: at(0)})
+	}
 
 	// a1: sync create, E(iv), label change, HTTP restart, queued restart,
 	// stop of the unobserved start.
 	a := baseAgent()
-	h.create(a)
+	create(a)
 	r := func(run string, sec int) {
 		b := clone(a)
 		a.RunID = run
@@ -82,7 +87,7 @@ func TestLifecycleExamplesSlice2(t *testing.T) {
 	// a2: a legacy broker answered running without naming the run.
 	l := baseAgent()
 	l.ID, l.Slug, l.Name = "00000000-0000-4000-8000-0000000000a2", "a2", "a2"
-	h.create(l)
+	create(l)
 	lb := clone(l)
 	l.RunID = "run-9"
 	h.write(ctx, store.AgentWrite{Op: store.AgentWriteRunID, Before: lb, After: clone(l), Now: at(8),
@@ -95,7 +100,7 @@ func TestLifecycleExamplesSlice2(t *testing.T) {
 	// a3: an accepted async launch reaped at its deadline.
 	c := baseAgent()
 	c.ID, c.Slug, c.Name, c.RunID = "00000000-0000-4000-8000-0000000000a3", "a3", "a3", "run-7"
-	h.create(c)
+	create(c)
 	cb := clone(c)
 	c.LaunchID, c.LaunchState, c.Phase = "al-1", store.LaunchStateActive, "provisioning"
 	h.write(ctx, store.AgentWrite{Op: store.AgentWriteLaunch, Before: cb, After: clone(c), Now: at(10),
@@ -104,6 +109,28 @@ func TestLifecycleExamplesSlice2(t *testing.T) {
 	c.LaunchState, c.Phase = store.LaunchStateEnded, "error"
 	h.write(ctx, store.AgentWrite{Op: store.AgentWriteLaunch, Before: cb, After: clone(c), Now: at(11),
 		Hints: store.AgentWriteHints{LaunchEnd: &store.LaunchEndHint{Reason: store.LaunchEndReasonTimedOut, Code: store.LaunchErrorLaunchTimeout}}})
+
+	// Per agent, event_ts never goes backwards with the revision, and
+	// observed_ts is never earlier than event_ts (review r2 N2,
+	// r2-delta Required).
+	lastTS := map[string]time.Time{}
+	for _, e := range h.events() {
+		ets, err := time.Parse(time.RFC3339Nano, e.EventTS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ots, err := time.Parse(time.RFC3339Nano, e.ObservedTS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ots.Before(ets) {
+			t.Errorf("%s rev %d: observed_ts %s before event_ts %s", e.AgentID, e.TransitionRevision, e.ObservedTS, e.EventTS)
+		}
+		if prev, ok := lastTS[e.AgentID]; ok && ets.Before(prev) {
+			t.Errorf("%s rev %d: event_ts %s runs backwards (previous %s)", e.AgentID, e.TransitionRevision, e.EventTS, prev.Format(time.RFC3339Nano))
+		}
+		lastTS[e.AgentID] = ets
+	}
 
 	var buf bytes.Buffer
 	for _, row := range h.db.rows() {

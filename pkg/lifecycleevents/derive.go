@@ -545,6 +545,13 @@ func deriveRunWrite(f Facts, plan *Plan) {
 		if r.PendingAdoptedFrom == "" || r.PendingAdoptedTo != f.BeforeRunID {
 			r.PendingAdoptedFrom = f.BeforeRunID
 		}
+		if r.PendingAdoptedFrom == f.AfterRunID {
+			// Adopted back to the origin: no alias remains to report.
+			r.PendingAdoptedFrom, r.PendingAdoptedAt, r.PendingAdoptionSource, r.PendingAdoptedTo = "", nil, "", ""
+			return
+		}
+		// adopted_at and adoption_source describe the hop that made the
+		// final run current (the chained alias holds from then on).
 		r.PendingAdoptedAt = &now
 		r.PendingAdoptionSource = f.AdoptionSource
 		r.PendingAdoptedTo = f.AfterRunID

@@ -719,16 +719,26 @@ func TestDeriveReincarnationTagsSparesTheBaseRun(t *testing.T) {
 // (R1 -> L2) instead of dropping the first alias; an adoption from a run
 // that is not the pending target starts a new alias.
 func TestDeriveSecondAdoptionChains(t *testing.T) {
+	secondHop := tableNow.Add(time.Minute) // later than the cursor's first hop
 	adopt := func(before, after string) Facts {
 		return Facts{Op: store.AgentWriteRunID, Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceHeartbeat,
 			HasBefore: true, BeforeLive: true, HasAfter: true, BeforePhase: "running", AfterPhase: "running",
-			BeforeRunID: before, AfterRunID: after, BeforeGeneration: 1, AfterGeneration: 1, Now: tableNow,
+			BeforeRunID: before, AfterRunID: after, BeforeGeneration: 1, AfterGeneration: 1, Now: secondHop,
 			BeforeDigest: "d", AfterDigest: "d", Cursor: adoptedCursor("L1")}
 	}
 	p := Derive(adopt("L1", "L2"))
 	if p.Run.PendingAdoptedFrom != "R1" || p.Run.PendingAdoptedTo != "L2" || p.Run.OpenRun != "L2" {
 		t.Errorf("chained adoption: got from=%q to=%q open=%q, want R1 -> L2 with the segment rebound",
 			p.Run.PendingAdoptedFrom, p.Run.PendingAdoptedTo, p.Run.OpenRun)
+	}
+	// adopted_at and adoption_source are the final hop's.
+	if p.Run.PendingAdoptedAt == nil || !p.Run.PendingAdoptedAt.Equal(secondHop) || p.Run.PendingAdoptionSource != store.AdoptionSourceHeartbeat {
+		t.Errorf("chained adoption: got at=%v source=%q, want the second hop's (%v, heartbeat_adopt)",
+			p.Run.PendingAdoptedAt, p.Run.PendingAdoptionSource, secondHop)
+	}
+	// Adopting back to the origin leaves no alias (no self-alias R1 -> R1).
+	if p = Derive(adopt("L1", "R1")); p.Run.PendingAdoptedFrom != "" || p.Run.PendingAdoptedTo != "" {
+		t.Errorf("adopt back to origin: got from=%q to=%q, want no pending adoption", p.Run.PendingAdoptedFrom, p.Run.PendingAdoptedTo)
 	}
 	p = Derive(adopt("X9", "L3"))
 	if p.Run.PendingAdoptedFrom != "X9" || p.Run.PendingAdoptedTo != "L3" {
