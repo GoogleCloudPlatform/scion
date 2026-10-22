@@ -2973,6 +2973,8 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 		return "", nil
 	}
 	if effectiveWorkspace != "" && !resolvedPathWithin(effectiveWorkspace, projectRepo) {
+		slog.Warn("Workspace is outside the project's repository; mounting the workspace only, without the repository",
+			"workspace", effectiveWorkspace, "repository", projectRepo)
 		return "", nil
 	}
 	top, err := boundedRevParse(projectDir, filepath.Dir(projectRepo), "--show-toplevel")

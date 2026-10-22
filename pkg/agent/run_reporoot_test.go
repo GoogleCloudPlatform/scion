@@ -15,8 +15,10 @@
 package agent
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -122,9 +124,17 @@ func TestDetectRepoRoot_AutoDetectFromProjectDir(t *testing.T) {
 		t.Fatalf("auto-detect from project dir: got repoRoot %q, want %q", got, want)
 	}
 
+	var logs strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
 	plain := t.TempDir() // effective workspace, not a git repo, outside root
 	if got := mustDetectRepoRoot(t, false, plain, root); got != "" {
 		t.Fatalf("plain workspace outside the project repository: got repoRoot %q, want \"\"", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "Workspace is outside the project's repository; mounting the workspace only") {
+		t.Errorf("expected a warning naming the layout, got: %s", out)
 	}
 }
 
