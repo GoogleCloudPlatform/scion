@@ -192,7 +192,8 @@ type doctorJSONHub struct {
 // doctorJSONHubAuth describes the Hub credential without revealing it.
 type doctorJSONHubAuth struct {
 	// Source is a hubAuthSource value: hub_profile, stored_login,
-	// agent_token_file, env_auth_token, env_hub_token, dev or none.
+	// agent_token_file, env_auth_token, env_hub_token, dev, transport or
+	// none.
 	// Doctor is refused with a hub profile selected, so it does not
 	// report hub_profile today.
 	Source string `json:"source"`
@@ -395,10 +396,10 @@ func (r *doctorReport) overallStatus() string {
 //     the Hub client or the HTTP transport (which can quote the request
 //     URL) reaches any message: doctorHubError returns
 //     doctorHubErrorHidden instead;
-//   - (C) any other endpoint cannot hold a credential: it is shown as
-//     scheme, host, port and path, and error text is shown, with the
-//     shared URL redaction (config.RedactURL, config.RedactURLsIn in add)
-//     as a second line of defence.
+//   - (C) for any other endpoint, no user info, query or fragment is
+//     shown either: it is shown as scheme, host, port and path, and error
+//     text is shown with the shared URL redaction applied
+//     (config.RedactURL, and config.RedactURLsIn in add).
 
 // doctorEndpointRedacted is shown in place of an endpoint containing "@".
 const doctorEndpointRedacted = "(endpoint not shown: it contains @)"
@@ -562,7 +563,7 @@ func doctorHubContext(hubEP, authSource string, healthz doctorHealthzProbe, summ
 	if hubEP == "" {
 		return nil
 	}
-	h := &doctorJSONHub{Endpoint: doctorDisplayEndpoint(hubEP)}
+	h := &doctorJSONHub{Endpoint: singleLine(doctorDisplayEndpoint(hubEP))}
 	if authSource != "" {
 		h.Auth = &doctorJSONHubAuth{Source: authSource}
 	}
@@ -599,6 +600,8 @@ func doctorHubCredentialCheck(source string) scionruntime.CheckResult {
 		msg = "Using SCION_HUB_TOKEN"
 	case hubAuthSourceDev:
 		msg = "Using a development token"
+	case hubAuthSourceTransport:
+		msg = "Using the transport (proxy) credential only; no Hub credential found"
 	case hubAuthSourceNone:
 		msg = "No credential found; requests are sent without one"
 	default:

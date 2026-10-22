@@ -36,11 +36,13 @@ import (
 type headerRecorder struct {
 	bearer     string
 	agentToken string
+	proxy      string
 }
 
 func (h *headerRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	h.bearer = req.Header.Get("Authorization")
 	h.agentToken = req.Header.Get("X-Scion-Agent-Token")
+	h.proxy = req.Header.Get("Proxy-Authorization")
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -59,6 +61,8 @@ func TestHubClientAuthSource(t *testing.T) {
 
 	type setup struct {
 		storedLogin, tokenFile, envAuth, envHub, dev, agentID bool
+		// transport sets an IAP transport token in the environment.
+		transport bool
 	}
 	all := setup{storedLogin: true, tokenFile: true, envAuth: true, envHub: true, dev: true}
 	tests := []struct {
@@ -76,6 +80,9 @@ func TestHubClientAuthSource(t *testing.T) {
 		{"SCION_HUB_TOKEN next", remote, setup{envHub: true, dev: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
 		{"development token last", remote, setup{dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
 		{"no credential", remote, setup{}, hubAuthSourceNone, "", ""},
+		{"transport credential only", remote, setup{transport: true}, hubAuthSourceTransport, "", ""},
+		{"a development token wins over the transport credential", remote, setup{transport: true, dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		{"SCION_HUB_TOKEN with a transport credential", remote, setup{transport: true, envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
 		{"localhost prefers the development token over the agent token file", local, setup{tokenFile: true, dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
 		{"localhost without a development token keeps the agent token file", local, setup{tokenFile: true}, hubAuthSourceAgentTokenFile, "", "file-tok"},
 		{"localhost hub-managed agent keeps the agent token file", local, setup{tokenFile: true, dev: true, agentID: true}, hubAuthSourceAgentTokenFile, "", "file-tok"},
@@ -113,6 +120,12 @@ func TestHubClientAuthSource(t *testing.T) {
 			if tt.setup.agentID {
 				t.Setenv("SCION_AGENT_ID", "agent-1")
 			}
+			wantProxy := ""
+			if tt.setup.transport {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+				t.Setenv(transportauth.EnvTransportToken, "transport-tok")
+				wantProxy = "Bearer transport-tok"
+			}
 
 			rec := &headerRecorder{}
 			orig := http.DefaultTransport
@@ -126,15 +139,17 @@ func TestHubClientAuthSource(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header")
 			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header")
+			assert.Equal(t, wantProxy, rec.proxy, "transport header")
 
 			// hubClientForEndpoint sends the same credential.
-			rec.bearer, rec.agentToken = "", ""
+			rec.bearer, rec.agentToken, rec.proxy = "", "", ""
 			c2, err := hubClientForEndpoint(nil, tt.endpoint)
 			require.NoError(t, err)
 			_, err = c2.Health(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (hubClientForEndpoint)")
 			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (hubClientForEndpoint)")
+			assert.Equal(t, wantProxy, rec.proxy, "transport header (hubClientForEndpoint)")
 
 			// Through the invocation's hub (SCION_HUB_ENDPOINT, no profile):
 			// getHubClientWithAuthSource reports the same source, and
@@ -143,7 +158,7 @@ func TestHubClientAuthSource(t *testing.T) {
 			hubEndpoint, hubProfileFlag = "", ""
 			t.Cleanup(func() { hubEndpoint, hubSource, hubProfileFlag = origEP, origSrc, origProfile })
 			t.Setenv("SCION_HUB_ENDPOINT", tt.endpoint)
-			rec.bearer, rec.agentToken = "", ""
+			rec.bearer, rec.agentToken, rec.proxy = "", "", ""
 			c3, source3, err := getHubClientWithAuthSource(nil)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantSource, source3, "getHubClientWithAuthSource")
@@ -151,19 +166,21 @@ func TestHubClientAuthSource(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (getHubClientWithAuthSource)")
 			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (getHubClientWithAuthSource)")
-			rec.bearer, rec.agentToken = "", ""
+			assert.Equal(t, wantProxy, rec.proxy, "transport header (getHubClientWithAuthSource)")
+			rec.bearer, rec.agentToken, rec.proxy = "", "", ""
 			c4, err := getHubClient(nil)
 			require.NoError(t, err)
 			_, err = c4.Health(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantBearer, rec.bearer, "Authorization header (getHubClient)")
 			assert.Equal(t, tt.wantAgent, rec.agentToken, "agent token header (getHubClient)")
+			assert.Equal(t, wantProxy, rec.proxy, "transport header (getHubClient)")
 		})
 	}
 }
 
 func TestDoctorHubCredentialCheck_NamesOnlyTheSource(t *testing.T) {
-	for _, src := range []string{hubAuthSourceHubProfile, hubAuthSourceStoredLogin, hubAuthSourceAgentTokenFile, hubAuthSourceEnvAuthToken, hubAuthSourceEnvHubToken, hubAuthSourceDev, hubAuthSourceNone} {
+	for _, src := range []string{hubAuthSourceHubProfile, hubAuthSourceStoredLogin, hubAuthSourceAgentTokenFile, hubAuthSourceEnvAuthToken, hubAuthSourceEnvHubToken, hubAuthSourceDev, hubAuthSourceTransport, hubAuthSourceNone} {
 		c := doctorHubCredentialCheck(src)
 		assert.Equal(t, "hub-credential", c.Name, src)
 		assert.Equal(t, "info", c.Status, src)

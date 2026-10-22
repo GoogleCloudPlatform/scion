@@ -1715,6 +1715,7 @@ them:
 | `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
 | `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
 | `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
+| `transport` | No Hub credential was found, and only the transport (proxy) credential configured in the environment, for example for IAP, is sent. |
 | `none` | No credential was found; requests are sent without one. |
 
 The text output shows the same source as the `hub-credential` line of Hub Health.
@@ -1730,8 +1731,9 @@ it applies a fixed rule, in the text and the JSON output alike:
   (which can quote the request URL) appears in any check message or in `platformHealth.message`.
   The message ends with "error details not shown because the Hub endpoint contains @, ? or #"
   instead.
-- Any other endpoint cannot hold such a credential. It is shown as scheme, host, port and path,
-  and error text is shown in full.
+- For any other endpoint, no user info, query or fragment is shown either: the endpoint is shown
+  as scheme, host, port and path, and error text is shown with the shared URL redaction applied
+  (credential parameters of any URL in it are masked).
 
 **Changes from the earlier format.** The JSON output before format version 2 had no
 `formatVersion`. Version 2 breaks it, with no compatibility keys:
@@ -1748,7 +1750,7 @@ it applies a fixed rule, in the text and the JSON output alike:
 | - | new `hubHealth` check `hub-credential` (also in the text output) |
 
 `status` and the exit status are unchanged. The text output and the check names are unchanged
-except for the new `hub-credential` line in Hub Health and the endpoint rules below.
+except for the new `hub-credential` line in Hub Health and the endpoint rules above.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an

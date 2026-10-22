@@ -457,11 +457,18 @@ func TestDoctorHubEndpoint_QueryHidesErrorText(t *testing.T) {
 	assertNoEndpointCredentials(t, text.String())
 	assert.Contains(t, text.String(), "Cannot reach Hub at "+doctorDisplayEndpoint(ep)+": "+doctorHubErrorHidden)
 	assert.True(t, strings.HasSuffix(doctorDisplayEndpoint(ep), "/base"))
+
+	js, doc := runDoctorJSON(t, ep, client, "")
+	assertNoEndpointCredentials(t, string(js))
+	assert.JSONEq(t, `"`+doctorDisplayEndpoint(ep)+`"`, string(hubObject(t, doc)["endpoint"]))
+	var hh doctorJSONSection
+	require.NoError(t, json.Unmarshal(doc["hubHealth"], &hh))
+	assert.Equal(t, "Cannot reach Hub at "+doctorDisplayEndpoint(ep)+": "+doctorHubErrorHidden, findCheck(t, hh.Checks, "hub-connectivity").Message)
 }
 
 func TestDoctorHubEndpoint_PlainEndpointKeepsErrorText(t *testing.T) {
-	// Rule C: nothing in the endpoint can be a credential, so the error
-	// text is shown.
+	// Rule C: no "@", "?" or "#", so the error text is shown (with the
+	// shared URL redaction applied).
 	ep := closedServerURL()
 	var text bytes.Buffer
 	r := &doctorReport{stdout: &text}
@@ -474,11 +481,80 @@ func TestDoctorHubEndpoint_PlainEndpointKeepsErrorText(t *testing.T) {
 func TestDoctorPlatformHealth_ErrorTextHiddenForQueryEndpoint(t *testing.T) {
 	srv := (&fakeDoctorHub{summaryStatus: http.StatusInternalServerError, summaryBody: `{"error":{"code":"internal","message":"boom s3cr3t-tok"}}`, brokersBody: `{"brokers":[]}`, agentsBody: `{"agents":[]}`}).serve(t)
 	ep := srv.URL + "?token=s3cr3t-tok"
-	_, doc := runDoctorJSON(t, ep, newDoctorTestClient(t, srv.URL), "")
+	client := newDoctorTestClient(t, srv.URL)
+
+	var text bytes.Buffer
+	r := &doctorReport{stdout: &text}
+	r.platformHealthSection(r.hubChecks(ep, client, ""))
+	assertNoEndpointCredentials(t, text.String())
+	assert.Contains(t, text.String(), "health-summary: Could not read the health summary: "+doctorHubErrorHidden)
+
+	js, doc := runDoctorJSON(t, ep, client, "")
+	assertNoEndpointCredentials(t, string(js))
 	var ph doctorJSONPlatformHealth
 	require.NoError(t, json.Unmarshal(doc["platformHealth"], &ph))
 	assert.Equal(t, doctorPHReasonError, ph.Reason)
 	assert.Equal(t, "Could not read the health summary: "+doctorHubErrorHidden, ph.Message)
+}
+
+// failingListHub is a Hub whose /healthz is healthy, whose health summary
+// is forbidden (so the list-based checks run), and which answers every
+// other request with HTTP 500 and an error body quoting a secret.
+func failingListHub(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_, _ = io.WriteString(w, `{"status":"healthy"}`)
+		case "/api/v1/admin/health/summary":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"code":"forbidden","message":"forbidden"}}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"code":"internal","message":"boom s3cr3t-tok"}}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDoctorHubChecks_ErrorTextHiddenAtEverySite(t *testing.T) {
+	srv := failingListHub(t)
+	client := newDoctorTestClient(t, srv.URL)
+	endpoints := map[string]string{
+		"query":     srv.URL + "/b?token=s3cr3t-tok#frag",
+		"user info": strings.Replace(srv.URL, "http://", "http://alice:pa55word@", 1) + "/b",
+	}
+	for name, ep := range endpoints {
+		t.Run(name, func(t *testing.T) {
+			var text bytes.Buffer
+			r := &doctorReport{stdout: &text}
+			r.platformHealthSection(r.hubChecks(ep, client, "proj-1"))
+			for check, prefix := range map[string]string{
+				"hub-auth":            "Authentication failed: ",
+				"broker-connectivity": "Failed to query brokers: ",
+				"gcp-sa-mappings":     "Could not list the project's GCP service accounts: ",
+				"agent-health":        "Failed to query agents: ",
+			} {
+				assert.Equal(t, prefix+doctorHubErrorHidden, findCheck(t, r.HubChecks, check).Message, check)
+			}
+			assertNoEndpointCredentials(t, text.String())
+
+			var buf bytes.Buffer
+			rj := &doctorReport{stdout: &buf, json: true}
+			rj.platformHealthSection(rj.hubChecks(ep, client, "proj-1"))
+			require.NoError(t, rj.finish())
+			assertNoEndpointCredentials(t, buf.String())
+			assert.Contains(t, buf.String(), "Failed to query agents: "+doctorHubErrorHidden)
+		})
+	}
+
+	// With a plain endpoint the same errors are shown (rule C).
+	var text bytes.Buffer
+	r := &doctorReport{stdout: &text}
+	r.platformHealthSection(r.hubChecks(srv.URL, client, "proj-1"))
+	assert.Contains(t, findCheck(t, r.HubChecks, "agent-health").Message, "boom")
 }
 
 func TestDoctorHubHealth_CredentialLine(t *testing.T) {

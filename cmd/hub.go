@@ -615,8 +615,18 @@ const (
 	hubAuthSourceEnvAuthToken   = "env_auth_token"
 	hubAuthSourceEnvHubToken    = "env_hub_token"
 	hubAuthSourceDev            = "dev"
-	hubAuthSourceNone           = "none"
+	// hubAuthSourceTransport: no Hub credential, only the transport
+	// (proxy) credential that hubclient.New adds from the environment.
+	hubAuthSourceTransport = "transport"
+	hubAuthSourceNone      = "none"
 )
+
+// transportAuthActive reports whether hubclient.New will add a transport
+// (proxy) credential from the environment, as noCredentialAuthInfo does.
+func transportAuthActive() bool {
+	src, err := transportauth.FromEnv()
+	return err == nil && src != nil
+}
 
 // getHubClientWithAuthSource is getHubClient that also names the source
 // of the credential the client sends (a hubAuthSource value).
@@ -694,10 +704,15 @@ func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint strin
 	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
-		// WithAutoDevAuth sends no credential when it finds no dev token.
-		source = hubAuthSourceNone
-		if apiclient.ResolveDevToken() != "" {
+		// WithAutoDevAuth sends no Hub credential when it finds no dev
+		// token; transport auth (hubclient.New) may still add one.
+		switch {
+		case apiclient.ResolveDevToken() != "":
 			source = hubAuthSourceDev
+		case transportAuthActive():
+			source = hubAuthSourceTransport
+		default:
+			source = hubAuthSourceNone
 		}
 	}
 
