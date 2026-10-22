@@ -536,6 +536,27 @@ describe('auto-expose source and inheritance in edit mode', () => {
   });
 });
 
+describe('Clear on a field that only inherits', () => {
+  it('is disabled until the user types, then drops the edit instead of sending null', async () => {
+    const el = await mount('stopped', { values: {} });
+    const clearBtn = () =>
+      field(el, 'config.max_turns').querySelector('sl-button.clear') as HTMLElement;
+    expect(clearBtn().hasAttribute('disabled')).toBe(true);
+    await typeInto(el, 'config.max_turns', '5');
+    expect(clearBtn().hasAttribute('disabled')).toBe(false);
+    clearBtn().click();
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({});
+    expect(el.touchedKeys).not.toContain('config.max_turns');
+  });
+
+  it('a stored value is cleared with null (inherit)', async () => {
+    const el = await mount('stopped', { values: { max_turns: 4 } });
+    await clickClear(el, 'config.max_turns');
+    expect(el.collectConfigPatch()).toEqual({ max_turns: null });
+  });
+});
+
 describe('fields that are never sent from edit mode', () => {
   type WithDrafts = { drafts: Record<string, unknown> };
   const draft = { typed: true, text: 'x', cleared: false, unlimited: false };

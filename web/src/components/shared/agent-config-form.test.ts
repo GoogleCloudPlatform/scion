@@ -258,7 +258,7 @@ describe('scion-agent-config-form mutability display', () => {
   });
 
   it('warns that a clear or Unlimited turns applies at the next reincarnation', async () => {
-    const el = await mount();
+    const el = await mount({ values: { max_turns: 20 } });
     expect(el.shadowRoot!.querySelector('[data-testid="clear-note"]')).toBeNull();
     await clear(el, 'config.max_turns');
     expect(
@@ -271,7 +271,7 @@ describe('scion-agent-config-form mutability display', () => {
   });
 
   it('does not warn for Unlimited duration, which applies at the next start', async () => {
-    const el = await mount();
+    const el = await mount({ values: { max_duration: '1h' } });
     await setUnlimited(el, 'config.max_duration', true);
     expect(field(el, 'config.max_duration').querySelector('[data-testid="clear-note"]')).toBeNull();
     await clear(el, 'config.max_duration');

@@ -1190,7 +1190,10 @@ export class ScionAgentConfigForm extends LitElement {
    * (nothing stored to clear); in edit mode it is sent as null.
    */
   private clearField(f: AgentConfigFieldDef): void {
-    if (this.mode === 'create') {
+    // Nothing stored on the agent (create mode, or an edit-mode field that
+    // only inherits): there is nothing to revert, so Clear just drops the
+    // user's edit and nothing is sent.
+    if (this.mode === 'create' || !this.hasStoredValue(f)) {
       const next = { ...this.drafts };
       delete next[f.key];
       this.drafts = next;
@@ -1343,8 +1346,16 @@ export class ScionAgentConfigForm extends LitElement {
       : `Inherited from ${p.source}`;
   }
 
+  /** Edit mode: the agent stores its own value for f (not only an inherited one). */
+  private hasStoredValue(f: AgentConfigFieldDef): boolean {
+    return this.storedText(f) !== '' || this.storedUnlimited(f);
+  }
+
   private renderClear(f: AgentConfigFieldDef, off: boolean, d: FieldDraft | undefined) {
-    const nothingToClear = this.mode === 'create' ? !isTouched(d) : !!d?.cleared;
+    // Edit mode: Clear reverts a value the agent stores to the inherited
+    // one, so a field that only inherits offers it only to drop an edit.
+    const nothingToClear =
+      this.mode === 'create' || !this.hasStoredValue(f) ? !isTouched(d) : !!d?.cleared;
     return html`<sl-button
       size="small"
       class="clear"

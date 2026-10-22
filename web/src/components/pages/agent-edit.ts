@@ -204,7 +204,7 @@ export function dispositionSummary(d: AgentUpdateDisposition | undefined): strin
   if (held) parts.push(`Saved ${held} for the next start.`);
   const reincarnate = names(d?.heldForReincarnate);
   if (reincarnate) parts.push(`Saved ${reincarnate}; takes effect at the next reincarnation.`);
-  return parts.length > 0 ? parts.join(' ') : 'Nothing to save.';
+  return parts.length > 0 ? parts.join(' ') : 'Saved; nothing changed.';
 }
 
 @customElement('scion-page-agent-edit')

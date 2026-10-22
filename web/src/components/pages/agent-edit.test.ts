@@ -84,7 +84,9 @@ function makeAgent(phase: string, stateVersion: number, extra: Partial<Agent> = 
     appliedConfig: {
       model: 'claude-opus',
       env: { FOO: 'bar' },
-      inlineConfig: { max_turns: 20 },
+      // Like the hub golden's agent: model, max_turns and max_duration are
+      // the agent's own values, so Clear reverts them.
+      inlineConfig: { model: 'claude-opus', max_turns: 20, max_duration: '1h' },
     },
     editability: hubEditability(phase),
     _capabilities: { actions: ['read', 'update', 'lifecycle', 'attach'] },
@@ -101,6 +103,8 @@ interface Call {
 let calls: Call[] = [];
 let agentResponses: Agent[] = [];
 let patchStatus = 200;
+/** The disposition the stub hub answers a PATCH with; null applies every config key. */
+let nextDisposition: Record<string, string[]> | null = null;
 let navigated: string[] = [];
 
 function stubFetch(): void {
@@ -127,7 +131,7 @@ function stubFetch(): void {
           status: 200,
           json: () =>
             Promise.resolve({
-              disposition: {
+              disposition: nextDisposition ?? {
                 applied: Object.keys(call.body?.config ?? {}).map((k) => `config.${k}`),
                 held: [],
                 heldForReincarnate: [],
@@ -174,6 +178,7 @@ beforeEach(() => {
   localStorage.removeItem(AGENT_EDIT_GROUPING_KEY);
   navigated = [];
   patchStatus = 200;
+  nextDisposition = null;
   document.addEventListener('nav-click', onNav);
   stubFetch();
 });
@@ -535,6 +540,34 @@ describe('agent edit page grouping', () => {
   });
 });
 
+describe('agent edit page Clear (UAT AC6)', () => {
+  it('clearing a previously set Max turns sends null and reports it in the toast', async () => {
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    await editField(el, 'config.max_turns', 'clear');
+    const f = formOf(el)!.shadowRoot!.querySelector('.field[data-key="config.max_turns"]')!;
+    // Before the save the field says when the clear takes effect.
+    expect(f.querySelector('[data-testid="clear-note"]')!.textContent).toContain(
+      'next reincarnation'
+    );
+    // The hub's answer for this body (TestAgentEditGoldens "clear").
+    nextDisposition = { applied: [], held: [], heldForReincarnate: ['config.max_turns'] };
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([
+      { stateVersion: 5, config: { max_turns: null } },
+    ]);
+    expect(toasts).toEqual(['Saved max_turns; takes effect at the next reincarnation.']);
+  });
+
+  it('a field with no stored value of its own offers no Clear, and sends nothing', async () => {
+    const agent = makeAgent('stopped', 5);
+    agent.appliedConfig!.inlineConfig = {};
+    const el = await mount(agent);
+    const f = formOf(el)!.shadowRoot!.querySelector('.field[data-key="config.max_turns"]')!;
+    expect(f.querySelector('sl-button.clear')!.hasAttribute('disabled')).toBe(true);
+    expect(button(el, 'save')!.hasAttribute('disabled')).toBe(true);
+  });
+});
+
 describe('agent edit page stale save', () => {
   it('a 409 offers a reload that keeps the edits and saves against the new version', async () => {
     const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 8));
@@ -672,8 +705,8 @@ describe('dispositionSummary', () => {
 
   it('says nothing was saved when every list is empty or missing', () => {
     expect(dispositionSummary({ applied: [], held: [], heldForReincarnate: [] })).toBe(
-      'Nothing to save.'
+      'Saved; nothing changed.'
     );
-    expect(dispositionSummary(undefined)).toBe('Nothing to save.');
+    expect(dispositionSummary(undefined)).toBe('Saved; nothing changed.');
   });
 });
