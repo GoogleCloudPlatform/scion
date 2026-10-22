@@ -509,6 +509,12 @@ func storageSyncViolations(src string) ([]string, error) {
 			problems = append(problems, helper+" must carry git data only through syncGitData")
 		}
 	}
+	if callsIn["uploadWorkspace"]["clearGitState"] != 1 || callsIn["downloadWorkspace"]["clearGitState"] != 0 {
+		problems = append(problems, "uploadWorkspace must clear the remote ref state when it skips git data")
+	}
+	if got := argsIn["clearGitState"]["syncFiltered"]; len(got) != 1 || got[0] != "ctx,dst,emptyFs,filterWorkspaceGitState" {
+		problems = append(problems, "clearGitState must sync the ref state from its empty directory")
+	}
 	if got := argsIn["syncGitData"]["syncFiltered"]; callsIn["syncGitData"]["copyGitObjects"] != 1 || len(got) != 1 || !strings.HasSuffix(got[0], ",filterWorkspaceGitState") {
 		problems = append(problems, "syncGitData must copy objects and sync the ref state with filterWorkspaceGitState")
 	}
@@ -677,6 +683,12 @@ func TestWorkspaceSyncGuard_StorageGuardCatchesBypasses(t *testing.T) {
 				return edit(t, orig, "\treturn syncFiltered(ctx, dst, src, filterWorkspaceGitState)\n}", "\treturn copyGitObjects(ctx, dst, src)\n}")
 			},
 			want: []string{"syncGitData must copy objects and sync the ref state with filterWorkspaceGitState"},
+		},
+		"skip leaves the remote ref state": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, "\t\treturn clearGitState(ctx, dstFs)\n", "\t\treturn nil\n")
+			},
+			want: []string{"uploadWorkspace must clear the remote ref state when it skips git data"},
 		},
 		"workspace download straight into the workspace": {
 			mutate: func(t *testing.T) string {

@@ -552,6 +552,34 @@ func createTemp(dir *os.Root, mode fs.FileMode) (*os.File, error) {
 	return nil, errors.New("could not create a temporary file")
 }
 
+// keptFiles indexes the destination files a deletion pass keeps, by size,
+// for os.SameFile lookups.
+type keptFiles map[int64][]fs.FileInfo
+
+// indexKept resolves every kept path in scope to its destination file.
+func indexKept(root *os.Root, keep map[string]bool, inScope func(rel string, isDir bool) bool) keptFiles {
+	k := keptFiles{}
+	for rel := range keep {
+		if !inScope(rel, false) {
+			continue
+		}
+		if info, err := root.Lstat(rel); err == nil && info.Mode().IsRegular() {
+			k[info.Size()] = append(k[info.Size()], info)
+		}
+	}
+	return k
+}
+
+// has reports whether info is the same file as a kept destination file.
+func (k keptFiles) has(info fs.FileInfo) bool {
+	for _, ki := range k[info.Size()] {
+		if os.SameFile(ki, info) {
+			return true
+		}
+	}
+	return false
+}
+
 // deleteExtraneous removes, under the directory start of root, the regular
 // files in scope (inScope, by root-relative path) that are not in keep, and
 // then the directories in scope that are not in keepDirs once they are
@@ -596,6 +624,13 @@ func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]boo
 	if err != nil {
 		return 0, fmt.Errorf("failed to scan workspace: %w", err)
 	}
+	// A destination entry that is the same file as a kept entry is kept: on
+	// a case-insensitive (or otherwise name-folding) filesystem, a kept
+	// path spelled differently (a case-only rename) resolves to it.
+	var kept keptFiles
+	if len(extraneous) > 0 {
+		kept = indexKept(root, keep, inScope)
+	}
 	deleted := 0
 	for _, rel := range extraneous {
 		dirRel, base := path.Split(rel)
@@ -607,7 +642,7 @@ func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]boo
 			return deleted, err
 		}
 		info, err := dir.Lstat(base)
-		if err == nil && info.Mode().IsRegular() && !aliasesReserved(dir, base, info) {
+		if err == nil && info.Mode().IsRegular() && !aliasesReserved(dir, base, info) && !kept.has(info) {
 			if err := dir.Remove(base); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				_ = dir.Close()
 				return deleted, fmt.Errorf("failed to remove %s: %w", rel, err)

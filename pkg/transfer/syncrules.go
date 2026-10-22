@@ -40,7 +40,8 @@ import (
 //     deleted ref does not come back, and the objects (objects/**), only
 //     ever copied;
 //   - never synced: everything else under any .git (config, hooks, info,
-//     modules, worktrees, logs, objects/info such as alternates, and every
+//     modules, worktrees, logs, objects/info such as alternates, lock files
+//     (*.lock) anywhere under it, and every
 //     .git below the root, such as a submodule's gitdir file), every .scion
 //     entry at any depth (the project's own configuration, wherever the
 //     project sits in the repository), and .DS_Store.
@@ -117,11 +118,17 @@ var (
 	scionPattern = reservedPattern(dotScion, `scion~[1-9]`, `sc[0-9a-f][0-9a-f][0-9a-f][0-9a-f]~[1-9]`)
 	dsPattern    = reservedPattern(dsStore, `ds_sto~[1-9]`)
 	infoPattern  = reservedPattern(infoDir)
+	// lockPattern matches a git lock file (name.lock, in any of the same
+	// variants): a ref, packed-refs, HEAD or index being updated. Lock
+	// files are never git data: carried, one would block updates on the
+	// receiver; deleted there, a live lock of a running git could go.
+	lockPattern = `[^/]*` + reservedPattern(".lock")
 
 	gitElem   = regexp.MustCompile(`^(?:` + gitPattern + `)$`)
 	scionElem = regexp.MustCompile(`^(?:` + scionPattern + `)$`)
 	dsElem    = regexp.MustCompile(`^(?:` + dsPattern + `)$`)
 	infoElem  = regexp.MustCompile(`^(?:` + infoPattern + `)$`)
+	lockElem  = regexp.MustCompile(`^(?:` + lockPattern + `)$`)
 )
 
 // ClassifyWorkspaceSyncPath classifies rel, a slash-separated path relative
@@ -155,6 +162,9 @@ func ClassifyWorkspaceSyncPath(rel string, isDir bool) WorkspaceSyncClass {
 		return WorkspaceSyncNever
 	}
 	// Under the root .git.
+	if len(parts) > 1 && lockElem.MatchString(parts[len(parts)-1]) {
+		return WorkspaceSyncNever
+	}
 	if len(parts) == 1 {
 		if isDir {
 			return WorkspaceSyncGitData
@@ -224,7 +234,8 @@ var WorkspaceSyncContentRcloneRules = append(neverRules(gitPattern, scionPattern
 // refs/**, without any reserved name inside.
 var WorkspaceSyncGitStateRcloneRules = append(append(neverRules(scionPattern, dsPattern),
 	"- /"+dotGit+"/**/"+rcloneElem(gitPattern),
-	"- /"+dotGit+"/**/"+rcloneElem(gitPattern)+"/**"),
+	"- /"+dotGit+"/**/"+rcloneElem(gitPattern)+"/**",
+	"- /"+dotGit+"/**/"+rcloneElem(lockPattern)),
 	"+ /"+dotGit+"/HEAD",
 	"+ /"+dotGit+"/packed-refs",
 	"+ /"+dotGit+"/index",
@@ -240,7 +251,8 @@ var WorkspaceSyncGitObjectRcloneRules = append(append(neverRules(scionPattern, d
 	"- /"+dotGit+"/"+objsDir+"/"+rcloneElem(infoPattern),
 	"- /"+dotGit+"/"+objsDir+"/"+rcloneElem(infoPattern)+"/**",
 	"- /"+dotGit+"/**/"+rcloneElem(gitPattern),
-	"- /"+dotGit+"/**/"+rcloneElem(gitPattern)+"/**"),
+	"- /"+dotGit+"/**/"+rcloneElem(gitPattern)+"/**",
+	"- /"+dotGit+"/**/"+rcloneElem(lockPattern)),
 	"+ /"+dotGit+"/"+objsDir+"/**",
 	"- **",
 )

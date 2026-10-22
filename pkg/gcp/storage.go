@@ -204,11 +204,28 @@ func syncRemoteToLocal(ctx context.Context, remote, localPath string) error {
 	return syncFiltered(ctx, dstFs, srcFs, filterIdentity)
 }
 
+// clearGitState removes the git ref state from dst by syncing it from an
+// empty directory (filterWorkspaceGitState). Objects are left; without ref
+// state a receiver applies no refs and removes none.
+func clearGitState(ctx context.Context, dst fs.Fs) error {
+	empty, err := os.MkdirTemp("", "scion-empty-")
+	if err != nil {
+		return fmt.Errorf("failed to create empty directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(empty) }()
+	emptyFs, err := fs.NewFs(ctx, empty)
+	if err != nil {
+		return fmt.Errorf("failed to create source fs for %s: %w", empty, err)
+	}
+	return syncFiltered(ctx, dst, emptyFs, filterWorkspaceGitState)
+}
+
 // uploadWorkspace makes remote's content match the workspace at localPath
 // (filterWorkspaceContent) and carries the workspace's git data next to it
 // (syncGitData), unless the repository cannot travel as git data
 // (transfer.WorkspaceGitDataUnsupported): its git data is then skipped
-// with a warning. Excluded entries already at remote are left alone.
+// with a warning, and an earlier upload's ref state at remote is removed
+// (clearGitState). Excluded entries already at remote are left alone.
 func uploadWorkspace(ctx context.Context, localPath, remote string) error {
 	srcFs, dstFs, err := openPair(ctx, localPath, remote)
 	if err != nil {
@@ -220,7 +237,9 @@ func uploadWorkspace(ctx context.Context, localPath, remote string) error {
 	}
 	if reason := transfer.WorkspaceGitDataUnsupported(localPath); reason != "" {
 		slog.Warn("Workspace upload skipped git data: commits travel only by git push", "reason", reason)
-		return nil
+		// The prefix is reused: remove an earlier upload's ref state, so
+		// no receiver applies it as this workspace's.
+		return clearGitState(ctx, dstFs)
 	}
 	return syncGitData(ctx, dstFs, srcFs)
 }

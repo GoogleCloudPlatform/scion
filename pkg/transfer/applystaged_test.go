@@ -465,3 +465,55 @@ func TestApplyStagedWorkspace_ShallowValidated(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile stands in for a
+// case-insensitive receiver with a hard link: the destination's README.md
+// and Readme.md are one file, the source renamed it to Readme.md, and the
+// file must survive the deletion pass (in content and in the ref state).
+func TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	writeTreeT(t, staging, map[string]string{
+		"Readme.md":            "same\n",
+		".git/HEAD":            "ref: refs/heads/main\n",
+		".git/refs/heads/Main": "abc\n",
+	})
+	writeTreeT(t, dest, map[string]string{
+		"README.md":            "same\n",
+		".git/refs/heads/main": "abc\n",
+	})
+	if err := os.Link(filepath.Join(dest, "README.md"), filepath.Join(dest, "Readme.md")); err != nil {
+		t.Skipf("hard links unsupported: %v", err)
+	}
+	if err := os.Link(filepath.Join(dest, ".git/refs/heads/main"), filepath.Join(dest, ".git/refs/heads/Main")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	for _, rel := range []string{"README.md", "Readme.md", ".git/refs/heads/main", ".git/refs/heads/Main"} {
+		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
+			t.Errorf("%s removed: %v", rel, err)
+		}
+	}
+}
+
+// TestApplyStagedWorkspace_LockFilesNeverTouched checks that lock files are
+// neither applied from staging nor removed from the destination.
+func TestApplyStagedWorkspace_LockFilesNeverTouched(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	writeTreeT(t, staging, map[string]string{
+		".git/HEAD":                 "ref: refs/heads/main\n",
+		".git/refs/heads/main":      "abc\n",
+		".git/refs/heads/main.lock": "agent's lock\n",
+		".git/index.lock":           "agent's lock\n",
+	})
+	writeTreeT(t, dest, map[string]string{".git/refs/heads/other.lock": "receiver's live lock\n"})
+	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	absentT(t, filepath.Join(dest, ".git/refs/heads/main.lock"))
+	absentT(t, filepath.Join(dest, ".git/index.lock"))
+	if got := readT(t, filepath.Join(dest, ".git/refs/heads/other.lock")); got != "receiver's live lock\n" {
+		t.Errorf("receiver's lock = %q", got)
+	}
+}

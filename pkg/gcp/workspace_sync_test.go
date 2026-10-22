@@ -60,7 +60,8 @@ var workspaceSyncCorpus = []string{
 	"sub/git~1/hooks/x", "\ufeff.git/config", ".g\u200cit/config", ".scion.", "proj/.scion /x", "SCION~1/settings.yaml",
 	"proj/sc1a2b~1/x", "proj/.s\u206acion/x", ".\u017fcion/x", ".DS_Store.", ".git/objects/info./alternates",
 	".git/objects/INFO~1", ".git/objects/i\u200cnfo/alternates", ".git/objects/info:x", ".git/refs/heads/git~1",
-	".git/HEAD.", ".git/shallow", ".gitignore", ".gitattributes", "git~1.txt", ".git.bak/x", ".scionrc", "information/x",
+	".git/HEAD.", ".git/shallow", ".git/refs/heads/main.lock", ".git/refs/heads/x.LOCK", ".git/packed-refs.lock",
+	".git/HEAD.lock", ".git/index.lock", ".git/objects/pack/p.lock", ".git/refs/heads/lockstep", "src/file.lock", ".gitignore", ".gitattributes", "git~1.txt", ".git.bak/x", ".scionrc", "information/x",
 }
 
 // TestWorkspaceSyncRcloneDirectoryDecisions checks the directory side of
@@ -208,17 +209,43 @@ func TestUploadWorkspace_GitDataSemantics(t *testing.T) {
 }
 
 // TestUploadWorkspace_SkipsUnsupportedRepository checks that a repository
-// that cannot travel as git data (here: reftable) uploads its content only.
+// that cannot travel as git data uploads its content only, and that the ref
+// state an earlier supported upload left at the same prefix is removed, so
+// a receiver applies none of it.
 func TestUploadWorkspace_SkipsUnsupportedRepository(t *testing.T) {
-	workspace, bucket := t.TempDir(), t.TempDir()
-	writeTree(t, workspace, map[string]string{"a.txt": "a", ".git/HEAD": "ref: refs/heads/.invalid\n", ".git/reftable/tables.list": "x", ".git/objects/ab/cd": "o"})
-	if err := uploadWorkspace(context.Background(), workspace, bucket); err != nil {
-		t.Fatalf("upload: %v", err)
+	for name, marker := range map[string]string{
+		"reftable":      ".git/reftable/tables.list",
+		"partial clone": ".git/objects/pack/p.promisor",
+		"split index":   ".git/sharedindex.0123",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			workspace, bucket, receiver := t.TempDir(), t.TempDir(), t.TempDir()
+			writeTree(t, workspace, map[string]string{"a.txt": "v1", ".git/HEAD": "ref: refs/heads/main\n", ".git/refs/heads/main": "old\n", ".git/objects/ab/cd": "o"})
+			if err := uploadWorkspace(ctx, workspace, bucket); err != nil {
+				t.Fatalf("first upload: %v", err)
+			}
+			writeTree(t, workspace, map[string]string{"a.txt": "v2", ".git/refs/heads/main": "new\n", marker: "x"})
+			if err := uploadWorkspace(ctx, workspace, bucket); err != nil {
+				t.Fatalf("second upload: %v", err)
+			}
+			if got := readFile(t, filepath.Join(bucket, "a.txt")); got != "v2" {
+				t.Errorf("a.txt = %q", got)
+			}
+			for _, rel := range []string{".git/HEAD", ".git/refs/heads/main"} {
+				assertAbsent(t, filepath.Join(bucket, rel))
+			}
+			assertAbsent(t, filepath.Join(bucket, marker))
+
+			writeTree(t, receiver, map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/refs/heads/main": "receiver\n"})
+			if err := downloadWorkspace(ctx, bucket, receiver, true); err != nil {
+				t.Fatalf("download: %v", err)
+			}
+			if got := readFile(t, filepath.Join(receiver, ".git/refs/heads/main")); got != "receiver\n" {
+				t.Errorf("receiver's ref = %q, want kept (no stale ref state applied)", got)
+			}
+		})
 	}
-	if got := readFile(t, filepath.Join(bucket, "a.txt")); got != "a" {
-		t.Errorf("a.txt = %q", got)
-	}
-	assertAbsent(t, filepath.Join(bucket, ".git"))
 }
 
 // TestDownloadWorkspace_RefusesPreExistingBucketObjects puts every entry
