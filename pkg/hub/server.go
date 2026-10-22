@@ -808,8 +808,8 @@ type StartExtras struct {
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// are a start's asynchronous launch fields (ptone/scion#4669), sent
 	// under the same wire keys as a create's (RemoteCreateAgentRequest).
-	// Zero values send nothing; this release never sets them, so every
-	// start is sent synchronously.
+	// Zero values send nothing: the start is sent synchronously. Set by
+	// dispatchAgentStart for an asynchronous start.
 	AsyncLaunch            bool
 	LaunchID               string
 	LaunchTimeoutSeconds   int
@@ -1126,6 +1126,19 @@ func withRunIDURL(endpoint, runID string) string {
 		return endpoint + "&runId=" + url.QueryEscape(runID)
 	}
 	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withDispatchAgentIDURL appends the api.AgentIDQueryParam query
+// parameter to a start request URL (or path) when an agent ID was attached
+// with withDispatchAgentID (ptone/scion#4669): the broker's asynchronous
+// start needs the hub's agent ID before it reads the body. An older broker
+// ignores it.
+func withDispatchAgentIDURL(ctx context.Context, endpoint string) string {
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + dispatchAgentIDQuery(ctx, sep)
 }
 
 // withRunIDQuery is withRunIDURL for a bare query string.
@@ -1715,6 +1728,9 @@ type Server struct {
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
 	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
+	// attachmentDeliveryKey signs attachment delivery capabilities
+	// (ptone/scion#4596, attachment_delivery.go).
+	attachmentDeliveryKey []byte
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -2215,6 +2231,9 @@ type Server struct {
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map
+	// asyncStartGate caches whether every live hub instance advertises
+	// async_start_v1 (async_start_gate.go). The zero value reads false.
+	asyncStartGate asyncStartGate
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -2679,6 +2698,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize the artifact view capability key (pkg/artifacts RouteView).
 	if err := srv.initArtifactViewKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the attachment delivery capability key (ptone/scion#4596).
+	if err := srv.initAttachmentDeliveryKey(ctx); err != nil {
 		return nil, err
 	}
 
@@ -3799,6 +3823,7 @@ func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
 		hd.SetShutdownGate(s.dispatchShutdownGate)
+		hd.SetAttachmentIssuer(s.attachmentDelivery())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -7273,9 +7298,12 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
+
+	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
+	s.mux.HandleFunc("/api/v1/attachment-deliveries/", s.guarded("/api/v1/attachment-deliveries/", s.handleAttachmentDelivery))
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.guarded("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect))
