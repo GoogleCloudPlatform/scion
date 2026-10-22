@@ -219,6 +219,9 @@ func TestAgentPendingConfig_SuspendThenWakeAppliesHeldEdit(t *testing.T) {
 	applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
 	_, trigger := pendingAuditSummary(t, applied[0])
 	assert.Equal(t, pendingFoldTriggerWake, trigger)
+	// The wake here carries no caller identity: the hub is the actor.
+	assert.Equal(t, "system", applied[0].ActorPrincipalKind)
+	assert.Equal(t, pendingConfigSystemActor, applied[0].ActorPrincipalID)
 }
 
 // gatedCaptureDispatcher blocks DispatchAgentStart until released, so a

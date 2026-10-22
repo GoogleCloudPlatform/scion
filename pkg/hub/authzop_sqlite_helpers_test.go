@@ -945,6 +945,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
 		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/pending-config":                                   {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},

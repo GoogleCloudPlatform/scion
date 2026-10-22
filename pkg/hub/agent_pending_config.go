@@ -73,6 +73,10 @@ const (
 // effectiveNextRun.
 const agentViewEdit = "edit"
 
+// pendingConfigSystemActor is the actor of a pending config audit record
+// written with no caller identity.
+const pendingConfigSystemActor = "pending_config"
+
 // pendingFoldAttempts bounds the start fold's compare-and-set retries.
 const pendingFoldAttempts = 3
 
@@ -479,12 +483,19 @@ func (s *Server) auditPendingConfig(ctx context.Context, agentID, mutationType s
 	if err != nil {
 		after = nil
 	}
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+	rec := &store.MutationAuditRecord{
 		MutationType: mutationType,
 		TargetType:   "agent",
 		TargetID:     agentID,
 		AfterSummary: string(after),
-	})
+	}
+	// A start with no caller identity (a hub-internal wake or resume) is
+	// recorded as the hub's own action: the actor columns are required.
+	if GetIdentityFromContext(ctx) == nil {
+		rec.ActorPrincipalKind = "system"
+		rec.ActorPrincipalID = pendingConfigSystemActor
+	}
+	s.emitMutationAudit(ctx, rec)
 }
 
 // cloneAppliedConfig returns a deep copy of ac (nil for nil). It round-trips

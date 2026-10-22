@@ -4179,8 +4179,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	access.HeldEdits = s.heldEditsEnabled()
 	resp.Editability = buildAgentEditability(agent, access)
 
-	canAttachEnv := s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap)
-	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, canAttachEnv)
+	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	if r.URL.Query().Get("view") == agentViewEdit {
 		// The applied config with every pending key applied, as the
 		// edit form shows it; the same env gate as the applied config.
@@ -4191,7 +4190,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 				next.CreateInputs = nil
 			}
 		}
-		resp.EffectiveNextRun = redactAppliedConfigEnvForResponse(next, canAttachEnv)
+		resp.EffectiveNextRun = redactAppliedConfigEnvForResponse(next, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
