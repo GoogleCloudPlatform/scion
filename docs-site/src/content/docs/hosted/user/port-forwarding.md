@@ -102,7 +102,7 @@ X-Scion-Proxy-Error: no-credentials
 X-Scion-Proxy-Hint: sandboxed-subresource
 ```
 
-`X-Scion-Proxy-Hint: sandboxed-subresource` is present when the request came from a page opened through the proxy. Any other request that carries no credential and is not a page navigation gets the same answer, without the hint unless it has `Origin: null` or `Sec-Fetch-Site: cross-site`. Opening a proxy URL in a browser tab without being signed in still takes you to the sign-in page.
+`X-Scion-Proxy-Hint: sandboxed-subresource` is present when the request came from a page opened through the proxy. Other requests to the link that are not page loads get the same plain-text answer. Opening a proxy URL in a browser tab without being signed in still takes you to the sign-in page.
 
 A request made with your own credential, for example with `curl` and an agent token or a [personal access token](/scion/hosted/user/personal-access-tokens/), is served for any path. That shows the app answers, not that the page works for a person who opens the link; check the page in a browser.
 
