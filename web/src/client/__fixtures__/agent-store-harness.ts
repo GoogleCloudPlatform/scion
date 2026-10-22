@@ -144,6 +144,11 @@ export interface AgentServer {
   fetch: ReturnType<typeof vi.fn<(path: string, options: ApiFetchOptions) => Promise<Response>>>;
   /** How a project list page renders a row (the hub's omits `_messageability`). */
   projectRow?: (agent: Agent) => Agent;
+  /**
+   * The server-side filters a list request applies (ownership, label), from
+   * its query parameters; unset lists every row of the scope.
+   */
+  listFilter?: ((agent: Agent, params: URLSearchParams) => boolean) | undefined;
   /** Hold every request until the returned release is called. */
   pause(): () => void;
   /**
@@ -298,7 +303,9 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const scoped = project
         ? server.agents.filter((a) => a.projectId === decodeURIComponent(project))
         : server.agents;
-      const rows = sorted ? [...scoped].sort(compareUpdatedKey) : scoped;
+      const filter = server.listFilter;
+      const filtered = filter ? scoped.filter((a) => filter(a, url.searchParams)) : scoped;
+      const rows = sorted ? [...filtered].sort(compareUpdatedKey) : filtered;
       const page = rows.slice(offset, offset + limit);
       const end = offset + page.length;
       const body = {

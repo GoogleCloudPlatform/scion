@@ -665,10 +665,14 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
 	util.Debugf("Hub endpoint: %s", config.RedactURL(endpoint))
 
-	opts = append(opts, hubclient.WithTimeout(30*time.Second))
+	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
 
 	return hubclient.New(endpoint, opts...)
 }
+
+// hubClientTimeout is the client timeout of hub requests. A synchronous
+// agent create can take longer and gets hubCreateRequestTimeout instead.
+const hubClientTimeout = 30 * time.Second
 
 // hubEndpointScope describes where the effective hub endpoint comes from.
 type hubEndpointScope struct {

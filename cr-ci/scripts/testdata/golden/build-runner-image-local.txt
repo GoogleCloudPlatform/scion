@@ -1,0 +1,9 @@
+# cr-ci build-runner-image.sh (dry-run) project=example-project region=us-central1
+# dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
+# C7: runner image gh-runner:golden
+? gcloud artifacts docker images describe us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden --project=example-project '--format=value(image_summary.digest)'
++ env DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -f Dockerfile -t us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden runner
++ gcloud auth print-access-token --impersonate-service-account=cr-runner-build-sa@example-project.iam.gserviceaccount.com | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
++ docker push us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden
++ docker logout https://us-central1-docker.pkg.dev
+# done; next: deploy-job.sh --tag golden

@@ -129,10 +129,11 @@ const (
 // inconsistent with its own remote, which SharingMode() and its callers would
 // then evaluate against mismatched state.
 //
-// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
-// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
-// settings endpoint refuses on PUT (projectSettingsNotStoredFields) and never
-// returns on GET. They are not annotation-backed, so their absence here is
+// Finally, do not try to "complete" this list from the settings endpoint's
+// keys. It also knows bucket, runtimes, harnesses and profiles, which it
+// refuses on PUT (projectSettingsNotStoredFields) and never returns on GET
+// (hubclient.ProjectSettings no longer has fields for them,
+// ptone/scion#5360). They are not annotation-backed, so their absence here is
 // correct and loses nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
@@ -607,10 +608,10 @@ var projectSettingsNullClearsFields = map[string]bool{
 	projectSettingsFieldAutoExposePortsEnabled: true,
 }
 
-// projectSettingsNotStoredFields are the hubclient.ProjectSettings fields
-// the project settings endpoint does not store: bucket, runtimes, harnesses
-// and profiles are read from server and Runtime Broker settings, never
-// from a project's settings. A PUT carrying one of them with a value is
+// projectSettingsNotStoredFields are the request keys the project settings
+// endpoint does not store (hubclient.ProjectSettings has no fields for them,
+// ptone/scion#5360): bucket, runtimes, harnesses and profiles are read from
+// server and Runtime Broker settings, never from a project's settings. A PUT carrying one of them with a value is
 // refused (projectSettingsNotStoredFieldError) instead of being accepted
 // and dropped.
 var projectSettingsNotStoredFields = []string{"bucket", "runtimes", "harnesses", "profiles"}

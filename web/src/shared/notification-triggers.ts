@@ -20,11 +20,17 @@
  * only the text shown in the web UI comes from here.
  */
 
-/** Triggers a new subscription starts with. */
+/**
+ * Triggers a new subscription starts with, matching the Hub's default when an
+ * agent is created with notify on (newNotifySubscription in
+ * pkg/hub/handlers_agent_create_helpers.go).
+ */
 export const DEFAULT_TRIGGERS: readonly string[] = [
   'COMPLETED',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
+  'STALLED',
+  'ERROR',
   'HALTED',
 ];
 
@@ -59,16 +65,10 @@ export function triggerLabel(trigger: string): string {
 
 /**
  * Triggers the Hub subscribes when an agent is created with notify on
- * (newNotifySubscription in pkg/hub/handlers_agent_create_helpers.go).
+ * (newNotifySubscription in pkg/hub/handlers_agent_create_helpers.go);
+ * same set as {@link DEFAULT_TRIGGERS}.
  */
-export const AGENT_CREATE_TRIGGERS: readonly string[] = [
-  'COMPLETED',
-  'WAITING_FOR_INPUT',
-  'LIMITS_EXCEEDED',
-  'STALLED',
-  'ERROR',
-  'HALTED',
-];
+export const AGENT_CREATE_TRIGGERS: readonly string[] = DEFAULT_TRIGGERS;
 
 /**
  * Hint listing the default triggers.
