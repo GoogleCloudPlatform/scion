@@ -36,9 +36,9 @@ import (
 // (operation recovery_disable or recovery_enable). Constraints are processed
 // sequentially; the first failure stops the operation, and the constraints
 // already committed stay committed (see RecoveryPartialError). Each
-// transaction re-reads its constraint first: one whose disabled state
-// already matches the target (it changed after the list was taken) is
-// skipped, with no mutation, no row, and no count.
+// transaction re-reads its constraint first: one that no longer exists, or
+// whose disabled state already matches the target (it changed after the
+// list was taken), is skipped, with no mutation, no row, and no count.
 //
 // The service has no production caller; it is exercised by tests only.
 type RecoveryService struct {
@@ -99,7 +99,7 @@ func (e *RecoveryPartialError) Error() string {
 func (e *RecoveryPartialError) Unwrap() error { return e.Err }
 
 // errRecoveryAlreadyInState ends a per-constraint transaction without a
-// change: the constraint already has the target state.
+// change: the constraint already has the target state, or no longer exists.
 var errRecoveryAlreadyInState = errors.New("constraint already in the target state")
 
 // ---------------------------------------------------------------------------
@@ -167,6 +167,9 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actor PrincipalContex
 		var auditID string
 		err := rs.store.WithTx(ctx, func(tx store.Store) error {
 			before, err := tx.GetAccessConstraint(ctx, id)
+			if errors.Is(err, store.ErrNotFound) {
+				return errRecoveryAlreadyInState // deleted after the list was taken
+			}
 			if err != nil {
 				return fmt.Errorf("load constraint: %w", err)
 			}
@@ -298,6 +301,9 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actor PrincipalContex
 		var auditID string
 		err := rs.store.WithTx(ctx, func(tx store.Store) error {
 			before, err := tx.GetAccessConstraint(ctx, id)
+			if errors.Is(err, store.ErrNotFound) {
+				return errRecoveryAlreadyInState // deleted after the list was taken
+			}
 			if err != nil {
 				return fmt.Errorf("load constraint: %w", err)
 			}

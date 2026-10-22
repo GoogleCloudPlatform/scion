@@ -402,11 +402,14 @@ type mutationResponse struct {
 
 // deleteResponse is the response for delete mutations.
 type deleteResponse struct {
-	// AuditID is the event ID (a UUID) of the access_boundary/delete
-	// structured-log event dispatched after the delete committed. It
-	// identifies a best-effort log event only: it is not retrievable through
-	// any API and is not backed by history, because the constraint's history
-	// is deleted with it. Empty if the event could not be built.
+	// AuditID is the event ID (a UUID) assigned to the access_boundary/delete
+	// structured-log event for this delete. It identifies a best-effort log
+	// event only: it is not retrievable through any API and is not backed by
+	// history (the constraint's history is deleted with it). A non-empty value
+	// does not guarantee the event was written: a dispatch failure is logged
+	// with this event_id, and the event is silently dropped when the process
+	// log level is above info. Empty if the event could not be built or no
+	// sink is configured.
 	AuditID string `json:"auditId"`
 }
 

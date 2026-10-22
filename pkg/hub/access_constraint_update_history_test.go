@@ -218,6 +218,52 @@ func TestGovernanceUpdateHistory_StoreFaultLeavesNoMutationOrRow(t *testing.T) {
 	}
 }
 
+// p6RevisionSkewStore performs the real update inside the transaction but
+// reports a revision other than the one read before it (as if the row had
+// changed between the transaction's read and the store's locked read).
+type p6RevisionSkewStore struct {
+	store.Store
+}
+
+func (s *p6RevisionSkewStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&p6RevisionSkewStore{Store: tx})
+	})
+}
+
+func (s *p6RevisionSkewStore) UpdateAccessConstraint(ctx context.Context, c *store.AccessConstraint, expectedRevision int64) (*store.AccessConstraint, error) {
+	updated, err := s.Store.UpdateAccessConstraint(ctx, c, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	skewed := *updated
+	skewed.Revision = updated.Revision + 1
+	return &skewed, nil
+}
+
+// O6 refusal branch: when the store's revision is not exactly the in-tx
+// before revision plus one, the update is refused as a revision conflict
+// (stale_authorization_preview, HTTP 409) and the real mutation rolls back
+// with no history row.
+func TestGovernanceUpdateHistory_UnexpectedRevisionRefused(t *testing.T) {
+	gs, ps, authz, realStore := govTestSetup(t)
+	adminID, created := p6SeedUpdatableConstraint(t, gs, ps, realStore, "p6-update-revision-skew")
+	skewed := NewGovernanceService(&p6RevisionSkewStore{Store: realStore}, ps, authz, gs.logger)
+	skewed.nowFunc = gs.nowFunc
+	capture := auditevent.NewCaptureSink()
+	skewed.auditSink = capture
+
+	result, _, err := p6CommitUpdate(t, p6OperationContext(t, "request-p6-update-skew"), skewed, ps, created, p6NarrowedDraft(created), pvTestActor(adminID))
+	require.Error(t, err)
+	assert.Nil(t, result)
+	var governanceErr *GovernanceError
+	require.ErrorAs(t, err, &governanceErr)
+	assert.Equal(t, ErrCodeStaleAuthorizationPreview, governanceErr.Code)
+	assert.Equal(t, http.StatusConflict, governanceErrorStatus(governanceErr.Code))
+	p6AssertUnchanged(t, realStore, created, 1)
+	assert.Empty(t, capture.Records())
+}
+
 func TestGovernanceUpdateHistory_HistoryFailuresRollBack(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

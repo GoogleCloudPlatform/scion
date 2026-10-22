@@ -194,10 +194,13 @@ type CommitResult struct {
 	// AuditID identifies the audit record of this mutation (a UUID).
 	// For create and update it is the event ID of the
 	// access_constraint_history row committed with the mutation. For delete
-	// it is the event ID of the post-commit structured-log event: not a
-	// persisted record and not retrievable through any API, because the
-	// constraint's history is deleted with it. For a delete it is empty if
-	// the event was not built or no sink was configured.
+	// it is the event ID assigned to the post-commit structured-log event:
+	// not a persisted record and not retrievable through any API, because the
+	// constraint's history is deleted with it. A non-empty delete AuditID
+	// does not guarantee the event was written: a dispatch failure is logged
+	// with this event_id, and the event is silently dropped when the process
+	// log level is above info. For a delete it is empty if the event could
+	// not be built or no sink is configured.
 	AuditID string
 }
 

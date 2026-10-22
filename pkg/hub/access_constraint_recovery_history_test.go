@@ -337,6 +337,54 @@ func TestRecoveryHistory_SkipsConstraintAlreadyInTargetState(t *testing.T) {
 	})
 }
 
+// O2-1: a constraint deleted after the list was taken is skipped (not found
+// inside its transaction): no mutation, no row, not counted, no error.
+func TestRecoveryHistory_SkipsConstraintDeletedAfterList(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+		run      func(rs *RecoveryService, actor PrincipalContext) ([]string, []string, int, error)
+	}{
+		{name: "DisableAll", run: func(rs *RecoveryService, actor PrincipalContext) ([]string, []string, int, error) {
+			result, err := rs.DisableAll(context.Background(), actor)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			return result.DisabledIDs, result.AuditIDs, result.DisabledCount, nil
+		}},
+		{name: "RecoverAll", disabled: true, run: func(rs *RecoveryService, actor PrincipalContext) ([]string, []string, int, error) {
+			result, err := rs.RecoverAll(context.Background(), actor)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			return result.RecoveredIDs, result.AuditIDs, result.RecoveredCount, nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			prefix := "p6-skip-deleted-" + strings.ToLower(tc.name)
+			actorID := govSeedAdminUser(t, s, prefix+"-actor")
+			constraints := p6SeedRecoveryConstraints(t, s, prefix, 3, tc.disabled)
+			ids := p6IDs(constraints)
+			deleted := ids[1]
+			faults := &p6RecoveryFaults{afterList: func() {
+				require.NoError(t, s.DeleteAccessConstraint(context.Background(), deleted))
+			}}
+			rs := NewRecoveryService(&p6RecoveryStore{Store: s, faults: faults}, nil, slog.Default())
+
+			gotIDs, auditIDs, count, err := tc.run(rs, pvTestActor(actorID))
+			require.NoError(t, err, "a concurrently deleted constraint does not stop the run")
+			assert.Equal(t, 2, count)
+			assert.ElementsMatch(t, []string{ids[0], ids[2]}, gotIDs)
+			require.Len(t, auditIDs, 2)
+			assert.NotContains(t, faults.mutations, deleted)
+			assert.NotContains(t, faults.appends, deleted)
+			assert.Equal(t, 3, faults.txCount, "the deleted constraint's transaction opened and ended without a change")
+			assert.False(t, rs.recoveryLock.IsHeld())
+		})
+	}
+}
+
 func TestRecoveryHistory_FaultOnKthConstraintKeepsPriorCommits(t *testing.T) {
 	type operationCase struct {
 		name           string
