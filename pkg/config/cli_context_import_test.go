@@ -595,3 +595,77 @@ func TestLinkEntryForProject_UnlistedUnderTheLock(t *testing.T) {
 		t.Errorf("context.yaml was written: %v", err)
 	}
 }
+
+// assertNoCLIContextFiles fails when context.yaml or its lock exists.
+func assertNoCLIContextFiles(t *testing.T, ctxPath string) {
+	t.Helper()
+	for _, p := range []string{ctxPath, ctxPath + ".lock"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s exists (stat error %v)", p, err)
+		}
+	}
+}
+
+// The in-memory global import gives the same context as the saved one,
+// and writes nothing (ptone/scion#5483).
+func TestLoadCLIContextImportedInMemory_WritesNothing(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://Hub.Example.com/\n")
+
+	c, err := LoadCLIContextImportedInMemory(importNamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CurrentHub != "hub" || c.Hubs["hub"] == nil || c.Hubs["hub"].Endpoint != "https://hub.example.com" {
+		t.Fatalf("in-memory import = %+v, current %q", c.Hubs, c.CurrentHub)
+	}
+	assertNoCLIContextFiles(t, ctxPath)
+
+	// The saving import afterwards gives the same hub.
+	saved, err := LoadCLIContextImported(importNamer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.CurrentHub != c.CurrentHub || saved.Hubs["hub"].Endpoint != c.Hubs["hub"].Endpoint {
+		t.Errorf("saved import %+v differs from the in-memory one %+v", saved.Hubs, c.Hubs)
+	}
+}
+
+// The in-memory project link import gives the link entry and writes
+// nothing (ptone/scion#5483).
+func TestLinkEntryForProjectInMemory_WritesNothing(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	settings := "hub:\n  endpoint: https://Proj.Example.com/\n  projectId: hub-1\n  linked: true\n"
+	projectDir, settingsPath, linkPath := linkImportProject(t, settings)
+
+	c := newCLIContext()
+	// The import links only a hub in the hub list (here only in memory).
+	if err := c.AddHub("proj", "https://proj.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	p, h := LinkEntryForProjectInMemory(c, projectDir)
+	if p == nil || h == nil || p.ID != "hub-1" || p.LocalPath != linkPath || h.Endpoint != "https://proj.example.com" {
+		t.Fatalf("link entry = %+v, hub %+v", p, h)
+	}
+	if !c.ProjectImported(linkPath) {
+		t.Errorf("caller's context lacks the import: %+v", c)
+	}
+	assertNoCLIContextFiles(t, ctxPath)
+	if got := readFileString(t, settingsPath); got != settings {
+		t.Errorf("the project settings changed:\n%s", got)
+	}
+}
+
+// The in-memory project link import does not link a hub that is not in the
+// hub list, adds no hub, leaves the import pending and writes nothing.
+func TestLinkEntryForProjectInMemory_UnlistedHub(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	projectDir, _, linkPath := linkImportProject(t, "hub:\n  endpoint: https://unlisted.example.com\n  projectId: hub-1\n  linked: true\n")
+
+	c := newCLIContext()
+	p, h := LinkEntryForProjectInMemory(c, projectDir)
+	if p != nil || h != nil || len(c.Hubs) != 0 || c.ProjectImported(linkPath) {
+		t.Errorf("= %+v, %+v, context %+v; want no link, no hub, import pending", p, h, c)
+	}
+	assertNoCLIContextFiles(t, ctxPath)
+}

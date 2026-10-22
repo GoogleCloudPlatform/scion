@@ -497,8 +497,9 @@ func TestConfigUnsetGlobalHubEndpoint_WarnsAboutAFormItCannotEdit(t *testing.T) 
 }
 
 // When the first-run import of the global settings' hub exists only in
-// memory (context.yaml cannot be written), config get still names the hub
-// entry: the name comes from the invocation's resolution, not from the file.
+// memory (config get applies it without saving, and here context.yaml
+// could not be written anyway), config get still names the hub entry: the
+// name comes from the invocation's resolution, not from the file.
 func TestConfigGetHubEndpoint_NamesAnImportHeldInMemory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permissions are not enforced for root")
@@ -513,7 +514,7 @@ func TestConfigGetHubEndpoint_NamesAnImportHeldInMemory(t *testing.T) {
 	stdout, stderr, err := runConfig(t, "--global", "config", "get", "--source", "hub.endpoint")
 	require.NoError(t, err)
 	assert.Equal(t, "https://global.example.org  (current hub 'global')\n", stdout)
-	assert.Contains(t, stderr, "could not save the imported hub settings")
+	assert.NotContains(t, stderr, "Error")
 	_, statErr := os.Stat(contextFilePath())
 	assert.True(t, os.IsNotExist(statErr), "context.yaml was not written")
 }

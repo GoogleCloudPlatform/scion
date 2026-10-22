@@ -183,6 +183,19 @@ var errProjectHubNotListed = errors.New("project hub not in the hub list")
 // context. When it cannot be saved, c holds the import anyway and the error
 // wraps ErrCLIContextImport.
 func LinkEntryForProject(c *CLIContext, projectDir string) (*KnownProject, *HubEntry, error) {
+	return linkEntryForProject(c, projectDir, true)
+}
+
+// LinkEntryForProjectInMemory is LinkEntryForProject without the save: c
+// gets the pending one-time import of the project's link (for a hub in the
+// hub list, as LinkEntryForProject), and nothing is written. A hub that is
+// not in the hub list gives no link, without an error (ptone/scion#5483).
+func LinkEntryForProjectInMemory(c *CLIContext, projectDir string) (*KnownProject, *HubEntry) {
+	p, h, _ := linkEntryForProject(c, projectDir, false)
+	return p, h
+}
+
+func linkEntryForProject(c *CLIContext, projectDir string, save bool) (*KnownProject, *HubEntry, error) {
 	localPath := LinkPathForProject(projectDir)
 	if localPath == "" {
 		return nil, nil, nil
@@ -223,6 +236,11 @@ func LinkEntryForProject(c *CLIContext, projectDir string) (*KnownProject, *HubE
 			_ = target.SetLinkEntry(name, KnownProject{ID: link.ProjectID}, localPath, now)
 		}
 		target.markProjectImported(localPath, now)
+	}
+	if !save {
+		importInto(c, time.Now())
+		p, h := c.LinkEntryFor(localPath)
+		return p, h, nil
 	}
 	var saved *CLIContext
 	err := UpdateCLIContext(func(fresh *CLIContext) error {

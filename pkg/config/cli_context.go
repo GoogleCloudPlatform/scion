@@ -361,17 +361,6 @@ func NormalizeEndpoint(endpoint string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-// asciiLower returns s with only its ASCII letters lowercased.
-func asciiLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + ('a' - 'A')
-		}
-	}
-	return string(b)
-}
-
 // HubByEndpoint returns the name and entry of the hub with endpoint, or ""
 // and nil.
 func (c *CLIContext) HubByEndpoint(endpoint string) (string, *HubEntry) {

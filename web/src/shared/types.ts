@@ -832,6 +832,10 @@ export interface AgentAppliedConfig {
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;
+  /** The harness type the hub resolved at create; absent on older agents. */
+  harness?: string;
+  /** The model size alias the agent was created with; absent for an explicit model ID or no model. */
+  modelSize?: AgentModelSize;
   creatorName?: string;
   hubAccessScopes?: string[];
   agentRole?: string;
@@ -902,6 +906,9 @@ export interface AgentUpdateDisposition {
   heldForReincarnate: string[];
 }
 
+/** A model size alias (pkg/config KnownModelAliases). */
+export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
+
 /**
  * Agent information from the Hub API
  */
@@ -932,6 +939,21 @@ export interface Agent {
   harnessAuth?: string;
   resolvedHarness?: string;
   harnessCapabilities?: HarnessAdvancedCapabilities;
+  /**
+   * The harness vendor (pkg/harness Vendor): the model vendor of a
+   * single-vendor harness ("anthropic", "google", "openai", "xai", "meta"),
+   * the harness name of a multi-vendor one ("opencode", "copilot",
+   * "hermes"). Absent for a custom or unresolved harness. Set on list
+   * items (full and compact), the single-agent GET and SSE created/status
+   * events.
+   */
+  harnessVendor?: string;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**

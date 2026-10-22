@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // hubProjectID returns the project ID of hubCtx, or "" without a Hub.
@@ -48,7 +49,7 @@ func currentAgentTarget(targets []string, targetProjectID string) string {
 	if len(selfRefs) == 0 {
 		return "" // not inside an agent
 	}
-	if ownProjectID := os.Getenv("SCION_PROJECT_ID"); ownProjectID != "" && targetProjectID != "" && ownProjectID != targetProjectID {
+	if ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv); ownProjectID != "" && targetProjectID != "" && ownProjectID != targetProjectID {
 		return ""
 	}
 	for _, target := range targets {

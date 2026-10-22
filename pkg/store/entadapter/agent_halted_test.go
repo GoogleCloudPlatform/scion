@@ -1040,3 +1040,58 @@ func TestAgentHalted_SignaledStopThenOOMBackfillCleanExitHalts(t *testing.T) {
 		})
 	}
 }
+
+// A failed started-status write or reincarnation can leave old exit fields
+// on a starting row until the new run reports itself running.
+func TestAgentHalted_StartingRunningClearsExitFields(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		phase      string
+		wantPhase  string
+		report     store.AgentStatusUpdate
+		guard      string
+		wantCode   *int
+		wantReason string
+	}{
+		{name: "heartbeat", phase: "starting", wantPhase: "running", report: heartbeat("running", "", nil)},
+		{name: "self-report", phase: "starting", wantPhase: "running", report: selfReport("running", "working")},
+		{name: "fresh-evidence", phase: "starting", wantPhase: "running", report: heartbeat("running", "evicted", intp(143)), wantCode: intp(143), wantReason: "evicted"},
+		{name: "fresh-zero-code", phase: "starting", wantPhase: "running", report: heartbeat("running", "", intp(0)), wantCode: intp(0)},
+		{name: "terminal-running-fresh-evidence", phase: "error", wantPhase: "running", report: store.AgentStatusUpdate{Phase: "running", ExitCode: intp(1), ExitReason: "crashed"}, wantCode: intp(1), wantReason: "crashed"},
+		{name: "clear-exit-fresh-evidence", phase: "running", wantPhase: "running", report: store.AgentStatusUpdate{Phase: "running", ClearExit: true, ExitCode: intp(1), ExitReason: "crashed"}, wantCode: intp(1), wantReason: "crashed"},
+		{name: "clear-remnants-fresh-evidence", phase: "running", wantPhase: "running", report: store.AgentStatusUpdate{Phase: "running", ClearTerminalRemnants: true, ExitCode: intp(1), ExitReason: "crashed"}, wantCode: intp(1), wantReason: "crashed"},
+		{name: "still-running", phase: "running", report: heartbeat("running", "", nil), wantCode: intp(137), wantReason: "preempted"},
+		{name: "provisional-start", phase: "stopped", wantPhase: "starting", report: store.AgentStatusUpdate{Phase: "starting"}, wantCode: intp(137), wantReason: "preempted"},
+		{name: "delete", phase: "starting", report: selfReport("running", "working"), guard: "delete", wantCode: intp(137), wantReason: "preempted"},
+		{name: "reincarnation", phase: "starting", report: selfReport("running", "working"), guard: "reincarnation", wantCode: intp(137), wantReason: "preempted"},
+		{name: "old-run", phase: "starting", report: store.AgentStatusUpdate{Phase: "running", ReportSource: store.StatusReportSourceAgent, ReportRunID: "old-run"}, wantCode: intp(137), wantReason: "preempted"},
+		{name: "halted", phase: "halted", report: selfReport("running", "working"), wantCode: intp(137), wantReason: "preempted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			r := defaultHaltRow()
+			r.phase, r.exitCode, r.exitReason = tc.phase, intp(137), "preempted"
+			id := newHaltAgent(t, ctx, s, projectID, "exit-fields", r)
+			if tc.guard != "" {
+				rawUpdate(t, ctx, s, id, func(u *ent.AgentUpdateOne) {
+					if tc.guard == "delete" {
+						u.SetDeletionState(store.DeletionStateDeleting).SetDeletionLeaseAt(time.Now().Add(time.Hour))
+					} else {
+						u.SetReincarnationState(store.ReincarnationStateStarting)
+					}
+				})
+			}
+			apply(t, ctx, s, id, tc.report)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			wantPhase := tc.wantPhase
+			if wantPhase == "" {
+				wantPhase = tc.phase
+			}
+			assert.Equal(t, wantPhase, got.Phase)
+			assert.Equal(t, tc.wantCode, got.ExitCode)
+			assert.Equal(t, tc.wantReason, got.ExitReason)
+		})
+	}
+}

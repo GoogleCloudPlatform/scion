@@ -52,6 +52,12 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// A command that must not write (server preflight) turns the
+		// no-write switch on before anything below loads settings. Execute
+		// already did, for the real entry point; this covers callers that
+		// run rootCmd directly.
+		applyNoWriteGuard(cmd)
+
 		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
 		// returns, so check them first: a later hook error, such as running
 		// outside a project, must not hide a flag conflict.
@@ -237,6 +243,17 @@ return an error instead of blocking.`,
 	},
 }
 
+// prepareInvocation finds the command args name (a read-only tree walk:
+// no flags are parsed, nothing executes) and runs the hooks that must come
+// before any settings load: the no-write guard, then the legacy-env
+// warning and global layout migration hook.
+func prepareInvocation(args []string) *cobra.Command {
+	target, _, _ := rootCmd.Find(args)
+	applyNoWriteGuard(target)
+	maybeWarnRemovedLegacyEnv(target)
+	return target
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
@@ -246,13 +263,12 @@ func Execute() {
 	// runs too late for that. rootCmd.Find is a read-only tree walk (no
 	// flags are parsed, nothing executes), so it is safe to call before
 	// ExecuteC(). Skipped for "start" under the "server"/"runtime-broker"
-	// subtree; see maybeWarnRemovedLegacyEnv.
+	// subtree, and for "server preflight"; see maybeWarnRemovedLegacyEnv.
 	var cliArgs []string
 	if len(os.Args) > 1 {
 		cliArgs = os.Args[1:]
 	}
-	target, _, _ := rootCmd.Find(cliArgs)
-	maybeWarnRemovedLegacyEnv(target)
+	target := prepareInvocation(cliArgs)
 
 	// Decide early whether an inherited SCION_DEBUG applies. This call is
 	// load-bearing: the settings loads below and anything else that runs

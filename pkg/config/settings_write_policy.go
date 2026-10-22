@@ -80,18 +80,27 @@ var settingsGlobalOnlyPrefixes = []string{"server.auth."}
 // the file exactly as it was. The returned error matches
 // ErrSettingNotWritable and does not contain the value.
 //
-// It covers only keys whose write would be accepted and then never read at
-// that layer. Keys the writer does not know at all are still rejected later
+// It covers keys whose write would be accepted and then never read at
+// that layer, and the global-only keys the writer does not know (refused
+// as unknown at either layer, so no layer hint points at a key no layer
+// accepts). Other keys the writer does not know are still rejected later
 // as unknown.
 func ValidateSettingWrite(key string, global bool) error {
 	if reason, ok := settingsNotStoredKeys[key]; ok {
 		return &SettingNotWritableError{Key: key, Reason: reason}
 	}
-	if !global {
-		for _, p := range settingsGlobalOnlyPrefixes {
-			if strings.HasPrefix(key, p) {
-				return &SettingNotWritableError{Key: key, Reason: reasonGlobalOnly}
-			}
+	for _, p := range settingsGlobalOnlyPrefixes {
+		if !strings.HasPrefix(key, p) {
+			continue
+		}
+		// The hint to use --global is only for a key the writer accepts
+		// there. Any other key under the prefix is unknown at both layers,
+		// and is refused as such here, before any I/O (ptone/scion#5481).
+		if _, ok := versionedSettingKeys[key]; !ok {
+			return fmt.Errorf("unknown or complex setting key: %s", key)
+		}
+		if !global {
+			return &SettingNotWritableError{Key: key, Reason: reasonGlobalOnly}
 		}
 	}
 	return nil
