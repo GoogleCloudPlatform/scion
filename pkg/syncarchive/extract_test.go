@@ -690,3 +690,89 @@ func TestExtractGzip_NotGzip(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+// Regression: a symbolic link entry followed by an entry whose path goes
+// through that link must not reach .scion or .scion/agents (GNU tar's
+// exclude matched the archive path only, so this wrote through the link).
+func TestExtract_SymlinkThenEntryThroughItToProtected(t *testing.T) {
+	cases := map[string][]ent{
+		".scion via link": {
+			symlink("./x", ".scion"),
+			file("./x/settings.yaml", "evil"),
+		},
+		".scion/agents via link": {
+			symlink("./y", ".scion/agents"),
+			file("./y/mine/prompt.md", "evil"),
+			file("./y/other/prompt.md", "evil"),
+		},
+		".scion/agents via case-folded link": {
+			symlink("./y", ".SCION/Agents"),
+			file("./y/mine/prompt.md", "evil"),
+		},
+		"root link then .scion": {
+			symlink("./r", "."),
+			file("./r/.scion/settings.yaml", "evil"),
+			file("./r/.scion/agents/mine/prompt.md", "evil"),
+		},
+		"link to parent then .scion/agents": {
+			dir("./sub/"),
+			symlink("./sub/up", ".."),
+			file("./sub/up/.scion/agents/mine/prompt.md", "evil"),
+		},
+		"chained in-tree links": {
+			dir("./d/"),
+			symlink("./a", "d"),
+			symlink("./d/b", ".."),
+			file("./a/b/.scion/settings.yaml", "evil"),
+			file("./a/b/x.txt", "evil"),
+		},
+		"directory entry through link": {
+			symlink("./x", ".scion"),
+			dir("./x/agents/"),
+			dir("./x/agents/new/"),
+			file("./x/agents/new/prompt.md", "evil"),
+		},
+		"hard link through link": {
+			file("./payload", "evil"),
+			symlink("./x", ".scion"),
+			hardlink("./x/settings.yaml", "./payload"),
+		},
+	}
+	for name, ents := range cases {
+		t.Run(name, func(t *testing.T) {
+			l := newLayout(t)
+			check := l.guard(t)
+			res, err := extract(t, l.dest, Options{Excludes: []string{".scion/agents"}}, ents...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check()
+			if res.UnsafeCount+res.Protected == 0 {
+				t.Errorf("result = %+v, want the entries skipped", res)
+			}
+		})
+	}
+}
+
+// The same holds for a caller-supplied exclude reached through a link.
+func TestExtract_SymlinkThenEntryThroughItToExclude(t *testing.T) {
+	l := newLayout(t)
+	if err := os.MkdirAll(filepath.Join(l.dest, "build", "out"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := extract(t, l.dest, Options{Excludes: []string{"build/out"}},
+		symlink("./z", "build/out"),
+		file("./z/a", "evil"),
+		symlink("./w", "build"),
+		file("./w/out/b", "evil"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if des := dirNames(t, filepath.Join(l.dest, "build", "out")); len(des) != 0 {
+		t.Errorf("excluded directory written through a link: %v", des)
+	}
+	if res.UnsafeCount != 2 {
+		t.Errorf("result = %+v, want 2 unsafe", res)
+	}
+}

@@ -215,3 +215,47 @@ func TestIsSyncTransientError_RefusedArchive(t *testing.T) {
 		t.Errorf("isSyncTransientError(%v) = true", err)
 	}
 }
+
+// Regression: a pod archive with a symbolic link followed by entries whose
+// paths go through it leaves the broker's .scion and .scion/agents alone.
+func TestExtractPodArchive_SymlinkThenEntryThroughIt(t *testing.T) {
+	dest, outside := syncDest(t)
+	mine := filepath.Join(dest, ".scion", "agents", "mine", "prompt.md")
+	if err := os.MkdirAll(filepath.Dir(mine), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mine, []byte("broker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archive := podArchive(t,
+		syncEntry{name: "./x", link: ".scion", typ: tar.TypeSymlink},
+		syncEntry{name: "./x/settings.yaml", body: "evil", typ: tar.TypeReg},
+		syncEntry{name: "./y", link: ".scion/agents", typ: tar.TypeSymlink},
+		syncEntry{name: "./y/mine/prompt.md", body: "evil", typ: tar.TypeReg},
+		syncEntry{name: "./y/other/prompt.md", body: "evil", typ: tar.TypeReg},
+		syncEntry{name: "./z", link: "../outside", typ: tar.TypeSymlink},
+		syncEntry{name: "./z/victim.txt", body: "evil", typ: tar.TypeReg},
+	)
+	res, err := extractPodArchive(dest, []string{sharedWorkspaceAgentsDir}, streamOf(archive), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireContent(t, filepath.Join(dest, ".scion", "settings.yaml"), "broker")
+	requireContent(t, mine, "broker")
+	requireContent(t, filepath.Join(outside, "victim.txt"), "untouched")
+	if _, err := os.Lstat(filepath.Join(dest, ".scion", "agents", "other")); !os.IsNotExist(err) {
+		t.Errorf(".scion/agents/other written (err %v)", err)
+	}
+	// The links are skipped, so the later entries land as ordinary files
+	// in real directories inside the workspace.
+	for _, p := range []string{"x", "y", "z"} {
+		if fi, err := os.Lstat(filepath.Join(dest, p)); err != nil || !fi.IsDir() {
+			t.Errorf("%s is not a real directory (%v, %v)", p, fi, err)
+		}
+	}
+	requireContent(t, filepath.Join(dest, "x", "settings.yaml"), "evil")
+	requireContent(t, filepath.Join(dest, "z", "victim.txt"), "evil")
+	if res.Symlinks != 0 || res.UnsafeCount != 3 || res.Files != 4 {
+		t.Errorf("result = %+v, want 3 links skipped and 4 in-tree files", res)
+	}
+}
