@@ -141,8 +141,9 @@ func countProjectSettingsReads(t *testing.T) *int {
 }
 
 // A linked project's own hub.endpoint becomes a hub entry plus a link
-// entry for the project's hub ID, with its transport; the import is
-// recorded, the caller's context is updated and no settings file changes.
+// entry for the project's hub ID; the project's hub.transport is not
+// copied; the import is recorded, the caller's context is updated and no
+// settings file changes.
 func TestLinkEntryForProject_ImportsTheProjectEndpoint(t *testing.T) {
 	ctxPath := cliContextTestHome(t)
 	settings := "hub:\n  endpoint: https://Proj.Example.com/\n  projectId: hub-1\n  linked: true\n  transport:\n    mode: iap\n    audience: aud-1\n"
@@ -162,8 +163,8 @@ func TestLinkEntryForProject_ImportsTheProjectEndpoint(t *testing.T) {
 	if h.Endpoint != "https://proj.example.com" {
 		t.Errorf("hub endpoint = %q", h.Endpoint)
 	}
-	if want := (&HubTransportConfig{Mode: "iap", Audience: "aud-1"}); !reflect.DeepEqual(h.Transport, want) {
-		t.Errorf("transport = %+v, want %+v", h.Transport, want)
+	if h.Transport != nil {
+		t.Errorf("transport = %+v: the project's settings must not set it", h.Transport)
 	}
 	if c.Hubs["proj"] == nil || !c.ProjectImported(linkPath) {
 		t.Errorf("caller's context not updated: %+v", c)
@@ -188,7 +189,7 @@ func TestLinkEntryForProject_ImportsTheProjectEndpoint(t *testing.T) {
 }
 
 // A linked project without its own endpoint is linked to the global
-// settings' hub.endpoint, with the global transport.
+// settings' hub.endpoint; the project import sets no transport.
 func TestLinkEntryForProject_InheritsTheGlobalEndpoint(t *testing.T) {
 	cliContextTestHome(t)
 	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://glob.example.com\n  transport:\n    mode: cloudrun_invoker\n    audience: aud-g\n")
@@ -201,8 +202,8 @@ func TestLinkEntryForProject_InheritsTheGlobalEndpoint(t *testing.T) {
 	if p == nil || h == nil || p.ID != "hub-2" || h.Endpoint != "https://glob.example.com" {
 		t.Fatalf("link entry = %+v, hub = %+v", p, h)
 	}
-	if h.Transport == nil || h.Transport.Audience != "aud-g" {
-		t.Errorf("transport = %+v, want the global one", h.Transport)
+	if h.Transport != nil {
+		t.Errorf("transport = %+v: the project import never sets it", h.Transport)
 	}
 }
 
@@ -478,8 +479,8 @@ func TestLinkEntryForProject_VersionedFile(t *testing.T) {
 		if p == nil || h == nil || p.ID != "hub-v1" || h.Endpoint != "https://proj.example.com" {
 			t.Fatalf("link entry = %+v, hub = %+v", p, h)
 		}
-		if h.Transport == nil || h.Transport.Audience != "aud-v1" {
-			t.Errorf("transport = %+v, want the file's", h.Transport)
+		if h.Transport != nil {
+			t.Errorf("transport = %+v: the project's settings must not set it", h.Transport)
 		}
 	})
 	t.Run("linked unset", func(t *testing.T) {

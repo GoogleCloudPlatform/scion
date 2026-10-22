@@ -57,10 +57,10 @@ type projectHubLink struct {
 	// ProjectID is the ID the hub knows the project by: hub.projectId,
 	// else project_id.
 	ProjectID string
-	// Endpoint and Transport are the project's own hub.endpoint and
-	// hub.transport ("" and nil when its settings set none).
-	Endpoint  string
-	Transport *HubTransportConfig
+	// Endpoint is the project's own hub.endpoint ("" when its settings
+	// set none). Its hub.transport is never read: a project's settings do
+	// not configure how the CLI reaches a hub.
+	Endpoint string
 }
 
 // projectHubLinkSettings reads the project's own settings files: the
@@ -103,9 +103,6 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 			if ep := strings.TrimSpace(vs.Hub.Endpoint); ep != "" {
 				l.Endpoint = ep
 			}
-			if t := vs.Hub.Transport; t != nil {
-				l.Transport = &HubTransportConfig{Mode: t.Mode, Audience: t.Audience}
-			}
 			continue
 		}
 		s, err := LoadSettingsFromDir(dir)
@@ -126,9 +123,6 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 		}
 		if ep := strings.TrimSpace(s.Hub.Endpoint); ep != "" {
 			l.Endpoint = ep
-		}
-		if s.Hub.Transport != nil {
-			l.Transport = s.Hub.Transport
 		}
 	}
 	switch {
@@ -153,8 +147,7 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 //   - a linked project (see projectHubLinkSettings) gets a link entry for
 //     its own hub.endpoint, or, without one, for the global settings'
 //     hub.endpoint; the hub gets an entry (named by baseName) when it has
-//     none, and the transport of the settings the endpoint came from is
-//     copied onto an entry without one;
+//     none. The import never sets a hub entry's transport;
 //   - the import is recorded for the project's link path even when there
 //     was nothing usable to import (no valid endpoint or no project ID), so
 //     its settings are not read again, and a link entry removed later
@@ -182,9 +175,9 @@ func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoin
 	if !link.Linked {
 		return nil, nil, nil
 	}
-	endpoint, transport := link.Endpoint, link.Transport
+	endpoint := link.Endpoint
 	if endpoint == "" {
-		endpoint, transport = globalHubSettings()
+		endpoint, _ = globalHubSettings()
 	}
 	if endpoint != "" && ValidateHubURL(endpoint) != nil {
 		endpoint = ""
@@ -195,7 +188,6 @@ func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoin
 		}
 		if endpoint != "" && link.ProjectID != "" {
 			name, _ := target.EnsureHub(endpoint, baseName(endpoint))
-			setTransportIfUnset(target.Hubs[name], transport)
 			// SetLinkEntry cannot fail here: the hub entry, the ID and
 			// the path are all set.
 			_ = target.SetLinkEntry(name, KnownProject{ID: link.ProjectID}, localPath, now)
