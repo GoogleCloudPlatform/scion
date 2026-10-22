@@ -2949,6 +2949,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	hubCfg.HubIDSource = resolveHubIDSource(hubCfg.HubIDPinned, hubCfg.HubID)
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for

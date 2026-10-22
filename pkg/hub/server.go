@@ -330,6 +330,10 @@ type ServerConfig struct {
 	// replica of one logical hub must share one pinned id. Every --test-mode
 	// level but off requires it (ValidateTestModeConfig).
 	HubIDPinned bool
+	// HubIDSource is where HubID came from (lifecycleevents.HubIDSource*:
+	// pinned, persisted_file, hostname, k_service). The lifecycle observer
+	// runs only on a stable ID (lifecycle_events.go).
+	HubIDSource string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
 	// MonitoringDashboardURL is the optional external monitoring dashboard
@@ -2382,6 +2386,10 @@ type Server struct {
 	// proxy right after the port-forward tunnel returns, before the
 	// answer is written. Only tests set it, on their own Server.
 	legacyPortTunnelReturnedTestHook func()
+
+	// lifecycleEvents is the agent lifecycle event pipeline
+	// (lifecycle_events.go).
+	lifecycleEvents lifecycleEventsRuntime
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -6607,6 +6615,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// startHubInstanceRegistry records the loop's stop handle on s;
 	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
+
+	// Start the lifecycle outbox drainer, only when it has work.
+	s.startLifecycleEvents(ctx)
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -6755,6 +6766,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// health summary shows a clean stop as stopped rather than stale.
 		// Runs while the store is still open.
 		s.stopHubInstanceRegistry(ctx)
+
+		// Stop the lifecycle drainer after its bounded final pass, while
+		// the store is still open.
+		s.stopLifecycleEvents(ctx)
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from

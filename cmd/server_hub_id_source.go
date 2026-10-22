@@ -1,0 +1,42 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
+)
+
+// hubIDFile is the persisted workstation hub ID file in the global
+// directory (config.PersistentHubID writes it).
+const hubIDFile = "hub-id"
+
+// resolveHubIDSource reports where the hub's resolved ID came from
+// (lifecycleevents.HubIDSource*), mirroring config.ResolveHubIDFromEnv's
+// precedence. The lifecycle observer runs only on a stable ID (WP1
+// design 3.3).
+func resolveHubIDSource(pinned bool, resolvedID string) string {
+	persisted := ""
+	if dir, err := config.GetGlobalDir(); err == nil {
+		if b, err := os.ReadFile(filepath.Join(dir, hubIDFile)); err == nil {
+			persisted = string(b)
+		}
+	}
+	return lifecycleevents.ClassifyHubIDSource(pinned, cloudrunenv.ServiceName(), persisted, resolvedID)
+}
