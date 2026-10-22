@@ -277,6 +277,7 @@ var dryCases = []dryCase{
 	{"set-secrets-generate", "set-secrets.sh", []string{"--generate-webhook-secret", "new-webhook-secret"}, nil},
 	{"teardown", "teardown.sh", nil, nil},
 	{"teardown-keep", "teardown.sh", []string{"--keep-secrets", "--keep-images"}, nil},
+	{"teardown-regional-only", "teardown.sh", []string{"--regional-only"}, nil},
 }
 
 // TestDryRunGolden: every script's dry-run output equals its committed
@@ -813,6 +814,48 @@ func TestTeardown(t *testing.T) {
 	for _, c := range r.calls {
 		if strings.Contains(c.String(), " delete ") {
 			t.Errorf("deleted a missing resource: %s", c)
+		}
+	}
+}
+
+// TestTeardownRegionalOnly: only the stack in REGION goes; everything
+// project-wide (service accounts, secrets, staging bucket, project binding)
+// stays.
+func TestTeardownRegionalOnly(t *testing.T) {
+	e := newEnv(t, baseConfig())
+	e.state("exists", allExisting...)
+	r := e.run("teardown.sh", project+"\n", "--config", "config.env", "--apply", "--regional-only")
+	wantCode(t, r, 0)
+	if !strings.Contains(r.stderr, "the cr-ci stack in region us-central1 of project "+project) {
+		t.Errorf("confirmation prompt does not name the region:\n%s", r.stderr)
+	}
+	var deletes []string
+	for _, c := range r.calls {
+		s := c.String()
+		if strings.Contains(s, " delete ") || strings.Contains(s, "remove-iam-policy-binding") || strings.Contains(s, "storage rm ") {
+			deletes = append(deletes, strings.Join(c.argv[1:4], " "))
+		}
+	}
+	want := []string{"scheduler jobs delete", "run services delete", "run jobs delete", "artifacts repositories delete"}
+	if strings.Join(deletes, "\n") != strings.Join(want, "\n") {
+		t.Errorf("regional teardown:\n--- got\n%s\n--- want\n%s", strings.Join(deletes, "\n"), strings.Join(want, "\n"))
+	}
+
+	r = e.run("teardown.sh", "", "--config", "config.env", "--apply", "--confirm", project, "--regional-only", "--keep-images")
+	wantCode(t, r, 0)
+	for _, c := range r.calls {
+		if s := c.String(); strings.Contains(s, "artifacts repositories delete") || strings.Contains(s, "remove-iam-policy-binding") {
+			t.Errorf("--keep-images: %s", c)
+		}
+	}
+
+	r = e.run("teardown.sh", "", "--config", "config.env", "--apply", "--confirm", project, "--regional-only", "--keep-secrets")
+	if r.code == 0 || !strings.Contains(r.stderr, "--keep-secrets has no effect with --regional-only") {
+		t.Errorf("--regional-only --keep-secrets: code %d, want refused; stderr:\n%s", r.code, r.stderr)
+	}
+	for _, c := range r.calls {
+		if s := c.String(); strings.Contains(s, " delete ") || strings.Contains(s, " describe ") {
+			t.Errorf("--regional-only --keep-secrets: called %s, want refused before any resource call", c)
 		}
 	}
 }

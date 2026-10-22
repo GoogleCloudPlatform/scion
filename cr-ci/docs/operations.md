@@ -108,7 +108,9 @@ to another region. What is scoped per stack and what is not:
 
 Procedure: deploy the new stack (`REGION` changed in its `config.env`), switch the
 App's webhook URL to its `MEDIATOR_URL`, let the old stack's executions finish,
-then remove the old stack's regional resources.
+then remove the old stack's regional resources with `scripts/teardown.sh
+--regional-only --config <old config.env> --apply` (it keeps the service accounts,
+secrets, staging bucket and project binding the new stack shares).
 
 ## Secret rotation
 
@@ -176,7 +178,8 @@ To remove cr-ci from a repository, clear its routing variable and uninstall
 the App ([github-setup.md, step 10](github-setup.md#10-removing-cr-ci-from-a-repository)).
 To remove the GCP side, run `scripts/teardown.sh` and read its transcript,
 then run it with `--apply` (it asks you to type `GCP_PROJECT`;
-`--keep-secrets` and `--keep-images` retain those). It deletes in reverse
+`--keep-secrets` and `--keep-images` retain those; `--regional-only` removes one
+region's stack and keeps everything project-wide). It deletes in reverse
 order and skips what is gone; APIs stay enabled
 ([gcp-setup.md, step 10](gcp-setup.md#10-teardown-scriptsteardownsh)).
 

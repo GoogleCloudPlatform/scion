@@ -332,6 +332,7 @@ them the same way.
 scripts/teardown.sh                    # read the transcript
 scripts/teardown.sh --apply            # asks you to type GCP_PROJECT
 scripts/teardown.sh --apply --keep-secrets --keep-images
+scripts/teardown.sh --apply --regional-only   # one region's stack only
 ```
 
 It deletes, in reverse order, skipping what is already gone:
@@ -346,6 +347,14 @@ It deletes, in reverse order, skipping what is already gone:
    `MEDIATOR_SA_NAME`'s access);
 7. `BUILD_SA_NAME`'s project-level `logging.logWriter` binding;
 8. the four service accounts.
+
+`--regional-only` stops after step 4: it deletes only the scheduler job,
+mediator service, runner job and Artifact Registry repository in `REGION`
+(`--keep-images` keeps the repository), and keeps the service accounts, secrets,
+staging bucket and project binding that a stack in another region still uses.
+Use it to remove the old stack after a region move
+([operations](operations.md#two-stacks-region-move)); `--keep-secrets` is refused
+with it, since the secrets are always kept.
 
 APIs stay enabled, since the project may use them. Uninstall the GitHub App
 and clear the routing variable first
