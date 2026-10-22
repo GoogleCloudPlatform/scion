@@ -91,6 +91,19 @@ func startSSHForSignalExe(t *testing.T, pidFile, exe string) <-chan int {
 	}
 }
 
+// signalWhileRunning sends sig to this process, after checking that runSSH
+// has not returned: it catches the signal only while it runs, and a signal
+// it does not catch would end the test binary.
+func signalWhileRunning(t *testing.T, codes <-chan int, sig syscall.Signal) {
+	t.Helper()
+	select {
+	case code := <-codes:
+		t.Fatalf("scion ssh exited %d before the signal was sent", code)
+	default:
+	}
+	require.NoError(t, syscall.Kill(os.Getpid(), sig))
+}
+
 // waitSSHCode returns runSSH's exit code, failing if it takes longer than
 // within.
 func waitSSHCode(t *testing.T, codes <-chan int, within time.Duration) int {
@@ -123,7 +136,7 @@ func TestSSH_ParentSignalEndsSSH(t *testing.T) {
 			codes := startSSHForSignal(t, pidFile)
 
 			start := time.Now()
-			require.NoError(t, syscall.Kill(os.Getpid(), tc.sig))
+			signalWhileRunning(t, codes, tc.sig)
 			assert.Equal(t, tc.want, waitSSHCode(t, codes, 5*time.Second))
 			assert.Less(t, time.Since(start), 5*time.Second)
 		})
@@ -139,7 +152,7 @@ func TestSSH_ParentSignalKillsSSHAfterGrace(t *testing.T) {
 	pidFile := installWaitingSSHClient(t, true)
 	codes := startSSHForSignal(t, pidFile)
 
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	signalWhileRunning(t, codes, syscall.SIGTERM)
 	assert.Equal(t, 143, waitSSHCode(t, codes, 5*time.Second))
 }
 
@@ -152,13 +165,13 @@ func TestSSH_InterruptLeftToSSH(t *testing.T) {
 	pidFile := installWaitingSSHClient(t, false)
 	codes := startSSHForSignal(t, pidFile)
 
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	signalWhileRunning(t, codes, syscall.SIGINT)
 	select {
 	case code := <-codes:
 		t.Fatalf("scion ssh exited %d on an interrupt it should leave to ssh", code)
 	case <-time.After(300 * time.Millisecond):
 	}
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	signalWhileRunning(t, codes, syscall.SIGTERM)
 	assert.Equal(t, 143, waitSSHCode(t, codes, 5*time.Second))
 }
 
@@ -198,7 +211,9 @@ func TestSSH_ParentSignalEndsProxyCommand(t *testing.T) {
 	t.Cleanup(func() { sshSignalGrace = old })
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	proxy := filepath.Join(t.TempDir(), "scion")
-	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec /bin/cat > /dev/null\n"
+	// fd 3 keeps the original stdout open, so ssh sees no end of the
+	// connection while cat discards what it reads.
+	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec /bin/cat 3>&1 > /dev/null\n"
 	require.NoError(t, os.WriteFile(proxy, []byte(script), 0o755))
 	t.Setenv("PATH", filepath.Dir(sshBin))
 	codes := startSSHForSignalExe(t, pidFile, proxy)
@@ -212,7 +227,7 @@ func TestSSH_ParentSignalEndsProxyCommand(t *testing.T) {
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond, "the ProxyCommand did not record its pid")
 
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	signalWhileRunning(t, codes, syscall.SIGTERM)
 	assert.Equal(t, 143, waitSSHCode(t, codes, 5*time.Second))
 	assert.Eventually(t, func() bool { return processGone(pid) }, 5*time.Second, 20*time.Millisecond,
 		"the ProxyCommand (pid %d) is still running", pid)
