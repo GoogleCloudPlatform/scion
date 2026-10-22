@@ -1906,6 +1906,10 @@ type Server struct {
 	// in New and never replaced.
 	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
 	decisionAuditLogger *decisionAuditLogger
+	// auditWriterHandler is the async slog handler over auditWriter. The
+	// converted broker audit events (P4 slice 1) emit through a SlogSink
+	// over it (wireBrokerAuditEnvelopes). Set in New, never replaced.
+	auditWriterHandler slog.Handler
 
 	// cloudLoggingHealth reports the direct Cloud Logging path for the
 	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
@@ -2939,6 +2943,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditLogger, cfg.PerfTrace))
+	// Converted broker audit events (remaining-audit P4 slice 1) share the
+	// same async writer. They are always on: never gated on the decision
+	// experiment.
+	if err := srv.wireBrokerAuditEnvelopes(); err != nil {
+		return nil, err
+	}
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -7427,6 +7437,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// The audit operation context (remaining-audit P4-1) sits directly
+	// inside the request logger, which mints the request ID it adopts, and
+	// outside every auth middleware, so broker auth audit events carry it.
+	// See auditOperationMiddleware for the re-entry and no-ID rules.
+	h = auditOperationMiddleware(h)
 
 	// The request logger wraps UnifiedAuthMiddleware, so it is the request
 	// logger's own next.ServeHTTP call that invokes auth: every request is
