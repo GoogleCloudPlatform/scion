@@ -123,6 +123,7 @@ type HealthAnalyticsCounters struct {
 	OversizeTotal, AppendFailedTotal, DeadLettersTotal   int64
 	SyncUncertain, CorruptIntents, Invalid               int64
 	Unresolved, CommitDeferred                           int64
+	InvalidLines                                         int64
 	SyncUncertainTotal, CommitDeferredTotal              int64
 	// Held is true when an unresolved append holds the outbox (on disk).
 	Held          bool
@@ -228,8 +229,12 @@ type HealthEvent struct {
 	// index commit was completed later by recovery (quality). *_total are
 	// persisted across runs. Held (on disk): an unresolved append holds the
 	// outbox, so appends and finalization wait (nothing ships behind it).
-	AnalyticsUnresolved          *int64 `json:"analytics_unresolved,omitempty"`
-	AnalyticsCommitDeferred      *int64 `json:"analytics_commit_deferred,omitempty"`
+	AnalyticsUnresolved     *int64 `json:"analytics_unresolved,omitempty"`
+	AnalyticsCommitDeferred *int64 `json:"analytics_commit_deferred,omitempty"`
+	// AnalyticsInvalidLines: complete outbox lines the current build
+	// rejected (WP2 dead-letters them, so they are also in the dead letter
+	// counts; quality detail, not counted twice in loss_indicated).
+	AnalyticsInvalidLines        *int64 `json:"analytics_invalid_lines,omitempty"`
 	AnalyticsSyncUncertainTotal  *int64 `json:"analytics_sync_uncertain_total,omitempty"`
 	AnalyticsCommitDeferredTotal *int64 `json:"analytics_commit_deferred_total,omitempty"`
 	AnalyticsHeld                *bool  `json:"analytics_held,omitempty"`
@@ -512,6 +517,7 @@ func (e *HealthEvent) analyticsCounters() map[string]*int64 {
 		"analytics_sync_uncertain": e.AnalyticsSyncUncertain, "analytics_corrupt_intents": e.AnalyticsCorruptIntents,
 		"analytics_invalid": e.AnalyticsInvalid, "analytics_retry_backoff_ms": e.AnalyticsRetryBackoffMs,
 		"analytics_unresolved": e.AnalyticsUnresolved, "analytics_commit_deferred": e.AnalyticsCommitDeferred,
+		"analytics_invalid_lines": e.AnalyticsInvalidLines,
 	}
 }
 
@@ -595,6 +601,7 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsSyncUncertain, e.AnalyticsCorruptIntents = i64(c.SyncUncertain), i64(c.CorruptIntents)
 	e.AnalyticsInvalid, e.AnalyticsRetryBackoffMs = i64(c.Invalid), i64(c.RetryBackoffMs)
 	e.AnalyticsUnresolved, e.AnalyticsCommitDeferred = i64(c.Unresolved), i64(c.CommitDeferred)
+	e.AnalyticsInvalidLines = i64(c.InvalidLines)
 	failed := c.StatsFailed
 	e.AnalyticsStatsFailed = &failed
 	// On-disk values: omitted (unknown) when any read failed.

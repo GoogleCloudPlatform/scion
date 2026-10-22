@@ -453,6 +453,7 @@ func (h analyticsHandles) counters(now time.Time, readDisk bool) telemetrycontra
 		CorruptIntents:    s.CorruptIntents,
 		Invalid:           h.native.Invalid(),
 		Unresolved:        s.Unresolved,
+		InvalidLines:      s.InvalidLines,
 		CommitDeferred:    s.CommitDeferred,
 		StatsFailed:       err != nil,
 	}
@@ -712,7 +713,9 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 		in.HarnessVersion = usage.HarnessVersion
 	}
 	in.DeliveryState = p.DeliveryState()
-	if handles.native != nil {
+	// WP2 may keep a failing producer when the outbox cannot be opened
+	// (disabledReason outbox_unavailable): analytics is still disabled.
+	if handles.enabled() {
 		in.AnalyticsEnabled = true
 		in.Analytics = handles.counters(in.Now, true)
 	} else {
@@ -855,7 +858,7 @@ func (p *Pipeline) AnalyticsDiagnostics(readDisk bool) (counters telemetrycontra
 	h.mu.Lock()
 	handles := h.analyticsHandles
 	h.mu.Unlock()
-	if handles.native == nil {
+	if !handles.enabled() {
 		return counters, false, handles.disabledReason
 	}
 	return handles.counters(time.Now(), readDisk), true, ""
@@ -947,4 +950,10 @@ func finalHealthBudget(ctx context.Context, now time.Time) time.Duration {
 		budget = healthFinalMinBudget
 	}
 	return budget
+}
+
+// enabled reports whether analytics is enabled: a producer exists and no
+// disabled reason was recorded.
+func (h analyticsHandles) enabled() bool {
+	return h.native != nil && h.disabledReason == ""
 }

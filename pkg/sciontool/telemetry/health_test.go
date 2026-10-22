@@ -1203,7 +1203,12 @@ func TestRetainedMatchesOutbox(t *testing.T) {
 // O-3: a lazily opened outbox that failed yields stats_failed, not a panic.
 func TestAnalyticsCountersNilOutbox(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
-	lazy := NewLazyUsageAnalytics(func() (*AnalyticsOutbox, error) { return nil, errors.New("no home") }, telemetrycontract.UsageSourceHooks)
+	// A directory that cannot be created (its parent is a regular file).
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lazy := NewLazyUsageAnalytics(filepath.Join(blocker, "ob"), nil, telemetrycontract.UsageSourceHooks)
 	c := analyticsHandles{native: lazy}.counters(time.Now(), true)
 	if !c.StatsFailed {
 		t.Fatal("unavailable outbox must report stats_failed")
@@ -1462,5 +1467,31 @@ func TestAnalyticsLedgerLockTimeoutIsStatsFailure(t *testing.T) {
 	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters(time.Now(), true)
 	if !c.StatsFailed {
 		t.Fatal("a lock timeout must be a stats failure")
+	}
+}
+
+// WP2 keeps a failing producer when the pipeline's outbox cannot be opened
+// (disabledReason outbox_unavailable): health reports analytics disabled
+// with that reason, not enabled.
+func TestHealthAnalyticsDisabledWithFailingProducer(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	setTestVersion(t)
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handles := analyticsHandles{
+		native:         NewLazyUsageAnalytics(filepath.Join(blocker, "ob"), nil, telemetrycontract.UsageSourceNative),
+		disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable,
+	}
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.analyticsHandles = handles
+	if _, ok, reason := p.AnalyticsDiagnostics(false); ok || reason != telemetrycontract.AnalyticsDisabledOutboxUnavailable {
+		t.Fatalf("ok %v reason %q", ok, reason)
+	}
+	p.health.now, p.health.runID = time.Now, "run"
+	in := p.healthSnapshotInputs(telemetrycontract.HealthTriggerPeriodic)
+	if in.AnalyticsEnabled || in.AnalyticsDisabledReason != telemetrycontract.AnalyticsDisabledOutboxUnavailable {
+		t.Fatalf("inputs: enabled %v reason %q", in.AnalyticsEnabled, in.AnalyticsDisabledReason)
 	}
 }

@@ -68,6 +68,7 @@
   "analytics_retained_bytes": 0,
   "analytics_unresolved": 0,
   "analytics_commit_deferred": 0,
+  "analytics_invalid_lines": 0,
   "analytics_sync_uncertain_total": 0,
   "analytics_commit_deferred_total": 0,
   "analytics_held": false,
