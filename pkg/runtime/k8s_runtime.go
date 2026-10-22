@@ -5052,8 +5052,10 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 // k8sProjectConfigVolumeMount returns the read-only mount of the project
 // configuration directory (or .scion marker file) of an NFS-shared
 // workspace, whose broker-side view is config.Workspace, over the pod's
-// /workspace mount of the same export. ok is false when that directory does not exist on the broker's
-// view (workspaceProjectConfigMount).
+// /workspace mount of the same export. ok is false when the workspace has
+// no .scion entry. A workspace the broker cannot see (including a symlink
+// whose target is unreachable), or a .scion entry it cannot check, is an
+// error: the pod is refused rather than built without the read-only mount.
 func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
 	// The NFS-shared pod mounts the project's shared workspace
 	// (config.Workspace, the export subPath) at /workspace, whatever repo
@@ -5063,7 +5065,7 @@ func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, er
 	}
 	// The broker must see the shared workspace to decide; a workspace it
 	// cannot check refuses the pod rather than omit the read-only mount.
-	if _, err := os.Lstat(config.Workspace); err != nil {
+	if _, err := os.Stat(config.Workspace); err != nil {
 		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
 	}
 	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)

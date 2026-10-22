@@ -385,3 +385,18 @@ func TestBuildPod_ProjectConfigUncheckableWorkspaceRefused(t *testing.T) {
 		t.Fatalf("buildPod error = %v, want a refusal", err)
 	}
 }
+
+// A shared workspace that is a symlink to an unreachable target is refused
+// too: the broker cannot see the share through it.
+func TestBuildPod_ProjectConfigDanglingWorkspaceLinkRefused(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := nfsBaseConfig("nfs")
+	cfg.RepoRoot, cfg.Workspace = link, link
+	_, err := newNFSTestK8sRuntime().buildPod("default", cfg)
+	if err == nil || !strings.Contains(err.Error(), "cannot check the shared workspace") {
+		t.Fatalf("buildPod error = %v, want a refusal", err)
+	}
+}

@@ -503,6 +503,22 @@ func TestWorkspaceProjectConfigMount_UncheckableEntryRefused(t *testing.T) {
 	if _, _, ok, err := workspaceProjectConfigMount(ws, "/workspace", true); ok || err == nil {
 		t.Fatalf("(ok=%v, err=%v), want an error", ok, err)
 	}
+	// A workspace path that cannot be resolved for another reason than not
+	// existing (here a parent without search permission) is refused too.
+	parent := filepath.Join(t.TempDir(), "locked")
+	inner := filepath.Join(parent, "ws")
+	mkdirs(t, inner)
+	if err := os.Chmod(parent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	if _, _, ok, err := workspaceProjectConfigMount(inner, "/workspace", true); ok || err == nil {
+		t.Fatalf("unresolvable workspace: (ok=%v, err=%v), want an error", ok, err)
+	}
+	// A workspace that does not exist yet has nothing to protect.
+	if _, _, ok, err := workspaceProjectConfigMount(filepath.Join(t.TempDir(), "absent"), "/workspace", true); ok || err != nil {
+		t.Fatalf("absent workspace: (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
 }
 
 // The Apple marker refusal says what to do on that runtime.

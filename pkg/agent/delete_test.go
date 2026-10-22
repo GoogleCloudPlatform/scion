@@ -1097,6 +1097,11 @@ func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *tes
 	if _, err := os.Stat(filepath.Join(userWorktree, ".git")); err != nil {
 		t.Errorf("user-created worktree must survive teardown of its last scion-tracked sharer: %v", err)
 	}
+	// Deleting the agent removes its attached-worktree record with its
+	// state dir.
+	if got := readAgentOwnWorkspace(config.ResolveAgentDir(scionDir, "agent-x")); got != "" {
+		t.Errorf("attached-worktree record %q survives the agent's deletion", got)
+	}
 }
 
 func intPtr(i int) *int { return &i }
