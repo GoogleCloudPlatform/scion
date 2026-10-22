@@ -113,6 +113,20 @@ func TestSharedDirLayoutWarnings(t *testing.T) {
 	assert.Contains(t, got[0], "/mnt/ws/share1")
 }
 
+// declareSharedDir declares shared dir name on the project unless it is
+// already declared (new projects get the default scratchpad).
+func declareSharedDir(t *testing.T, srv *Server, projectID, name string) {
+	t.Helper()
+	p, err := srv.store.GetProject(context.Background(), projectID)
+	require.NoError(t, err)
+	for _, sd := range p.SharedDirs {
+		if sd.Name == name {
+			return
+		}
+	}
+	addSharedDirToProject(t, srv, projectID, name)
+}
+
 // sharedDirLayoutFixture is a hub with a fresh HOME, a hub-managed project
 // declaring shared dirs scratchpad and custom, and an NFS mount root.
 type sharedDirLayoutFixture struct {
@@ -129,8 +143,8 @@ func newSharedDirLayoutFixture(t *testing.T) sharedDirLayoutFixture {
 	t.Setenv("CLOUD_RUN_INSTANCE", "")
 	srv, s := testServer(t)
 	project, _ := createTestHubManagedProject(t, srv, "Layout Project")
-	addSharedDirToProject(t, srv, project.ID, "scratchpad")
-	addSharedDirToProject(t, srv, project.ID, "custom")
+	declareSharedDir(t, srv, project.ID, "scratchpad")
+	declareSharedDir(t, srv, project.ID, "custom")
 	mountRoot := t.TempDir()
 	return sharedDirLayoutFixture{srv: srv, s: s, project: project, mountRoot: mountRoot}
 }
@@ -186,7 +200,7 @@ func TestSharedDirFiles_WorkspaceStorageNFS_UUIDTree(t *testing.T) {
 func TestSharedDirFiles_WorkspaceStorageNFS_RemoteLinkedProject(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
 	project := createTestGitProject(t, f.srv, "Remote Linked", "github.com/test/remote-linked")
-	addSharedDirToProject(t, f.srv, project.ID, "scratchpad")
+	declareSharedDir(t, f.srv, project.ID, "scratchpad")
 	addProviderBroker(t, f.s, project.ID, "remote")
 
 	rec := doRequest(t, f.srv, http.MethodGet, f.filesURL(project.ID, "scratchpad"), nil)
@@ -217,7 +231,7 @@ func TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedProvidedProjects(t *testing.
 	f.srv.SetEmbeddedBrokerID(b.ID)
 
 	linked := createTestGitProject(t, f.srv, "Embedded Linked", "github.com/test/embedded-linked")
-	addSharedDirToProject(t, f.srv, linked.ID, "scratchpad")
+	declareSharedDir(t, f.srv, linked.ID, "scratchpad")
 	localScion := filepath.Join(t.TempDir(), "proj", ".scion")
 	require.NoError(t, os.MkdirAll(localScion, 0o755))
 	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
