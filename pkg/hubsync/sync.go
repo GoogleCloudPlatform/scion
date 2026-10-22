@@ -1679,7 +1679,9 @@ func applyFileTimestampFallback(info *api.AgentInfo, path string) {
 	if !info.Updated.IsZero() || !info.Created.IsZero() {
 		return
 	}
-	stat, err := os.Stat(path)
+	// Lstat: a link at path (for example swapped in after the confined
+	// read) is not followed to another file's mtime.
+	stat, err := os.Lstat(path)
 	if err != nil {
 		return
 	}
