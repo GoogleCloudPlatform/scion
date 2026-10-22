@@ -45,6 +45,12 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// AgentOwnWorkspace marks Workspace as the agent's own directory
+	// (<agent dir>/workspace: its worktree or private checkout), as the
+	// broker decided from its own paths. That workspace's .scion is the
+	// agent's branch checkout, which stays writable; any other workspace's
+	// .scion is project configuration and is mounted read-only.
+	AgentOwnWorkspace bool
 	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
 	// trusts. In broker mode, this field arrives already resolved by the
 	// runtime broker from operator-controlled tiers only — the request's

@@ -481,13 +481,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
 			addArg("--workdir", containerWorkspace)
-			// A workspace that is a subdirectory of the main checkout
-			// rather than a linked worktree (a project kept in a
-			// subdirectory of the repository) holds that project's .scion:
-			// it gets the read-only bind and the agents mask of the shared
-			// layout below. A linked worktree's .scion is the agent's own
-			// branch checkout, which the broker does not read.
-			if !isLinkedWorktree(config.Workspace) {
+			// A workspace that is not the agent's own (a project kept in
+			// a subdirectory of the repository) holds that project's
+			// .scion: it gets the read-only bind and the agents mask of the
+			// shared layout below. The agent's own worktree's .scion is its
+			// branch checkout, which the broker does not read. Which one
+			// this is comes from the broker (AgentOwnWorkspace), never from
+			// the workspace's contents.
+			if !config.AgentOwnWorkspace {
 				src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, containerWorkspace, config.RuntimeName != appleContainerRuntimeName)
 				if err != nil {
 					return nil, err
@@ -572,14 +573,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		// project that keeps its .scion directory in place, or an explicit
 		// workspace pointing at one) gets it read-only, with any agents
 		// root in it masked, as in the shared-workspace layout above.
-		src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			registerMount(src, tgt, true, true)
-			if isDir(filepath.Join(src, "agents")) {
-				sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
+		// The agent's own workspace (AgentOwnWorkspace) is left as is.
+		if !config.AgentOwnWorkspace {
+			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				registerMount(src, tgt, true, true)
+				if isDir(filepath.Join(src, "agents")) {
+					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
+				}
 			}
 		}
 	}
@@ -751,8 +755,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// never creates that mount point in the host checkout.
 	if fullRepoRootMounted {
 		if config.RuntimeName == appleContainerRuntimeName {
-			if isDir(filepath.Join(config.RepoRoot, workspaceProjectConfigDir)) {
+			scionPath := filepath.Join(config.RepoRoot, workspaceProjectConfigDir)
+			if isDir(scionPath) {
 				addArg("--tmpfs", "/repo-root/"+workspaceProjectConfigDir)
+			} else if info, err := os.Lstat(scionPath); err == nil && !info.IsDir() {
+				// A marker file or link cannot be masked or bound
+				// read-only on Apple.
+				return nil, errProjectConfigMarkerNoBind
 			}
 		} else {
 			addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")

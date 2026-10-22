@@ -29,6 +29,20 @@ import (
 // returns the run config that mounts it.
 type projectConfigLayout func(t *testing.T, cfg RunConfig) RunConfig
 
+// subdirProjectLayout is a project kept in a subdirectory of a repository:
+// the workspace is <repo>/sub, holding the project's .scion.
+func subdirProjectLayout(t *testing.T, cfg RunConfig, withAgents bool) RunConfig {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repo")
+	ws := filepath.Join(root, "sub")
+	mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
+	if withAgents {
+		mkdirs(t, filepath.Join(ws, ".scion", "agents", "other"))
+	}
+	cfg.RepoRoot, cfg.Workspace = root, ws
+	return cfg
+}
+
 func mkdirs(t *testing.T, dirs ...string) {
 	t.Helper()
 	for _, d := range dirs {
@@ -129,23 +143,31 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "repo")
 		ws := filepath.Join(root, ".scion", "agents", "me", "workspace")
 		mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
-		// A linked worktree's .git is a file.
-		writeFile(t, filepath.Join(ws, ".git"), "gitdir: ../../../../.git/worktrees/me\n")
 		cfg.RepoRoot, cfg.Workspace = root, ws
+		cfg.AgentOwnWorkspace = true
+		return cfg
+	}
+	// A subdirectory project where an agent created a .git file: still the
+	// project's workspace, since the broker decides AgentOwnWorkspace.
+	subdirWithGitFile := func(t *testing.T, cfg RunConfig) RunConfig {
+		cfg = subdirProjectLayout(t, cfg, true)
+		writeFile(t, filepath.Join(cfg.Workspace, ".git"), "gitdir: ../.git/worktrees/x\n")
+		return cfg
+	}
+	// The agent's own private workspace with a checked-out .scion (plain
+	// layout): left writable.
+	plainOwn := func(t *testing.T, cfg RunConfig) RunConfig {
+		ws := filepath.Join(t.TempDir(), "agents", "me", "workspace")
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+		cfg.Workspace = ws
+		cfg.AgentOwnWorkspace = true
 		return cfg
 	}
 	// A project kept in a subdirectory of the repository: the workspace is
 	// that subdirectory of the main checkout, holding the project's .scion.
 	subdirProject := func(withAgents bool) projectConfigLayout {
 		return func(t *testing.T, cfg RunConfig) RunConfig {
-			root := filepath.Join(t.TempDir(), "repo")
-			ws := filepath.Join(root, "sub")
-			mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
-			if withAgents {
-				mkdirs(t, filepath.Join(ws, ".scion", "agents", "other"))
-			}
-			cfg.RepoRoot, cfg.Workspace = root, ws
-			return cfg
+			return subdirProjectLayout(t, cfg, withAgents)
 		}
 	}
 	subdirMarker := func(t *testing.T, cfg RunConfig) RunConfig {
@@ -223,6 +245,8 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"project in a repo subdirectory, agents dir exists", subdirProject(true), ".scion", "/repo-root/sub/.scion", "/repo-root/sub/.scion/agents", "", false, false},
 			{"project in a repo subdirectory, no agents dir", subdirProject(false), ".scion", "/repo-root/sub/.scion", "", "/repo-root/sub/.scion/agents", false, false},
 			{"project in a repo subdirectory, .scion marker", subdirMarker, "", "", "", "", true, false},
+			{"project in a repo subdirectory with an agent-created .git file", subdirWithGitFile, ".scion", "/repo-root/sub/.scion", "/repo-root/sub/.scion/agents", "", false, false},
+			{"plain, agent's own workspace", plainOwn, "", "", "", "", false, false},
 			{"worktree", worktree, "", "", "", "", false, false},
 			{"git clone", gitClone, "", "", "", "", false, false},
 		} {
@@ -235,6 +259,13 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 				mkdirs(t, cfg.HomeDir)
 				cfg = tt.layout(t, cfg)
 				args, err := buildCommonRunArgs(cfg)
+				if tt.markerRO && rt == appleContainerRuntimeName {
+					// Apple cannot bind the marker read-only: refused.
+					if !errors.Is(err, errProjectConfigMarkerNoBind) {
+						t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigMarkerNoBind", err)
+					}
+					return
+				}
 				if tt.symlinkRefused {
 					if !errors.Is(err, errProjectConfigSymlink) {
 						t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigSymlink", err)
@@ -421,8 +452,8 @@ func TestWorkspaceProjectConfigMount(t *testing.T) {
 	if src, tgt, ok, err := workspaceProjectConfigMount(marker, "/workspace", true); err != nil || !ok || src != filepath.Join(resolvedMarker, ".scion") || tgt != "/workspace/.scion" {
 		t.Errorf("marker, file binds: got (%q, %q, %v, %v)", src, tgt, ok, err)
 	}
-	if _, _, ok, err := workspaceProjectConfigMount(marker, "/workspace", false); ok || err != nil {
-		t.Errorf("marker, no file binds: (ok=%v, err=%v), want (false, nil)", ok, err)
+	if _, _, ok, err := workspaceProjectConfigMount(marker, "/workspace", false); ok || !errors.Is(err, errProjectConfigMarkerNoBind) {
+		t.Errorf("marker, no file binds: (ok=%v, err=%v), want errProjectConfigMarkerNoBind", ok, err)
 	}
 
 	// Any symlinked .scion is refused, wherever it points.
@@ -435,5 +466,23 @@ func TestWorkspaceProjectConfigMount(t *testing.T) {
 		if _, _, ok, err := workspaceProjectConfigMount(ws, "/workspace", true); ok || !errors.Is(err, errProjectConfigSymlink) {
 			t.Errorf(".scion -> %s: (ok=%v, err=%v), want errProjectConfigSymlink", target, ok, err)
 		}
+	}
+}
+
+// In the full-repo-root fallback on Apple, a .scion marker file can be
+// neither masked nor bound read-only, so the start is refused.
+func TestBuildCommonRunArgs_FallbackAppleMarkerRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := filepath.Join(t.TempDir(), "repo")
+	mkdirs(t, filepath.Join(root, ".git"))
+	writeFile(t, filepath.Join(root, ".scion"), "project-id: x\n")
+	ws := filepath.Join(t.TempDir(), "outside")
+	mkdirs(t, ws)
+	cfg := minimalRunConfig()
+	cfg.BrokerMode = true
+	cfg.RuntimeName = appleContainerRuntimeName
+	cfg.RepoRoot, cfg.Workspace = root, ws
+	if _, err := buildCommonRunArgs(cfg); !errors.Is(err, errProjectConfigMarkerNoBind) {
+		t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigMarkerNoBind", err)
 	}
 }

@@ -5050,22 +5050,18 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 }
 
 // k8sProjectConfigVolumeMount returns the read-only mount of the project
-// configuration directory (or .scion marker file) of an NFS-shared workspace, whose broker-side
-// view is config.RepoRoot, over the pod's /workspace mount of the same
-// export. ok is false when that directory does not exist on the broker's
+// configuration directory (or .scion marker file) of an NFS-shared
+// workspace, whose broker-side view is config.Workspace, over the pod's
+// /workspace mount of the same export. ok is false when that directory does not exist on the broker's
 // view (workspaceProjectConfigMount).
 func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
-	// Only the shared layout mounts the project's checkout (the repo root)
-	// at /workspace.
-	if config.RepoRoot == "" || config.Workspace == "" {
+	// The NFS-shared pod mounts the project's shared workspace
+	// (config.Workspace, the export subPath) at /workspace, whatever repo
+	// root git metadata reports for it.
+	if config.Workspace == "" || config.AgentOwnWorkspace {
 		return corev1.VolumeMount{}, false, nil
 	}
-	repoRoot, err1 := filepath.EvalSymlinks(config.RepoRoot)
-	workspace, err2 := filepath.EvalSymlinks(config.Workspace)
-	if err1 != nil || err2 != nil || repoRoot != workspace {
-		return corev1.VolumeMount{}, false, nil
-	}
-	_, target, ok, err := workspaceProjectConfigMount(repoRoot, "/workspace", true)
+	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)
 	if err != nil || !ok {
 		return corev1.VolumeMount{}, false, err
 	}

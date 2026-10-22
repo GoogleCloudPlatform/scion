@@ -89,6 +89,11 @@ const workspaceProjectConfigDir = ".scion"
 // the agent could point it elsewhere for later starts.
 var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic link; project configuration in a workspace that agents share must be a directory or a project marker file, so that it can be mounted read-only")
 
+// errProjectConfigMarkerNoBind is returned for a workspace whose .scion is
+// a project marker file on a runtime that cannot bind a single file: the
+// marker would stay writable, so the agent could replace it.
+var errProjectConfigMarkerNoBind = errors.New("the workspace's .scion is a project marker file, which this container runtime cannot mount read-only; use a runtime that can (docker, podman or kubernetes), or keep the project configuration in a .scion directory")
+
 // workspaceProjectConfigMount returns the broker-side .scion entry of a
 // workspace that is mounted into the container at containerWorkspace, and
 // the container path it is mounted read-only at. The broker reads project
@@ -103,8 +108,8 @@ var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic l
 // allowMarkerFile is set: the broker reads it to locate the project's
 // configuration, so the agent must not change it or replace it with a
 // directory (a mount point cannot be removed or renamed in the container).
-// Runtimes that cannot bind a single file pass false and rely on the
-// broker's record of the workspace's .scion state.
+// Runtimes that cannot bind a single file pass false; a marker is then
+// refused with errProjectConfigMarkerNoBind.
 //
 // ok is false when there is no .scion at all: binding a missing path would
 // make the container runtime create it in the host checkout. A .scion that
@@ -128,16 +133,12 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 		return "", "", false, errProjectConfigSymlink
 	case info.IsDir():
 		return candidate, target, true, nil
-	case info.Mode().IsRegular() && allowMarkerFile:
+	case info.Mode().IsRegular():
+		if !allowMarkerFile {
+			return "", "", false, errProjectConfigMarkerNoBind
+		}
 		return candidate, target, true, nil
 	default:
 		return "", "", false, nil
 	}
-}
-
-// isLinkedWorktree reports whether dir is a linked git worktree: its .git
-// is a file pointing at the main repository's admin dir.
-func isLinkedWorktree(dir string) bool {
-	info, err := os.Lstat(filepath.Join(dir, ".git"))
-	return err == nil && info.Mode().IsRegular()
 }

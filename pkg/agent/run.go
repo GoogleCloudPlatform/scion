@@ -2368,6 +2368,7 @@ authDone:
 		Workspace:            effectiveWorkspace,
 		RepoRoot:             repoRoot,
 		ContainerWorkspace:   containerWorkspace,
+		AgentOwnWorkspace:    isAgentOwnWorkspace(agentDir, effectiveWorkspace),
 		ResolvedAuth:         resolvedAuth,
 		Harness:              h,
 		Project:              projectName,
@@ -2828,6 +2829,25 @@ func writeAgentTokenFile(agentHome, token string) error {
 // inside a repo" (provision.go). explicit is set on first start (opts.Workspace)
 // and re-derived on resume from the persisted ExplicitWorkspace flag, so the
 // guarantee holds on every entry path.
+// isAgentOwnWorkspace reports whether workspace is the agent's own
+// directory, <agentDir>/workspace (its worktree or private checkout),
+// comparing the broker's own paths after resolving symlinks. It never looks
+// at the workspace's contents, which the agent can write.
+func isAgentOwnWorkspace(agentDir, workspace string) bool {
+	if agentDir == "" || workspace == "" {
+		return false
+	}
+	own := filepath.Join(agentDir, "workspace")
+	if resolved, err := filepath.EvalSymlinks(own); err == nil {
+		own = resolved
+	}
+	ws := workspace
+	if resolved, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = resolved
+	}
+	return filepath.Clean(ws) == filepath.Clean(own)
+}
+
 func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string {
 	if explicit {
 		return ""

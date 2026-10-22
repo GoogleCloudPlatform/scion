@@ -81,6 +81,11 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 		{"NFS shared, no agents dir", shared(nfsBaseConfig("nfs"), scionOnly), true, false, true},
 		{"NFS shared without .scion", shared(nfsBaseConfig("nfs"), noScion), false, false, false},
 		{"NFS shared, .scion marker file", shared(nfsBaseConfig("nfs"), markerOnly), false, false, true},
+		{"NFS shared, repo root reported elsewhere", func() RunConfig {
+			c := shared(nfsBaseConfig("nfs"), scionOnly)
+			c.RepoRoot = noScion
+			return c
+		}(), false, false, true},
 		{"local, .scion marker file", shared(local, markerOnly), false, false, false},
 		{"NFS worktree", shared(nfsWorktreeConfig("wt"), withAgents), false, false, false},
 		{"NFS agent dir", shared(nfsAgentDirConfig("cpa"), withAgents), false, false, false},
