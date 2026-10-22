@@ -49,6 +49,11 @@ describe('legacyAgentRedirect', () => {
     const dir = path.dirname(fileURLToPath(import.meta.url));
     const main = readFileSync(path.join(dir, 'main.ts'), 'utf-8');
     expect(main).toContain('legacyAgentRedirect(pathname)');
+    // The redirect rewrites the URL, so it records the shown entry like
+    // every other router URL write (for a vetoed Back/Forward).
+    expect(main).toMatch(
+      /const redirected = legacyAgentRedirect\(pathname\);[\s\S]{0,240}replaceState\([^)]*\)\);\s*noteShownEntry\(\);/
+    );
     expect(main).not.toContain('agent-configure');
     expect(main).not.toContain('scion-page-agent-configure');
   });

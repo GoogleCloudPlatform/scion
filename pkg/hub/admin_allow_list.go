@@ -359,7 +359,9 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		// CSV file upload
-		if err := r.ParseMultipartForm(2 << 20); err != nil { // 2MB max
+		cleanup, err := parseMultipartUpload(r, 2<<20) // 2MB in memory
+		defer cleanup()
+		if err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to parse multipart form", nil)
 			return
 		}

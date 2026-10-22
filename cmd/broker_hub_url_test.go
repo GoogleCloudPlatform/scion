@@ -74,7 +74,7 @@ func brokerHubURLRefused(t *testing.T, run func() error) {
 	err := run()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid hub URL")
-	assert.Contains(t, err.Error(), "http://user:xxxxx@127.0.0.1:")
+	assert.Contains(t, err.Error(), `"http://xxxxx": a hub URL must not contain '@'`)
 	assert.NotContains(t, err.Error(), "s3cret")
 	assert.Zero(t, requests.Load(), "no request is sent to the hub")
 	require.NoError(t, filepath.WalkDir(home, func(path string, d fs.DirEntry, werr error) error {
