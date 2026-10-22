@@ -962,10 +962,6 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 	}
 }
 
-// TestEntrypointCacheTarRoundTrip reproduces actions/cache's archive scheme
-// (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
-// an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
-// directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
 // tarCommand runs tar with a minimal environment: an inherited TAR_OPTIONS (for
 // example --exclude) would otherwise change what the round-trip tests see.
 func tarCommand(args ...string) *exec.Cmd {
@@ -974,6 +970,10 @@ func tarCommand(args ...string) *exec.Cmd {
 	return cmd
 }
 
+// TestEntrypointCacheTarRoundTrip reproduces actions/cache's archive scheme
+// (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
+// an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
+// directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
 func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
 
 // With RUNNER_BUILD_CACHE_IN_RAM=true, /scratch/.cache is a link to a RAM dir; the
@@ -1211,6 +1211,20 @@ func TestEntrypointIgnoresOtherUnknownCodeLines(t *testing.T) {
 	}
 }
 
+// killEntrypoint ends a started entrypoint on a test's failure path, together with
+// the stub run.sh: run.sh runs in its own process group (job control), so killing
+// the entrypoint alone could leave it running past the test.
+func killEntrypoint(h *harness, cmd *exec.Cmd) {
+	if b, err := os.ReadFile(filepath.Join(h.stubOut, "pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL) // run.sh's process group
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
 // signalStub waits until it is signalled, records the signal and exits with a
 // signal-specific code (42 for TERM, 43 for INT).
 const signalStub = `trap 'echo TERM > "$out/signal"; exit 42' TERM
@@ -1245,7 +1259,7 @@ func TestEntrypointForwardsSignals(t *testing.T) {
 					break
 				}
 				if time.Now().After(deadline) {
-					_ = cmd.Process.Kill()
+					killEntrypoint(h, cmd)
 					t.Fatalf("stub run.sh never became ready; stderr:\n%s", stderr.String())
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -1369,7 +1383,7 @@ func TestEntrypointSignalDuringClaim(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	for len(cs.recorded()) == 0 {
 		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
+			killEntrypoint(h, cmd)
 			t.Fatalf("no claim attempt; stderr:\n%s", stderr.String())
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -1429,7 +1443,7 @@ exit 9
 				break
 			}
 			if time.Now().After(deadline) {
-				_ = cmd.Process.Kill()
+				killEntrypoint(h, cmd)
 				t.Fatalf("stub never became ready; stderr:\n%s", stderr.String())
 			}
 			time.Sleep(20 * time.Millisecond)
