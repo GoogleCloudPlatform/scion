@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,7 +55,10 @@ harness_configs:
 `), 0o644))
 	t.Chdir(root)
 
-	vs := (&Server{}).reincarnateImageSettings()
+	// A logger as the other hub tests set one: if the settings load fails,
+	// reincarnateImageSettings logs a warning, which must report the error
+	// rather than panic on a nil logger.
+	vs := (&Server{agentLifecycleLog: slog.Default()}).reincarnateImageSettings()
 	require.NotNil(t, vs)
 	require.Equal(t, "global-image:v1", settingsHarnessConfigImage(vs, "cwd-hc", ""),
 		"the image must come from the global settings, not the working directory's project")
