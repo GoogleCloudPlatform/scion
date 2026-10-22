@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/syncarchive"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/google/uuid"
@@ -250,6 +251,11 @@ func (r *KubernetesRuntime) syncWithRetry(ctx context.Context, op func() error) 
 // the sync operation should be retried.
 func isSyncTransientError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// A refused archive is refused again on retry, and its message quotes
+	// entry names from the pod, which must not decide whether to retry.
+	if errors.Is(err, syncarchive.ErrRefused) {
 		return false
 	}
 	msg := err.Error()
@@ -3586,17 +3592,6 @@ func syncArchiveCreateArgs(sourcePath string, excludes ...string) []string {
 	return append(args, "-C", sourcePath, ".")
 }
 
-// syncArchiveExtractArgs returns the local tar arguments that extract a
-// workspace archive from a pod into localPath, skipping each exclude
-// (relative to the archive root, as in syncArchiveCreateArgs).
-func syncArchiveExtractArgs(localPath string, excludes ...string) []string {
-	args := []string{"-xz", "-m"}
-	for _, e := range excludes {
-		args = append(args, "--exclude="+tarLiteralPattern("./"+path.Clean(e)))
-	}
-	return append(args, "-C", localPath)
-}
-
 // tarLiteralPattern quotes the tar wildcard characters in p with a backslash so that an
 // exclude pattern matches p only.
 func tarLiteralPattern(p string) string {
@@ -3738,39 +3733,85 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 		return err
 	}
 
-	// Prepare local tar
-	tarCmd := exec.CommandContext(ctx, "tar", syncArchiveExtractArgs(localPath, excludes...)...)
-	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	stdin, err := tarCmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := tarCmd.Start(); err != nil {
-		return err
-	}
-
 	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
 	var stderr bytes.Buffer
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: stdin,
-		Stderr: &stderr,
-	})
-
-	// Close stdin to tell local tar that stream is finished
-	_ = stdin.Close()
-	waitErr := tarCmd.Wait()
-
+	res, err := extractPodArchive(localPath, excludes, func(w io.Writer) error {
+		return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Stdout: w,
+			Stderr: &stderr,
+		})
+	}, &stderr)
 	if err != nil {
-		return fmt.Errorf("stream failed: %w (remote stderr: %s)", err, stderr.String())
+		return err
 	}
-
-	if waitErr != nil {
-		return fmt.Errorf("local tar failed: %w", waitErr)
-	}
+	reportSkippedSyncEntries(res)
 
 	fmt.Printf("  Sync from %s complete.\n", remotePath)
+	runtimeLog().Info("Sync from pod complete", "pod", podName, "dest", localPath,
+		"files", res.Files, "bytes", res.Bytes,
+		"skipped_protected", res.Protected, "skipped_unsafe", res.UnsafeCount)
 	return nil
+}
+
+// extractPodArchive runs stream, which writes a gzip-compressed tar archive
+// built in the pod, and extracts that archive into localPath while it
+// arrives. The archive is built by the agent, so it is extracted by
+// syncarchive rather than by tar: only regular files, directories and
+// in-tree symbolic links are written, nothing outside localPath and nothing
+// under .scion. remoteStderr, if not nil, is quoted when the stream fails.
+func extractPodArchive(localPath string, excludes []string, stream func(io.Writer) error, remoteStderr *bytes.Buffer) (syncarchive.Result, error) {
+	pr, pw := io.Pipe()
+	type extraction struct {
+		res syncarchive.Result
+		err error
+	}
+	done := make(chan extraction, 1)
+	go func() {
+		res, err := syncarchive.ExtractGzip(pr, localPath, syncarchive.Options{Excludes: excludes})
+		// If extraction stopped early, fail the stream's next write
+		// instead of leaving it blocked on the pipe.
+		if err != nil {
+			_ = pr.CloseWithError(err)
+		} else {
+			_ = pr.Close()
+		}
+		done <- extraction{res: res, err: err}
+	}()
+
+	streamErr := stream(pw)
+	// A nil streamErr closes the pipe with io.EOF, ending the archive.
+	_ = pw.CloseWithError(streamErr)
+	ext := <-done
+
+	// A refused archive is reported as such even though refusing it also
+	// broke the stream; otherwise a stream failure is the cause of any
+	// extraction error.
+	if ext.err != nil && (streamErr == nil || errors.Is(ext.err, syncarchive.ErrRefused)) {
+		return ext.res, fmt.Errorf("extract archive from pod: %w", ext.err)
+	}
+	if streamErr != nil {
+		var stderr string
+		if remoteStderr != nil {
+			stderr = remoteStderr.String()
+		}
+		return ext.res, fmt.Errorf("stream failed: %w (remote stderr: %s)", streamErr, stderr)
+	}
+	return ext.res, nil
+}
+
+// reportSkippedSyncEntries prints the entries of an archive from a pod that
+// were not copied because writing them would not be safe.
+func reportSkippedSyncEntries(res syncarchive.Result) {
+	if res.UnsafeCount == 0 {
+		return
+	}
+	fmt.Printf("  Warning: %d entries were not copied (only regular files, directories and links inside the workspace are):\n", res.UnsafeCount)
+	for _, s := range res.Unsafe {
+		fmt.Printf("    %s: %s\n", s.Name, s.Reason)
+	}
+	if more := res.UnsafeCount - len(res.Unsafe); more > 0 {
+		fmt.Printf("    ... and %d more\n", more)
+	}
 }
 
 // Stop is Delete on Kubernetes: ref.RunID is enforced by Delete (a pod of

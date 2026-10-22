@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/syncarchive"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -214,9 +216,9 @@ func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
 	}
 }
 
-// The tar arguments both sync directions use leave the agents root out of
-// the archive (to the pod) and out of the extraction (from the pod), and
-// extraction never removes the broker's own copy.
+// The tar arguments a sync to the pod uses leave the agents root out of the
+// archive, and extraction of an archive from the pod leaves the broker's
+// .scion (agents root and project settings) as it was.
 func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	src := t.TempDir()
 	for _, f := range []string{"README.md", ".scion/agents/other/prompt.md", ".scion/settings.yaml"} {
@@ -256,15 +258,26 @@ func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	if err := os.WriteFile(kept, []byte("mine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	extract := append([]string{"-f", full}, syncArchiveExtractArgs(dest, sharedWorkspaceAgentsDir)...)
-	if out, err := exec.Command("tar", extract...).CombinedOutput(); err != nil {
-		t.Fatalf("tar extract: %v: %s", err, out)
+	settings := filepath.Join(dest, ".scion", "settings.yaml")
+	if err := os.WriteFile(settings, []byte("broker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := syncarchive.ExtractGzip(f, dest, syncarchive.Options{Excludes: []string{sharedWorkspaceAgentsDir}}); err != nil {
+		t.Fatalf("extract: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, ".scion", "agents", "other")); !os.IsNotExist(err) {
 		t.Errorf("extraction wrote into the agents root (stat err %v)", err)
 	}
 	if b, err := os.ReadFile(kept); err != nil || string(b) != "mine" {
 		t.Errorf("broker agents root changed: %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(settings); err != nil || string(b) != "broker" {
+		t.Errorf("broker project settings changed: %q, %v", b, err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
 		t.Errorf("workspace file not extracted: %v", err)
