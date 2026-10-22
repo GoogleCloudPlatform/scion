@@ -279,7 +279,7 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		residual := in.FinalResidualRecords
 		ev.FinalResidualRecords = &residual
 		ev.FinalFlushOutcome = telemetrycontract.FinalFlushDrained
-		pending := in.AnalyticsEnabled && in.Analytics.PendingBytes > 0
+		pending := in.AnalyticsEnabled && (in.Analytics.PendingBytes > 0 || in.Analytics.StatsFailed)
 		if residual > 0 || in.Queue.Records > 0 || pending {
 			ev.FinalFlushOutcome = telemetrycontract.FinalFlushNotDrained
 		}
@@ -405,6 +405,9 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 	outbox := h.native.Outbox()
 	s := outbox.Stats()
 	epoch, seq := outboxLedger(outbox)
+	// Stats swallows a failed disk read as 0 pending; re-check so that a
+	// failure is reported, never mistaken for an empty outbox.
+	_, _, statErr := outbox.pendingBytes()
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:               s.Appended,
 		CertainDuplicates:      s.CertainDuplicates,
@@ -422,6 +425,7 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 		OldestPendingFileAgeMs: -1,
 		ProducerEpoch:          epoch,
 		ProducerSeqLast:        seq,
+		StatsFailed:            statErr != nil,
 	}
 	if s.PendingBytes > 0 {
 		c.OldestPendingFileAgeMs = s.OldestPendingAge.Milliseconds()

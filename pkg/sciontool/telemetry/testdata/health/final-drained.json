@@ -61,6 +61,7 @@
   "analytics_retry_backoff_ms": 0,
   "producer_epoch": "epoch-1",
   "producer_seq_last": 4,
+  "analytics_stats_failed": false,
   "metric_points_accepted": 12,
   "metric_points_rejected": 0,
   "metric_points_filtered": 0,

@@ -122,6 +122,9 @@ type HealthAnalyticsCounters struct {
 	RetryBackoffMs         int64
 	ProducerEpoch          string
 	ProducerSeqLast        int64
+	// StatsFailed means the outbox's on-disk pending state could not be
+	// read: PendingBytes is then not a measured value.
+	StatsFailed bool
 }
 
 // HealthEvent is one telemetry.health analytics event.
@@ -194,6 +197,10 @@ type HealthEvent struct {
 	// producers).
 	ProducerEpoch   string `json:"producer_epoch,omitempty"`
 	ProducerSeqLast *int64 `json:"producer_seq_last,omitempty"`
+	// AnalyticsStatsFailed is true when the outbox's pending state could
+	// not be read from disk (analytics_pending_bytes is then not measured,
+	// and a final event is not_drained). Present only with analytics.
+	AnalyticsStatsFailed *bool `json:"analytics_stats_failed,omitempty"`
 
 	MetricPointsAccepted    int64 `json:"metric_points_accepted"`
 	MetricPointsRejected    int64 `json:"metric_points_rejected"`
@@ -221,8 +228,10 @@ type HealthEvent struct {
 	HealthSendFailures int64 `json:"health_send_failures"`
 	HealthSuperseded   int64 `json:"health_superseded"`
 
-	// LossIndicated is true when any loss counter in this snapshot is
-	// non-zero (design note section 3.2). Always written.
+	// LossIndicated is true when any INCLUDED loss counter in this
+	// snapshot is non-zero (design note section 3.2). false never means
+	// loss-free: hook-process append failures, for example, are counted in
+	// those processes and are absent here. Always written.
 	LossIndicated bool `json:"loss_indicated"`
 
 	// FinalResidualRecords are metric/log records still unconfirmed when
@@ -348,6 +357,9 @@ func (e *HealthEvent) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("analytics_state %q is not known", e.AnalyticsState))
 	}
+	if (e.AnalyticsStatsFailed == nil) != (e.AnalyticsPendingBytes == nil) {
+		errs = append(errs, errors.New("analytics_stats_failed is reported with the analytics_* counters"))
+	}
 	if !groupComplete(e.usageCounters()) || !groupComplete(e.analyticsCounters()) {
 		errs = append(errs, errors.New("usage_* and analytics_* counters are each reported as a complete group or not at all"))
 	}
@@ -440,7 +452,7 @@ func (e *HealthEvent) hasAnalyticsCounters() bool {
 			return true
 		}
 	}
-	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != ""
+	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil
 }
 
 // groupComplete reports whether a counter group is all set or all unset.
@@ -482,4 +494,6 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	}
 	e.ProducerEpoch = c.ProducerEpoch
 	e.ProducerSeqLast = i64(c.ProducerSeqLast)
+	failed := c.StatsFailed
+	e.AnalyticsStatsFailed = &failed
 }

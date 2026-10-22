@@ -118,12 +118,14 @@ func TestHealthEventValidate(t *testing.T) {
 			e.AnalyticsAppendFailed, e.AnalyticsDroppedNoIdentity, e.AnalyticsFinalized, e.AnalyticsDelivered = nil, nil, nil, nil
 			e.AnalyticsSendFailures, e.AnalyticsSendRetries, e.AnalyticsTorn, e.AnalyticsHubIDMismatch = nil, nil, nil, nil
 			e.AnalyticsPendingBytes, e.AnalyticsRetryBackoffMs, e.ProducerSeqLast = nil, nil, nil
+			e.AnalyticsStatsFailed, e.ProducerEpoch, e.AnalyticsOldestPendingFileAgeMs = nil, "", nil
 		}, "requires the analytics_* counters"},
 		"negative counter": {func(e *HealthEvent) { e.MetricExportRetries = -1 }, "metric_export_retries"},
 		"negative optional": {func(e *HealthEvent) {
 			v := int64(-5)
 			e.AnalyticsPendingBytes = &v
 		}, "analytics_pending_bytes"},
+		"stats_failed without counters": {func(e *HealthEvent) { e.AnalyticsStatsFailed = nil }, "analytics_stats_failed"},
 		"bad origin": {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
 	}
 	for name, c := range cases {

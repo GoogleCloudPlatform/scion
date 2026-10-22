@@ -448,6 +448,8 @@ func TestFinalFlushOutcomeAndLoss(t *testing.T) {
 		"metric residual":   func(in *healthInputs) { in.FinalResidualRecords = 1 },
 		"queued records":    func(in *healthInputs) { in.Queue.Records = 1 },
 		"analytics pending": func(in *healthInputs) { in.Analytics.PendingBytes = 10; in.Analytics.OldestPendingFileAgeMs = 5 },
+		// A failed disk read is not an empty outbox.
+		"analytics stats failed": func(in *healthInputs) { in.Analytics.StatsFailed = true },
 	} {
 		in := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 		mutate(&in)
@@ -654,4 +656,55 @@ func TestHealthDisabledWithoutGCPExporter(t *testing.T) {
 		t.Fatalf("analytics diagnostics ok=%v reason=%q", ok, reason)
 	}
 	p.emitFinalHealth(context.Background()) // no-op, no panic
+}
+
+// With analytics enabled the native path offers one usage event per derived
+// AND per duplicate observation (design section 1.1): offered = derived +
+// duplicate, and every offered event ends in exactly one outbox outcome.
+func TestOfferedEventsEqualDerivedPlusDuplicate(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	d, o := analyticsDeriver(t, filepath.Join(t.TempDir(), "ob"), claudeUsageRule{})
+	rid := "req_011CUabcdefghijklmnopq"
+	feed(d, claudeLogs(
+		claudeRecord(rid, "1", 10, fullClaudeTokens), // derived, written
+		claudeRecord(rid, "1", 10, fullClaudeTokens), // counter duplicate, outbox certain duplicate
+		claudeRecord("", "2", 20, fullClaudeTokens),  // derived, written (composite)
+		claudeRecord("", "2", 20, fullClaudeTokens),  // counter duplicate, written as ambiguous occurrence 2
+		namedRecord("tool_result", 30),               // not a usage frame: not offered
+	))
+	diag := d.Diagnostics()
+	s := o.Stats()
+	offered := s.Appended + s.CertainDuplicates + s.Overflow + s.AppendFailed + d.analytics.DroppedNoIdentity()
+	if diag.Derived != 2 || diag.Duplicate != 2 || offered != diag.Derived+diag.Duplicate {
+		t.Fatalf("derived %d duplicate %d offered %d (appended %d certain dup %d)", diag.Derived, diag.Duplicate, offered, s.Appended, s.CertainDuplicates)
+	}
+	if s.Appended != 3 || s.CertainDuplicates != 1 {
+		t.Fatalf("appended %d certain duplicates %d, want 3 and 1", s.Appended, s.CertainDuplicates)
+	}
+}
+
+// A failed on-disk stat of the outbox is reported, not read as empty.
+func TestAnalyticsStatsFailureReported(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	dir := filepath.Join(t.TempDir(), "ob")
+	o, err := OpenAnalyticsOutbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cursor"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	if !c.StatsFailed || c.PendingBytes != 0 {
+		t.Fatalf("stats failed %v pending %d", c.StatsFailed, c.PendingBytes)
+	}
+	in := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
+	in.Analytics = c
+	ev, err := buildHealthEvent(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.FinalFlushOutcome != "not_drained" || ev.AnalyticsStatsFailed == nil || !*ev.AnalyticsStatsFailed {
+		t.Fatalf("outcome %q stats_failed %v", ev.FinalFlushOutcome, ev.AnalyticsStatsFailed)
+	}
 }
