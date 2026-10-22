@@ -801,17 +801,35 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	rev, _, err := o.update(ctx, section, doc, updatedBy, expectedRevision, origin)
+	return rev, err
+}
+
+// update is Update, also reporting whether the cache held the write (or a
+// newer state of its section) before the self-apply. That is false only
+// when the write could not be cached directly and the re-read of the
+// store failed or kept losing to newer writes: the write is saved, and
+// this hub applies it on its own settings event or the next poll, but the
+// self-apply did not include it (ptone/scion#5691).
+func (o *OperationalSettings) update(
+	ctx context.Context,
+	section string,
+	doc json.RawMessage,
+	updatedBy string,
+	expectedRevision int64,
+	origin string,
+) (int64, bool, error) {
 	if err := o.checkWriteGuard(ctx, section); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
-		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
+		return 0, false, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
 	}
 
 	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	// Update local cache.
@@ -862,8 +880,9 @@ func (o *OperationalSettings) Update(
 		o.cacheSeq++
 	}
 	o.mu.Unlock()
+	inEffect := true
 	if reread {
-		o.refreshThrough(ctx, result.SettingsRevision, section)
+		inEffect = o.refreshThrough(ctx, result.SettingsRevision, section)
 	}
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -887,7 +906,7 @@ func (o *OperationalSettings) Update(
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
 
-	return result.Revision, nil
+	return result.Revision, inEffect, nil
 }
 
 // DeleteSection removes a section row from the store, evicts it from the local
@@ -965,22 +984,24 @@ const refreshThroughAttempts = 3
 // which was above writeRevision, and a read at revision N holds every
 // operational write up to N. A read is discarded only when another write
 // raised the cached revision meanwhile, so the next read is newer; after
-// refreshThroughAttempts reads (or on a read error) it logs and returns,
-// and the writer's own settings event refreshes again.
-func (o *OperationalSettings) refreshThrough(ctx context.Context, writeRevision int64, section string) {
+// refreshThroughAttempts reads (or on a read error) it logs and returns
+// false, and the writer's own settings event refreshes again. It returns
+// true when a read at or above writeRevision was taken into the cache.
+func (o *OperationalSettings) refreshThrough(ctx context.Context, writeRevision int64, section string) bool {
 	for attempt := 1; attempt <= refreshThroughAttempts; attempt++ {
 		_, read, accepted, err := o.refresh(ctx)
 		if err != nil {
-			slog.Warn("operational settings: re-read after a write failed; the settings event will refresh",
+			slog.Warn("operational settings: re-read after a write failed; the settings event will refresh, and a save report lists the write's keys as skipped",
 				"section", section, "write_revision", writeRevision, "error", err)
-			return
+			return false
 		}
 		if accepted && read >= writeRevision {
-			return
+			return true
 		}
 	}
-	slog.Warn("operational settings: re-read after a write kept losing to newer writes; the settings event will refresh",
+	slog.Warn("operational settings: re-read after a write kept losing to newer writes; the settings event will refresh, and a save report lists the write's keys as skipped",
 		"section", section, "write_revision", writeRevision, "attempts", refreshThroughAttempts)
+	return false
 }
 
 // EnvOverriddenKeys returns the list of Layer-1 koanf keys that are overridden
