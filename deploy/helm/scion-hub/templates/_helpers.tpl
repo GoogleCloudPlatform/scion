@@ -1842,7 +1842,8 @@ Exactly one list is.
 
      cmd/server_web_base_url.go, resolveWebBaseURL (the OAuth redirect base)
        --base-url, else SCION_SERVER_BASE_URL, else SCION_SERVER_HUB_ENDPOINT,
-       else server.hub.public_url from the global settings file, else
+       else server.hub.public_url from the global settings file, else (hosted,
+       Cloud Run IAP audience) the IAP-derived URL, else
        http://localhost:<web-port>
      cmd/server_foreground.go, resolveHubEndpointFrom (the URL agents dial)
        --base-url, else SCION_SERVER_HUB_ENDPOINT, else SCION_SERVER_BASE_URL,

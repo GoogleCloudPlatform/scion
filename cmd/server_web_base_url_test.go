@@ -33,7 +33,9 @@ func webBaseURLTestEnv(t *testing.T) {
 
 // The web base URL order: --base-url, SCION_SERVER_BASE_URL,
 // SCION_SERVER_HUB_ENDPOINT, server.hub.public_url from the global settings
-// file, then the default; the legacy settings hub.endpoint is not followed
+// file, then (hosted mode, Cloud Run IAP audience; see
+// TestResolveWebBaseURL_IAPAudienceDecision) the IAP-derived URL, then the
+// default; the legacy settings hub.endpoint is not followed
 // (ptone/scion#5364).
 func TestResolveWebBaseURL_Order(t *testing.T) {
 	const file = "/home/u/.scion/settings.yaml"
@@ -135,18 +137,34 @@ func TestResolveWebBaseURL_Order(t *testing.T) {
 	})
 }
 
-// The IAP-derived hub endpoint is not followed: this pins the current D3
-// decision (webBaseURLFollowsIAPAudience = false, ptone/scion#5364) as a
-// literal, so flipping the const must change this test, deliberately and
-// visibly (to expect https://hub-123.us-central1.run.app, source "derived
-// from the IAP audience (server.auth.proxy.iap.audience)").
+// The IAP-derived hub endpoint is followed: this pins the D3 decision
+// (webBaseURLFollowsIAPAudience = true, ptone/scion#5364) as a literal, so
+// flipping the const back must fail this test, deliberately and visibly.
+// The derived URL is https, so a non-loopback listener accepts it.
 func TestResolveWebBaseURL_IAPAudienceDecision(t *testing.T) {
 	webBaseURLTestEnv(t)
 	cfg := &config.GlobalConfig{}
 	cfg.Auth.Proxy = &config.ProxyAuthConfig{IAP: &config.IAPAuthConfig{Audience: "/projects/123/locations/us-central1/services/hub"}}
 	mode := serverEndpointMode{hubEnabled: true, webEnabled: true, webPort: 8080, hosted: true}
 	got := resolveWebBaseURL(cfg, mode, "")
-	assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, got)
+	assert.Equal(t, resolvedWebBaseURL{URL: "https://hub-123.us-central1.run.app", Source: "derived from the IAP audience (server.auth.proxy.iap.audience)"}, got)
+	assert.NoError(t, checkWebBaseURLListener(got, "0.0.0.0", 8080))
+
+	// The hub endpoint resolver derives it in hosted mode only.
+	notHosted := mode
+	notHosted.hosted = false
+	assert.Equal(t, resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, resolveWebBaseURL(cfg, notHosted, ""))
+
+	// server.hub.public_url outranks the derived URL.
+	withFile := &config.GlobalConfig{}
+	withFile.Auth.Proxy = cfg.Auth.Proxy
+	withFile.Hub.Endpoint = "https://public.example.com"
+	assert.Equal(t, "https://public.example.com", resolveWebBaseURL(withFile, mode, "").URL)
+
+	// An explicit base URL still wins over the derived one.
+	t.Setenv("SCION_SERVER_BASE_URL", "https://scion.example.com")
+	got = resolveWebBaseURL(cfg, mode, "")
+	assert.Equal(t, resolvedWebBaseURL{URL: "https://scion.example.com", Source: "SCION_SERVER_BASE_URL"}, got)
 }
 
 // A non-loopback listener with a base URL that is not https is refused,

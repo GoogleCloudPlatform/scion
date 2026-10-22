@@ -33,9 +33,11 @@ import (
 //
 // It is read only from operator inputs: the --base-url flag, the
 // environment (SCION_SERVER_HUB_ENDPOINT, SCION_SERVER_BASE_URL) and the
-// GLOBAL settings FILE (server.hub.public_url, which the server loads from
-// the global settings directory only). It is never read from the settings
-// database or any value saved through the admin settings API. A runtime
+// GLOBAL settings FILE (server.hub.public_url, and the IAP audience
+// server.auth.proxy.iap.audience that a Cloud Run URL is derived from; the
+// server loads both from the global settings directory only). It is never
+// read from the settings database or any value saved through the admin
+// settings API: it is resolved at startup, before the store is opened. A runtime
 // write through the admin API (from a compromised or mistaken web session)
 // must not be able to redirect OAuth logins to another host or downgrade
 // the session cookie; changing the web base URL takes operator access to
@@ -43,7 +45,9 @@ import (
 //
 // Order (ptone/scion#5364): --base-url, then SCION_SERVER_BASE_URL, then
 // SCION_SERVER_HUB_ENDPOINT, then server.hub.public_url from the global
-// settings file, then the default http://localhost:<port>. The two inputs
+// settings file, then (hosted mode only) the Cloud Run URL derived from the
+// IAP audience in the global settings file, then the default
+// http://localhost:<port>. The two inputs
 // the web server read before (--base-url and SCION_SERVER_BASE_URL) keep
 // their relative order and win; SCION_SERVER_HUB_ENDPOINT and the file only
 // fill in when neither is set. SCION_SERVER_HUB_ENDPOINT is documented as an
@@ -51,7 +55,8 @@ import (
 // OAuth redirect base away from SCION_SERVER_BASE_URL. Below those two, the
 // hub-side values come from the hub's operator endpoint resolver
 // (resolveHubEndpointFrom), so they cannot drift from it. The legacy
-// settings hub.endpoint (SCION_HUB_ENDPOINT) is not followed.
+// settings hub.endpoint (SCION_HUB_ENDPOINT) is not followed, so for the
+// web the IAP-derived URL comes right after server.hub.public_url.
 //
 // In a process that does not run the hub (the web server with the Runtime
 // Broker only), server.hub.public_url and SCION_SERVER_HUB_ENDPOINT name the
@@ -66,15 +71,18 @@ import (
 // webBaseURLFollowsIAPAudience decides whether the web base URL follows a
 // hub endpoint derived from the IAP audience (a Cloud Run IAP front end;
 // see iapAudienceToCloudRunURL). That URL is built from operator
-// configuration only and is https by construction. It is one of the two
-// availability decisions of ptone/scion#5364 (pending): false keeps such a
-// deployment on the default, which a non-loopback listener refuses.
-const webBaseURLFollowsIAPAudience = false
+// configuration only (server.auth.proxy.iap.audience in the global settings
+// file, never the settings database) and is https by construction. It is
+// one of the two availability decisions of ptone/scion#5364, decided true:
+// a Cloud Run IAP deployment with no explicit base URL starts with the
+// derived https URL instead of the default, which a non-loopback listener
+// refuses.
+const webBaseURLFollowsIAPAudience = true
 
 // webBaseURLRefuseDefault decides whether the non-loopback refusal
 // (checkWebBaseURLListener) also covers the default
 // http://localhost:<port> base URL, used when no operator input sets one.
-// It is the other availability decision of ptone/scion#5364 (pending).
+// It is the other availability decision of ptone/scion#5364, decided true.
 const webBaseURLRefuseDefault = true
 
 // webBaseURLSourceDefault is the source of the default base URL.
