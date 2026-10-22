@@ -24,6 +24,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -116,8 +117,17 @@ type rerenderRecord struct {
 	// that reads prompts from the agent home: written by provisioning and
 	// by each prompt re-render. Only these are removed when a later render
 	// no longer produces them, so a file a template's home/ supplies is
-	// kept, as a reincarnation keeps it.
+	// kept, as a reincarnation keeps it. (One narrow exception: when
+	// provisioning rendered the prompt over a file the template's home/
+	// supplies at the same path, that path is recorded, and a later clear
+	// removes it where a reincarnation would restore the template's file.)
 	SystemPromptPaths []string `json:"systemPromptPaths,omitempty"`
+	// SystemPromptPathsKnown is set once SystemPromptPaths is maintained
+	// for this agent (by provisioning or a prompt re-render). Without it
+	// (an agent provisioned before the record existed), every system-prompt
+	// target of the harness that the render does not produce is treated as
+	// Scion-rendered, so a clear still removes the old prompt.
+	SystemPromptPathsKnown bool `json:"systemPromptPathsKnown,omitempty"`
 }
 
 func rerenderRecordPath(agentDir string) string {
@@ -137,26 +147,42 @@ func readRerenderRecord(agentDir string) rerenderRecord {
 	return rec
 }
 
+// writeRerenderRecord writes rec to a new temporary file in agentDir and
+// renames it over the record, so a reader never sees a torn record.
 func writeRerenderRecord(agentDir string, rec rerenderRecord) error {
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(rerenderRecordPath(agentDir), data, 0o644)
+	tmp, err := os.CreateTemp(agentDir, "."+config.RerenderRecordFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, rerenderRecordPath(agentDir))
 }
 
 // resetRerenderRecord replaces the rerender record with one holding no
 // fingerprints and the system-prompt paths provisioning just rendered
-// (ProvisionAgent: the files it renders are the new baseline), or deletes
-// it when there are none.
+// (ProvisionAgent: the files it renders are the new baseline).
 func resetRerenderRecord(agentDir string, systemPromptPaths []string) error {
-	if len(systemPromptPaths) == 0 {
-		if err := os.Remove(rerenderRecordPath(agentDir)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	return writeRerenderRecord(agentDir, rerenderRecord{SystemPromptPaths: systemPromptPaths})
+	return writeRerenderRecord(agentDir, rerenderRecord{SystemPromptPaths: systemPromptPaths, SystemPromptPathsKnown: true})
 }
 
 // rerenderProvisionedFiles re-renders the files provisioning wrote for
@@ -312,7 +338,15 @@ func rerenderPrompts(in rerenderInputs, rec *rerenderRecord, write func(func() e
 		return "", "", err
 	}
 	var stale, rendered []string
-	for _, rel := range rec.SystemPromptPaths {
+	scionRendered := rec.SystemPromptPaths
+	if !rec.SystemPromptPathsKnown && in.Inline != nil && slices.Contains(in.Inline.ClearedFields, "system_prompt") {
+		// An agent provisioned before the record listed these paths: when
+		// this start clears the system prompt, every target counts as
+		// Scion-rendered, so the old prompt goes. Otherwise nothing is
+		// removed.
+		scionRendered = targets
+	}
+	for _, rel := range scionRendered {
 		if _, ok := files[rel]; !ok {
 			stale = append(stale, rel)
 		}
@@ -345,6 +379,7 @@ func rerenderPrompts(in rerenderInputs, rec *rerenderRecord, write func(func() e
 		return "", "", err
 	}
 	rec.SystemPromptPaths = rendered
+	rec.SystemPromptPathsKnown = true
 	util.Debugf("rerender: wrote prompts for agent %s into the agent home", in.AgentName)
 	return fp, "", nil
 }

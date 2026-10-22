@@ -565,12 +565,58 @@ func TestRerender_ClearedPromptKeepsTemplateHomeFile(t *testing.T) {
 	f := newRerenderFixture(t)
 	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
 	writeFileString(t, promptFile, "template home prompt")
+	// Provisioning rendered no system prompt.
+	if err := resetRerenderRecord(f.agentDir, nil); err != nil {
+		t.Fatal(err)
+	}
 	inline := &api.ScionConfig{ClearedFields: []string{"system_prompt"}}
 	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(&harness.Generic{}, []string{"system_prompt"}, &api.ScionConfig{}, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFileString(t, promptFile); got != "template home prompt" {
 		t.Fatalf("a cleared system prompt removed or changed a template-home file: %q", got)
+	}
+}
+
+// TestRerender_ClearedPromptLegacyAgentWithoutRecord: an agent provisioned
+// before the record listed system-prompt paths has its prompt files counted
+// as Scion-rendered, so a cleared system prompt with no template default
+// still removes the old file.
+func TestRerender_ClearedPromptLegacyAgentWithoutRecord(t *testing.T) {
+	f := newRerenderFixture(t)
+	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
+	writeFileString(t, promptFile, "old prompt rendered by an older broker")
+	inline := &api.ScionConfig{ClearedFields: []string{"system_prompt"}}
+	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(&harness.Generic{}, []string{"system_prompt"}, &api.ScionConfig{}, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
+		t.Fatalf("a legacy agent kept its cleared system prompt (err %v)", err)
+	}
+	if rec := readRerenderRecord(f.agentDir); !rec.SystemPromptPathsKnown {
+		t.Fatalf("the prompt re-render did not mark the paths known: %+v", rec)
+	}
+}
+
+// TestRerender_RecordWriteIsAtomic: the record is replaced by a rename, and
+// no temporary file is left in the agent directory.
+func TestRerender_RecordWriteIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeRerenderRecord(dir, rerenderRecord{Fingerprints: map[string]string{"prompts": "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRerenderRecord(dir, rerenderRecord{Fingerprints: map[string]string{"prompts": "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRerenderRecord(dir).Fingerprints["prompts"]; got != "b" {
+		t.Fatalf("record = %q, want b", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("agent directory holds %d entries, want only the record: %v", len(entries), entries)
 	}
 }
 
@@ -595,6 +641,9 @@ func TestProvisionAgent_RecordsSystemPromptPaths(t *testing.T) {
 	}
 	if len(rec.Fingerprints) != 0 {
 		t.Fatalf("provisioning recorded fingerprints: %v", rec.Fingerprints)
+	}
+	if !rec.SystemPromptPathsKnown {
+		t.Fatalf("provisioning did not mark the paths known: %+v", rec)
 	}
 }
 
