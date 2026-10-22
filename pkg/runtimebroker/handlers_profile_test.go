@@ -32,7 +32,7 @@ func TestResolveManagerForOpts_NoProfile(t *testing.T) {
 	srv, _ := newTestServerWithProvisionCapture()
 
 	opts := api.StartOptions{Name: "test-agent"}
-	mgr, _ := srv.resolveManagerForOpts(opts)
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// With no profile, should return the default manager
 	if mgr != srv.manager {
@@ -47,7 +47,7 @@ func TestResolveManagerForOpts_ProfileNotInSettings(t *testing.T) {
 		Name:    "test-agent",
 		Profile: "nonexistent-profile",
 	}
-	mgr, _ := srv.resolveManagerForOpts(opts)
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// Profile not found in settings should return the default manager
 	if mgr != srv.manager {
@@ -85,7 +85,7 @@ runtimes:
 		Profile:     "apple",
 		ProjectPath: projectPath,
 	}
-	mgr, _ := srv.resolveManagerForOpts(opts)
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// Profile specifies "container" runtime which differs from mock's "mock",
 	// so we should get a different manager
@@ -97,7 +97,7 @@ runtimes:
 // TestResolveManagerForOpts_NilRuntimeResolverFallsBack proves that a nil
 // srv.resolveAuxiliaryRuntime does not panic when settings resolve to a
 // runtime other than the broker's default. New() always sets
-// resolveAuxiliaryRuntime to agent.ResolveRuntime, so this only matters for
+// resolveAuxiliaryRuntime to agent.ResolveRuntimeWithRecord, so this only matters for
 // a Server built without New() (e.g. a test literal, or some future
 // construction path) — but resolveManagerForOpts falls back to that exact
 // same function rather than a stand-in, so the fallback resolves
@@ -141,7 +141,7 @@ runtimes:
 	}
 
 	// Must not panic.
-	mgr, _ := srv.resolveManagerForOpts(opts)
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// Profile specifies "container" runtime which differs from mock's
 	// "mock", so the fallback must have actually resolved a new manager
@@ -179,7 +179,7 @@ runtimes:
 		Profile:     "local",
 		ProjectPath: projectPath,
 	}
-	mgr, _ := srv.resolveManagerForOpts(opts)
+	mgr, _ := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// Profile specifies "docker" runtime which matches the broker's runtime,
 	// so we should get the same manager
@@ -241,7 +241,7 @@ runtimes:
 		Name:        "test-agent",
 		ProjectPath: projectPath,
 	}
-	mgr, rtName := srv.resolveManagerForOpts(opts)
+	mgr, rtName := managerAndType(srv.resolveManagerForOpts(opts))
 
 	// The broker's default runtime is "docker" (see
 	// newTestServerWithProvisionCapture); the project's active profile
@@ -300,7 +300,7 @@ profiles: [not valid yaml
 		Name:        "test-agent",
 		ProjectPath: projectPath,
 	}
-	mgr, rtName := srv.resolveManagerForOpts(opts)
+	mgr, rtName := managerAndType(srv.resolveManagerForOpts(opts))
 
 	if mgr != srv.manager {
 		t.Error("expected default manager when settings fail to load")

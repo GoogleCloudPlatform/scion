@@ -394,12 +394,13 @@ func TestBearerDisposition_PendingEntriesAreLiveAndUncatalogued(t *testing.T) {
 
 // TestProjectSubRoutes_UnlistedSegmentIsNotFound requires handleProjectRoutes
 // to answer 404 for a first segment after the project ID that is not in
-// projectSubRouteTable, and to dispatch every listed segment.
+// projectSubRouteTable, and to dispatch every listed segment. "dav" pins the
+// removal of the WebDAV endpoint (ptone/scion#5547).
 func TestProjectSubRoutes_UnlistedSegmentIsNotFound(t *testing.T) {
 	srv, _ := testServer(t)
 	const unlisted = "Project route not found"
 
-	for _, sub := range []string{"bogus", "envX", "membersX", "davX", "secretsX", "settingsX", "metricsX/summary", "sync-status"} {
+	for _, sub := range []string{"bogus", "envX", "membersX", "dav", "dav/report.txt", "davX", "secretsX", "settingsX", "metricsX/summary", "sync-status"} {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			path := "/api/v1/projects/proj-unlisted/" + sub
 			rec := doRequest(t, srv, method, path, nil)

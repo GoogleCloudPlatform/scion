@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -324,10 +325,30 @@ func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key
 }
 
 // validateChatSendInput checks the content, reply target and attachments of
-// a send by user and returns the trimmed content and the attachment
+// a send by user and returns the trimmed content, with agent-prefixed
+// mentions rewritten (rewriteIncomingAgentMentions), and the attachment
 // references. It writes nothing, so a refused send leaves no trace.
 func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
-	content := strings.TrimSpace(in.Content)
+	return s.validateChatSendInputMode(ctx, user, target, in, false)
+}
+
+// prevalidateChatSendInput is validateChatSendInput for the HTTP handler's
+// check before its idempotency lookup. It differs in one case: an
+// attachment stored as an artifact that this sender already sent passes,
+// because a retry of the send that bound it carries the same id and must
+// reach the idempotency lookup (and get the replay, or 409 while the first
+// send is still running) instead of a 400. The send itself always runs
+// validateChatSendInput, which refuses it. The references it returns are
+// incomplete and must not be used.
+func (s *Server) prevalidateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, *chatSendError) {
+	content, _, serr := s.validateChatSendInputMode(ctx, user, target, in, true)
+	return content, serr
+}
+
+// validateChatSendInputMode is validateChatSendInput; with replay set, an
+// artifact attachment already sent by user passes (prevalidateChatSendInput).
+func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput, replay bool) (string, []AttachmentRef, *chatSendError) {
+	content := rewriteIncomingAgentMentions(strings.TrimSpace(in.Content))
 	if content == "" && len(in.Attachments) == 0 {
 		return "", nil, chatSendValidationError("content or attachments required")
 	}
@@ -358,7 +379,49 @@ func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, t
 	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
+		// Only a caller attachmentWriterKind admits may name one; any other
+		// caller's id is looked up in the AttachmentStore only, so an
+		// artifact id gets the answer of an unknown one.
+		var svc *artifacts.Service
+		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
+			svc = s.attachmentService()
+		}
+		// A user access token names its uploads only where it may post
+		// (chatTokenMaySend, ptone/scion#4596 section 9); otherwise its ids
+		// get the answer of an unknown one.
+		if token := chatToken(ctx); svc != nil && token != nil {
+			if allowed, err := s.chatTokenMaySend(ctx, token, target.Key, target.ProjectID); err != nil || !allowed {
+				svc = nil
+			}
+		}
 		for _, aid := range in.Attachments {
+			// An attachment stored as an artifact (ptone/scion#4595) is
+			// usable only as an unsent upload of the sender, in any
+			// conversation the sender may post to; sending binds it to the
+			// message. Any other attachment of the artifact service is
+			// refused like a missing one, and never looked up below. A
+			// failed lookup falls through to the AttachmentStore, which
+			// never holds an artifact id, so a legacy send does not depend
+			// on the artifact store being healthy.
+			if svc != nil {
+				info, state, err := svc.UsableAttachment(ctx, aid, artifacts.PrincipalKindUser, user.ID())
+				if err != nil {
+					slog.WarnContext(ctx, "chat v2 artifact attachment lookup failed; trying the attachment store",
+						"attachment", aid, "error", err)
+					state = artifacts.AttachmentAbsent
+				}
+				if replay && state == artifacts.AttachmentSentBySender {
+					continue
+				}
+				if state == artifacts.AttachmentUnusable || state == artifacts.AttachmentSentBySender {
+					logReferenceRefused(ctx, chatSendPath(target.Key), "attachment is not an unsent upload of the sender", user)
+					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
+				}
+				if state == artifacts.AttachmentUsable {
+					attachmentRefs = append(attachmentRefs, newArtifactAttachmentRef(info))
+					continue
+				}
+			}
 			meta, err := target.wcs.GetAttachment(ctx, aid)
 			reason := ""
 			switch {
@@ -381,6 +444,12 @@ func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, t
 				Size:     meta.Size,
 			})
 		}
+	}
+	// Delivery writes the attachments of one message into one directory
+	// under their names, so two attachments may not share a name, artifact
+	// and AttachmentStore ones alike (ptone/scion#4596).
+	if msg := duplicateAttachmentRefusal(attachmentRefs); msg != "" {
+		return "", nil, chatSendValidationError(msg)
 	}
 	return content, attachmentRefs, nil
 }
@@ -549,6 +618,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
+		// The send reaches agents: its attachments stored as artifacts must
+		// fit the delivery budget (ptone/scion#4596).
+		if msg := s.checkAttachmentDeliveryBudget(attachmentRefs); msg != "" {
+			return nil, chatSendValidationError(msg)
+		}
 		// DM registration happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,

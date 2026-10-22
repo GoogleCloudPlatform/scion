@@ -116,6 +116,10 @@ var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 // while it is reserved: when you un-reserve a row, decide whether
 // unrecorded chains may hold it, and if not, cover it with a
 // ceiling-optional scope or add it to this set explicitly.
+//
+// user.list is not Reserved (the user list checks it) and is not in the
+// set: it maps to no agent scope, so no agent role, and no unrecorded
+// chain, can hold it.
 var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), permissions.ReservedIDs()...))
 
 // sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
@@ -407,7 +411,8 @@ func (a *AuthzService) activeProjectEdges(ctx context.Context, agentID, projectI
 
 // devLocalHopUsable applies both local-development checks to a hop with
 // dev_local provenance: dev-auth is enabled on this server, and the hop's
-// delegator is user:DevUserID and that user is active. devUserActive caches
+// delegator is user:DevUserID and that user is active (checkUserAccount, the
+// account-status rule shared with decide). devUserActive caches
 // the GetUser result across hops of one fold. A failed check returns
 // errSourceNotAllowed; a GetUser fault returns a wrapped lookup error.
 func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.DelegationEdge, devUserActive *bool) error {
@@ -420,14 +425,11 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 	if devUserActive != nil && *devUserActive {
 		return nil
 	}
-	user, err := a.store.GetUser(ctx, DevUserID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: %s", errSourceNotAllowed, reasonPrincipalInactive)
-		}
+	switch user, err := checkUserAccount(ctx, a.store, devUserPrincipal()); classifyUserAccount(user, err) {
+	case accountAllowed:
+	case accountLookupFault:
 		return fmt.Errorf("local development user lookup: %w", err)
-	}
-	if user == nil || user.Status != store.UserStatusActive {
+	default:
 		return fmt.Errorf("%w: %s", errSourceNotAllowed, reasonPrincipalInactive)
 	}
 	if devUserActive != nil {
@@ -700,15 +702,11 @@ func (a *AuthzService) loadScopeCeilings(ctx context.Context, agent *store.Agent
 			continue
 		}
 		devUserChecked = true
-		user, err := a.store.GetUser(ctx, DevUserID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				sc.DevLocalUsable = false
-				continue
-			}
+		switch user, err := checkUserAccount(ctx, a.store, devUserPrincipal()); classifyUserAccount(user, err) {
+		case accountAllowed:
+		case accountLookupFault:
 			return ScopeCeilings{}, fmt.Errorf("local development user lookup: %w", err)
-		}
-		if user == nil || user.Status != store.UserStatusActive {
+		default:
 			sc.DevLocalUsable = false
 		}
 	}
@@ -803,7 +801,26 @@ func (a *AuthzService) mintCandidateScopes(agent *store.Agent) []AgentTokenScope
 //	return filterScopes(candidates, sc.Chain.Ceiling, sc), err
 //
 // Errors: those of chainEffectCeiling.
+//
+// For an agent rooted at an admin-kind test identity the result is then
+// clamped (clampTestAdminRootedScopes, admin tier A3).
 func (a *AuthzService) ceilingFilteredAgentScopes(ctx context.Context, agent *store.Agent, candidates []AgentTokenScope) ([]AgentTokenScope, error) {
+	scopes, err := a.chainFilteredAgentScopes(ctx, agent, candidates)
+	if err != nil {
+		return nil, err
+	}
+	return a.clampTestAdminRootedScopes(ctx, agent, scopes)
+}
+
+// chainFilteredAgentScopes is ceilingFilteredAgentScopes without the
+// test-admin clamp: the scopes the agent's chain ceilings allow. Only the
+// coverage of a child edge's ceiling uses it (agentRowEffectCeiling): the
+// clamp is not frozen into edges, because every descendant of an agent
+// rooted at an admin-kind identity inherits that root and has its own
+// tokens clamped at mint. Freezing it would make the full role never fit
+// such an agent's sub-agents and change the A2 delivery eligibility, which
+// stays as it was.
+func (a *AuthzService) chainFilteredAgentScopes(ctx context.Context, agent *store.Agent, candidates []AgentTokenScope) ([]AgentTokenScope, error) {
 	sc, err := a.loadScopeCeilings(ctx, agent)
 	if err != nil {
 		return nil, err
@@ -1007,7 +1024,9 @@ func (a *AuthzService) agentRowEffectCeiling(ctx context.Context, parent *store.
 		return store.EffectCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, parent.ID)
 	}
 
-	scopes, err := a.ceilingFilteredAgentScopes(ctx, parent, a.mintCandidateScopes(parent))
+	// Unclamped on purpose (chainFilteredAgentScopes): the child's own
+	// tokens are clamped at mint when its root is an admin-kind identity.
+	scopes, err := a.chainFilteredAgentScopes(ctx, parent, a.mintCandidateScopes(parent))
 	if err != nil {
 		return store.EffectCeiling{}, err
 	}

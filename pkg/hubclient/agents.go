@@ -688,7 +688,10 @@ type ScopeReissueResult struct {
 	CredentialsRevoked int                       `json:"credentials_revoked"`
 	Dispatched         bool                      `json:"dispatched"`
 	DispatchError      string                    `json:"dispatch_error,omitempty"`
-	Message            string                    `json:"message"`
+	// ReloadUnconfirmed is set when the new credential was delivered but
+	// the running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
 }
 
 // ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
@@ -724,6 +727,9 @@ type ScopeReissueBulkAgent struct {
 	RoleAfter     string   `json:"role_after,omitempty"`
 	OpID          string   `json:"op_id,omitempty"`
 	DispatchError string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
 }
 
 // ScopeReissueBulkRef names an agent in a bulk result list.
@@ -851,6 +857,9 @@ type SendMessageOptions struct {
 	// addition to any @mentions the server extracts from the body. The
 	// primary recipient and the sender are excluded automatically.
 	Mentions []string
+	// AttachmentIDs names attachments the sender uploaded
+	// (AttachmentUploader.UploadAttachments), by id (ptone/scion#4596).
+	AttachmentIDs []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
@@ -873,12 +882,14 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
 		Mentions          []string                    `json:"mentions,omitempty"`
+		AttachmentIDs     []string                    `json:"attachment_ids,omitempty"`
 	}{
 		StructuredMessage: msg,
 		Interrupt:         opts.Interrupt,
 		Notify:            opts.Notify,
 		Wake:              opts.Wake,
 		Mentions:          opts.Mentions,
+		AttachmentIDs:     opts.AttachmentIDs,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -959,6 +970,9 @@ type OutboundMessageRequest struct {
 	// Wake requests that a suspended target agent be resumed before
 	// delivering the message. Ignored for non-agent recipients.
 	Wake bool `json:"wake,omitempty"`
+	// AttachmentIDs names attachments the sending agent uploaded, by id
+	// (ptone/scion#4596). Attachments keeps meaning staged paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound
@@ -1261,6 +1275,11 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is recreated on the
+	// target and the agent's local state is given up. A hub that predates
+	// it ignores it; MoveVerdict.TransferMode tells a client the hub knows it.
+	ForceMove bool `json:"forceMove,omitempty"`
 	// SharedDirBackends changes the recorded shared-dir storage backend of
 	// the named shared dirs (dir name to "nfs" or "local"). Only the
 	// agent's record changes; the data is copied by the operator.
@@ -1299,12 +1318,17 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to
 // another broker. A refused request carries it in the error details under
 // "verdict". Checks lists every check in evaluation order, each passed,
-// failed or not_evaluated.
+// failed, not_evaluated or (for a forced move) waived; treat any other
+// value as not passed.
 type MoveVerdict struct {
 	Eligible     bool          `json:"eligible"`
 	SourceBroker MoveBrokerRef `json:"sourceBroker"`
@@ -1312,6 +1336,21 @@ type MoveVerdict struct {
 	Profile      string        `json:"profile,omitempty"`
 	RuntimeType  string        `json:"runtimeType,omitempty"`
 	Checks       []MoveCheck   `json:"checks"`
+	// TransferMode is how the workspace reaches the target of an eligible
+	// move: "export" (carried through a shared NFS export) or "recreate"
+	// (provisioned fresh; local state is lost). A hub that predates
+	// --force never sets it.
+	TransferMode string `json:"transferMode,omitempty"`
+	// Consequences lists what an eligible move keeps, carries, recreates
+	// and loses.
+	Consequences []MoveConsequence `json:"consequences,omitempty"`
+}
+
+// MoveConsequence is one item a move keeps, carries, recreates or loses.
+type MoveConsequence struct {
+	Kind string `json:"kind"` // kept | carried | recreated | lost
+	Item string `json:"item"` // stable key, e.g. "identity", "workspace"
+	Text string `json:"text"`
 }
 
 // MoveBrokerRef identifies a broker in a MoveVerdict.

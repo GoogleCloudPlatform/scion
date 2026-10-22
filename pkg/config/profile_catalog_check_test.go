@@ -103,7 +103,7 @@ func catalogViewRT(t *testing.T, globalDir string, stored, storedRT []string) *V
 			runtimes[r] = V1RuntimeConfig{Type: "kubernetes"}
 		}
 	}
-	vs, err := ProfileCatalogView(globalDir, runtimes, storedProfiles(stored))
+	vs, err := ProfileCatalogView(globalDir, runtimes, storedProfiles(stored), nil)
 	require.NoError(t, err)
 	return vs
 }
@@ -343,7 +343,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	globalDir := catalogHome(t, "local", "gke", "local-nfs")
 	running := NewSettingsOverlay()
-	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
+	running.Update(nil, storedProfiles([]string{"gke"}), nil)
 	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
 
 	oneStored := catalogView(t, globalDir, []string{"gke"})
@@ -403,7 +403,8 @@ func TestProfileOrigins_Versioned(t *testing.T) {
 	}
 }
 
-// A legacy hierarchy labels every profile "settings".
+// A legacy-format file is converted at its own layer, so a legacy hierarchy
+// tells file profiles from built-in defaults like a versioned one.
 func TestProfileOrigins_Legacy(t *testing.T) {
 	old := GetGlobalSettingsOverlay()
 	t.Cleanup(func() { SetGlobalSettingsOverlay(old) })
@@ -425,13 +426,11 @@ profiles:
 
 	got, err := ProfileOrigins(projectDir)
 	require.NoError(t, err)
-	if got["legacy-profile"] != ProfileSourceSettings {
-		t.Fatalf("origins = %v, want legacy-profile labelled settings", got)
+	if got["legacy-profile"] != ProfileSourceFile {
+		t.Fatalf("origins = %v, want legacy-profile labelled file", got)
 	}
-	for name, src := range got {
-		if src != ProfileSourceSettings {
-			t.Fatalf("legacy origin %q = %q, want settings", name, src)
-		}
+	if got["local"] != ProfileSourceBuiltin {
+		t.Fatalf("origins = %v, want the default local profile labelled builtin", got)
 	}
 }
 
@@ -446,5 +445,96 @@ func TestProfileCatalogFinding_Fields(t *testing.T) {
 	want := []string{"Agents", "Kind", "PreExisting", "Previous", "Profile", "Project", "Source"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("ProfileCatalogFinding fields = %v, want %v", names, want)
+	}
+}
+
+// retainedView is ProfileCatalogView with built-in retention enabled from
+// refs, and storedRT as kubernetes-type stored runtimes (nil: none).
+func retainedView(t *testing.T, globalDir string, stored, storedRT []string, refs ProfileReferences) *VersionedSettings {
+	t.Helper()
+	var runtimes map[string]V1RuntimeConfig
+	if storedRT != nil {
+		runtimes = map[string]V1RuntimeConfig{}
+		for _, r := range storedRT {
+			runtimes[r] = V1RuntimeConfig{Type: "kubernetes"}
+		}
+	}
+	vs, err := ProfileCatalogView(globalDir, runtimes, storedProfiles(stored), &refs)
+	require.NoError(t, err)
+	return vs
+}
+
+// With references, the after view keeps a referenced built-in profile
+// (ptone/scion#5113): it resolves, so its agents give no
+// agent_saved_profile finding, only the INFO retained_builtin_profile.
+// Without references (a nil refs), the same change blocks.
+func TestCheckProfileCatalog_RetainedBuiltinProfile(t *testing.T) {
+	globalDir := catalogHome(t, "gke", "gke", "local-nfs")
+	before := catalogView(t, globalDir, nil)
+	agents := map[string]int{"local": 2}
+	refs := ProfileReferences{Agents: agents, Projects: map[string]int{}}
+
+	got := CheckProfileCatalog(retainedView(t, globalDir, []string{"gke"}, nil, refs), before, catalogOrigins(t, globalDir), nil, agents)
+	want := []ProfileCatalogFinding{
+		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
+		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingRetainedBuiltinProfile, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("with references:\n got  %+v\n want %+v", got, want)
+	}
+
+	got = CheckProfileCatalog(catalogView(t, globalDir, []string{"gke"}), before, catalogOrigins(t, globalDir), nil, agents)
+	want = []ProfileCatalogFinding{
+		{Kind: ProfileFindingAgentSavedProfile, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
+		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("without references (retention off):\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// With stored runtimes, the after view also keeps the built-in runtime of a
+// retained profile: INFO retained_builtin_runtime, whose Agents sums the
+// agents of the after profiles naming it.
+func TestCheckProfileCatalog_RetainedBuiltinRuntime(t *testing.T) {
+	globalDir := catalogHome(t, "gke", "gke:k8s", "local-nfs")
+	before := catalogView(t, globalDir, nil)
+	agents := map[string]int{"local": 1}
+	refs := ProfileReferences{Agents: agents, Projects: map[string]int{}}
+	after := retainedView(t, globalDir, []string{"gke:k8s"}, []string{"k8s"}, refs)
+	rt := after.Profiles["local"].Runtime
+	require.NotEmpty(t, rt, "the retained built-in local names a runtime")
+	require.Equal(t, []string{rt}, after.RetainedRuntimeNames())
+
+	got := CheckProfileCatalog(after, before, catalogOrigins(t, globalDir), nil, agents)
+	want := []ProfileCatalogFinding{
+		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
+		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingRetainedBuiltinProfile, Profile: "local", Agents: 1, Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingRetainedBuiltinRuntime, Profile: rt, Agents: 1, Source: ProfileSourceBuiltin},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// A built-in active_profile is retained with no reference when two or more
+// profiles are stored; its finding counts the agents without a saved
+// profile, and the default resolves, so there is no active_profile finding.
+func TestCheckProfileCatalog_RetainedActiveProfileWithoutReferences(t *testing.T) {
+	globalDir := catalogHome(t, "local", "gke", "local-nfs")
+	before := catalogView(t, globalDir, nil)
+	agents := map[string]int{"": 3}
+	refs := ProfileReferences{Agents: map[string]int{}, Projects: map[string]int{}}
+
+	got := CheckProfileCatalog(retainedView(t, globalDir, []string{"gke", "local-nfs"}, nil, refs), before, catalogOrigins(t, globalDir), nil, agents)
+	want := []ProfileCatalogFinding{
+		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingRetainedBuiltinProfile, Profile: "local", Agents: 3, Source: ProfileSourceBuiltin},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings:\n got  %+v\n want %+v", got, want)
 	}
 }

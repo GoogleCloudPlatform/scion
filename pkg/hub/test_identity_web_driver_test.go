@@ -251,13 +251,20 @@ type tiCall struct {
 	pos token.Pos
 }
 
-// tiCensus parses every non-test .go file of the package and returns, per
+// tiCensus parses every non-test .go file of the package (and its
+// guardScanSubdirs subpackages) and returns, per
 // selector name, the call sites x.<name>(...) with the selector expression
 // x rendered as source-like text ("cfg.ProxyAuthenticator").
 func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	out := map[string]map[string][]tiCall{}
 	for _, e := range entries {
@@ -450,7 +457,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
-		"grantProjectVisitor": true,
+		"grantProjectVisitor": true, "linkPendingVisitor": true,
 	}, creators, "every function that calls CreateUser, CreateFederatedUser or another checked Create*User method")
 	for fn := range creators {
 		if reason, ok := exempt[fn]; ok {

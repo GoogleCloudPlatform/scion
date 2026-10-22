@@ -125,7 +125,7 @@ func TestRewriteImageRegistry(t *testing.T) {
 	}
 }
 
-func TestResolveImageRegistry(t *testing.T) {
+func TestSettingsImageRegistry(t *testing.T) {
 	tests := []struct {
 		name        string
 		settings    *VersionedSettings
@@ -201,7 +201,7 @@ func TestResolveImageRegistry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.settings.ResolveImageRegistry(tt.profileName)
+			got := tt.settings.SettingsImageRegistry(tt.profileName)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -239,7 +239,7 @@ func TestImageRegistryYAMLRoundTrip(t *testing.T) {
 	assert.Empty(t, roundTripped.Profiles["local"].ImageRegistry)
 }
 
-func TestIsImageRegistryConfigured(t *testing.T) {
+func TestSettingsImageRegistry_Configured(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings *VersionedSettings
@@ -285,52 +285,10 @@ func TestIsImageRegistryConfigured(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.settings.IsImageRegistryConfigured(tt.profile)
+			got := tt.settings.SettingsImageRegistry(tt.profile) != ""
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-func TestRequireImageRegistry_NotConfigured(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	dir := t.TempDir()
-
-	// Create a minimal versioned settings file without image_registry
-	vs := &VersionedSettings{
-		SchemaVersion: "1",
-		ActiveProfile: "local",
-		Profiles: map[string]V1ProfileConfig{
-			"local": {Runtime: "docker"},
-		},
-		HarnessConfigs: map[string]HarnessConfigEntry{},
-		Runtimes:       map[string]V1RuntimeConfig{},
-	}
-	require.NoError(t, SaveVersionedSettings(dir, vs))
-
-	err := RequireImageRegistry(dir, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "image_registry is not configured")
-	assert.Contains(t, err.Error(), "image-build/README.md")
-}
-
-func TestRequireImageRegistry_Configured(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	dir := t.TempDir()
-
-	vs := &VersionedSettings{
-		SchemaVersion: "1",
-		ActiveProfile: "local",
-		ImageRegistry: "ghcr.io/myorg",
-		Profiles: map[string]V1ProfileConfig{
-			"local": {Runtime: "docker"},
-		},
-		HarnessConfigs: map[string]HarnessConfigEntry{},
-		Runtimes:       map[string]V1RuntimeConfig{},
-	}
-	require.NoError(t, SaveVersionedSettings(dir, vs))
-
-	err := RequireImageRegistry(dir, "")
-	assert.NoError(t, err)
 }
 
 // TestRewriteImageRegistry_Idempotent proves that rewriting an image that was

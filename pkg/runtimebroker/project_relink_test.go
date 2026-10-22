@@ -70,6 +70,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 	agentDir := filepath.Join(oldRoot, config.DotScion, "agents", relinkAgent)
 	writeRelinkFile(t, filepath.Join(agentDir, "home", "state.txt"), relinkState)
 	writeRelinkFile(t, filepath.Join(agentDir, "scion-agent.json"), `{}`)
+	writeRelinkFile(t, filepath.Join(agentDir, "image-provenance.json"), `{"version": 1}`)
 	writeRelinkFile(t, filepath.Join(agentDir, "home", "agent-info.json"), `{"name": "`+relinkAgent+`"}`)
 	writeRelinkFile(t, filepath.Join(oldRoot, config.SharedDirsSubdir, "cache", "f"), "shared\n")
 	if err := os.Symlink("state.txt", filepath.Join(agentDir, "home", "link")); err != nil {
@@ -83,7 +84,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 		ID: relinkAgent, Name: relinkAgent, ContainerID: relinkAgent, ProjectPath: filepath.Join(oldRoot, config.DotScion), Phase: "stopped",
 		Labels: map[string]string{"scion.name": relinkAgent, "scion.project_id": relinkOldID},
 	}}}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	return &relinkFixture{srv: srv, mgr: mgr, root: root, dotScion: dotScion, oldRoot: oldRoot, newRoot: newRoot}
 }
 

@@ -37,11 +37,6 @@ var sectionSchemaDiffAllowList = map[string]string{
 	"profiles.*.harness_overrides.*.auth_selected_type: enum [], root [api-key auth-file oauth-token vertex-ai]":                 "section looser than root; ptone/scion#3053",
 	"runtimes.*.type: enum [], root [cloudrun cloudrun-instances cloudrun-sandbox container docker kubernetes podman substrate]": "section looser than root; ptone/scion#3053",
 
-	// Pre-existing: the profiles section schema accepts profiles.*.env, but
-	// V1ProfileConfig has no env field, so a PUT carrying it gets a 200 and
-	// the value is dropped when the doc decodes. Tracked in ptone/scion#3048.
-	"profiles.*.env: missing from root schema": "section-only key with no Go field; ptone/scion#3048",
-
 	// The gcp_iam section schema is hand-written with the recognised values
 	// (a PUT with any other value is refused). settings-v1.schema.json
 	// documents the keys as plain strings with no enum, because the loader
@@ -148,9 +143,6 @@ func TestSectionSchemas_MatchRootSchema(t *testing.T) {
 func sectionKoanfPath(section, key string) string {
 	if kp := KoanfPathFromSectionKey(section, key); kp != "" {
 		return kp
-	}
-	if section == "notifications" {
-		return "server." + key
 	}
 	return key // agent_defaults: top-level keys
 }

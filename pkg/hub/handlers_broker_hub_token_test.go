@@ -444,7 +444,7 @@ func TestBrokerHubToken_OwnNameWithOtherBrokerIDReregistersOwnBroker(t *testing.
 	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name:     own.Name,
 		BrokerID: target.ID,
-		Labels:   map[string]string{"env": "updated"},
+		Labels:   map[string]string{"zone": "added"},
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -452,7 +452,7 @@ func TestBrokerHubToken_OwnNameWithOtherBrokerIDReregistersOwnBroker(t *testing.
 	assert.Equal(t, own.ID, resp.BrokerID, "the name match selects the caller's own broker")
 	updated, err := s.GetRuntimeBroker(ctx, own.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "updated", updated.Labels["env"])
+	assert.Equal(t, "added", updated.Labels["zone"])
 	assertBrokerUnchanged(t, s, target.ID)
 }
 

@@ -59,7 +59,7 @@ export interface TimelineRow {
   /** Header lifecycle controls present, by test id (header-start, ...). */
   headerControls: string[];
   launchBanner: boolean;
-  /** launch-step text ("Step: <step>", "_" shown as a space). */
+  /** launch-step text ("Step: <step label>"; see uiStepName). */
   step: string;
   incompleteBanner: boolean;
   /** launch-code text (the failure code alone). */

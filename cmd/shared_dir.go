@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -100,18 +101,6 @@ var sharedDirCreateCmd = &cobra.Command{
 			return fmt.Errorf("failed to resolve project: %w", err)
 		}
 
-		// Load current settings to check for duplicates
-		vs, err := config.LoadSingleFileVersioned(projectDir)
-		if err != nil {
-			return fmt.Errorf("failed to load settings: %w", err)
-		}
-
-		for _, d := range vs.SharedDirs {
-			if d.Name == name {
-				return fmt.Errorf("shared directory %q already exists", name)
-			}
-		}
-
 		sdReadOnly, _ := cmd.Flags().GetBool("read-only")
 		sdInWorkspace, _ := cmd.Flags().GetBool("in-workspace")
 
@@ -121,8 +110,21 @@ var sharedDirCreateCmd = &cobra.Command{
 			InWorkspace: sdInWorkspace,
 		}
 
-		vs.SharedDirs = append(vs.SharedDirs, newDir)
-		if err := config.SaveVersionedSettings(projectDir, vs); err != nil {
+		// The duplicate check and the append run under the settings lock,
+		// from the read to the write, so a concurrent change is not lost.
+		errExists := fmt.Errorf("shared directory %q already exists", name)
+		if err := config.LoadModifySaveVersionedSettings(projectDir, func(vs *config.VersionedSettings) error {
+			for _, d := range vs.SharedDirs {
+				if d.Name == name {
+					return errExists
+				}
+			}
+			vs.SharedDirs = append(vs.SharedDirs, newDir)
+			return nil
+		}); err != nil {
+			if errors.Is(err, errExists) {
+				return err
+			}
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
 
@@ -167,13 +169,11 @@ var sharedDirRemoveCmd = &cobra.Command{
 		}
 
 		found := false
-		var updated []api.SharedDir
 		for _, d := range vs.SharedDirs {
 			if d.Name == name {
 				found = true
-				continue
+				break
 			}
-			updated = append(updated, d)
 		}
 
 		if !found {
@@ -190,8 +190,26 @@ var sharedDirRemoveCmd = &cobra.Command{
 			}
 		}
 
-		vs.SharedDirs = updated
-		if err := config.SaveVersionedSettings(projectDir, vs); err != nil {
+		// Re-read under the settings lock (the prompt above is not held
+		// under it) and remove the entry from the current file, so a
+		// concurrent change is not lost.
+		errGone := fmt.Errorf("shared directory %q not found", name)
+		if err := config.LoadModifySaveVersionedSettings(projectDir, func(vs *config.VersionedSettings) error {
+			kept := vs.SharedDirs[:0:0]
+			for _, d := range vs.SharedDirs {
+				if d.Name != name {
+					kept = append(kept, d)
+				}
+			}
+			if len(kept) == len(vs.SharedDirs) {
+				return errGone
+			}
+			vs.SharedDirs = kept
+			return nil
+		}); err != nil {
+			if errors.Is(err, errGone) {
+				return err
+			}
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
 

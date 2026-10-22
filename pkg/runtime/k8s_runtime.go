@@ -91,10 +91,10 @@ type KubernetesRuntime struct {
 	// (syncToPod). Tests use it to observe the order of the start steps.
 	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
-	// syncTransfer, when set, replaces the copies Sync performs (toPod is
-	// true for broker to pod). Tests use it to observe which paths Sync
-	// transfers.
-	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool) error
+	// syncTransfer, when set, replaces the broker-to-pod copies Sync and the
+	// start's workspace sync perform. Tests use it to observe which paths
+	// they transfer, and what they leave out.
+	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, excludes []string) error
 
 	// nowFn and sinceFn, when set, replace time.Now and time.Since for the
 	// per-run object sweep and the start's verify trigger (see
@@ -863,7 +863,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// NFS-home pods: home-prepare chose how this start fills the home.
 	homeMode := ""
 	if nfsHomeStart {
-		out, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeModeCommand)
+		out, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeModeCommand, config.Name, "home-prepare")
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to read %s: %w", k8sHomeModeFile, err)
 		}
@@ -873,7 +873,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		runtimeLog().Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
 		if config.HomeDir != "" {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername))); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername)), config.Name, "home-prepare"); err != nil {
 				return createdPod.Name, fmt.Errorf("agent home check failed: %w", err)
 			}
 		}
@@ -930,7 +930,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if nfsHomeStart && config.HomeDir != "" {
 		secretsSrc := filepath.Join(config.HomeDir, harnessBundleSecretsRel)
 		if st, err := os.Lstat(secretsSrc); err == nil && st.IsDir() {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand, config.Name, "harness-secrets"); err != nil {
 				return createdPod.Name, fmt.Errorf("failed to create the in-memory harness secrets directory: %w", err)
 			}
 			err = r.syncWithRetry(ctx, func() error {
@@ -982,9 +982,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		hooks.progress(api.LaunchStepWorkspaceSync)
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		workspaceSyncStart := time.Now()
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
-		})
+		err = r.syncWorkspaceToPod(ctx, namespace, createdPod, config.Workspace)
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
@@ -1011,7 +1009,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog().Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
 	hooks.progress(api.LaunchStepStartupGate)
 	gateStart := time.Now()
-	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}, config.Name, "startup-gate"); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
 	runtimeLog().Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
@@ -2573,6 +2571,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
 	}
+	// Keep the in-project agents root of a shared /workspace mount out of
+	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
+	// agent-dir layouts do not mount the shared workspace at /workspace.
+	podVolumes := []corev1.Volume{workspaceVolume}
+	agentsExcluded := false
+	if !nfsAgentDir && !nfsWorktree {
+		var maskTarget string
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "")
+		if maskTarget != "" {
+			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
+			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
+		}
+	}
 
 	// NFS-home pods: the home volume and mount, and the home init
 	// containers (k8s_nfs_home.go).
@@ -2594,7 +2605,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: withHomeStorageAnnotation(config.Annotations, nfsHome),
+			Annotations: withWorkspaceAgentsAnnotation(withHomeStorageAnnotation(config.Annotations, nfsHome), agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -2617,7 +2628,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					VolumeMounts: agentVolumeMounts,
 				},
 			},
-			Volumes:       []corev1.Volume{workspaceVolume},
+			Volumes:       podVolumes,
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
@@ -3016,14 +3027,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if config.Kubernetes != nil {
+		// Validate the merged placement values before they reach the pod
+		// spec; the rules match the API server's, so only values that pod
+		// creation would reject fail here.
+		if err := validateKubernetesPlacement(config.Kubernetes); err != nil {
+			return nil, err
+		}
 		if config.Kubernetes.ServiceAccountName != "" {
 			pod.Spec.ServiceAccountName = config.Kubernetes.ServiceAccountName
 		}
 		if config.Kubernetes.RuntimeClassName != "" {
-			pod.Spec.RuntimeClassName = &config.Kubernetes.RuntimeClassName
+			// Copy the value so the pod spec does not point into the
+			// caller's configuration.
+			runtimeClassName := config.Kubernetes.RuntimeClassName
+			pod.Spec.RuntimeClassName = &runtimeClassName
 		}
 		if len(config.Kubernetes.NodeSelector) > 0 {
-			pod.Spec.NodeSelector = config.Kubernetes.NodeSelector
+			// Copy the map so later changes to the pod spec never reach
+			// the caller's configuration.
+			pod.Spec.NodeSelector = maps.Clone(config.Kubernetes.NodeSelector)
 		}
 		if len(config.Kubernetes.Tolerations) > 0 {
 			for _, t := range config.Kubernetes.Tolerations {
@@ -3489,9 +3511,9 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
-						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message))
 					}
@@ -3505,12 +3527,12 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						// On GKE Autopilot, Unschedulable is transient — the cluster
 						// will auto-provision nodes. Continue waiting instead of failing.
 						if !autopilotWaitLogged {
-							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", cond.Message, "phase", "scheduling")
+							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 							fmt.Printf("  Waiting for GKE Autopilot to provision node capacity...\n")
 							autopilotWaitLogged = true
 						}
 					} else {
-						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
+						runtimeLog().Error("Pod unschedulable", append([]any{"pod", podName, "message", cond.Message, "phase", "scheduling"}, podPlacementLogAttrs(pod)...)...)
 						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, cond.Reason,
 							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message))
 					}
@@ -3668,75 +3690,6 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	fmt.Printf("  Sync to %s complete.\n", destPath)
 	runtimeLog().Info("Sync to pod complete", "pod", podName, "dest", destPath,
 		"elapsed_ms", time.Since(syncStart).Milliseconds(), "bytes", counted.count)
-	return nil
-}
-
-func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string) error {
-	if err := os.MkdirAll(localPath, 0755); err != nil {
-		return fmt.Errorf("failed to create local workspace directory: %w", err)
-	}
-	fmt.Printf("  Preparing remote tar archive from %s...\n", remotePath)
-
-	remoteCmd := fmt.Sprintf("tar -cz -C '%s' .", remotePath)
-	cmd := []string{"sh", "-c", remoteCmd}
-
-	req := r.Client.Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec")
-
-	option := &corev1.PodExecOptions{
-		Container: agentContainerName,
-		Command:   cmd,
-		Stdin:     false,
-		Stdout:    true,
-		Stderr:    true,
-		TTY:       false,
-	}
-
-	req.VersionedParams(
-		option,
-		scheme.ParameterCodec,
-	)
-
-	executor, err := remotecommand.NewSPDYExecutor(r.Client.Config, "POST", req.URL())
-	if err != nil {
-		return err
-	}
-
-	// Prepare local tar
-	tarCmd := exec.CommandContext(ctx, "tar", "-xz", "-m", "-C", localPath)
-	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	stdin, err := tarCmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := tarCmd.Start(); err != nil {
-		return err
-	}
-
-	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
-	var stderr bytes.Buffer
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: stdin,
-		Stderr: &stderr,
-	})
-
-	// Close stdin to tell local tar that stream is finished
-	_ = stdin.Close()
-	waitErr := tarCmd.Wait()
-
-	if err != nil {
-		return fmt.Errorf("stream failed: %w (remote stderr: %s)", err, stderr.String())
-	}
-
-	if waitErr != nil {
-		return fmt.Errorf("local tar failed: %w", waitErr)
-	}
-
-	fmt.Printf("  Sync from %s complete.\n", remotePath)
 	return nil
 }
 
@@ -4013,7 +3966,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			agentStatus = string(state.PhaseError)
 		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
 			// Non-terminal pod phases are represented via ContainerStatus and
-			// local agent-info state until the agent exits.
+			// local agent-info state until the agent exits; a Pending pod
+			// reports "starting" (below, after the container status check).
 		}
 
 		// Try to get more detail from container status
@@ -4045,6 +3999,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 				}
 				break
 			}
+		}
+
+		// A Pending pod has not started its agent container yet: it is
+		// waiting to be scheduled (for example for a node scale-up), pulling
+		// images or running init containers. Report it as starting, so
+		// agent.Manager.List does not fall back to agent-info.json's phase,
+		// which Start sets to running before the pod is created; otherwise a
+		// broker heartbeat would report a Pending pod as running and the hub
+		// would end an active launch as observed running (ptone/scion#5365).
+		// A terminated agent container keeps its stopped/error mapping, and a
+		// committed disruption below still overrides this.
+		if agentStatus == "" && p.Status.Phase == corev1.PodPending {
+			agentStatus = string(state.PhaseStarting)
 		}
 
 		// A pod that reached a terminal phase may have gotten there through a
@@ -4328,7 +4295,16 @@ func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 	return nil
 }
 
+// errK8sSyncFromUnsupported is Sync's error for SyncFrom: the Kubernetes
+// runtime only copies from the broker to the pod. An agent's changes reach
+// the host only when the agent commits and pushes them to the remote.
+var errK8sSyncFromUnsupported = errors.New("kubernetes: syncing from an agent is not supported; the agent must commit and push its changes to the remote")
+
 func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+	if direction == SyncFrom {
+		return errK8sSyncFromUnsupported
+	}
+
 	// Find pod first
 	agents, err := r.List(ctx, map[string]string{"scion.name": id})
 	if err != nil {
@@ -4357,15 +4333,14 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
 
-	// Only a path that passes the fixed floors may be used here, as either a
-	// sync source (broker disk -> agent, SyncTo direction) or a sync
-	// destination (agent -> broker disk, SyncFrom direction). This is a
-	// value read straight from a persisted pod annotation, not freshly
-	// computed, so it needs this check independent of whatever validated it
-	// (or didn't) when it was first written. No per-project root is
-	// available at this call site — only agent annotations/labels are in
-	// scope, with no project directory or settings to derive one from — so
-	// only the fixed deny-set applies, not per-project root containment.
+	// Only a path that passes the fixed floors may be used here as the sync
+	// source (broker disk -> agent). This is a value read straight from a
+	// persisted pod annotation, not freshly computed, so it needs this check
+	// independent of whatever validated it (or didn't) when it was first
+	// written. No per-project root is available at this call site — only
+	// agent annotations/labels are in scope, with no project directory or
+	// settings to derive one from — so only the fixed deny-set applies, not
+	// per-project root containment.
 	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
 	if err != nil {
 		return err
@@ -4376,17 +4351,16 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	username := agent.Annotations["scion.username"]
 
 	// Same reasoning as workspacePath above: homeDir is a host path read
-	// straight from a persisted annotation, used below as either a sync
-	// destination (SyncFrom) or a sync source (SyncTo), and needs the same
-	// check independent of whatever validated it when first written. This is
-	// an agent's home directory, not a workspace, so it goes through
-	// ValidateAgentHomeSource rather than ValidateWorkspaceSource: the two
-	// admit disjoint shapes under ~/.scion (see ValidateAgentHomeSource's
-	// doc comment). Agent homes under ~/.scion take one of three layouts
-	// (global, hub-managed, or externalized git project); a home outside
-	// ~/.scion entirely (a plain in-repo project's own agent home, for
-	// example) is subject to the fixed floors only, the same as any other
-	// source this function's sibling validates.
+	// straight from a persisted annotation, used below as the sync source,
+	// and needs the same check independent of whatever validated it when
+	// first written. This is an agent's home directory, not a workspace, so
+	// it goes through ValidateAgentHomeSource rather than
+	// ValidateWorkspaceSource: the two admit disjoint shapes under ~/.scion
+	// (see ValidateAgentHomeSource's doc comment). Agent homes under ~/.scion
+	// take one of three layouts (global, hub-managed, or externalized git
+	// project); a home outside ~/.scion entirely (a plain in-repo project's
+	// own agent home, for example) is subject to the fixed floors only, the
+	// same as any other source this function's sibling validates.
 	if homeDir != "" {
 		resolvedHomeDir, err := ValidateAgentHomeSource(homeDir, "")
 		if err != nil {
@@ -4408,6 +4382,11 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("direction (to or from) must be specified for tar sync. Example: scion sync to %s", agent.ContainerID)
 	}
 
+	// A pod whose annotation excludes the in-project agents root keeps it
+	// out of the copy: a sync to the pod does not put it in the agent's
+	// view.
+	workspaceExcludes := k8sWorkspaceSyncExcludes(agent.Annotations)
+
 	// The home of an NFS-home agent is kept on the export across starts;
 	// it is not copied to or from the broker's copy.
 	if homeDir != "" && homeKeptOnExport(agent.Annotations) {
@@ -4415,28 +4394,9 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		homeDir = ""
 	}
 
-	if direction == SyncFrom {
-		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
-		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false)
-		}); err != nil {
-			return err
-		}
-		if homeDir != "" && username != "" {
-			destHome := util.GetHomeDir(username)
-			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
-			if err := r.syncWithRetry(ctx, func() error {
-				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false)
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
 	if err := r.syncWithRetry(ctx, func() error {
-		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true)
+		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", workspaceExcludes)
 	}); err != nil {
 		return err
 	}
@@ -4444,7 +4404,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, nil)
 		}); err != nil {
 			return err
 		}
@@ -4452,16 +4412,22 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	return nil
 }
 
-// syncTransferFn copies src to dest for Sync, from the broker to the pod
-// when toPod is true and back otherwise.
-func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool) error {
+// syncWorkspaceToPod copies the broker's workspace src into a new pod's
+// /workspace, leaving out what the pod's annotations exclude
+// (k8sWorkspaceSyncExcludes).
+func (r *KubernetesRuntime) syncWorkspaceToPod(ctx context.Context, namespace string, pod *corev1.Pod, src string) error {
+	return r.syncWithRetry(ctx, func() error {
+		return r.syncTransferFn(ctx, namespace, pod.Name, src, "/workspace", k8sWorkspaceSyncExcludes(pod.Annotations))
+	})
+}
+
+// syncTransferFn copies src on the broker to dest in the pod for Sync and
+// the start's workspace sync.
+func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, excludes []string) error {
 	if r.syncTransfer != nil {
-		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod)
+		return r.syncTransfer(ctx, namespace, podName, src, dest, excludes)
 	}
-	if toPod {
-		return r.syncToPod(ctx, namespace, podName, src, dest)
-	}
-	return r.syncFromPod(ctx, namespace, podName, src, dest)
+	return r.syncToPod(ctx, namespace, podName, src, dest, excludes...)
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
@@ -4897,4 +4863,87 @@ func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVa
 		ids = append(ids, strconv.FormatInt(gid, 10))
 	}
 	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
+}
+
+// k8sWorkspaceAgentsAnnotation marks a pod whose workspace tar syncs leave
+// the in-project agents root out (ptone/scion#5513). buildPod sets it from
+// k8sWorkspaceAgentsExcluded only; a caller-supplied value is dropped.
+const k8sWorkspaceAgentsAnnotation = "scion.workspace_agents_excluded"
+
+// k8sAgentsMaskVolume names the pod volume that shadows the in-project
+// agents root of an NFS-shared workspace.
+const k8sAgentsMaskVolume = "agents-mask"
+
+// k8sAgentsMaskSizeLimit caps the memory-backed mask volume, which is meant
+// to stay empty (every tar sync leaves the path out). Where the kubelet
+// sizes memory-backed emptyDirs to their limit, writes past it fail with
+// ENOSPC in the container; otherwise the eviction manager evicts the pod
+// once usage exceeds it, and with RestartPolicy Never the agent stops.
+// Docker's tmpfs mask has no limit.
+const k8sAgentsMaskSizeLimit = "1Mi"
+
+// k8sWorkspaceAgentsExcluded decides how a pod that mounts the shared
+// workspace at /workspace keeps the in-project agents root out of the
+// agent's view. excluded: every workspace tar sync leaves the path out,
+// under the same condition as Docker's mask. That is the whole control on
+// the local backend, whose per-pod emptyDir is filled only by the sync.
+// maskTarget: on an NFS-shared workspace, which the pod mounts directly,
+// the path is also shadowed with an empty volume, but only when
+// <workspace>/.scion/agents already exists on the broker's view of the
+// export, so the mount point is never created there.
+func k8sWorkspaceAgentsExcluded(config RunConfig, nfsShared bool) (excluded bool, maskTarget string) {
+	target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", false)
+	if !ok {
+		return false, ""
+	}
+	// Workspace resolved to the repo root above, so checking the agents dir
+	// under it is the requireAgentsDir condition without resolving again.
+	if nfsShared {
+		if isDir(filepath.Join(config.RepoRoot, filepath.FromSlash(sharedWorkspaceAgentsDir))) {
+			maskTarget = target
+		} else {
+			runtimeLog().Debug("Not masking the in-project agents dir: it does not exist", "agent", config.Name)
+		}
+	}
+	return true, maskTarget
+}
+
+// k8sAgentsMaskPodVolume is the pod volume that shadows the in-project
+// agents root: an empty, memory-backed emptyDir, like Docker's tmpfs.
+func k8sAgentsMaskPodVolume() corev1.Volume {
+	limit := resource.MustParse(k8sAgentsMaskSizeLimit)
+	return corev1.Volume{
+		Name: k8sAgentsMaskVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &limit},
+		},
+	}
+}
+
+// withWorkspaceAgentsAnnotation returns annotations with
+// k8sWorkspaceAgentsAnnotation set when excluded is true and removed
+// otherwise. The input map is not modified.
+func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool) map[string]string {
+	if _, has := annotations[k8sWorkspaceAgentsAnnotation]; !excluded && !has {
+		return annotations
+	}
+	out := make(map[string]string, len(annotations)+1)
+	for k, v := range annotations {
+		out[k] = v
+	}
+	delete(out, k8sWorkspaceAgentsAnnotation)
+	if excluded {
+		out[k8sWorkspaceAgentsAnnotation] = "true"
+	}
+	return out
+}
+
+// k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to a
+// pod with these annotations leaves out. The annotation records the
+// decision buildPod made, so no RepoRoot is needed.
+func k8sWorkspaceSyncExcludes(annotations map[string]string) []string {
+	if annotations[k8sWorkspaceAgentsAnnotation] == "true" {
+		return []string{sharedWorkspaceAgentsDir}
+	}
+	return nil
 }

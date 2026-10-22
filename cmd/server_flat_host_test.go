@@ -127,7 +127,7 @@ func newRemoteTestHost(t *testing.T, globalDir string, inst config.V1RuntimeBrok
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance,
 				RemoteCredentials: ic.Activation.RemoteCredentials}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -154,7 +154,9 @@ func TestFlatRemoteActivation_BindingCheckedOnEveryStart(t *testing.T) {
 	// registered.
 	legacy := &brokercredentials.BrokerCredentials{Name: "hub", BrokerID: id.RuntimeBrokerID, SecretKey: secret, HubEndpoint: hub.URL}
 	require.NoError(t, brokercredentials.NewMultiStore(filepath.Join(globalDir, "hub-credentials")).Save(legacy))
-	require.NoError(t, brokercredentials.NewStore(filepath.Join(globalDir, brokercredentials.DefaultFileName)).Save(legacy))
+	legacyJSON, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, brokercredentials.DefaultFileName), legacyJSON, brokercredentials.FileMode))
 	h, built := newRemoteTestHost(t, globalDir, inst)
 	require.NoError(t, h.Prepare(ctx))
 	st := h.Status()[0]
@@ -301,7 +303,7 @@ func colocatedTestHost(t *testing.T, hubSrv *hub.Server, globalDir string, insts
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -389,7 +391,7 @@ func TestFlatHost_HubTransportReachesPrefixedInstance(t *testing.T) {
 			cfg.HubEndpoint = "http://127.0.0.1:1"
 			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
@@ -488,7 +490,7 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 		cfg.ControlChannelEnabled = true
 		cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 		cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-		return runtimebroker.New(cfg, ic.Manager, ic.Runtime)
+		return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{})
 	}
 	h, err := brokerhost.New(brokerhost.Config{
 		GlobalDir: globalDir,

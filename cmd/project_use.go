@@ -171,6 +171,9 @@ type useTarget struct {
 	ProjectLabel  string
 	// ProjectDir is the directory project's display path, if any.
 	ProjectDir string
+	// ProjectUnverified: the context project was selected while its hub
+	// could not confirm it.
+	ProjectUnverified bool
 }
 
 // describeUseTarget computes the effective target the way
@@ -178,23 +181,11 @@ type useTarget struct {
 // calls.
 func describeUseTarget(c *config.CLIContext) useTarget {
 	var t useTarget
-	envHub, envName := envHubEndpoint()
 	dir, inDir := filesystemProject()
 	dirIsGlobal := inDir && config.IsGlobalProjectDir(dir)
 
-	switch {
-	case hubSource == targetSourceContext:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceContext, "current context"
-	case hubSource == targetSourceDirectory:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceDirectory, "directory link"
-	case hubEndpoint != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
-	case envHub != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	}
-	if t.HubEndpoint == "" {
-		t.HubSource, t.HubLabel = useSourceNone, "none"
-	}
+	h := resolveCLIHub()
+	t.HubEndpoint, t.HubSource, t.HubLabel = h.Endpoint, h.Source, h.Label
 
 	switch {
 	case projectSource == targetSourceContext:
@@ -235,6 +226,10 @@ func describeUseTarget(c *config.CLIContext) useTarget {
 func (t *useTarget) setContextProject(c *config.CLIContext, p *config.ProjectRef) {
 	t.ProjectSource, t.ProjectLabel = useSourceContext, "current context"
 	t.ProjectID, t.ProjectSlug = p.ID, p.Slug
+	if saved := c.ProjectFor(t.HubEndpoint); saved != nil && saved.ID == p.ID && saved.Unverified {
+		t.ProjectUnverified = true
+		t.ProjectLabel = "current context, unverified"
+	}
 	hubName, _ := c.HubByEndpoint(t.HubEndpoint)
 	for _, kp := range c.Projects {
 		if kp.Hub == hubName && kp.ID == p.ID {
@@ -286,6 +281,9 @@ type useProjectJSON struct {
 	Name   string `json:"name,omitempty"`
 	Path   string `json:"path,omitempty"`
 	Source string `json:"source"`
+	// Unverified marks a context project selected while its hub could not
+	// confirm it.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 type useAuthJSON struct {
@@ -383,6 +381,7 @@ func runUseShow(out, stderr io.Writer) error {
 				Project: useProjectJSON{
 					ID: t.ProjectID, Slug: t.ProjectSlug, Name: t.ProjectName,
 					Path: t.ProjectDir, Source: t.ProjectSource,
+					Unverified: t.ProjectUnverified,
 				},
 			},
 			Context:    saved,
@@ -416,6 +415,10 @@ func runUseShow(out, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(w, "Project:\t%s\t%s\t(%s)\n", shownProject, projectValue, t.ProjectLabel)
 		_ = w.Flush()
 		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, hubLoginCommand(c, t.HubEndpoint)))
+		if t.ProjectUnverified {
+			_, _ = fmt.Fprintf(out, "Note: project '%s' was selected while the hub could not confirm it. To verify it, run: scion hub auth login --hub %s, then scion use %s\n",
+				shownProject, config.RedactURL(t.HubEndpoint), shownProject)
+		}
 	}
 	if t.HubSource == useSourceContext {
 		warnHubTokenForContextHub(stderr, hubName)

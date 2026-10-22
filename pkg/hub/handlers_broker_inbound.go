@@ -274,6 +274,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		req.Message.Msg = content
 		req.Message.Urgent = true
 	}
+	// This path routes to one named agent and extracts no mentions, but the
+	// body is stored and rendered, so it gets the same rewrite as the other
+	// send paths.
+	req.Message.Msg = rewriteIncomingAgentMentions(req.Message.Msg)
 
 	// Validate the inbound message through the new envelope choke point.
 	// This catches malformed payloads from external channels (e.g. the Teams

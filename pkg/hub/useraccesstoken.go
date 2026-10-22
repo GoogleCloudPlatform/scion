@@ -111,15 +111,15 @@ func (e *UATScopeViolationError) Unwrap() error {
 }
 
 // UATRejection reports that a presented UAT failed ValidateToken, and
-// classifies why. Reason is one of "invalid", "revoked", "expired", or
-// "user_suspended" — see auth.go's UAT branch, which logs exactly one of
+// classifies why. Reason is one of "invalid", "revoked", "expired",
+// "user_suspended" or "user_not_active" — see auth.go's UAT branch, which logs exactly one of
 // these per rejection (plan §3.1(3)).
 //
 // Found and TokenID answer the rulings' plan correction (b): a rejection log
 // may identify a server-verified matched credential record, but must mark it
 // as a rejection, not an authenticated principal. Found is true, and TokenID
 // is set, only when the presented value hashed to a stored token row
-// (revoked, expired, or the row's user suspended) — never for a value that
+// (revoked, expired, or the row's user suspended or not active) — never for a value that
 // matched nothing (invalid format or unknown hash), so an unrecognized
 // bearer value never yields an asserted identity, not even a rejected one.
 type UATRejection struct {
@@ -568,16 +568,20 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		_ = s.tokens.UpdateUserAccessTokenLastUsed(context.Background(), token.ID)
 	}()
 
-	user, err := s.users.GetUser(ctx, token.UserID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("token user not found")
-		}
+	// The token's user must be active (checkUserAccount, the rule decide
+	// applies): suspended, missing and every other non-active status are
+	// refused.
+	user, err := checkUserAccount(ctx, s.users, PrincipalContext{Kind: PrincipalKindUser, ID: token.UserID})
+	switch classifyUserAccount(user, err) {
+	case accountAllowed:
+	case accountLookupFault:
 		return nil, fmt.Errorf("failed to look up user: %w", err)
-	}
-
-	if user.Status == store.UserStatusSuspended {
+	case accountMissing:
+		return nil, fmt.Errorf("token user not found")
+	case accountSuspended:
 		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
+	default:
+		return nil, &UATRejection{err: ErrInvalidUAT, Reason: "user_not_active", Found: true, TokenID: token.ID}
 	}
 
 	// The boundary was already validated above (ValidateBoundary), so it is
@@ -729,4 +733,56 @@ func expandScopes(scopes []string) []string {
 // IsUAT returns true if the token appears to be a user access token.
 func IsUAT(token string) bool {
 	return strings.HasPrefix(token, store.UATPrefix)
+}
+
+// requestCredentialIsUAT reports whether the credential of the request in
+// ctx is a user access token: the credential recorded on the request, or,
+// when none is recorded, the credential of the request's identity.
+func requestCredentialIsUAT(ctx context.Context) bool {
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(GetIdentityFromContext(ctx))
+	}
+	return credential.Kind == CredentialKindUAT
+}
+
+// bearerStillValid reports whether the credential of the request in ctx
+// still validates. A request whose credential is not a user access token
+// (requestCredentialIsUAT) passes. For a user access token the stored token
+// must exist, must not be revoked or expired, must have a valid boundary and
+// must belong to the request's user, and that user must exist and be active
+// (checkUserAccount). A token credential without a token ID, a request without a
+// user identity and any lookup error fail the check.
+func (s *Server) bearerStillValid(ctx context.Context) bool {
+	if !requestCredentialIsUAT(ctx) {
+		return true
+	}
+	if s.store == nil {
+		return false
+	}
+	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
+	if !ok || isNilIdentity(user) {
+		return false
+	}
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(user)
+	}
+	if credential.ID == "" {
+		return false
+	}
+	token, err := s.store.GetUserAccessToken(ctx, credential.ID)
+	if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
+		return false
+	}
+	if token.ExpiresAt != nil && time.Until(*token.ExpiresAt) <= 0 {
+		return false
+	}
+	if token.ValidateBoundary() != nil {
+		return false
+	}
+	if _, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: token.UserID}); err != nil {
+		return false
+	}
+	return true
 }

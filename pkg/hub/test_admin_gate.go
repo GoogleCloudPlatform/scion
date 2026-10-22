@@ -85,6 +85,10 @@ var (
 		"--test-mode requires a hub with a user store")
 	ErrTestAdminHubIDMismatch = testAdminGateErr("G2", "hub_id_mismatch",
 		"the hub id in --test-mode=<level>:<hub id> must equal this hub's resolved hub id")
+	ErrTestModeHubIDNotPinned = testAdminGateErr("G2", "hub_id_not_pinned",
+		"every --test-mode level but off requires an explicitly configured hub id: set server.hub.hub_id (or SCION_SERVER_HUB_HUBID) on every replica of this hub "+
+			"to the hub's CURRENT resolved id (the hub_id GET /healthz reports, or ~/.scion/hub-id), never a new value, which would re-scope its secrets, signing keys, hub-scoped env vars, storage prefix and test infrastructure marker; "+
+			"a hub id derived from the hostname, the persisted ~/.scion/hub-id file or K_SERVICE is refused")
 	ErrTestSuperAdminRequiresPolicyRegistry = testAdminGateErr("G3", "super_admin_requires_policy_registry",
 		"--test-mode=super-admin is refused: the test super-admin kind needs a complete test-admin policy classification in this binary")
 	ErrTestAdminHubClassNotTest = testAdminGateErr("G4", "hub_class_not_test",
@@ -344,7 +348,8 @@ type testAdminSigningKeyClass struct {
 }
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
-// agent tokens, signed download URLs, artifact view capability URLs, list
+// agent tokens, signed download URLs, artifact view capability URLs,
+// attachment delivery capabilities, list
 // cursors, conduit stream grants and the web session cookie key. The OIDC
 // identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
@@ -353,6 +358,7 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "agent_token", KeyName: SecretKeyAgentSigningKey},
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
+		{Class: "attachment_delivery", KeyName: SecretKeyAttachmentDeliveryKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
 		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},
 		{Class: "web_session", KeyName: webSessionKeyName},
@@ -403,6 +409,7 @@ func (s *Server) emitTestAdminGateStart() error {
 		"marker_created_at":   markerAt,
 		"signing_key_sources": sources,
 		"federation":          "off",
+		"admin_web_sessions":  s.testAdminWeb.on,
 		"test_mode":           string(s.TestModeLevel()),
 		"preconditions":       s.testModePreconditions(),
 	}); err != nil {

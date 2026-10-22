@@ -49,6 +49,14 @@ type AttachmentRef struct {
 	Name     string `json:"name"`
 	MimeType string `json:"mime"`
 	Size     int64  `json:"size"`
+	// artifact marks a reference to an attachment stored in the artifact
+	// service (ptone/scion#4595) rather than in the AttachmentStore. It is
+	// set by send validation only and never serialized.
+	artifact bool
+	// sha256 is the hex digest of an artifact attachment's file, set with
+	// artifact by newArtifactAttachmentRef, for delivery into an agent's
+	// home. Never serialized.
+	sha256 string
 }
 
 // AttachmentStore abstracts file storage for chat attachments.

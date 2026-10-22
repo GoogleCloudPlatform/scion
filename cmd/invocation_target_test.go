@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName, hubEntryName = "", "", "", "", ""
 	contextWarned = false
 }
 
@@ -47,7 +47,7 @@ func resetContextTargets() {
 // working directory outside any project, human mode, no hub or agent
 // variables from the environment, and the root flag variables (including
 // the ones resolveInvocationTarget sets) restored at the end. Unlike
-// setupNoProjectPreRun it leaves the hub on (noHub = false).
+// setupNoProjectPreRun it does not clear the hub settings.
 func setupContextTest(t *testing.T) string {
 	t.Helper()
 	setupNoProjectPreRun(t)
@@ -69,7 +69,6 @@ func setupContextTest(t *testing.T) string {
 		t.Setenv(name, "")
 	}
 	t.Setenv("SCION_CLI_MODE", string(ModeHuman))
-	noHub = false
 	resetContextTargets()
 	useClear, useForce = false, false
 	return os.Getenv("HOME")

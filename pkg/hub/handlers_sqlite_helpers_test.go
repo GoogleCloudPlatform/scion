@@ -45,7 +45,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -557,9 +556,15 @@ type reincarnateTestDispatcher struct {
 	// resolved container image on a successful start response.
 	startImage string
 
-	// imageRegistry is the registry the fake reports through ImageRegistry(),
-	// as the HTTP dispatcher reports the registry it rewrites images to.
+	// imageRegistry is the registry the fake reports through
+	// ImageRegistryFor, as the HTTP dispatcher reports the registry it
+	// rewrites images to.
 	imageRegistry string
+	// imageRegistryByBroker, when set, answers ImageRegistryFor per broker
+	// instead of imageRegistry; registryCalls records each (broker,
+	// profile) asked for.
+	imageRegistryByBroker map[string]string
+	registryCalls         [][2]string
 
 	// reprovisionEcho and startEcho, when set, run on a successful dispatch
 	// against the dispatched agent's AppliedConfig, simulating the broker
@@ -577,7 +582,33 @@ type reincarnateTestDispatcher struct {
 	moveProvisionErr     error
 	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
 	localOnlyDeleteErr   map[string]error
-	startBrokers         []string
+	// recreatedDeleteCalls records a forced move's rollback deletes
+	// (DispatchAgentDeleteRecreated): "<brokerID>|<projectID>|<runID>".
+	recreatedDeleteCalls []string
+	recreatedDeleteErr   error
+	// recreateFiles, when non-nil, models each broker's files for the
+	// moved agent as a forced move sees them: a fresh-agent-dir provision
+	// to a broker holding some is refused with the broker's 409 (marked
+	// sent); one that proceeds creates them, even when it then fails with
+	// a moveProvisionErr marked sent (a partial provision); a
+	// moveProvisionErr not marked sent is returned before any of this,
+	// as a pre-send failure; a recreated-files delete
+	// removes them, and a localOnly delete does not (it leaves the
+	// workspace a move created on the export).
+	recreateFiles map[string]bool
+	// recreateOwner is the move marker (reincarnation ID) of the files a
+	// forced move's provision created on each broker; files a test put in
+	// recreateFiles itself have none, so a rollback delete is refused with
+	// move_marker_mismatch and removes nothing. moveProvisionFailsBeforeF4
+	// makes a sent moveProvisionErr a refusal from before the broker's
+	// absence check: nothing is created. moveProvisionIDs and
+	// recreatedDeleteIDs record the reincarnation IDs each call carried.
+	recreateOwner              map[string]string
+	moveProvisionFailsBeforeF4 bool
+	moveProvisionIDs           []string
+	recreatedDeleteIDs         []string
+
+	startBrokers []string
 	// runStore, when set, makes DispatchAgentStart mint and record a run
 	// on the row first, like the real dispatcher's beginRun, and record
 	// startPlacement (when set), like a target's start report.
@@ -3907,6 +3938,15 @@ type projectAgentAuthzFixture struct {
 func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return projectAgentAuthzSetupOn(t, srv, s)
+}
+
+// projectAgentAuthzSetupOn builds the projectAgentAuthzFixture on an existing
+// server and its raw store. Tests that need a store fault wrapper call
+// installStoreFault on srv first, so the wrapper is in place before any
+// audited setup step reads srv.store.
+func projectAgentAuthzSetupOn(t *testing.T, srv *Server, s store.Store) *projectAgentAuthzFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &projectAgentAuthzFixture{srv: srv, store: s}
 
@@ -4555,34 +4595,6 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 	return ownerUser
 }
 
-// assertScheduledEventBoundaryIneligible checks that identity is refused
-// scheduled_event.<action> on projectID at bearer gate stage 3b.
-// scheduled_event.create is not eligible for a project boundary.
-// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
-// dispatch_agent authoring precondition itself for every credential shape.
-func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
-	t.Helper()
-	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: credentialContextForIdentity(identity),
-		Resource:   Resource{Type: "scheduled_event", ParentType: "project", ParentID: projectID},
-		Action:     action,
-		Permission: "scheduled_event." + string(action),
-	})
-	assert.False(t, decision.Allowed)
-	assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
-}
-
-// assertScheduleAuthoringRefused checks that rec is the authoring credential
-// gate's refusal: 403 with the GOV_PENDING session-only reason.
-func assertScheduleAuthoringRefused(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, string(authzop.ReasonGovernancePending), reason, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, rec.Body.String())
-}
-
 // checkJSONError asserts that the response body is a valid JSON ErrorResponse.
 func checkJSONError(t *testing.T, body string) {
 	t.Helper()
@@ -5167,9 +5179,13 @@ func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentApp
 	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
-func (d *reincarnateTestDispatcher) ImageRegistry() string {
+func (d *reincarnateTestDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.registryCalls = append(d.registryCalls, [2]string{brokerID, profile})
+	if d.imageRegistryByBroker != nil {
+		return d.imageRegistryByBroker[brokerID]
+	}
 	return d.imageRegistry
 }
 
@@ -5200,17 +5216,66 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect, moveID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	d.moveProvisionIDs = append(d.moveProvisionIDs, moveID)
+	if d.moveProvisionErr != nil && (!errors.Is(d.moveProvisionErr, errProvisionSent) || d.moveProvisionFailsBeforeF4) {
+		// Failed on the hub before the request was sent (the real
+		// dispatcher marks only errors at or after the send), or refused
+		// by the broker before its absence check: nothing is created.
+		return d.moveProvisionErr
+	}
+	if d.recreateFiles != nil && expect == "fresh-agent-dir" {
+		if d.recreateFiles[agent.RuntimeBrokerID] {
+			return provisionSent(&brokerStatusError{StatusCode: http.StatusConflict, Body: freshAgentDirConflictBody})
+		}
+		d.recreateFiles[agent.RuntimeBrokerID] = true
+		if d.recreateOwner == nil {
+			d.recreateOwner = map[string]string{}
+		}
+		d.recreateOwner[agent.RuntimeBrokerID] = moveID
+	}
 	return d.moveProvisionErr
 }
+
+// moveMarkerMismatchBody is the broker's fixed, path-free 409 body for a
+// forced move's rollback delete of files the move did not create.
+const moveMarkerMismatchBody = `{"error":{"code":"move_marker_mismatch","message":"Failed to delete agent: its files on this broker were not created by this move; nothing was removed"}}`
+
+// freshAgentDirConflictBody is the broker's fixed, path-free 409 body for a
+// forced move's provision onto a broker that has files for the agent.
+const freshAgentDirConflictBody = `{"error":{"code":"move_target_not_fresh","message":"Failed to provision moved agent: the agent already has files on this broker; refusing to recreate over them"}}`
+
 func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
 	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
+}
+func (d *reincarnateTestDispatcher) DispatchAgentDeleteRecreated(_ context.Context, agent *store.Agent, moveID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recreatedDeleteCalls = append(d.recreatedDeleteCalls, agent.RuntimeBrokerID+"|"+agent.ProjectID+"|"+agent.RunID)
+	d.recreatedDeleteIDs = append(d.recreatedDeleteIDs, moveID)
+	if d.recreatedDeleteErr != nil {
+		return d.recreatedDeleteErr
+	}
+	if d.recreateFiles != nil && d.recreateFiles[agent.RuntimeBrokerID] {
+		// The broker removes only files marked by this move.
+		if d.recreateOwner[agent.RuntimeBrokerID] != moveID {
+			return &brokerStatusError{StatusCode: http.StatusConflict, Body: moveMarkerMismatchBody}
+		}
+		delete(d.recreateFiles, agent.RuntimeBrokerID)
+		delete(d.recreateOwner, agent.RuntimeBrokerID)
+	}
+	return nil
+}
+func (d *reincarnateTestDispatcher) recreatedDeletes() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.recreatedDeleteCalls...)
 }
 func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
 	d.mu.Lock()

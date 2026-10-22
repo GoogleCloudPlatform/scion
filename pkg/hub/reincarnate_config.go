@@ -65,7 +65,17 @@ import (
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
 // which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
-	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
+	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
+}
+
+// imageRegistryResolver returns the registry the hub rewrites an agent's
+// explicit image to for the new generation's profile ("" = no rewrite). It
+// is bound to the broker the new generation runs on (ptone/scion#3916).
+type imageRegistryResolver func(profile string) string
+
+// fixedImageRegistry is an imageRegistryResolver that ignores the profile.
+func fixedImageRegistry(registry string) imageRegistryResolver {
+	return func(string) string { return registry }
 }
 
 // buildPatchedAppliedConfig is buildFreshAppliedConfig with an optional,
@@ -75,16 +85,17 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 // they take the explicit-input slot and the new generation keeps them; its
 // Role and GCPIdentity replace the kept values. A nil patch is exactly
 // buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
-func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
+//
+// resolveRegistry is called once the new generation's profile is settled,
+// so the stored image is rewritten for that profile and the target broker.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolveRegistry imageRegistryResolver, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
 	}
 
-	// Resolve the template FIRST: the legacy-fallback env reconstruction
-	// (A1 addendum 2) needs to know the current template's env keys to strip
-	// them from a legacy agent's InlineConfig.Env before they're
-	// misclassified as explicit.
+	// Resolve the template (no template row field feeds the legacy-fallback
+	// env reconstruction below; ptone/scion#4224).
 	var resolvedTemplate *store.Template
 	if agent.Template != "" {
 		tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
@@ -95,15 +106,6 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 			resolvedTemplate = tmpl
 		}
 	}
-	// templateEnv is a legacy read-only filter: its keys are used only to
-	// DROP residue an older hub merged into a legacy agent's env (see
-	// legacyCreateInputsFromAppliedConfig). No template env value is copied
-	// into the fresh config (ptone/scion#4222). Retire or rekey it when the
-	// template row's config column goes (ptone/scion#4224).
-	var templateEnv map[string]string
-	if resolvedTemplate != nil && resolvedTemplate.Config != nil {
-		templateEnv = resolvedTemplate.Config.Env
-	}
 
 	// Adopt a legacy env TZ into ExplicitTimezone before anything reads
 	// old's env: legacyCreateInputsFromAppliedConfig below would otherwise
@@ -113,7 +115,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	createInputs := old.CreateInputs
 	var warnings []string
 	if createInputs == nil {
-		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old, templateEnv)
+		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old)
 	}
 	if patch != nil {
 		// A copy: createInputs may be the outgoing generation's own record
@@ -337,8 +339,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// Store the image in the form the broker actually runs: the dispatcher
 	// rewrites every image to its registry at send time and the broker echoes
 	// that form back. RewriteImageRegistry is a no-op for an empty registry
-	// and for an already-qualified name.
-	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
+	// and for an already-qualified name. The registry is the one for the
+	// new generation's profile on the broker it runs on.
+	fresh.Image = config.RewriteImageRegistry(fresh.Image, resolveRegistry(fresh.Profile))
 
 	// deriveAgentConfig's timezone capture already stripped TZ from the
 	// fresh env copies; strip again so no step after it can leave one.
@@ -350,14 +353,21 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 // reincarnate plan's image steps, or returns nil (logged) if they cannot be
 // loaded, in which case those steps contribute nothing.
 //
-// The settings view comes from the hub's own config.LoadEffectiveSettings(""),
-// which — in postgres mode — already reflects DB-backed harness_configs and
+// The settings view comes from the hub's own config.LoadEffectiveSettings
+// of its global settings directory (never a project found from the process
+// working directory, ptone/scion#5363), which — in postgres mode — already
+// reflects DB-backed harness_configs and
 // profiles through the process-global settings overlay that
 // OperationalSettings.Refresh populates (pkg/config/settings_overlay.go), the
 // same overlay a co-located broker's own LoadEffectiveSettings call sees. In
 // file/SQLite mode it reads the hub's settings.yaml directly.
 func (s *Server) reincarnateImageSettings() *config.VersionedSettings {
-	vs, _, err := config.LoadEffectiveSettings("")
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnate: failed to resolve the global settings directory for the image plan", "error", err)
+		return nil
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
 	if err != nil {
 		s.agentLifecycleLog.Warn("reincarnate: failed to load settings for the image plan", "error", err)
 		return nil
@@ -396,16 +406,46 @@ func settingsProfileOverrideImage(vs *config.VersionedSettings, harnessConfigNam
 // imageRegistryProvider is implemented by dispatchers that rewrite image
 // names to a registry before sending them to a broker.
 type imageRegistryProvider interface {
-	ImageRegistry() string
+	ImageRegistryFor(brokerID, profile string) string
 }
 
-// dispatchImageRegistry returns the registry the dispatcher rewrites images
-// to, or "" when it does not rewrite them.
-func dispatchImageRegistry(dispatcher AgentDispatcher) string {
+// agentImageRegistryTarget returns the broker and profile an agent's image
+// registry is resolved for: its runtime broker and its saved profile.
+func agentImageRegistryTarget(agent *store.Agent) (brokerID, profile string) {
+	if agent == nil {
+		return "", ""
+	}
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return agent.RuntimeBrokerID, profile
+}
+
+// dispatchImageRegistry returns the registry the dispatcher rewrites the
+// agent's images to (for its broker and profile), or "" when it does not
+// rewrite them.
+func dispatchImageRegistry(dispatcher AgentDispatcher, agent *store.Agent) string {
+	brokerID, profile := agentImageRegistryTarget(agent)
+	return dispatchImageRegistryForTarget(dispatcher, brokerID, profile)
+}
+
+// dispatchImageRegistryForTarget is dispatchImageRegistry for an explicit
+// broker and profile.
+func dispatchImageRegistryForTarget(dispatcher AgentDispatcher, brokerID, profile string) string {
 	if p, ok := dispatcher.(imageRegistryProvider); ok {
-		return p.ImageRegistry()
+		return p.ImageRegistryFor(brokerID, profile)
 	}
 	return ""
+}
+
+// reincarnateImageRegistry returns the resolver for a reincarnation's new
+// generation on brokerID: the target broker of a move, or the agent's own
+// broker in place (ptone/scion#3916). The source broker's or the old
+// profile's registry is never used.
+func reincarnateImageRegistry(dispatcher AgentDispatcher, brokerID string) imageRegistryResolver {
+	return func(profile string) string {
+		return dispatchImageRegistryForTarget(dispatcher, brokerID, profile)
+	}
 }
 
 // legacyCreateInputsFromAppliedConfig reconstructs a best-effort
@@ -430,20 +470,15 @@ func dispatchImageRegistry(dispatcher AgentDispatcher) string {
 //     there, and cannot be told apart from an explicit value. The caller then
 //     re-derives the project and template tiers through deriveAgentConfig
 //     (resolveAutoExposeEnv), exactly as for an agent with CreateInputs.
-//   - Every other key InlineConfig.Env shares with templateEnv (the CURRENT
-//     template's env map) is also dropped, whatever its value (A1 addendum
-//     2, rule 2): the hub that created a legacy agent aliased
-//     AppliedConfig.Env to InlineConfig.Env, so its InlineConfig.Env is
-//     indistinguishable-by-inspection from a mix of explicit keys and
-//     template defaults merged in at create time. Assuming "the template
-//     still owns this key" errs toward template freshness — reincarnate's
-//     whole purpose — at the cost of resetting a genuinely explicit
-//     per-agent override that happens to share a name with a template key.
-//     Each dropped key is surfaced in the plan by name only.
-//     Keys InlineConfig.Env has that templateEnv does NOT define are kept as
-//     explicit, but flagged: they may equally be a stale default the
-//     requester never asked for, left over from an earlier version of the
-//     template that did define them.
+//   - Every other InlineConfig.Env key is kept as explicit, but flagged: it
+//     may equally be a stale default the requester never asked for. The hub
+//     that created a legacy agent aliased AppliedConfig.Env to
+//     InlineConfig.Env, so residue an older hub copied from the template
+//     row's stored env is replayed as explicit env too. The drop-only
+//     filter that once removed keys the template row's env defined is
+//     retired with that column (ptone/scion#4224): rekeying it on the
+//     template's file env would drop a requester's own keys that share a
+//     name with it, which is worse.
 //   - Everything else (HarnessConfig name, HarnessAuth, Profile,
 //     ThinkingLevel, Branch, Workspace, and any InlineConfig.Env key not
 //     covered above) is taken from the live AppliedConfig verbatim. These are
@@ -451,7 +486,7 @@ func dispatchImageRegistry(dispatcher AgentDispatcher) string {
 //     set (HarnessAuth aside, whose auto-no-auth fallback Phase 1 does not
 //     attempt to distinguish from an explicit "none" for a legacy agent), so
 //     reading them from the live config carries no staleness risk.
-func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, templateEnv map[string]string) (*store.AgentCreateInputs, []string) {
+func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.AgentCreateInputs, []string) {
 	warnings := []string{"explicit inputs reconstructed heuristically (agent predates CreateInputs)"}
 
 	var inline *api.ScionConfig
@@ -461,6 +496,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 		// provisions afresh, so the new generation starts with no clears
 		// (ptone/scion#3906).
 		inline.ClearedFields = nil
+		// So does changed_fields: the reprovision renders every
+		// provision-rendered key afresh (ptone/scion#3982).
+		inline.ChangedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))
@@ -481,30 +519,12 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 				warnings = append(warnings, "stripped SCION_AUTO_EXPOSE_PORTS (a project/hub default, not an explicit input) from the reconstructed config")
 			}
 
-			var dropped, kept []string
+			// Every other key is kept as explicit, but flagged. The
+			// drop-only filter keyed on the template row's stored env is
+			// retired with that column (ptone/scion#4224).
+			var kept []string
 			for k := range inline.Env {
-				if _, definedByTemplate := templateEnv[k]; definedByTemplate {
-					// Never surface the OLD value (design §3.4 Amendment
-					// A3.9). It came from a
-					// legacy agent's live InlineConfig.Env, which is
-					// indistinguishable-by-inspection from an explicit
-					// per-agent override — and that override could be a
-					// secret that merely happens to share a key name with a
-					// template default. No new value is shown either: the
-					// hub no longer copies template env into the agent; the
-					// template's own file supplies it on the broker
-					// (ptone/scion#4222).
-					dropped = append(dropped, k)
-					delete(inline.Env, k)
-				} else {
-					kept = append(kept, k)
-				}
-			}
-			if len(dropped) > 0 {
-				sort.Strings(dropped)
-				warnings = append(warnings, fmt.Sprintf(
-					"dropped %d env key(s) assumed template-derived (the template supplies them from its own file): %s",
-					len(dropped), strings.Join(dropped, ", ")))
+				kept = append(kept, k)
 			}
 			if len(kept) > 0 {
 				sort.Strings(kept)

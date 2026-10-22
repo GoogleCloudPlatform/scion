@@ -259,6 +259,16 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "bad"}},
 			wantError: `invalid cpu limit "bad"`,
 		},
+		{
+			name:      "NaN cpu limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "NaN"}},
+			wantError: `invalid cpu limit "NaN"`,
+		},
+		{
+			name:      "infinite millicore cpu limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "+Infm"}},
+			wantError: `invalid cpu limit "+Infm"`,
+		},
 	}
 
 	for _, test := range tests {

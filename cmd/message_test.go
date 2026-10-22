@@ -39,7 +39,6 @@ import (
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
 	projectPath  string
-	noHub        bool
 	bcastChanged bool
 	allChanged   bool
 	bodyFile     string
@@ -49,7 +48,6 @@ type messageTestState struct {
 func saveMessageTestState() messageTestState {
 	return messageTestState{
 		projectPath:  projectPath,
-		noHub:        noHub,
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
 		bodyFile:     msgBodyFile,
@@ -59,7 +57,6 @@ func saveMessageTestState() messageTestState {
 
 func (s messageTestState) restore() {
 	projectPath = s.projectPath
-	noHub = s.noHub
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
 	msgBodyFile = s.bodyFile
@@ -901,7 +898,9 @@ func TestAttachFlagValidation_NonExistentFile(t *testing.T) {
 	msgAttach = []string{"/workspace/this-file-does-not-exist-xyz.go"}
 	defer func() { msgAttach = nil }()
 
-	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	// Today's path checks run once the hub's probe answers "legacy"
+	// (or refuses it); they are tested directly.
+	err := validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "this-file-does-not-exist-xyz.go")
 	assert.Contains(t, err.Error(), "attachment")
@@ -914,7 +913,7 @@ func TestAttachFlagValidation_OutsideAllowedRoots(t *testing.T) {
 	msgAttach = []string{"/etc/passwd"}
 	defer func() { msgAttach = nil }()
 
-	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	err := validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside allowed roots")
 }
@@ -937,7 +936,7 @@ func TestAttachFlagValidation_Directory(t *testing.T) {
 	msgAttach = []string{testDir}
 	defer func() { msgAttach = nil }()
 
-	err = messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	err = validateStagedAttachmentPaths(msgAttach)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is a directory, not a regular file")
 }

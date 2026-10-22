@@ -421,7 +421,15 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 Without this permission, Policy Troubleshooter checks will return an indeterminate or unknown status (such as ACCESS_STATE_UNKNOWN_INFO_DENIED), which results in a **fail-closed** denial of service account assignment in Scion.
 
-The Hub's identity needs access to run the assignment check for each target service account; until it has that access, service account assignment is denied. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
+The Hub's identity needs access to run the assignment check for each target service account; until it has that access, service account assignment is denied. If you assign service accounts from other GCP projects and have not granted the role at the organization level, grant it on each of those projects too (replace `$SA_PROJECT_ID` with the project that holds the service account):
+
+```bash
+gcloud projects add-iam-policy-binding $SA_PROJECT_ID \
+  --member="serviceAccount:$SA_HUB" \
+  --role="roles/iam.securityReviewer"
+```
+
+Without it, assigning a service account from that project is refused with a message that names the project and gives this command. Registering or verifying such an account returns the same message as a warning, so you can grant the role before the first assignment. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
 
 ### 2f. Transport SA — IAP Access
 
@@ -707,7 +715,7 @@ gcloud projects get-iam-policy $PROJECT_ID \
 | `scion-hub-runner` | `roles/container.developer` | Project | GKE agent dispatch |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
-| `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org | Policy Troubleshooter (Optional, for SA assignment gates) |
+| `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org, plus each project that holds an assigned SA | Policy Troubleshooter (required for SA assignment when `gcp_iam_check_mode: enforce`) |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
 | `scion-transport` | `roles/run.invoker` | Hub service | Allow Cloud Run invocation |
 | `scion-discord-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
@@ -1031,7 +1039,7 @@ at its default `local` backend. With that backend each replica keeps
 hub-managed project workspaces on its own container storage, so replicas
 can see different workspace content, and the content is lost when an
 instance is replaced. On Cloud Run the Hub also refuses workspace writes
-(file edits, WebDAV, git clone) with `503 Service Unavailable` while the
+(file edits, git clone) with `503 Service Unavailable` while the
 backend is `local` (see
 [Ephemeral Storage & 503 Safety Gate](/scion/reference/server-config/#ephemeral-storage--503-safety-gate)).
 

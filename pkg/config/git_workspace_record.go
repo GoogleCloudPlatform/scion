@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 )
 
 // RecordGitWorkspace records, in the external config of the split-storage
@@ -111,7 +113,13 @@ var healedGitWorkspaces sync.Map
 // healGitWorkspaceOnce runs RecordGitWorkspace for projectDir at most once
 // per process, ignoring errors: it backfills the record for a project
 // initialized before it was written, when the CLI resolves the project.
+//
+// It does nothing while internal/writesonread is set: a read-only command
+// does not write the record.
 func healGitWorkspaceOnce(projectDir string) {
+	if writesonread.Disabled() {
+		return
+	}
 	if _, done := healedGitWorkspaces.LoadOrStore(projectDir, true); done {
 		return
 	}
@@ -124,8 +132,11 @@ func healGitWorkspaceOnce(projectDir string) {
 // place; a JSON file, or YAML the in-place edit cannot handle, goes through
 // the struct round trip. A legacy-format file is not changed.
 func setProjectTypeGit(configDir string) error {
-	unlock := LockSettingsFile()
-	defer unlock()
+	lock, err := LockSettingsDir(configDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	settingsPath := GetSettingsPath(configDir)
 	if settingsPath == "" {
@@ -142,12 +153,12 @@ func setProjectTypeGit(configDir string) error {
 	}
 	if filepath.Ext(settingsPath) != ".json" {
 		edit := versionedSettingEdit{path: []string{"project_type"}, value: newYAMLStringScalar(string(ProjectTypeGit))}
-		err := updateVersionedSettingYAML(configDir, settingsPath, edit)
+		err := updateVersionedSettingYAML(lock, configDir, settingsPath, edit)
 		if !errors.Is(err, errYAMLEditThroughAlias) {
 			return err
 		}
 	}
-	vs, err := LoadSingleFileVersioned(configDir)
+	vs, err := loadSingleFileVersioned(lock, configDir)
 	if err != nil {
 		return err
 	}
@@ -155,5 +166,5 @@ func setProjectTypeGit(configDir string) error {
 		return nil
 	}
 	vs.ProjectType = string(ProjectTypeGit)
-	return saveVersionedSettingsInPlace(configDir, vs)
+	return saveVersionedSettingsInPlace(lock, configDir, vs)
 }

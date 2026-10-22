@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -797,8 +796,9 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return newUsageError("requires a template name argument or --all flag")
 	}
 
-	// Check Hub availability first (we need it for sync anyway)
-	hubCtx, err := requireHub(projectPath)
+	// Check Hub availability first (we need it for sync anyway). A
+	// --global sync does not link the project (see requireHubForUpload).
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
@@ -1011,8 +1011,9 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 			return fmt.Errorf("failed to download %s: %w", fileInfo.Path, err)
 		}
 
-		// Write file, creating parent directories as needed
-		if err := transfer.WriteFileInRoot(root, fileInfo.Path, content, 0644); err != nil {
+		// Write file, creating parent directories as needed, with the
+		// executable bit the Hub recorded (ptone/scion#5652).
+		if err := writePulledFile(root, fileInfo.Path, content, fileInfo.Mode); err != nil {
 			return fmt.Errorf("failed to write %s: %w", fileInfo.Path, err)
 		}
 		fmt.Printf("  Downloaded: %s\n", fileInfo.Path)
@@ -1267,8 +1268,12 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			}
 			sort.Strings(removed)
 
+			// A changed executable bit alone needs a finalize too: the
+			// content hash does not cover modes (ptone/scion#5652).
+			modeChanged := modeOnlyChanges(files, downloadResp.Files)
+
 			// Check if anything changed
-			if len(filesToUpload) == 0 && len(removed) == 0 {
+			if len(filesToUpload) == 0 && len(removed) == 0 && len(modeChanged) == 0 {
 				fmt.Printf("Template '%s' is already up to date.\n", name)
 				fmt.Printf("  ID: %s\n", templateID)
 				fmt.Printf("  Content Hash: %s\n", truncateHash(existingTemplate.ContentHash))
@@ -1283,6 +1288,12 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			}
 			if len(filesToUpload) > 0 {
 				fmt.Printf("Found %d changed file(s), updating template...\n", len(filesToUpload))
+			}
+			if len(modeChanged) > 0 {
+				fmt.Printf("Updating the executable bit of %d file(s):\n", len(modeChanged))
+				for _, p := range modeChanged {
+					fmt.Printf("  ~ %s\n", p)
+				}
 			}
 		}
 	} else {
@@ -1513,7 +1524,7 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 				localHash := computeLocalContentHash(files)
 				entry.LocalHash = localHash
 				entry.HubHash = hub.ContentHash
-				if localHash == hub.ContentHash {
+				if localHash == hub.ContentHash && len(modeOnlyChangesInManifest(files, hub.Files)) == 0 {
 					entry.Status = "synced"
 				} else {
 					entry.Status = "out of date"

@@ -83,17 +83,24 @@ type authorizedListResult[T any] struct {
 // check, and scopeApplies' ordinary project-scope containment covers the
 // agent's own project — the same two cases getTemplateV2/getHarnessConfig's
 // per-ID authorizeRead already grant, so list and detail agree.
+//
+// The decision is a hub-level collection request for permissionID (the
+// list permission, template.list or harness_config.list), declared through
+// hubCollectionEvidence. A user access token takes the shortcut only on a
+// hub boundary, with permissionID in its ceiling and live hub-wide list
+// authority; any other token gets the per-row read scan.
 func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity, resourceType, permissionID string) bool {
 	user, ok := identity.(UserIdentity)
 	if !ok {
 		return false
 	}
 	return s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(user),
-		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: resourceType, ID: "hub"},
-		Action:     ActionList,
-		Permission: permissionID,
+		Principal:      principalContextForIdentity(user),
+		Credential:     credentialContextForIdentity(user),
+		Resource:       Resource{Type: resourceType},
+		Action:         ActionList,
+		Permission:     permissionID,
+		TargetEvidence: hubCollectionEvidence(permissionID),
 	}).Allowed
 }
 

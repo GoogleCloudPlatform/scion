@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -68,7 +69,7 @@ func newTestServerForRuntimeRemap(t *testing.T) (*Server, *mockManager) {
 
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 // writeRemapSettings writes a minimal settings.yaml under dir/.scion whose
@@ -110,9 +111,9 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "other")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -158,9 +159,9 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *test
 func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -199,9 +200,9 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing
 func TestBuildStartContext_HubDefaultPassthroughKeptWhenRuntimeMatches(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "docker")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -244,9 +245,9 @@ func TestBuildStartContext_HubDefaultPassthroughKeptWhenRuntimeMatches(t *testin
 func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "other")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -284,9 +285,9 @@ func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testi
 func TestBuildStartContext_HubDefaultPassthroughDowngradedOnUnresolvableRuntime(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "error" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -339,9 +340,9 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 	// resolver builds a real cluster client: where one is reachable the
 	// dispatch resolves to Kubernetes and keeps passthrough.
 	projectPath := writeRemapSettings(t, "other")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -381,9 +382,9 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	}
+	})
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -416,7 +417,7 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *t
 // — following newTestServer's own recipe (cwd-relative .scion) for the
 // template/harness-config scaffolding startAgent/restartAgent need. A
 // second profile, "local", is mapped to remapRuntimeName and set as
-// agentName's own saved profile (agent-info.json). Callers pass "kubernetes"
+// agentName's provisioned profile (image provenance). Callers pass "kubernetes"
 // to exercise the carve-out that keeps passthrough rather than downgrading
 // it (the Kubernetes runtime default is passthrough) or a
 // non-local/non-Kubernetes name like "other" to exercise the ordinary
@@ -497,8 +498,8 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 		}
 	}
 
-	// agentName's own saved profile is "local" — different from the
-	// project's active profile ("other") that the first resolution sees.
+	// agentName's own (provisioned) profile is "local" — different from
+	// the project's active profile ("other").
 	agentHome := config.GetAgentHomePath(dotScion, agentName)
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
@@ -510,6 +511,7 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
+	writeProvisionedProfile(t, dotScion, agentName, "local")
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -522,11 +524,11 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
-	}
+	})
 	return srv, mgr, remapRuntime
 }
 
@@ -807,33 +809,19 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 // newTestServerForLateCheckOrdering builds a server for pinning that the
 // start/restart handlers' later, authoritative resolution — not just
 // buildStartContext's own earlier one — is what the Kubernetes consistency
-// checks (rejectKubernetesBlockRuntimeChange and friends) run against.
-// Unlike newTestServerForSavedProfileRemap, this fixture deliberately makes
-// the two resolutions see different saved profiles:
+// checks (rejectKubernetesBlockRuntimeChange and friends) run against:
 //
 //   - The project's active profile ("other") resolves to docker; "local"
 //     resolves to remapRuntimeName (Kubernetes).
 //   - The mock agent record's Name is agentName, but its ContainerID and
 //     scion.name label are urlID — a different string. The HTTP request
 //     addresses the agent by urlID.
-//   - A saved profile of "local" (Kubernetes) exists only under urlID, not
-//     under agentName.
+//   - The agent's provisioned profile is "local", recorded under both
+//     names: start reads the agent dir named by the URL id, restart the one
+//     named by the record (agentName), on both of its lookups.
 //
-// On restart, the handler's own pre-buildStartContext lookup finds the
-// record by its scion.name label and passes its Name (agentName) to
-// buildStartContext, whose early resolution reads the saved profile under
-// that Name — finding nothing, so it falls back to the active profile
-// (docker). The handler's later, authoritative resolution reads the saved
-// profile under the URL id itself (agent.GetSavedProfile(id, ...),
-// handlers.go) — urlID — and finds Kubernetes, so a "block" resolved for
-// docker is refused there, before the stop.
-//
-// On start, buildStartContext's Name input is the URL id on both reads, and
-// startAgent recovers the project path from the record before
-// buildStartContext runs, so the early resolution already finds the
-// Kubernetes profile saved under urlID. Both resolutions then agree, and a
-// "block" start runs with the Kubernetes block identity
-// (TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig).
+// A restart test makes the two lookups disagree with
+// changeLocalProfileAfterFirstLoad, as a settings change between them would.
 func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// Isolate HOME and every ambient SCION_* variable, as
@@ -886,9 +874,8 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 		}
 	}
 
-	// The saved profile lives under urlID only — not under agentName — so
-	// only a resolution that looks the agent up by urlID finds Kubernetes.
 	writeSavedAgentProfile(t, dotScion, urlID, "local")
+	writeSavedAgentProfile(t, dotScion, agentName, "local")
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -904,12 +891,43 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
-	}
+	})
 	return srv, mgr, remapRuntime
+}
+
+// changeProfileRuntimeBetweenLoads changes the runtime profile maps to
+// between runtime-settings loads, as a settings change between them would:
+// the first load (buildStartContext's preliminary classification) sees
+// first, every later load (the handler's authoritative resolution) sees
+// later; "" keeps the settings file's value.
+func changeProfileRuntimeBetweenLoads(srv *Server, profile, first, later string) {
+	var loads atomic.Int32
+	srv.loadSettings = func(projectDir string) (*config.VersionedSettings, []string, error) {
+		vs, warnings, err := config.LoadEffectiveSettings(projectDir)
+		if err != nil || vs == nil {
+			return vs, warnings, err
+		}
+		runtime := later
+		if loads.Add(1) == 1 {
+			runtime = first
+		}
+		if p, ok := vs.Profiles[profile]; ok && runtime != "" {
+			p.Runtime = runtime
+			vs.Profiles[profile] = p
+		}
+		return vs, warnings, err
+	}
+}
+
+// changeLocalProfileAfterFirstLoad makes only the first runtime-settings
+// load see profile "local" on docker; later loads see the settings file
+// (local on the remapped runtime).
+func changeLocalProfileAfterFirstLoad(srv *Server) {
+	changeProfileRuntimeBetweenLoads(srv, "local", "docker", "")
 }
 
 // TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig covers a start
@@ -949,12 +967,12 @@ func TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig(t *testing.T) {
 
 // TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop pins the
 // ordering of the restart path's later resolution, and that the rejection
-// runs before the agent is stopped: see newTestServerForLateCheckOrdering's doc
-// comment for how this fixture makes only the later resolution see
-// Kubernetes. A "block" without resolved Kubernetes block settings must be
+// runs before the agent is stopped: changeLocalProfileAfterFirstLoad makes
+// only the later resolution see Kubernetes. A "block" without resolved Kubernetes block settings must be
 // refused with 409 before Stop is ever called.
 func TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop(t *testing.T) {
 	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	changeLocalProfileAfterFirstLoad(srv)
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
 		t.Fatal("Start must not run once the late Kubernetes/block rejection fires")
 		return "", nil

@@ -1,0 +1,64 @@
+# Allowlist for hack/check-store-delete-callers.sh.
+#
+#   <file> | <enclosing top-level function> | <count of DeleteAgent/DeleteProject references>
+#
+# The store's DeleteAgent and DeleteProject do not deactivate delegation
+# edges or service-account assignments; a caller must do so first, in the
+# same transaction. Each entry says how its caller meets that. Do not add an
+# entry or raise a count without such a comment. When a change removes a
+# call, lower the count (or delete the entry) in the same change, or the gate
+# fails as stale.
+
+# --- Project delete paths ---------------------------------------------------
+
+# ProjectDeletionService.Delete: cascadeSecurityState deactivates every edge
+# where an agent of the project is the delegate or the delegator, and those
+# agents' service-account assignments (deactivateProjectAgentEdges), in the
+# transaction that then calls tx.DeleteProject.
+pkg/hub/project_deletion_service.go | Delete | 1
+
+# purgeFixtureProject: the same cascadeSecurityState in the same transaction
+# before tx.DeleteProject.
+pkg/hub/project_fixture_purge.go | purgeFixtureProject | 1
+
+# --- Rollback of a project this request created -----------------------------
+
+# createProject: the two rollbacks (secret save failure, workspace
+# initialization failure) delete the project row this request created
+# moments earlier, before its ID is returned. No agent of the project
+# exists, so it has no edge or service-account assignment.
+pkg/hub/handlers_projects_core.go | createProject | 2
+
+# handleProjectClone: the rollback deletes the clone this request created,
+# before its ID is returned. The clone copies no agent, so it has no edge or
+# service-account assignment.
+pkg/hub/project_clone.go | handleProjectClone | 1
+
+# --- Store implementation ----------------------------------------------------
+
+# CompositeStore.DeleteAgent: re-enters itself on the transactional store,
+# then calls the inner AgentStore.DeleteAgent. This is the method the
+# contract is about.
+pkg/store/entadapter/composite.go | DeleteAgent | 2
+
+# CompositeStore.DeleteProject: re-enters itself on the transactional store,
+# then calls the inner ProjectStore.DeleteProject. This is the method the
+# contract is about.
+pkg/store/entadapter/composite.go | DeleteProject | 2
+
+# --- Store conformance suites (non-test files of pkg/store/storetest) --------
+
+# These exercise the store methods directly against a store under test; no
+# hub state is involved.
+pkg/store/storetest/domains.go | AgentDomain | 1
+pkg/store/storetest/domains_agent_hold.go | AgentHoldConformance | 1
+pkg/store/storetest/domains_delegation_descendants.go | DelegationDescendantsConformance | 2
+pkg/store/storetest/domains_group_membership.go | GroupMembershipCleanupConformance | 1
+pkg/store/storetest/domains_project_broker.go | ProjectDomain | 1
+
+# --- Unrelated methods of the same name ---------------------------------------
+
+# managedagent google Backend.DeleteAgent calls the cloud client's
+# DeleteAgent(ctx, cloudAgentID), which takes two arguments like the store
+# method. It is not a store call.
+pkg/managedagent/google/backend.go | DeleteAgent | 1

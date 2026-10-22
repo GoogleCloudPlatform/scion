@@ -100,6 +100,11 @@ func Created(v time.Time) predicate.InviteCode {
 	return predicate.InviteCode(sql.FieldEQ(FieldCreated, v))
 }
 
+// IssuanceID applies equality check predicate on the "issuance_id" field. It's identical to IssuanceIDEQ.
+func IssuanceID(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldEQ(FieldIssuanceID, v))
+}
+
 // CodeHashEQ applies the EQ predicate on the "code_hash" field.
 func CodeHashEQ(v string) predicate.InviteCode {
 	return predicate.InviteCode(sql.FieldEQ(FieldCodeHash, v))
@@ -528,6 +533,81 @@ func CreatedLT(v time.Time) predicate.InviteCode {
 // CreatedLTE applies the LTE predicate on the "created" field.
 func CreatedLTE(v time.Time) predicate.InviteCode {
 	return predicate.InviteCode(sql.FieldLTE(FieldCreated, v))
+}
+
+// IssuanceIDEQ applies the EQ predicate on the "issuance_id" field.
+func IssuanceIDEQ(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDNEQ applies the NEQ predicate on the "issuance_id" field.
+func IssuanceIDNEQ(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldNEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDIn applies the In predicate on the "issuance_id" field.
+func IssuanceIDIn(vs ...string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDNotIn applies the NotIn predicate on the "issuance_id" field.
+func IssuanceIDNotIn(vs ...string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldNotIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDGT applies the GT predicate on the "issuance_id" field.
+func IssuanceIDGT(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldGT(FieldIssuanceID, v))
+}
+
+// IssuanceIDGTE applies the GTE predicate on the "issuance_id" field.
+func IssuanceIDGTE(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldGTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDLT applies the LT predicate on the "issuance_id" field.
+func IssuanceIDLT(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldLT(FieldIssuanceID, v))
+}
+
+// IssuanceIDLTE applies the LTE predicate on the "issuance_id" field.
+func IssuanceIDLTE(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldLTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDContains applies the Contains predicate on the "issuance_id" field.
+func IssuanceIDContains(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldContains(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasPrefix applies the HasPrefix predicate on the "issuance_id" field.
+func IssuanceIDHasPrefix(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldHasPrefix(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasSuffix applies the HasSuffix predicate on the "issuance_id" field.
+func IssuanceIDHasSuffix(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldHasSuffix(FieldIssuanceID, v))
+}
+
+// IssuanceIDIsNil applies the IsNil predicate on the "issuance_id" field.
+func IssuanceIDIsNil() predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldIsNull(FieldIssuanceID))
+}
+
+// IssuanceIDNotNil applies the NotNil predicate on the "issuance_id" field.
+func IssuanceIDNotNil() predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldNotNull(FieldIssuanceID))
+}
+
+// IssuanceIDEqualFold applies the EqualFold predicate on the "issuance_id" field.
+func IssuanceIDEqualFold(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldEqualFold(FieldIssuanceID, v))
+}
+
+// IssuanceIDContainsFold applies the ContainsFold predicate on the "issuance_id" field.
+func IssuanceIDContainsFold(v string) predicate.InviteCode {
+	return predicate.InviteCode(sql.FieldContainsFold(FieldIssuanceID, v))
 }
 
 // And groups predicates with the AND operator between them.

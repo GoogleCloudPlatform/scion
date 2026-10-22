@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -563,21 +564,28 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 			DroppedScope: loser.Scope,
 		})
 
+		// The destination name comes from both references, so it is
+		// withheld when either is redacted (see LoggedSkillName).
+		destForLog := LoggedSkillName(winner.URI, dest)
+		if SkillRefRedacted(loser.URI) {
+			destForLog = SkillNameWithheld
+		}
+
 		// Log at appropriate level: Debug for optional losers, Warn otherwise.
 		if loser.Optional {
 			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		} else {
 			slog.WarnContext(ctx, "skill destination-name collision resolved",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		}
@@ -643,20 +651,22 @@ func installResolvedSkills(
 			reason := publicInstallReason(err)
 			if skill.Optional {
 				slog.WarnContext(ctx, "optional skill could not be installed; skipped",
-					"skill_uri", skill.URI, "skill_name", skill.Name,
-					"reason", reason, "error", err)
+					"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+					"reason", ResolverReasonForLog(skill.URI, reason),
+					"error", ResolverReasonForLog(skill.URI, err.Error()))
 				skipped = append(skipped, SkippedSkill{URI: skill.URI, Reason: reason})
 				continue
 			}
 			slog.WarnContext(ctx, "required skill could not be installed",
-				"skill_uri", skill.URI, "skill_name", skill.Name,
-				"reason", reason, "error", err)
+				"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+				"reason", ResolverReasonForLog(skill.URI, reason),
+				"error", ResolverReasonForLog(skill.URI, err.Error()))
 			return nil, nil, &SkillResolutionError{URI: skill.URI, Code: SkillErrCodeInstallFailed, Message: reason}
 		}
 		record.Skills = append(record.Skills, *entry)
 
 		if skill.Deprecated {
-			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", skill.Name, skill.Version)
+			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 			if skill.DeprecationMessage != "" {
 				msg += ": " + skill.DeprecationMessage
 			}
@@ -710,21 +720,21 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
 					return nil, err
 				}
-				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+				util.Debugf("provision: skill installed from cache: %s@%s", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 				slog.InfoContext(ctx, "skill_content_cache: cache hit",
-					"skill", skill.Name, "version", skill.Version,
+					"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 					"hash", truncHash(skill.Hash), "cache_hit", true)
 				return buildSkillEntry(skill, dest, skillsDest)
 			}
 			// Cache entry unusable (copy or hash verification failed) — re-downloading.
-			util.Debugf("provision: cached skill unusable, falling through to download: %v", copyErr)
+			util.Debugf("provision: cached skill unusable, falling through to download: %s", ResolverReasonForLog(skill.URI, copyErr.Error()))
 			_ = os.RemoveAll(skillStagingDir)
 			slog.InfoContext(ctx, "skill_content_cache: cache error, re-downloading",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		} else {
 			slog.InfoContext(ctx, "skill_content_cache: cache miss, will download",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		}
 	}
@@ -891,15 +901,15 @@ func populateSkillCache(cache interface {
 	for _, f := range skill.Files {
 		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
 		if err != nil {
-			util.Debugf("provision: failed to read skill file for caching: %s: %v", f.Path, err)
+			util.Debugf("provision: failed to read skill file for caching: %s: %s", f.Path, ResolverReasonForLog(skill.URI, err.Error()))
 			return
 		}
 		files[f.Path] = content
 	}
 	if _, err := cache.Put(skill.Hash, files); err != nil {
-		util.Debugf("provision: failed to cache skill %s@%s: %v", skill.Name, skill.Version, err)
+		util.Debugf("provision: failed to cache skill %s@%s: %v", LoggedSkillName(skill.URI, skill.Name), skill.Version, err)
 	} else {
-		util.Debugf("provision: cached skill %s@%s (%s)", skill.Name, skill.Version, skill.Hash)
+		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, skill.Hash)
 	}
 }
 
@@ -1094,8 +1104,11 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		return newSkillInstallError(msg, errors.New(msg))
 	}
 
-	// S5: Enforce size limit
-	limitedReader := io.LimitReader(resp.Body, maxSize+1)
+	// S5: Enforce size limit. bodyReader records a read error so a failure
+	// while receiving the body is reported as a download failure, not as a
+	// local write failure (ptone/scion#5033).
+	body := &bodyReader{r: resp.Body}
+	limitedReader := io.LimitReader(body, maxSize+1)
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -1104,6 +1117,17 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, limitedReader)
+	if body.err != nil {
+		// The read error names no URL (a *url.Error is reduced to its
+		// cause), but is kept out of the user text all the same.
+		cause := body.err.Error()
+		var ue *url.Error
+		if errors.As(body.err, &ue) {
+			cause = transportFailureCause(ue)
+		}
+		return newSkillInstallError("download failed while reading the response",
+			fmt.Errorf("download from %s failed while reading the response: %s", parsed.Host, cause))
+	}
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
@@ -1118,6 +1142,22 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
 	return nil
+}
+
+// bodyReader wraps a download response body and records the first read
+// error other than io.EOF, so a failed read can be told apart from a failed
+// write in an io.Copy.
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
 }
 
 // transportFailureCause returns the cause of a client.Do failure as text that
@@ -1258,6 +1298,11 @@ func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		// An Agent Plugins bundle installed in the skills dir (claude) is
+		// not a skill; the harness loads it as a plugin.
+		if fi, err := os.Lstat(filepath.Join(skillsPath, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
+			continue
+		}
 		entry := SkillResolutionEntry{
 			Name:          e.Name(),
 			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
@@ -1277,4 +1322,25 @@ func collectRequiredSkillURIs(skills []api.SkillReference) []string {
 		}
 	}
 	return uris
+}
+
+// platformSkillScheme is the scheme of the display-only entries the Hub
+// seeds for its platform (binary-embedded) skills. NOTE: this must be kept
+// in sync with platformSkillURIPrefix in pkg/hub/platform_skills_seed.go.
+const platformSkillScheme = "scion-platform"
+
+// resolvableSkillRefs returns skills without the optional display-only
+// platform entries (scheme scion-platform). Those entries only list the
+// platform skills; provisioning installs them separately, and no resolver
+// serves the scheme. A required entry is kept, so it still fails closed.
+// skills itself is not modified.
+func resolvableSkillRefs(skills []api.SkillReference) []api.SkillReference {
+	out := make([]api.SkillReference, 0, len(skills))
+	for _, s := range skills {
+		if s.Optional && detectScheme(s.URI) == platformSkillScheme {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }

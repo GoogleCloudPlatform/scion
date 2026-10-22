@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -72,7 +73,7 @@ func TestHandleAgentByID_QueryParameters(t *testing.T) {
 				agents: agents,
 			}
 			// Note: New expects agent.Manager. Config is ServerConfig in server.go
-			srv := New(ServerConfig{}, mgr, nil)
+			srv := New(ServerConfig{}, mgr, nil, config.RuntimeBuildRecord{})
 
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/agents/%s?%s", agentID, tt.query), nil)
 			w := httptest.NewRecorder()
@@ -108,14 +109,14 @@ func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOpt
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
-func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	return nil
 }
 
 func (m *protocolMockManager) StopTarget(ctx context.Context, ref scionrt.RunRef) error {
 	return nil
 }
-func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 

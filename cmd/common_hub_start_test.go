@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,7 +38,8 @@ type hubStartStub struct {
 	server           *httptest.Server
 	createBody       map[string]interface{}
 	createCalls      int
-	existingPhase    string // "" → existing-agent GET returns 404
+	existingPhase    string                 // "" → existing-agent GET returns 404
+	existingLaunch   map[string]interface{} // launch object of the existing agent (nil → none)
 	project          map[string]interface{}
 	createStatus     int                    // non-zero → the create POST fails with this status
 	createErrCode    string                 // error code for a failed create ("" → "conflict")
@@ -69,10 +71,14 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 				})
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			existing := map[string]interface{}{
 				"id": "agent-id", "slug": agentName, "name": agentName,
 				"phase": stub.existingPhase, "status": stub.existingPhase,
-			})
+			}
+			if stub.existingLaunch != nil {
+				existing["launch"] = stub.existingLaunch
+			}
+			_ = json.NewEncoder(w).Encode(existing)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
 			// Never FailNow in the handler goroutine: it would exit without a
@@ -229,6 +235,61 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 			}
 			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
 			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+		})
+	}
+}
+
+// D-T8 addition (design wave 3 D-c, R3; ptone/scion#4670): an agent left
+// in error by a failed start carries its resume memory in
+// launch.resumePhase. The CLI decides as the hub does, from the remembered
+// phase: the resume flag on the wire, the action line, the result word and
+// the flags warning. Without resumePhase an error agent behaves as before.
+func TestStartAgentViaHub_ExistingAgentResumeMemory(t *testing.T) {
+	const projectID, agentName = "proj-memory", "memory-agent"
+
+	for _, tc := range []struct {
+		resumePhase string
+		wantResume  bool
+		wantAction  string
+		wantResult  string
+		wantWarning string // "" → no flags warning
+	}{
+		{"suspended", true, "Resuming agent", "resumed", "(phase: error, resumes as suspended)"},
+		{"halted", true, "Restarting agent", "restarted", "(phase: error, resumes as halted)"},
+		{"created", false, "Starting agent", "started", "(phase: error, resumes as created)"},
+		{"provisioning", false, "Starting agent", "started", ""},
+		{"", false, "Starting agent", "started", ""},
+	} {
+		t.Run("resumePhase="+tc.resumePhase, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			stub := newHubStartStub(t, projectID, agentName, "error")
+			stub.existingLaunch = map[string]interface{}{
+				"id": "l1", "state": "ended", "active": false, "kind": "start", "error": "crash_loop",
+			}
+			if tc.resumePhase != "" {
+				stub.existingLaunch["resumePhase"] = tc.resumePhase
+			}
+			cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+			var err error
+			stdout, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			if tc.wantResume {
+				assert.Equal(t, true, stub.createBody["resume"])
+			} else {
+				_, present := stub.createBody["resume"]
+				assert.False(t, present, "resume must not be set for resumePhase %q", tc.resumePhase)
+			}
+			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+			if tc.wantWarning == "" {
+				assert.NotContains(t, stderr, "not applied to an existing agent")
+			} else {
+				assert.Contains(t, stderr, "Warning: agent '"+agentName+"' already exists "+tc.wantWarning+
+					" and is reused in place; these flags are not applied to an existing agent: --image\n")
+			}
 		})
 	}
 }
@@ -624,4 +685,47 @@ func TestNonInteractiveBrokerMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A synchronous create that the hub answers after the hub client's usual
+// timeout still succeeds: the create request has its own, longer timeout.
+// The timeouts are scaled down; the usual one is 50ms here, as
+// hubClientTimeout (30s) is in production.
+func TestCreateAgentWithBrokerResolution_SlowCreateOutlastsClientTimeout(t *testing.T) {
+	require.Greater(t, hubCreateRequestTimeout, hubClientTimeout, "the create timeout must exceed the usual client timeout")
+	orig := hubCreateRequestTimeout
+	hubCreateRequestTimeout = 10 * time.Second
+	t.Cleanup(func() { hubCreateRequestTimeout = orig })
+
+	const projectID = "proj-slow"
+	var creates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		creates.Add(1)
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agent": map[string]interface{}{"id": "agent-1", "slug": "slow"}})
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL, hubclient.WithTimeout(50*time.Millisecond))
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	resp, err := createAgentWithBrokerResolution(context.Background(), hubCtx, projectID, &hubclient.CreateAgentRequest{Name: "slow"})
+	require.NoError(t, err, "a create slower than the client timeout must not be cut off")
+	require.NotNil(t, resp.Agent)
+	assert.Equal(t, "agent-1", resp.Agent.ID)
+	assert.Equal(t, int32(1), creates.Load(), "the create is sent once")
+
+	// Other requests on the same client keep the usual timeout.
+	_, err = client.ProjectAgents(projectID).Create(context.Background(), &hubclient.CreateAgentRequest{Name: "slow"})
+	require.Error(t, err, "without the create timeout the usual client timeout applies")
 }

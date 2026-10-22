@@ -99,7 +99,7 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Individual agents can further override these via their `scion-agent.yaml`; a template's `telemetry` block is ignored with a warning.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates cannot set telemetry (a template's `telemetry:` block is ignored), and an individual agent can only turn it on or off; the project's telemetry policy beats both. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).
 
 ```yaml
 # In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)
@@ -236,17 +236,14 @@ Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or
 
 To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
 
-- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment, both for local agents and for agents started through a Hub. An invalid value is rejected before the agent starts.
+- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment. An invalid value is rejected before the agent starts.
 
   ```bash
   scion start my-agent --agent-log-level debug
   scion start my-agent --agent-log-level info,hubsync=debug
   ```
 
-  How long the setting lasts depends on the path:
-
-  - **Through a Hub**, the value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
-  - **Locally**, the value applies to that launch only. A later `scion start` or `scion resume` without the flag starts the agent without it.
+  The value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
 
 - **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
 
@@ -337,6 +334,21 @@ jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
 See the [Local Development Logging guide](/scion/contributing/logging/#http-request-logging) for the full field reference and file output format.
+
+## Artifact Decision Log
+
+The Hub writes one structured entry per artifact decision (publish, versions, grants, share links, moves, expiry, deletion, owner liveness marks and authorization refusals) to a dedicated log, `scion-artifacts`. With `SCION_CLOUD_LOGGING=true` it is a separate Cloud Logging log. Otherwise it goes to stdout. Entries carry the artifact id (from the parsed route, never the raw path), the outcome, a fixed reason code for refusals and failures, and, for decisions made on a request, the route template and the `request_id` of the matching request log line:
+
+```
+-- Every decision about one artifact
+logName="projects/YOUR_PROJECT/logs/scion-artifacts"
+labels.artifact_id = "ARTIFACT_ID"
+
+-- Refusals and the request they answered
+logName="projects/YOUR_PROJECT/logs/scion-artifacts" AND labels.outcome = "refused"
+```
+
+Reads answered with `404` are logged at `DEBUG` only. Share-link tokens, titles, notes, file contents and credentials are never logged. See [Artifacts: Decision log](/scion/reference/artifacts/#decision-log) for the actions, fields and reason codes.
 
 ## Querying Logs by Subsystem
 
@@ -534,7 +546,7 @@ The Hub runs two separate checks on running agents, each every 5 minutes. They s
 
 - **Offline (no heartbeat)**: An agent whose last heartbeat is more than 2 minutes old is set to the `offline` activity. The process, or its connection to the Hub, is gone. One cause is an agent that cannot refresh its auth token, which stops its heartbeat and other updates. Stop and restart such an agent to give it a new token; an agent that keeps its connection to the Hub refreshes its token on its own. Agents whose activity is `blocked`, `completed` or `limits_exceeded` are not marked offline.
 - **Stalled (heartbeat but no activity)**: A `running` agent whose heartbeat is still arriving (within the last 2 minutes) but that has sent no activity events within `server.hub.stalled_threshold` (default `5m`) is set to the `stalled` activity. The process is alive but not making progress. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. With `server.hub.auto_suspend_stalled` on (default off), the Hub also suspends it; see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
-- **Notifications**: A notification subscription can include the **Stalled** and **Error** triggers. The subscription set up during agent creation with notifications enabled includes both, along with **Completed**, **Waiting on Parent** and **Limits Exceeded**. `scion start` sets one up unless you pass `--no-notify`, and so does the web UI's create form when **Notify me on important agent state changes** is checked. A subscription you add later, from the web UI or with `scion notifications subscribe`, starts with only **Completed**, **Waiting on Parent** and **Limits Exceeded**.
+- **Notifications**: A notification subscription can include the **Stalled** and **Error** triggers. The subscription set up during agent creation with notifications enabled, and a subscription you add from the web UI, include both by default, along with **Completed**, **Waiting on Parent**, **Limits Exceeded** and **Halted**. `scion start` sets one up unless you pass `--no-notify`, and so does the web UI's create form when **Notify me on important agent state changes** is checked. A subscription you add with `scion notifications subscribe` starts with only `COMPLETED`, `WAITING_FOR_INPUT` and `LIMITS_EXCEEDED`; pass `--triggers` to include others.
 - **Visibility**: The Web UI shows `offline` and `stalled` agents with their own status badges, so they are not lost among active workloads.
 
 ## Server Maintenance Logs

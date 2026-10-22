@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -85,6 +84,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	runningNames := make(map[string]bool)
 	runtimePhases := make(map[string]string, len(agents))
 	for i := range agents {
+		// startFailed is set when the failed-start overlay below shows this
+		// entry as error; the runtime-starting override then leaves it.
+		startFailed := false
 		// Capture the runtime's Phase before agent-info.json overwrites it.
 		// The runtime Phase (derived from container state) is authoritative
 		// for running/stopped reconciliation below.
@@ -106,9 +108,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			agentInfoJSON := filepath.Join(agentHome, "agent-info.json")
 			terminalPhase := terminalRuntimePhase(agents[i])
 
+			// Profile and harness config come from the broker-side agent
+			// dir (brokerRecordedSettings), never from agent-info.json in
+			// the agent home; the runtime comes from the runtime entry.
+			recordedProfile, recordedHarnessConfig := brokerRecordedSettings(agentDir)
+			agents[i].Profile = recordedProfile
+			if agents[i].HarnessConfig == "" {
+				agents[i].HarnessConfig = recordedHarnessConfig
+			}
+
 			// Try agent-info.json first for latest status from container
+			// (read confined to the agent home; a link there is refused).
 			var parsedInfo *api.AgentInfo
-			if data, err := os.ReadFile(agentInfoJSON); err == nil {
+			if data, err := readHomeAgentInfo(agentHome); err == nil {
 				var info api.AgentInfo
 				if err := json.Unmarshal(data, &info); err == nil {
 					parsedInfo = &info
@@ -116,15 +128,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						agents[i].Phase = info.Phase
 						agents[i].Activity = info.Activity
 					}
-					if agents[i].Runtime == "" {
-						agents[i].Runtime = info.Runtime
-					}
-					agents[i].Profile = info.Profile
 					if agents[i].Template == "" {
 						agents[i].Template = info.Template
-					}
-					if agents[i].HarnessConfig == "" {
-						agents[i].HarnessConfig = info.HarnessConfig
 					}
 					if info.Detail != nil {
 						agents[i].Detail = info.Detail
@@ -148,12 +153,27 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			// A failed start recorded in the host state file
 			// (ptone/scion#4815) shows as error, for the run this container
 			// belongs to only, and not once the runtime reports the
-			// container running or starting. Display-only and fail-quiet:
-			// HubProjectID is the container's project-id label (set at
-			// create; a local CLI start fills it from project settings), so
-			// this must never feed a delete, cleanup or ownership decision.
-			// Any refusal, error or invalid record means no overlay.
-			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) && rp != string(state.PhaseStarting) &&
+			// container running. The run is the entry's run ID: every start
+			// clears the record before Runtime.Run and carries a new run
+			// ID, so a start in progress never matches a stale record.
+			//
+			// A runtime-reported "starting" does not suppress the overlay
+			// (ptone/scion#5373): a failed synchronous start can leave this
+			// run's entry starting (a Kubernetes pod left Pending), and it
+			// shows as error. The broker heartbeat uses List, so it reports
+			// such an agent to the hub as error too, the report from before
+			// the Kubernetes pod list gave "starting" (ptone/scion#5365).
+			// Cloud Run sandbox entries are unchanged: their List reports no
+			// ProjectPath, so this block is never reached for them; the
+			// broker heartbeat (an unfiltered List) still reports a failed
+			// start's leftover Starting entry as starting.
+			//
+			// Display-only and fail-quiet: HubProjectID is the container's
+			// project-id label (set at create; a local CLI start fills it
+			// from project settings), so this must never feed a delete,
+			// cleanup or ownership decision. Any refusal, error or invalid
+			// record means no overlay.
+			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) &&
 				agents[i].RunID != "" && agents[i].Phase != "deleted" {
 				t := RunOwnerTarget{
 					ProjectPath:  agents[i].ProjectPath,
@@ -163,11 +183,12 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				if startFailedForDisplay(t, agentDir) == agents[i].RunID {
 					agents[i].Phase = string(state.PhaseError)
 					agents[i].Activity = ""
+					startFailed = true
 				}
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
-			if fi, err := os.Stat(agentInfoJSON); err == nil {
+			if fi, err := os.Lstat(agentInfoJSON); err == nil {
 				agents[i].LastSeen = fi.ModTime()
 			}
 
@@ -239,8 +260,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		// provisioning, or a previous run's "stopped", "error" or
 		// "running" — must not replace it. Otherwise list and the
 		// broker heartbeat would report a live start as stopped or as
-		// running (ptone/scion#4756).
-		if runtimePhase == string(state.PhaseStarting) {
+		// running (ptone/scion#4756). A failed start recorded for this
+		// run (startFailed, above) is not live and keeps its error
+		// (ptone/scion#5373).
+		if runtimePhase == string(state.PhaseStarting) && !startFailed {
 			agents[i].Phase = string(state.PhaseStarting)
 			agents[i].Activity = ""
 		}
@@ -280,8 +303,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 
 				var info *api.AgentInfo
 
-				// Try agent-info.json first
-				if data, err := os.ReadFile(agentInfoJSON); err == nil {
+				// Try agent-info.json first (read confined to the agent home)
+				if data, err := readHomeAgentInfo(agentHome); err == nil {
 					var ai api.AgentInfo
 					if err := json.Unmarshal(data, &ai); err == nil {
 						info = &ai
@@ -313,6 +336,16 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						continue
 					}
 				}
+
+				// Profile and harness config come from the broker-side agent
+				// dir, never from agent-info.json in the agent home, which
+				// records no runtime either for an agent without a runtime
+				// entry (brokerRecordedSettings). info is a copy, so the
+				// file's values are not used below.
+				recorded := *info
+				recorded.Profile, recorded.HarnessConfig = brokerRecordedSettings(agentDir)
+				recorded.Runtime = ""
+				info = &recorded
 
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
 					continue
@@ -363,7 +396,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents
-				if fi, err := os.Stat(agentInfoJSON); err == nil {
+				if fi, err := os.Lstat(agentInfoJSON); err == nil {
 					agentEntry.LastSeen = fi.ModTime()
 				}
 
@@ -379,6 +412,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	return agents, nil
+}
+
+// brokerRecordedSettings returns the settings profile recorded in agentDir's
+// image provenance and the harness-config recorded in its scion-agent config
+// (harnessConfigInAgentDir), each "" when there is none or it cannot be read. Both files are in the
+// broker-side agent dir, outside every container mount, so List reports
+// them rather than the copies in agent-info.json in the agent home. An agent
+// provisioned before image provenance was recorded reports no profile.
+func brokerRecordedSettings(agentDir string) (profile, harnessConfig string) {
+	if p, err := readImageProvenance(agentDir); err == nil && p != nil {
+		profile = p.Profile
+	}
+	return profile, harnessConfigInAgentDir(agentDir)
 }
 
 // createdAgentLabels approximates the label set a created agent's
@@ -449,35 +495,26 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 	return string(state.PhaseStopped)
 }
 
+// persistAgentInfoState records phase and activity in the agent-info.json at
+// path (in the agent home, its directory). Locked read-modify-write (see
+// updateSavedAgentInfo, #4681), confined to the home (updateHomeAgentInfo).
 func persistAgentInfoState(path, phase, activity string) error {
-	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
-	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		fi, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-
+	if filepath.Base(path) != agentInfoFileName {
+		return fmt.Errorf("persistAgentInfoState: %s is not an %s", path, agentInfoFileName)
+	}
+	return updateHomeAgentInfo(filepath.Dir(path), false, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		if info.Phase == phase && info.Activity == activity {
-			return nil
+			return nil, nil
 		}
 
 		info.Phase = phase
 		info.Activity = activity
 
-		updated, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }

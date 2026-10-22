@@ -52,6 +52,12 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// A command that must not write (server preflight) turns the
+		// no-write switch on before anything below loads settings. Execute
+		// already did, for the real entry point; this covers callers that
+		// run rootCmd directly.
+		applyNoWriteGuard(cmd)
+
 		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
 		// returns, so check them first: a later hook error, such as running
 		// outside a project, must not hide a flag conflict.
@@ -223,32 +229,6 @@ return an error instead of blocking.`,
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
 		}
 
-		// Check image_registry is configured for commands that need it.
-		// Skip for config commands (users need those to set the registry).
-		// Skip for hub-dispatched work: the broker that runs the agent
-		// resolves images, so the local registry setting is not needed.
-		requiresRegistry := requiresProject
-		if commandInSubtree(cmd, "config") {
-			requiresRegistry = false
-		}
-		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
-			requiresRegistry = false
-		}
-		if requiresRegistry && isHubDispatchInvocation(projectPath) {
-			requiresRegistry = false
-		}
-		// Shadow projects never launch containers locally — skip registry check.
-		if requiresRegistry {
-			if isShadowProject() {
-				requiresRegistry = false
-			}
-		}
-		if requiresRegistry {
-			if err := config.RequireImageRegistry(projectPath, profile); err != nil {
-				return err
-			}
-		}
-
 		// Check for dev auth usage and warn if Hub is enabled
 		if !hubOnly {
 			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
@@ -263,6 +243,17 @@ return an error instead of blocking.`,
 	},
 }
 
+// prepareInvocation finds the command args name (a read-only tree walk:
+// no flags are parsed, nothing executes) and runs the hooks that must come
+// before any settings load: the no-write guard, then the legacy-env
+// warning and global layout migration hook.
+func prepareInvocation(args []string) *cobra.Command {
+	target, _, _ := rootCmd.Find(args)
+	applyNoWriteGuard(target)
+	maybeWarnRemovedLegacyEnv(target)
+	return target
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
@@ -272,13 +263,12 @@ func Execute() {
 	// runs too late for that. rootCmd.Find is a read-only tree walk (no
 	// flags are parsed, nothing executes), so it is safe to call before
 	// ExecuteC(). Skipped for "start" under the "server"/"runtime-broker"
-	// subtree; see maybeWarnRemovedLegacyEnv.
+	// subtree, and for "server preflight"; see maybeWarnRemovedLegacyEnv.
 	var cliArgs []string
 	if len(os.Args) > 1 {
 		cliArgs = os.Args[1:]
 	}
-	target, _, _ := rootCmd.Find(cliArgs)
-	maybeWarnRemovedLegacyEnv(target)
+	target := prepareInvocation(cliArgs)
 
 	// Decide early whether an inherited SCION_DEBUG applies. This call is
 	// load-bearing: the settings loads below and anything else that runs
@@ -759,33 +749,6 @@ func usesWorktrees(cmd *cobra.Command) bool {
 		return true
 	}
 	return false
-}
-
-// isShadowProject returns true if the current directory is inside a shadowed
-// project (a directory linked to a hub project purely for CLI routing, with no
-// local workspace or broker involvement). It reads the .scion marker file from
-// the project root discovered via FindProjectRoot.
-func isShadowProject() bool {
-	root, found := config.FindProjectRoot()
-	if !found {
-		return false
-	}
-	// The marker file is the .scion regular file in the workspace directory,
-	// not the resolved external config path. Walk up from cwd to find it.
-	markerPath := config.FindProjectMarkerPath()
-	if markerPath == "" {
-		// Fallback: if root itself looks like an external config, we can't
-		// directly read the workspace marker. Check versioned settings instead.
-		if vs, err := config.LoadVersionedSettings(root); err == nil && vs != nil {
-			return vs.ProjectType == string(config.ProjectTypeShadow)
-		}
-		return false
-	}
-	marker, err := config.ReadProjectMarker(markerPath)
-	if err != nil {
-		return false
-	}
-	return marker.IsShadow()
 }
 
 // isLocalEndpoint returns true if the given endpoint URL points to a local address

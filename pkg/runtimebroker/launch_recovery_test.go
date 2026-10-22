@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -144,7 +145,7 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L2", ContainerID: "c-run", RunID: "run-L2"})
+			mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L2", ContainerID: "c-run", RunID: "run-L2", ProjectID: "proj"})
 			srv, rtb := newAsyncTestServer(t, mgr)
 			srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 			srv.launchRecoveryTTL = 300 * time.Millisecond
@@ -179,7 +180,12 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 			} else if d := mgr.Deleted(); len(d) != 0 {
 				t.Fatalf("expected no delete, got %+v", d)
 			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
+			if c.name == "no answer" {
+				// Kept for the next boot to resend (ptone/scion#5186).
+				if jr := readJournalFileT(t, path); jr.State != "terminal_pending" || jr.ReportAttempts != 1 {
+					t.Fatalf("an unanswered report did not keep the record for a retry: %+v", jr)
+				}
+			} else if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Fatalf("recovered record not removed: %v", err)
 			}
 			if srv.launchRegistry.anyInFlight(launchKey{ProjectID: "proj", Slug: "agent-L2"}) {
@@ -192,7 +198,7 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 // TestRecoverLaunches_TerminalPendingSucceededResent is C-T3: a journalled
 // succeeded is resent unchanged and nothing is deleted.
 func TestRecoverLaunches_TerminalPendingSucceededResent(t *testing.T) {
-	mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L3", ContainerID: "c-run", RunID: "run-L3"})
+	mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L3", ContainerID: "c-run", RunID: "run-L3", ProjectID: "proj"})
 	srv, rtb := newAsyncTestServer(t, mgr)
 	rtb.launchReportFunc = appliedReports
 	jr := launchingRecord("L3")
@@ -225,8 +231,10 @@ func TestRecoverLaunches_TerminalPendingSucceededResent(t *testing.T) {
 func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 	entries := func(id string) []api.AgentInfo {
 		return []api.AgentInfo{
-			{Name: "agent-" + id, ContainerID: "c-legacy"},
-			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other"},
+			// Both carry the record's project ID, so only the exact-run
+			// filter keeps them from being deleted.
+			{Name: "agent-" + id, ContainerID: "c-legacy", ProjectID: "proj"},
+			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other", ProjectID: "proj"},
 		}
 	}
 	for _, rtName := range []string{"mock", "kubernetes"} {
@@ -244,7 +252,7 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 			}
 		})
 		t.Run(rtName+" exact run entry", func(t *testing.T) {
-			mgr := newRecFakeManager(append(entries("L5"), api.AgentInfo{Name: "agent-L5", ContainerID: "c-run", RunID: "run-L5"})...)
+			mgr := newRecFakeManager(append(entries("L5"), api.AgentInfo{Name: "agent-L5", ContainerID: "c-run", RunID: "run-L5", ProjectID: "proj"})...)
 			srv, rtb := newAsyncTestServer(t, newAsyncManager())
 			installRecoveryManager(srv, rtName, mgr)
 			rtb.launchReportFunc = appliedReports
@@ -271,8 +279,10 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 		if mgr.CleanupCallCount() != 0 {
 			t.Fatal("cleanup ran against a runtime that is not the launch's")
 		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("record not removed: %v", err)
+		// The runtime may come back (a later boot's auxiliary discovery),
+		// so the clean-up is kept for a bounded retry (ptone/scion#5177).
+		if got := readJournalFileT(t, path); got.State != "cleanup_pending" || got.CleanupAttempts != 1 {
+			t.Fatalf("a launch whose runtime is unavailable was not kept for a retry: %+v", got)
 		}
 	})
 }
@@ -311,7 +321,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 	})
 
 	t.Run("synchronous start of the name in flight", func(t *testing.T) {
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		_, finish := srv.startsInFlight.begin(context.Background(), key)
@@ -335,7 +345,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		cancelled := make(chan struct{})
@@ -376,7 +386,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		mgr.deleteBlock = make(chan struct{})
 		mgr.deleteStarted = make(chan struct{})
 		srv, rtb := newAsyncTestServer(t, mgr)
@@ -458,7 +468,7 @@ func TestRecoverLaunches_DispatchAttemptReplay(t *testing.T) {
 	cfg := srv1.config
 	cfg.StateDir = srv1.stateDir
 	mgr2 := newAsyncManager()
-	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	srv2 := New(cfg, mgr2, &runtime.MockRuntime{NameFunc: func() string { return "mock" }}, config.RuntimeBuildRecord{})
 	rtb2 := &mockRuntimeBrokerService{launchReportFunc: appliedReports}
 	srv2.hubMu.Lock()
 	srv2.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: rtb2}}
@@ -494,7 +504,7 @@ func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
 		t.Fatal("test setup: the two runtimes must differ in identity")
 	}
 	setup := func(t *testing.T) (*Server, *mockRuntimeBrokerService, *recFakeManager, *recFakeManager) {
-		entry := api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"}
+		entry := api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK", ProjectID: "proj"}
 		mgrA, mgrB := newRecFakeManager(entry), newRecFakeManager(entry)
 		srv, rtb := newAsyncTestServer(t, newAsyncManager())
 		srv.auxiliaryRuntimesMu.Lock()
@@ -525,7 +535,7 @@ func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
 	// cleaned up anywhere.
 	t.Run("profile resolves to another runtime", func(t *testing.T) {
 		srv, rtb, mgrA, mgrB := setup(t)
-		def := newRecFakeManager(api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"})
+		def := newRecFakeManager(api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK", ProjectID: "proj"})
 		installRecoveryManager(srv, "mock", def)
 		rtC := &runtime.KubernetesRuntime{DefaultNamespace: "ns-c"}
 		jr := launchingRecord("LK")

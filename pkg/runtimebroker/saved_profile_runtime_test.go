@@ -228,7 +228,7 @@ func TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker(t *testing
 	cfg.StateDir = t.TempDir()
 	cfg.ContainerHubEndpoint = lifecycleBridge
 	mgr := &filteringMockManager{}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleLog(srv)
 
 	w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/start", map[string]any{
@@ -317,12 +317,12 @@ func writeSavedAgentInfo(t *testing.T, dotScionDir, agentName, profile, recorded
 	}
 }
 
-// TestStartAgent_UnresolvableSavedProfileRecordedRuntime: when the saved
-// profile cannot be resolved, an agent whose agent-info.json records the
-// broker's default runtime ("docker" in the fixture) starts on the default
-// runtime; a recorded non-default runtime or no recorded runtime still
-// gets the 503.
-func TestStartAgent_UnresolvableSavedProfileRecordedRuntime(t *testing.T) {
+// TestStartAgent_UnresolvableHubProfileNoRecordedRuntimeFallback: for an
+// agent without image provenance, a Hub-sent profile that cannot be
+// resolved gets the 503 whatever runtime agent-info.json records,
+// including the broker's default runtime ("docker" in the fixture): the
+// broker keeps no runtime record outside the agent home to fall back on.
+func TestStartAgent_UnresolvableHubProfileNoRecordedRuntimeFallback(t *testing.T) {
 	for _, recorded := range []string{"docker", "kubernetes", ""} {
 		for _, tc := range unresolvedCases() {
 			t.Run("recorded="+recorded+"/"+tc.name, func(t *testing.T) {
@@ -334,88 +334,50 @@ func TestStartAgent_UnresolvableSavedProfileRecordedRuntime(t *testing.T) {
 
 				w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 					"projectPath": f.projectPath,
+					"profile":     "vanished",
 				})
+				assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
+				if f.defaultMgr.StartCalls() != 0 {
+					t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+				}
 				if runs, _ := f.k8sRun(); runs != 0 {
 					t.Errorf("kubernetes runtime runs = %d, want 0", runs)
 				}
-				if recorded != "docker" {
-					assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
-					if f.defaultMgr.StartCalls() != 0 {
-						t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
-					}
-					return
-				}
-				if w.Code != http.StatusAccepted {
-					t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
-				}
-				if f.defaultMgr.StartCalls() != 1 {
-					t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
-				}
-				out := logs.String()
-				assertFallbackLoggedOnceAtWarn(t, out)
-				if !strings.Contains(out, "agent last ran on the broker default runtime") ||
-					!strings.Contains(out, "runtime=docker") || !strings.Contains(out, "profile=vanished") {
-					t.Errorf("default-runtime fallback not logged:\n%s", out)
-				}
-				if strings.Contains(out, "refusing to use the broker default runtime") {
-					t.Errorf("fallback logged as a refusal:\n%s", out)
+				if strings.Contains(logs.String(), fallbackLogMsg) {
+					t.Errorf("recorded-runtime fallback taken:\n%s", logs.String())
 				}
 			})
 		}
 	}
 }
 
-// TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime: restart
-// uses the same resolution, so a recorded default runtime restarts there.
-func TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime(t *testing.T) {
+// TestRestartAgent_UnresolvableHubProfileNoRecordedRuntimeFallback: restart
+// uses the same resolution, so it gets the 503 before its stop.
+func TestRestartAgent_UnresolvableHubProfileNoRecordedRuntimeFallback(t *testing.T) {
 	f := newLifecycleFixture(t)
 	logs := captureLifecycleLog(f.srv)
 	const name = "restart-recorded-default"
 	writeSavedAgentInfo(t, f.projectPath, name, "vanished", "docker")
 	f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
-	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{})
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
-	}
-	assertFallbackLoggedOnceAtWarn(t, logs.String())
-	if f.defaultMgr.StartCalls() != 1 {
-		t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
-	}
-	if runs, _ := f.k8sRun(); runs != 0 {
-		t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{"profile": "vanished"})
+	tc := unresolvedCase{wantMsg: `profile \"vanished\" not found`, wantLog: "not found"}
+	assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
+	if f.defaultMgr.stopCalls != 0 || f.defaultMgr.StartCalls() != 0 {
+		t.Errorf("default runtime used: stop=%d start=%d", f.defaultMgr.stopCalls, f.defaultMgr.StartCalls())
 	}
 }
 
-// fallbackLogMsg is the recorded-runtime fallback's log message.
+// fallbackLogMsg is the log message of the former recorded-runtime fallback
+// to the broker's default runtime; tests assert it is never logged.
 const fallbackLogMsg = "agent last ran on the broker default runtime, using it"
 
-// assertFallbackLoggedOnceAtWarn checks that out has exactly one fallback
-// log line and that it is at Warn. The capture handler drops Debug, so a
-// handler-level recheck that logged at Warn would show up as a second line.
-func assertFallbackLoggedOnceAtWarn(t *testing.T, out string) {
-	t.Helper()
-	var lines []string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, fallbackLogMsg) {
-			lines = append(lines, line)
-		}
-	}
-	if len(lines) != 1 {
-		t.Fatalf("fallback logged %d times, want 1:\n%s", len(lines), out)
-	}
-	if !strings.Contains(lines[0], "level=WARN") {
-		t.Errorf("fallback not logged at Warn:\n%s", lines[0])
-	}
-}
-
-// TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes: agent-info.json
-// records only the runtime type. On a broker whose default runtime's
-// identity is more than its type (Kubernetes context/namespace) or that
-// has per-profile instances, a matching recorded type does not show the
-// agent ran on that instance, so an unresolvable saved profile still gets
-// the 503 instead of starting on the default. Restart gets the same 503
-// before its stop.
+// TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes: on a broker
+// whose default runtime's identity is more than its type (Kubernetes
+// context/namespace) or that has per-profile instances, an unresolvable
+// Hub-sent profile gets the 503 instead of starting on the default, whatever
+// runtime type agent-info.json records. Restart gets the same 503 before
+// its stop.
 func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -454,14 +416,15 @@ func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 				body := map[string]any{
 					"projectPath": projectPath,
 					"hubEndpoint": lifecycleHubEndpoint,
+					"profile":     "vanished",
 				}
 				if action == "restart" {
 					// Restart acts on a running agent and must fail
 					// before it stops it.
 					mgr.agents = append(mgr.agents, lifecycleAgent(name, projectPath, ""))
-					body = map[string]any{}
+					body = map[string]any{"profile": "vanished"}
 				}
-				srv := New(cfg, mgr, c.rt)
+				srv := New(cfg, mgr, c.rt, config.RuntimeBuildRecord{})
 				logs := captureLifecycleLog(srv)
 
 				w := lifecyclePost(t, srv, "/api/v1/agents/"+name+"/"+action, body)
@@ -479,15 +442,15 @@ func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 }
 
 // TestRestartAgent_HandlerStrictCheckWhenContainerNameDiffers: the matched
-// container's Name differs from the restart id, and only id has the saved
-// profile. buildStartContext reads the profile by Name, finds none and
-// stays non-strict, so only restartAgent's own strict resolution (which
-// reads the profile by id) can return the 503.
+// container's Name differs from the restart id. The agent's profile is read
+// from the agent dir Start uses, the container's Name, on both of the
+// restart's lookups, so the record under that name gets the 503 before the
+// stop.
 func TestRestartAgent_HandlerStrictCheckWhenContainerNameDiffers(t *testing.T) {
 	f := newLifecycleFixture(t)
 	logs := captureLifecycleLog(f.srv)
 	const id = "restart-by-id"
-	writeSavedAgentProfile(t, f.projectPath, id, "vanished")
+	writeSavedAgentProfile(t, f.projectPath, "container-name", "vanished")
 	entry := lifecycleAgent(id, f.projectPath, "")
 	entry.Name = "container-name"
 	f.defaultMgr.agents = append(f.defaultMgr.agents, entry)

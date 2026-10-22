@@ -1,0 +1,93 @@
+{
+  "autoProvide": false,
+  "connectionState": "connected",
+  "created": "2026-10-01T00:00:00Z",
+  "id": "b-1",
+  "name": "flat-k8s",
+  "runtimeTargetPresentation": {
+    "schemaVersion": 1,
+    "key": "k8s-nfs-1",
+    "name": "k8s nfs one",
+    "target": {
+      "type": "kubernetes",
+      "displayName": "Cluster A",
+      "namespace": "agents",
+      "gke": true,
+      "priorityClassName": "agents-high",
+      "sharedDirStorageClass": "standard-rwx",
+      "sharedDirSize": "40Gi",
+      "safeToEvict": false,
+      "sharedDirStorageBackend": "nfs",
+      "sharedDirStorageBackends": {
+        "cache": "nfs",
+        "data": "local"
+      },
+      "homeStorageBackend": "nfs"
+    },
+    "agentDefaults": {
+      "defaultHarnessConfig": "claude",
+      "imageRegistry": "registry.example/team",
+      "cloneDepth": "full",
+      "resources": {
+        "requests": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "limits": {
+          "cpu": "2",
+          "memory": "4Gi"
+        },
+        "disk": "20Gi"
+      },
+      "volumes": [
+        {
+          "target": "/mnt/a",
+          "readOnly": true,
+          "type": "nfs"
+        }
+      ],
+      "secrets": [
+        {
+          "key": "API_KEY",
+          "type": "file",
+          "description": "the API key"
+        }
+      ],
+      "harnessOverrides": {
+        "claude": {
+          "image": "img:1",
+          "imagePullPolicy": "Never",
+          "authSelectedType": "vertex-ai",
+          "user": "agent",
+          "envKeys": [
+            "EMPTY",
+            "TOKEN"
+          ],
+          "volumes": [
+            {
+              "target": "/mnt/b",
+              "readOnly": true,
+              "type": "nfs"
+            }
+          ],
+          "resources": {
+            "requests": {},
+            "limits": {
+              "memory": "8Gi"
+            }
+          }
+        },
+        "gemini": {
+          "envKeys": [
+            "OTHER"
+          ]
+        }
+      }
+    }
+  },
+  "runtimeTargetPresentationObservedAt": "2026-10-14T12:00:00Z",
+  "slug": "flat-k8s",
+  "status": "online",
+  "updated": "2026-10-01T00:00:00Z",
+  "version": "1.2.3"
+}

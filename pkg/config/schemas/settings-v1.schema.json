@@ -597,6 +597,29 @@
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
         },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods started on the runtime this entry describes, for example a sandbox class such as gvisor. A profile on this entry that sets one wins."
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1168,6 +1191,29 @@
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
         },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods whose runtime choice used this profile, over the runtime entry's values. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods whose runtime choice used this profile, over the runtime entry's values. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods whose runtime choice used this profile, for example a sandbox class such as gvisor. Wins over the runtime entry's value."
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1339,6 +1385,10 @@
               "type": "array",
               "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
               "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            },
+            "admin_web_sessions": {
+              "type": "string",
+              "description": "Turns on browser web sessions for the admin test identity kinds. The value is the hub id the setting is bound to and must equal this hub's resolved hub id; unset means off. Read once at startup. The hub refuses to start when it is set and --test-mode is not admin or super-admin (the test super-admin kind also needs super-admin), or when the value is another hub id. Admin web sessions are for systemd test hubs only: the Helm chart renders only --test-mode=member, so a Helm hub with this setting refuses to start."
             }
           },
           "additionalProperties": false
@@ -1540,6 +1590,20 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_RELAYMODE",
               "x-since": "1"
             },
+            "ingress": {
+              "type": "string",
+              "enum": ["proxy", "redirect"],
+              "description": "How a hub in external relay mode serves a conduit dial: 'proxy' (default) reverse-proxies the dial to the chosen relay, authenticated as relay-peer with HMAC peer authentication; 'redirect' answers with the relay's public URL. Read at startup; ignored in in_process mode.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INGRESS",
+              "x-since": "1"
+            },
+            "target_stream_deadlines": {
+              "type": "string",
+              "enum": ["off", "enforce"],
+              "description": "Whether targets enforce user streams' authorization deadlines locally: 'off' (default) or 'enforce'. Published to targets with the grant keys. The hub renews hub-held user streams to renewal-capable targets in both modes; with 'enforce', an open it cannot keep renewed is refused (503 unavailable, stream_renewal_unavailable). Requires the hub.conduit experiment.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_TARGETSTREAMDEADLINES",
+              "x-since": "1"
+            },
             "peer_secret": {
               "type": "string",
               "description": "Dedicated relay-peer secret, raw octets (no decoding; one trailing newline is removed), at least 32 octets with at least 16 distinct (generate with 'openssl rand -base64 32'): the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",
@@ -1636,31 +1700,36 @@
           "description": "Overrides hub_endpoint when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. http://host.containers.internal:8080 for local development).",
           "x-env-var": "SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT"
         },
+        "state_dir": {
+          "type": "string",
+          "description": "Base directory of the broker's runtime state: the async launch journal, dispatch attempts and pending env-gather. The broker uses <state_dir>/<broker-id>. Must be an absolute path or start with ~/. Empty: ~/.scion/runtime-broker-state. For crash recovery of in-flight launches, point it at a persistent local filesystem (not NFS). Flat Runtime Broker instances do not use it. Read at startup.",
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_STATEDIR"
+        },
         "broker_id": {
           "type": "string",
           "description": "Unique broker identifier (UUID). Auto-generated if empty.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_ID"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERID"
         },
         "auto_provide": {
           "type": "boolean",
           "description": "Automatically add as provider for new projects.",
-          "x-env-var": "SCION_SERVER_BROKER_AUTO_PROVIDE"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_AUTOPROVIDE"
         },
         "broker_name": {
           "type": "string",
           "description": "Human-readable broker name.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_NAME"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERNAME"
         },
         "broker_nickname": {
           "type": "string",
           "description": "Human-readable display name for the broker. Defaults to hostname.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_NICKNAME"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERNICKNAME"
         },
         "broker_token": {
           "type": "string",
           "description": "Token received when registering this broker with the Hub.",
           "x-sensitive": true,
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_TOKEN"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERTOKEN"
         },
         "allow_container_script_harnesses": {
           "type": "boolean",
@@ -2646,6 +2715,10 @@
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
         "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "accept_user_tokens": {
+          "type": "boolean",
+          "description": "issuer_type hub only: accept user access credentials (scion_token_kind user) from this peer hub. Default false."
+        },
         "allow_visitor_grants": {
           "type": "boolean",
           "description": "Let project owners grant visitor access to users of this issuer (issuer_type user or hub). Default false."

@@ -15,8 +15,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,17 +40,22 @@ func TestSandboxReconcile_ProbeOutputHolder(t *testing.T) {
 	sandboxReconcileProbeTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { sandboxReconcileProbeTimeout = prevTimeout })
 
+	// Every probed entry is kept (ptone/scion#4776); wantLog is the
+	// reconcile warning the probe's output must produce, so output written
+	// before the holder started is shown to be read back.
 	cases := []struct {
-		name string
-		tail string // runs after the holder is started
-		kept bool
+		name    string
+		tail    string // runs after the holder is started
+		wantLog string
 	}{
-		{"not-found exit leaves a holder", `echo "Error: sandbox \"$2\" not found" >&2; exit 1`, false},
-		{"passing probe leaves a holder", "exit 0", true},
-		{"probe hangs past the deadline with a holder", "exec sleep 60", true},
+		{"not-running exit leaves a holder", `echo "Error: sandbox $2 is not running" >&2; exit 1`, reconcileNotRunningLog},
+		{"passing probe leaves a holder", "exit 0", ""},
+		{"probe hangs past the deadline with a holder", "exec sleep 60", reconcileGenericLog},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 			pidFile := filepath.Join(t.TempDir(), "holder.pid")
 			t.Cleanup(func() { killPIDFile(pidFile) })
 			bin := writeMockBin(t, fmt.Sprintf("sleep 15 & echo $! > %q\n%s", pidFile, tc.tail))
@@ -69,8 +76,13 @@ func TestSandboxReconcile_ProbeOutputHolder(t *testing.T) {
 			if d := time.Since(begin); d > 5*time.Second {
 				t.Errorf("reconcile took %v, want well under the holder's 15 s: the probe waited on the held output", d)
 			}
-			if got := ss.get("sb-live") != nil; got != tc.kept {
-				t.Errorf("entry kept = %v, want %v", got, tc.kept)
+			if ss.get("sb-live") == nil {
+				t.Error("probed entry removed, want kept")
+			}
+			for _, frag := range []string{reconcileNotRunningLog, reconcileGenericLog} {
+				if got, want := strings.Contains(logs.String(), frag), frag == tc.wantLog; got != want {
+					t.Errorf("warning %q logged = %v, want %v (logs: %s)", frag, got, want, logs.String())
+				}
 			}
 		})
 	}

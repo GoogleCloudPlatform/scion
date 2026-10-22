@@ -28,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
@@ -141,15 +142,15 @@ When run outside an agent container, falls back to the system whoami command.`,
 		}
 
 		if rootOptions(cmd).JSONOutput() {
-			return outputJSON(result)
+			return writeJSONTo(cmd.OutOrStdout(), result)
 		}
 
 		if whoamiFull {
 			return printFullPlainText(cmd.OutOrStdout(), result)
 		}
 
-		fmt.Println(slug)
-		return nil
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), slug)
+		return err
 	},
 }
 
@@ -163,7 +164,7 @@ func buildWhoamiResult(slug, name string) WhoamiResult {
 		Name:        name,
 		ID:          id,
 		Project:     os.Getenv("SCION_PROJECT"),
-		ProjectID:   os.Getenv("SCION_PROJECT_ID"),
+		ProjectID:   projectkeys.ProjectIDFromEnv(os.Getenv),
 		Template:    os.Getenv("SCION_TEMPLATE_NAME"),
 		Harness:     os.Getenv("SCION_HARNESS"),
 		Model:       os.Getenv("SCION_MODEL"),

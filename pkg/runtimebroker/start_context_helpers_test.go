@@ -91,7 +91,7 @@ runtimes:
 	cfg.ForceRuntime = runtimeName
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return runtimeName }}
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // newTestServerForStartContextMultiProfile is newTestServerForStartContextRuntime
@@ -157,7 +157,7 @@ runtimes:
 	// whose profile names a different runtime than the broker's default.
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return defaultRuntimeName }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	// Once settings resolve the dispatch's profile to otherRuntimeName
 	// (differing from defaultRuntimeName), resolveManagerForOpts falls
 	// through to this resolver to construct it. A real "kubernetes" runtime
@@ -169,21 +169,32 @@ runtimes:
 	// non-default profile (otherProfile -> otherRuntimeName), so the
 	// resolver can report otherRuntimeName unconditionally rather than
 	// inspecting profileFlag.
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return otherRuntimeName }}
-	}
+	})
 	return srv, dotScion
 }
 
-// writeSavedAgentProfile writes an agent-info.json recording profile as the
-// agent's saved profile, the on-disk source agent.GetSavedProfile reads from
-// on start/restart dispatch (see pkg/agent/provision.go). dotScionDir is the
-// project's .scion directory (as returned alongside projectPath from the
-// test's own project setup), matching what config.GetAgentHomePath expects.
-// The record names a harness-config, as a provisioned agent's does: GetAgent
-// adopts an agent dir without scion-agent.json only from such a record and
-// refuses one without it (ptone/scion#4438).
+// writeSavedAgentProfile records profile as the agent's provisioned profile,
+// as provisioning does: in its broker-side image provenance record (the
+// source start/restart dispatch reads it from) and in its agent-info.json.
+// dotScionDir is the project's .scion directory (as returned alongside
+// projectPath from the test's own project setup), matching what
+// config.GetAgentHomePath expects. The record names a harness-config, as a
+// provisioned agent's does: GetAgent adopts an agent dir without
+// scion-agent.json only from such a record and refuses one without it
+// (ptone/scion#4438).
 func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string) {
+	t.Helper()
+	writeAgentInfoProfile(t, dotScionDir, agentName, profile)
+	writeProvisionedProfile(t, dotScionDir, agentName, profile)
+}
+
+// writeAgentInfoProfile writes only the agent's agent-info.json, recording
+// profile: an agent provisioned before image provenance was recorded, or
+// one whose agent-info.json was rewritten in its home. The broker never
+// takes the profile from it.
+func writeAgentInfoProfile(t *testing.T, dotScionDir, agentName, profile string) {
 	t.Helper()
 	agentHome := config.GetAgentHomePath(dotScionDir, agentName)
 	if err := os.MkdirAll(agentHome, 0o755); err != nil {
@@ -322,7 +333,7 @@ runtimes:
 	rt := &runtime.MockRuntime{
 		NameFunc: func() string { return runtimeName },
 	}
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // requireWorktreeGit skips the test when the host's git is too old for

@@ -135,6 +135,11 @@ type EntryPoint struct {
 	// example "scope=user"). Empty when the pattern alone identifies the
 	// branch.
 	Variant string
+
+	// Response classifies what the entry point's response body can carry.
+	// Empty means nothing that needs special handling. HTTP-like entry
+	// points only.
+	Response ResponseSensitivity
 }
 
 // EntryPointKind classifies entry point types.
@@ -168,6 +173,39 @@ var httpLikeEntryPoints = map[EntryPointKind]bool{
 	EntryPointHTTPRoute: true,
 	EntryPointWebSocket: true,
 	EntryPointSSE:       true,
+}
+
+// ResponseSensitivity classifies a response body that must not share a
+// compression context with other content. Every catalog entry point,
+// exemption and pending entry with a non-empty value must be covered by the
+// hub compression bypass (pkg/hub isCompressBypassPath);
+// TestCompressBypass_SensitiveResponsesFromCatalog enforces it.
+type ResponseSensitivity string
+
+const (
+	// ResponseCredential marks a response that can carry a credential:
+	// an access, refresh or identity token, a device code, a secret or
+	// environment value, a join, invite or one-time login code, or a
+	// signed object-store or capability URL. Agent create is tagged
+	// because its response carries the new agent's environment values
+	// and signed upload URLs.
+	ResponseCredential ResponseSensitivity = "credential"
+
+	// ResponseCallerSpecific marks a response that carries caller-specific
+	// configuration of a resource (for example the agent item).
+	ResponseCallerSpecific ResponseSensitivity = "caller_specific"
+)
+
+// validResponseSensitivities is the closed set of non-empty response
+// sensitivity values.
+var validResponseSensitivities = map[ResponseSensitivity]bool{
+	ResponseCredential:     true,
+	ResponseCallerSpecific: true,
+}
+
+// Valid reports whether r is empty or a recognized value.
+func (r ResponseSensitivity) Valid() bool {
+	return r == "" || validResponseSensitivities[r]
 }
 
 // PrincipalKind identifies a class of authenticated principal.
@@ -217,6 +255,11 @@ const (
 	// delegation a human issuer created (ptone/scion#4240). It acts for the
 	// delegation's grantor, within the delegation's single scope.
 	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
+	// CredentialFederatedUser is a trusted issuer's credential for one of
+	// its users, presented as the federation credential, whose identity is
+	// linked to a local federated account (a visitor). It names no
+	// unlinked federated user and no federated agent or service identity.
+	CredentialFederatedUser CredentialKind = "federated_user"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
@@ -230,6 +273,7 @@ var validCredentialKinds = map[CredentialKind]bool{
 	CredentialIdentityToken:      true,
 	CredentialDelegatedAgent:     true,
 	CredentialWorkloadDelegation: true,
+	CredentialFederatedUser:      true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an

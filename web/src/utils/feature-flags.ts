@@ -46,7 +46,7 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat']);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
 
 /**
  * Snapshot of `window.__SCION_FEATURES__` taken the first time
@@ -161,7 +161,23 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 }
 
 /**
- * Edit agent page (ptone/scion#3952): the Edit button on the agent page and
- * the /agents/{id}/edit route. Default OFF.
+ * Edit agent page (ptone/scion#3952): the by-tier grouping of its fields
+ * and the tier summary strip. The page and its by-function view are always
+ * available. Default ON.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
+
+/**
+ * Brokers area (broker UI Option A, slice A1): with the registered
+ * experiment hub.flat_runtime_brokers on, /brokers and /brokers/{id} render
+ * the new Brokers area; with it off, the existing pages. Presentation only:
+ * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
+ */
+export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
+
+/**
+ * Agent badges (ptone/scion#5503): the harness vendor mark and model size
+ * chip in the upper-left of agent cards, table rows and graph nodes.
+ * Presentation only. Default OFF.
+ */
+export const AGENT_BADGES_FLAG = 'web.agent_badges';

@@ -97,6 +97,11 @@ type AgentLaunch struct {
 	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
 	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden
 	EndReason string `json:"endReason,omitempty"`
+	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
+	// the resting phase the agent is treated as being in for a later start or
+	// resume (store.EffectiveRestingPhase), set only when it differs from the
+	// agent's phase.
+	ResumePhase string `json:"resumePhase,omitempty"`
 	// Deadline and RemainingSeconds are present only while the launch is
 	// active. RemainingSeconds is never negative.
 	Deadline         *time.Time `json:"deadline,omitempty"`
@@ -216,23 +221,25 @@ type ProjectProvider struct {
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// bucket, runtimes, harnesses and profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings, so this type has no fields for them
+// (ptone/scion#5360).
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
 	// keeps the stored value and an empty string clears it, so a client that
 	// does not manage the profile (the web settings page) cannot wipe it.
-	ActiveProfile          *string                `json:"activeProfile,omitempty"`
-	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
-	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
-	DefaultModel           string                 `json:"defaultModel,omitempty"`
-	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
-	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
-	AutoExposePortsEnabled *bool                  `json:"autoExposePortsEnabled,omitempty"`
-	Bucket                 *BucketConfig          `json:"bucket,omitempty"`
-	Runtimes               map[string]interface{} `json:"runtimes,omitempty"`
-	Harnesses              map[string]interface{} `json:"harnesses,omitempty"`
-	Profiles               map[string]interface{} `json:"profiles,omitempty"`
+	ActiveProfile          *string `json:"activeProfile,omitempty"`
+	DefaultTemplate        string  `json:"defaultTemplate,omitempty"`
+	DefaultHarnessConfig   string  `json:"defaultHarnessConfig,omitempty"`
+	DefaultHarnessAuth     string  `json:"defaultHarnessAuth,omitempty"`
+	DefaultModel           string  `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
+	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
 	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
@@ -341,13 +348,6 @@ type ProjectResourceList struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// BucketConfig represents cloud storage configuration.
-type BucketConfig struct {
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
-	Prefix   string `json:"prefix,omitempty"`
-}
-
 // RuntimeBroker represents a runtime broker from the Hub API.
 type RuntimeBroker struct {
 	ID              string              `json:"id"`
@@ -370,6 +370,14 @@ type RuntimeBroker struct {
 	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
 	// single runtime target; nil for a profile-based Runtime Broker.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported (FC4-a): its defaults for new
+	// agents, not the configuration of any agent and not a check of
+	// cluster permissions. Nil for a legacy Runtime Broker or when none
+	// was reported. RuntimeTargetPresentationObservedAt is when the Hub
+	// last saw it ("as reported at").
+	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -385,6 +393,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). Brokers
+	// that implement the async start (design wave 3, D2) set it in their
+	// heartbeat and registration. Mirrors store.BrokerCapabilities.AsyncStart.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (design #2703;
 	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
@@ -392,10 +405,26 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
+	// is its counterpart).
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982;
+	// store.BrokerCapabilities.ChangedFields is its counterpart).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890;
+	// store.BrokerCapabilities.ClearedFields is its counterpart).
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -408,6 +437,12 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
+	// layer of image_registry that beats every settings value for agents
+	// this broker runs (ptone/scion#3916). It is a node configuration value
+	// carried with the capabilities, not a feature flag; empty means none
+	// (store.BrokerCapabilities.NodeImageRegistry is its counterpart).
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -500,7 +535,7 @@ type User struct {
 	Status      string           `json:"status"`
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitempty"`
+	LastLogin   time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.

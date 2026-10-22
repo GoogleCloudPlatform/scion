@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 import {
   isLayer0Key,
@@ -486,6 +488,93 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ptone/scion#5311: the public settings are cached per page load; a save
+  // here can change them, so a successful save drops the cache and a failed
+  // one keeps it.
+  describe('public settings cache', () => {
+    async function saveWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config, {
+        putHandler: () =>
+          status < 400
+            ? { status, body: { reload: { applied: [] } } }
+            : { status, body: { error: { code: 'validation_error', message: 'bad' } } },
+      });
+      element = await createComponent((url, init) =>
+        requestUrl(url).includes('/api/v1/settings/public')
+          ? Promise.resolve(new Response('{}', { status: 200 }))
+          : handler(url, init)
+      );
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful save makes the next public settings read fetch again', async () => {
+      expect(await saveWith(200)).toBe(1);
+    });
+
+    it('a failed save keeps the cached public settings', async () => {
+      expect(await saveWith(422)).toBe(0);
+    });
+
+    /** Like saveWith, for a section reset (DELETE /admin/server-config/sections/{name}). */
+    async function resetWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config);
+      element = await createComponent((url, init) => {
+        if (requestUrl(url).includes('/api/v1/settings/public')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(status < 400 ? '{}' : 'bad', { status }));
+        }
+        return handler(url, init);
+      });
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      await (
+        element as unknown as { handleResetSection(name: string): Promise<void> }
+      ).handleResetSection('telemetry');
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, init]) =>
+            init?.method === 'DELETE' &&
+            requestUrl(u).includes('/api/v1/admin/server-config/sections/telemetry')
+        )
+      ).toBe(true);
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful section reset makes the next public settings read fetch again', async () => {
+      expect(await resetWith(200)).toBe(1);
+    });
+
+    it('a failed section reset keeps the cached public settings', async () => {
+      expect(await resetWith(500)).toBe(0);
+    });
+  });
+
   // ── Criterion 4: DB mode, Layer-0 read-only ──
 
   describe('Criterion 4 — DB mode, Layer-0 read-only', () => {
@@ -920,6 +1009,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field.querySelector('.broker-host-effective')).toBeNull();
     });
 
+    // ptone/scion#4418: the env-pin keys are the koanf keys
+    // server.broker.broker_name and broker_nickname, so an environment
+    // override locks those fields.
+    for (const [key, label, value] of [
+      ['server.broker.broker_name', 'Broker Name', 'env-broker'],
+      ['server.broker.broker_nickname', 'Broker Nickname', 'env-nick'],
+    ] as const) {
+      it(`an env override of ${key} locks the ${label} field`, async () => {
+        const config = withBrokerHost(undefined, { ...workstation, env_overrides: [key] });
+        config.server.broker[key.split('.').pop()!] = value;
+        element = await createComponent(createFetchHandler(config));
+        const fieldLabel = queryAll(element, 'sl-tab-panel[name="broker"] label').find(
+          (l) => l.textContent?.trim() === label
+        );
+        expect(fieldLabel).toBeDefined();
+        const field = fieldLabel!.closest('.form-field')!;
+        expect(field.querySelector('sl-input')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'environment variable'
+        );
+        expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe(value);
+      });
+    }
+
     it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
       element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
       const field = brokerHostField(element);
@@ -968,14 +1081,20 @@ describe('scion-page-admin-server-config', () => {
         },
       };
       let captured: Record<string, unknown> | null = null;
+      // default_runtime_broker is stored so clearing it is a change: the
+      // page sends it only when it differs from the loaded value
+      // (ptone/scion#3913).
       element = await createComponent(
-        createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
-          schemaResponse: schema,
-          putHandler: (body) => {
-            captured = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', default_runtime_broker: 'broker-1' }),
+          {
+            schemaResponse: schema,
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
       );
       const el = element as any;
       el.defaultTemplate = '';
@@ -1410,6 +1529,79 @@ describe('scion-page-admin-server-config', () => {
       expect(reloadBtn!.textContent).toContain('Reload');
     });
 
+    // ptone/scion#4467: the sections written before the conflict stay
+    // saved, so the banner lists their keys, a restart-required one included.
+    it('409 revision_conflict lists the keys saved before the conflict', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              message: 'One or more sections have been modified since the expected revision.',
+              applied: { endpoints: 4 },
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: ['server.hub.hub_name'],
+              pending_restart: ['server.hub.public_url'],
+              skipped: [{ key: 'server.notifications.slack', reason: 'invalid webhook URL' }],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const bannerEl = query(element, '.conflict-banner');
+      expect(bannerEl).not.toBeNull();
+      const saved = bannerEl!.querySelector('.conflict-saved');
+      expect(saved).not.toBeNull();
+      expect(saved!.querySelector('.pending-restart')?.textContent).toContain(
+        'applies after restart: server.hub.public_url'
+      );
+      expect(saved!.querySelector('.applied-keys')?.textContent).toContain(
+        'Applied now: server.hub.hub_name'
+      );
+      const skipped = saved!.querySelector('.skipped-keys')?.textContent ?? '';
+      expect(skipped).toContain('server.notifications.slack');
+      expect(skipped).toContain('invalid webhook URL');
+      // The changed sections and the Reload action are still there.
+      expect(bannerEl!.textContent).toContain('access');
+      expect(bannerEl!.querySelector('sl-button')?.textContent).toContain('Reload');
+    });
+
+    it('409 revision_conflict without saved keys shows no saved-keys block', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+              applied_keys: [],
+              pending_restart: [],
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(query(element, '.conflict-banner')).not.toBeNull();
+      expect(query(element, '.conflict-saved')).toBeNull();
+    });
+
     it('422 layer0_rejected renders safety net notice and logs keys', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1618,8 +1810,13 @@ describe('scion-page-admin-server-config', () => {
     ];
 
     it('buildFilePayload sends cleared string fields as "" (not omitted)', async () => {
+      // default_runtime_broker is sent only when it differs from the loaded
+      // value (ptone/scion#3913), so it is stored here for the clear to be
+      // a change.
       element = await createComponent(
-        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'file', default_runtime_broker: 'broker-1' })
+        )
       );
       const el = element as any;
       for (const [, prop] of clearable) el[prop] = '';
@@ -1965,6 +2162,9 @@ describe('scion-page-admin-server-config', () => {
     it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
       element = await createComponent(createFetchHandler(withLocal('file')));
       const el = element as any;
+      // A telemetry edit, so the save sends telemetry: an untouched file save
+      // leaves it out (ptone/scion#3913).
+      el.telemetryHubReportInterval = '30s';
       const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
       expect(telemetry).toHaveProperty('hub');
       expect(telemetry.local).toEqual(storedLocal);
@@ -1980,6 +2180,7 @@ describe('scion-page-admin-server-config', () => {
         )
       );
       const el = element as any;
+      el.telemetryHubReportInterval = '30s';
       const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
       expect(telemetry).toHaveProperty('hub');
       expect(telemetry).not.toHaveProperty('local');
@@ -2266,7 +2467,7 @@ describe('scion-page-admin-server-config', () => {
     // (admin-server-config.ts's handleSave: `this.settingsTier === 'db' ?
     // this.buildLayer1Payload() : this.buildFilePayload()`).
     it.each(['file', 'db'] as const)(
-      'both payload builders send agent_secrets.user_scope_only on save (settings_tier=%s)',
+      'both payload builders send agent_secrets.user_scope_only only when changed (settings_tier=%s)',
       async (settingsTier) => {
         let capturedPayload: Record<string, unknown> | null = null;
         const config = makeBaseConfig({
@@ -2283,14 +2484,22 @@ describe('scion-page-admin-server-config', () => {
           })
         );
 
-        const buttons = queryAll(element, 'sl-button[variant="primary"]');
-        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-        (saveBtn as HTMLElement).click();
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        const clickSave = async () => {
+          capturedPayload = null;
+          const buttons = queryAll(element!, 'sl-button[variant="primary"]');
+          const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+          (saveBtn as HTMLElement).click();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(capturedPayload).not.toBeNull();
+        };
 
-        expect(capturedPayload).not.toBeNull();
-        const agentSecrets = capturedPayload!.agent_secrets as Record<string, unknown> | undefined;
-        expect(agentSecrets?.user_scope_only).toBe(true);
+        // Untouched: the stored value is kept by omission (ptone/scion#3913).
+        await clickSave();
+        expect(capturedPayload!).not.toHaveProperty('agent_secrets');
+
+        (element as any).agentSecretsUserScopeOnly = false;
+        await clickSave();
+        expect(capturedPayload!.agent_secrets).toEqual({ user_scope_only: false });
       }
     );
 
@@ -2367,6 +2576,82 @@ describe('scion-page-admin-server-config', () => {
         (b.textContent ?? '').includes('environment variable')
       );
       expect(pinned.length).toBe(2);
+    });
+  });
+
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
     });
   });
 
@@ -3835,19 +4120,17 @@ describe('scion-page-admin-server-config', () => {
           // (ptone/scion#4416).
           github_app: { app_id: 0, api_base_url: '', installation_url: '' },
         },
+        // The telemetry switches and agent_secrets are tri-state and were
+        // not changed, so they are left out (ptone/scion#3724).
         telemetry: {
-          enabled: false,
           cloud: {
-            enabled: false,
             endpoint: '',
             protocol: '',
             provider: '',
             gcp_project_id: null,
-            cloud_logging: false,
           },
-          hub: { enabled: false, report_interval: '' },
+          hub: { report_interval: '' },
         },
-        agent_secrets: { user_scope_only: false },
       };
       expect(payloads).toEqual([expected, expected]);
       expect(query(element, '.validation-errors')).toBeNull();
@@ -4228,12 +4511,12 @@ describe('scion-page-admin-server-config', () => {
         clear: (el) => (el.brokerContainerHubEndpoint = ''),
         expected: '',
       },
-      'server.broker.name': {
+      'server.broker.broker_name': {
         clear: (el) => (el.brokerName = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_name'],
       },
-      'server.broker.nickname': {
+      'server.broker.broker_nickname': {
         clear: (el) => (el.brokerNickname = ''),
         expected: '',
         bodyPath: ['server', 'broker', 'broker_nickname'],
@@ -5122,5 +5405,292 @@ describe('hub observability export switches', () => {
     expect(query(element, `.hub-export-default[data-key="${TRACING_KEY}"]`)).not.toBeNull();
     await save(element);
     expect(bodies[0].server.hub.observability).toEqual({ tracing_enabled: true });
+  });
+});
+
+// Tri-state switches, stale values after a save, and the default runtime
+// broker (ptone/scion#3724, ptone/scion#3913): a save sends only what the
+// user changed, an unset switch stays unset, and a reload shows what GET
+// returns now.
+describe('settings the page must not write unless changed (ptone/scion#3913)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Schema with every tri-state section editable in the db tier. */
+  function triStateSchema(): Record<string, unknown> {
+    const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+    return {
+      sections: {
+        ...sections,
+        telemetry: {
+          koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.cloud_logging'],
+        },
+        auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+        quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        agent_secrets: { koanf_paths: ['agent_secrets.user_scope_only'] },
+        agent_defaults: {
+          koanf_paths: [...sections.agent_defaults.koanf_paths, 'default_runtime_broker'],
+        },
+      },
+    };
+  }
+
+  /** A GET with no telemetry, auto_expose_ports, quotas or agent_secrets. */
+  function unsetConfig(tier: 'db' | 'file', extra: Record<string, unknown> = {}) {
+    const cfg = makeBaseConfig({ settings_tier: tier, ...extra }) as Record<string, unknown>;
+    delete cfg.telemetry;
+    return cfg;
+  }
+
+  async function render(
+    cfg: Record<string, unknown>,
+    bodies: Array<Record<string, any>>,
+    brokers: unknown[] = []
+  ): Promise<HTMLElement> {
+    const base = createFetchHandler(cfg, {
+      schemaResponse: triStateSchema(),
+      putHandler: (body) => {
+        bodies.push(body);
+        return { status: 200, body: { reload: { applied: [] } } };
+      },
+    });
+    return createComponent((url, init) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.includes('/api/v1/runtime-brokers')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ brokers }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return base(url, init);
+    });
+  }
+
+  async function save(el: HTMLElement): Promise<void> {
+    const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  const TRI_STATE_FIELDS = [
+    'autoExposePortsEnabled',
+    'enforceBrokerQuotas',
+    'agentSecretsUserScopeOnly',
+    'telemetryEnabled',
+    'telemetryCloudEnabled',
+    'telemetryCloudCloudLogging',
+    'telemetryHubEnabled',
+  ];
+
+  it.each(['db', 'file'] as const)(
+    'untouched unset switches load as null and are not sent (settings_tier=%s)',
+    async (tier) => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(unsetConfig(tier), bodies);
+      const el = element as any;
+      for (const f of TRI_STATE_FIELDS) expect(el[f], f).toBeNull();
+
+      await save(element);
+      expect(bodies).toHaveLength(1);
+      const body = bodies[0]!;
+      expect(body).not.toHaveProperty('auto_expose_ports');
+      expect(body).not.toHaveProperty('quotas');
+      expect(body).not.toHaveProperty('agent_secrets');
+      expect(body.telemetry ?? {}).not.toHaveProperty('enabled');
+      expect(body.telemetry?.cloud ?? {}).not.toHaveProperty('enabled');
+      expect(body.telemetry?.cloud ?? {}).not.toHaveProperty('cloud_logging');
+      expect(body.telemetry?.hub ?? {}).not.toHaveProperty('enabled');
+    }
+  );
+
+  it('a file-mode save with nothing set sends no empty telemetry blocks', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('file'), bodies);
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty('telemetry');
+
+    (element as any).telemetryCloudEndpoint = 'otel.example.com:4317';
+    await save(element);
+    expect(bodies[1]!.telemetry).toEqual({ cloud: { endpoint: 'otel.example.com:4317' } });
+  });
+
+  it('a file-mode save keeps a telemetry block that holds only false or null', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    // unsetConfig drops telemetry, so the stored block is set afterwards.
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.telemetryCloudEnabled).toBe(true);
+    // Use default on the stored cloud switch, and set the unset hub switch off.
+    el.telemetryCloudEnabled = null;
+    el.telemetryHubEnabled = false;
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.telemetry.cloud).toEqual({ enabled: null });
+    expect(bodies[0]!.telemetry.hub).toEqual({ enabled: false });
+  });
+
+  it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('db'), bodies);
+    expect(
+      query(element, '[data-tristate-unset="auto_expose_ports.enabled"]')?.textContent
+    ).toContain('Not set');
+    const sw = query(element, 'sl-switch[data-tristate="auto_expose_ports.enabled"]') as
+      | (HTMLElement & { checked: boolean })
+      | null;
+    expect(sw).not.toBeNull();
+    sw!.checked = true;
+    sw!.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).autoExposePortsEnabled).toBe(true);
+    sw!.checked = false;
+    sw!.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).autoExposePortsEnabled).toBeNull();
+
+    await save(element);
+    expect(bodies[0]).not.toHaveProperty('auto_expose_ports');
+  });
+
+  it('setting an unset switch sends its value', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('db'), bodies);
+    (element as any).autoExposePortsEnabled = false;
+    (element as any).telemetryCloudEnabled = true;
+    await save(element);
+    expect(bodies[0]!.auto_expose_ports).toEqual({ enabled: false });
+    expect(bodies[0]!.telemetry.cloud.enabled).toBe(true);
+  });
+
+  it.each(['db', 'file'] as const)(
+    'Use default on a stored switch sends null, which clears it (settings_tier=%s)',
+    async (tier) => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig(tier, {
+          auto_expose_ports: { enabled: true },
+          quotas: { enforce_broker_quotas: false },
+        }),
+        bodies
+      );
+      expect((element as any).autoExposePortsEnabled).toBe(true);
+      const useDefault = query(
+        element,
+        'sl-button[data-tristate-default="auto_expose_ports.enabled"]'
+      ) as HTMLElement | null;
+      expect(useDefault).not.toBeNull();
+      useDefault!.click();
+      await (element as any).updateComplete;
+      expect((element as any).autoExposePortsEnabled).toBeNull();
+
+      await save(element);
+      expect(bodies[0]!.auto_expose_ports).toEqual({ enabled: null });
+      // The other stored switch was not touched and is left out.
+      expect(bodies[0]).not.toHaveProperty('quotas');
+    }
+  );
+
+  it('a reload after a save that removed sub-blocks shows them as unset, not the old values', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      auto_expose_ports: { enabled: true },
+      telemetry: {
+        enabled: true,
+        cloud: { enabled: true, endpoint: 'otel.example.com:4317' },
+        hub: { enabled: true, report_interval: '30s' },
+      },
+    }) as Record<string, any>;
+    cfg.server.broker = { broker_name: 'old-broker', port: 9800 };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.autoExposePortsEnabled).toBe(true);
+    expect(el.telemetryCloudEndpoint).toBe('otel.example.com:4317');
+    expect(el.brokerName).toBe('old-broker');
+
+    // The server no longer returns these blocks after the save.
+    delete cfg.auto_expose_ports;
+    delete cfg.telemetry;
+    delete cfg.server.broker;
+    el.defaultTemplate = 'claude';
+    await save(element);
+    expect(bodies).toHaveLength(1);
+
+    for (const f of TRI_STATE_FIELDS.filter((f) => f !== 'enforceBrokerQuotas')) {
+      expect(el[f], f).toBeNull();
+    }
+    expect(el.telemetryCloudEndpoint).toBe('');
+    expect(el.telemetryHubReportInterval).toBe('');
+    expect(el.brokerName).toBe('');
+    expect(el.brokerPort).toBe(0);
+  });
+
+  describe('default runtime broker', () => {
+    const BROKERS = [
+      { id: 'b-1111', name: 'My Laptop', slug: 'my-laptop', status: 'online' },
+      { id: 'b-2222', name: 'Build Box', slug: 'build-box', status: 'online' },
+    ];
+
+    it.each(['db', 'file'] as const)(
+      'a stored slug shows as the broker ID but an unrelated save does not rewrite it (settings_tier=%s)',
+      async (tier) => {
+        const bodies: Array<Record<string, any>> = [];
+        element = await render(
+          unsetConfig(tier, { default_runtime_broker: 'my-laptop' }),
+          bodies,
+          BROKERS
+        );
+        const el = element as any;
+        expect(el.defaultRuntimeBroker).toBe('b-1111');
+
+        el.defaultTemplate = 'claude';
+        await save(element);
+        expect(bodies).toHaveLength(1);
+        expect(bodies[0]!.default_template).toBe('claude');
+        expect(bodies[0]).not.toHaveProperty('default_runtime_broker');
+      }
+    );
+
+    it('a changed selection is sent', async () => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig('db', { default_runtime_broker: 'my-laptop' }),
+        bodies,
+        BROKERS
+      );
+      (element as any).defaultRuntimeBroker = 'b-2222';
+      await save(element);
+      expect(bodies[0]!.default_runtime_broker).toBe('b-2222');
+    });
+
+    it('clearing a stored value sends ""', async () => {
+      const bodies: Array<Record<string, any>> = [];
+      element = await render(
+        unsetConfig('db', { default_runtime_broker: 'my-laptop' }),
+        bodies,
+        BROKERS
+      );
+      (element as any).defaultRuntimeBroker = '';
+      await save(element);
+      expect(bodies[0]!.default_runtime_broker).toBe('');
+    });
   });
 });

@@ -34,7 +34,9 @@ import (
 
 // Tests for ptone/scion#4223 (TS-3): the template API no longer writes the
 // template config or image, a PUT replaces only metadata, and nothing writes
-// Config.Telemetry from an uploaded scion-agent.yaml.
+// Config.Telemetry from an uploaded scion-agent.yaml. TS-3b
+// (ptone/scion#4224) dropped the config and image columns; the 400
+// refusals stay.
 
 // templateWriteVariant is one of the four template write routes.
 type templateWriteVariant struct {
@@ -124,8 +126,8 @@ var pinnedTemplateFields = []pinnedTemplateField{
 	{"SourceURL", `"sourceUrl":"https://evil.example.com/src"`, func(t *store.Template) any { return t.SourceURL }},
 	{"CreatedBy", `"createdBy":"evil-creator"`, func(t *store.Template) any { return t.CreatedBy }},
 	{"Created", `"created":"2001-01-01T00:00:00Z"`, func(t *store.Template) any { return t.Created.UTC().Truncate(time.Second) }},
-	{"Config kept by a null config", `"config":null`, func(t *store.Template) any { return t.Config }},
-	{"Image kept by an empty image", `"image":""`, func(t *store.Template) any { return t.Image }},
+	{"AgentConfig kept by a null config", `"config":null`, func(t *store.Template) any { return t.AgentConfig }},
+	{"AgentConfig kept by an empty image", `"image":""`, func(t *store.Template) any { return t.AgentConfig }},
 }
 
 // seedPinnedTemplate stores a template with a distinctive value in every
@@ -141,8 +143,6 @@ func seedPinnedTemplate(t *testing.T, s store.Store, name, scope, scopeID, owner
 		Description:          "original description",
 		Harness:              "claude",
 		DefaultHarnessConfig: "claude-web",
-		Image:                "legacy-image:v1",
-		Config:               &store.TemplateConfig{Model: "legacy-model", Env: map[string]string{"LEGACY": "1"}},
 		AgentConfig:          &api.ScionConfig{Model: "snapshot-model"},
 		ContentHash:          "sha256:original",
 		Scope:                scope,
@@ -243,10 +243,18 @@ func TestTemplateUpload_NoConfigTelemetryAndBackendParity(t *testing.T) {
 	push := func(t *testing.T, srv *Server, s store.Store) *store.Template {
 		t.Helper()
 		tmpl := seedCommittedTemplate(t, srv, "parity-tpl", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": "default_harness_config: claude-web\n", "a.md": "a"})
+		// The row has no config column left to write (ptone/scion#4224);
+		// the stored template serializes without a config or image member.
 		check := func(step string) {
 			t.Helper()
-			if got := getTemplate(t, s, tmpl.ID); got.Config != nil {
-				t.Errorf("after %s: Config = %+v, want nil (no Config.Telemetry write)", step, got.Config)
+			data, err := json.Marshal(getTemplate(t, s, tmpl.ID))
+			require.NoError(t, err)
+			var keys map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &keys))
+			for _, k := range []string{"config", "image"} {
+				if _, ok := keys[k]; ok {
+					t.Errorf("after %s: stored template has a %q member: %s", step, k, data)
+				}
 			}
 		}
 
@@ -281,8 +289,6 @@ func TestTemplateUpload_NoConfigTelemetryAndBackendParity(t *testing.T) {
 		name string
 		get  func(*store.Template) any
 	}{
-		{"Config", func(t *store.Template) any { return t.Config }},
-		{"Image", func(t *store.Template) any { return t.Image }},
 		{"AgentConfig", func(t *store.Template) any { return t.AgentConfig }},
 		{"Harness", func(t *store.Template) any { return t.Harness }},
 		{"DefaultHarnessConfig", func(t *store.Template) any { return t.DefaultHarnessConfig }},
@@ -299,26 +305,25 @@ func TestTemplateUpload_NoConfigTelemetryAndBackendParity(t *testing.T) {
 	assert.Equal(t, "claude-web", local.AgentConfig.DefaultHarnessConfig)
 }
 
-// Acceptance 4: the validate report lists a row with a stored Config or
-// Image under stored_config, naming the fields, and not a clean row.
-func TestAdminValidateResources_ListsStoredTemplateConfig(t *testing.T) {
+// The validate report has no stored_config kind any more: the template row
+// has no stored config or image to report (ptone/scion#4224). The
+// environment_keys kind still lists a template whose snapshot sets
+// environment keys, and only that kind is reported.
+func TestAdminValidateResources_NoStoredConfigKind(t *testing.T) {
 	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
 	ctx := context.Background()
 
-	both := &store.Template{
-		ID: api.NewUUID(), Name: "stored-both", Slug: "stored-both", Scope: store.TemplateScopeGlobal,
-		Status: store.TemplateStatusActive, Image: "legacy:1",
-		Config: &store.TemplateConfig{Model: "opus", Env: map[string]string{"K": "v"}},
-	}
-	imageOnly := &store.Template{
-		ID: api.NewUUID(), Name: "stored-image", Slug: "stored-image", Scope: store.TemplateScopeUser,
-		ScopeID: DevUserID, OwnerID: DevUserID, Status: store.TemplateStatusActive, Image: "legacy:2",
+	envKeys := &store.Template{
+		ID: api.NewUUID(), Name: "env-keys", Slug: "env-keys", Scope: store.TemplateScopeGlobal,
+		Status:      store.TemplateStatusActive,
+		AgentConfig: &api.ScionConfig{Image: "snap:1", Model: "opus"},
 	}
 	clean := &store.Template{
-		ID: api.NewUUID(), Name: "stored-clean", Slug: "stored-clean", Scope: store.TemplateScopeGlobal,
-		Status: store.TemplateStatusActive, Config: &store.TemplateConfig{},
+		ID: api.NewUUID(), Name: "clean", Slug: "clean", Scope: store.TemplateScopeGlobal,
+		Status:      store.TemplateStatusActive,
+		AgentConfig: &api.ScionConfig{Model: "opus"},
 	}
-	for _, tmpl := range []*store.Template{both, imageOnly, clean} {
+	for _, tmpl := range []*store.Template{envKeys, clean} {
 		require.NoError(t, s.CreateTemplate(ctx, tmpl))
 	}
 
@@ -329,21 +334,49 @@ func TestAdminValidateResources_ListsStoredTemplateConfig(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), w.Body.String())
 
-	byName := map[string]TemplateConfigFinding{}
+	var mine []TemplateConfigFinding
 	for _, f := range resp.TemplateConfigFindings {
-		if f.Kind == TemplateFindingStoredConfig {
-			byName[f.Template] = f
+		assert.Equal(t, TemplateFindingEnvironmentKeys, f.Kind, "the only finding kind: %+v", f)
+		if f.TemplateID == envKeys.ID || f.TemplateID == clean.ID {
+			mine = append(mine, f)
 		}
 	}
-	require.Len(t, byName, 2, "findings: %+v", resp.TemplateConfigFindings)
-	b := byName["stored-both"]
-	assert.Equal(t, both.ID, b.TemplateID)
-	assert.Equal(t, store.TemplateScopeGlobal, b.Scope)
-	assert.Equal(t, []string{"config.env", "config.model", "image"}, b.Keys)
-	assert.Contains(t, b.Message, "stored-both")
-	i := byName["stored-image"]
-	assert.Equal(t, imageOnly.ID, i.TemplateID)
-	assert.Equal(t, store.TemplateScopeUser, i.Scope)
-	assert.Equal(t, DevUserID, i.ScopeID)
-	assert.Equal(t, []string{"image"}, i.Keys)
+	require.Len(t, mine, 1, "findings: %+v", resp.TemplateConfigFindings)
+	f := mine[0]
+	assert.Equal(t, "env-keys", f.Template)
+	assert.Equal(t, envKeys.ID, f.TemplateID)
+	assert.Equal(t, []string{"image"}, f.Keys)
+	assert.NotContains(t, w.Body.String(), "stored_config")
+}
+
+// Template clone copies no config or image: the clone's response and stored
+// row have neither member, and the clone's job config is re-derived from the
+// copied files (ptone/scion#4224).
+func TestTemplateClone_NoConfigOrImage(t *testing.T) {
+	srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+	ctx := context.Background()
+	src := seedCommittedTemplate(t, srv, "clone-src", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": "default_harness_config: claude-web\nmodel: opus\n"})
+
+	body, err := json.Marshal(CloneTemplateRequest{Name: "clone-dst", Scope: store.TemplateScopeGlobal})
+	require.NoError(t, err)
+	w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+src.ID+"/clone", "application/json", body)
+	mustStatus(t, w, http.StatusCreated)
+
+	var keys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &keys), w.Body.String())
+	for _, k := range []string{"config", "image"} {
+		assert.NotContains(t, keys, k, "clone response: %s", w.Body.String())
+	}
+
+	clone, err := s.GetTemplateBySlug(ctx, "clone-dst", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	assert.Equal(t, src.ID, clone.BaseTemplate)
+	require.NotNil(t, clone.AgentConfig, "the clone's snapshot is re-derived from the copied files")
+	assert.Equal(t, "opus", clone.AgentConfig.Model)
+	data, err := json.Marshal(clone)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &keys))
+	for _, k := range []string{"config", "image"} {
+		assert.NotContains(t, keys, k, "stored clone: %s", data)
+	}
 }

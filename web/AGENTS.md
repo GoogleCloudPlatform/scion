@@ -53,6 +53,7 @@ Note: The Vite dev server only serves client assets. API calls and SSE require t
 | `npm run dev` | Start Vite dev server with hot reload |
 | `npm run build` | Build client assets for production |
 | `npm run build:dev` | Build client assets in development mode |
+| `npm run test:move-sourcemaps` | Test `scripts/move-sourcemaps.mjs`, which the builds run to move source maps from `dist/client` (embedded and served) to `dist/sourcemaps` (not served) |
 | `npm run lint` | Check for linting errors |
 | `npm run lint:fix` | Auto-fix linting errors |
 | `npm run format` | Format code with Prettier |

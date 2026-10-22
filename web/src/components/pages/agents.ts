@@ -23,6 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 
 import type {
   PageData,
@@ -73,6 +74,8 @@ import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
+import { agentBadges } from '../shared/agent-badges.js';
+import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
@@ -1792,8 +1795,16 @@ export class ScionPageAgents extends LitElement {
   }
 
   private renderGrid(items: Agent[]): TemplateResult {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
-      <div class="resource-grid">${items.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="resource-grid">
+        ${repeat(
+          items,
+          (agent) => agent.id,
+          (agent) => this.renderAgentCard(agent, badgesOn)
+        )}
+      </div>
     `;
   }
 
@@ -2002,13 +2013,13 @@ export class ScionPageAgents extends LitElement {
     ></scion-deletion-banner>`;
   }
 
-  private renderAgentCard(agent: Agent) {
+  private renderAgentCard(agent: Agent, badgesOn: boolean) {
     return html`
       <div class="agent-card">
         <div class="agent-header">
           <div>
             <h3 class="resource-name">
-              <sl-icon name="cpu"></sl-icon>
+              ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>
@@ -2074,6 +2085,8 @@ export class ScionPageAgents extends LitElement {
   }
 
   private renderTable(items: Agent[]): TemplateResult {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="resource-table-container">
         <table>
@@ -2105,19 +2118,23 @@ export class ScionPageAgents extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${items.map((agent) => this.renderAgentRow(agent))}
+            ${repeat(
+              items,
+              (agent) => agent.id,
+              (agent) => this.renderAgentRow(agent, badgesOn)
+            )}
           </tbody>
         </table>
       </div>
     `;
   }
 
-  private renderAgentRow(agent: Agent) {
+  private renderAgentRow(agent: Agent, badgesOn: boolean) {
     return html`
       <tr>
         <td>
           <span class="name-cell">
-            <sl-icon name="cpu"></sl-icon>
+            ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>

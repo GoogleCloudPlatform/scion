@@ -1583,10 +1583,10 @@ Exactly one list is.
    NOT among them: PersistentPreRunE clears requiresProject for the server
    subtree before that check runs.
 
-   --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Its only consumer on
-   this path is config.RequireImageRegistry, and that call is skipped whenever
-   requiresRegistry is cleared for the hub or server subtree; LoadSettings does
-   not take it.
+   --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Nothing on this path
+   reads it: its former consumer, the CLI's image_registry pre-check
+   (config.RequireImageRegistry in cmd/root.go), was removed with local mode,
+   and LoadSettings does not take it.
    Every other consumer of the variable is a client subcommand. So it is INERT on
    server start today and I could find no harm for it - by axis (d), that is the
    same answer that removed the updateStrategy refusal. It survives here on the
@@ -2423,14 +2423,14 @@ than the registry check in scion-hub.settings can see from the rendered file:
   not at all.
 
   SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY with an empty literal
-  value. requireImageRegistryForBroker (cmd/server_foreground.go) skips an empty
-  variable, so neither is a registry source. For SCION_IMAGE_REGISTRY it is
-  worse: the env layer has already replaced the settings file's image_registry
-  with "", so a registry the chart rendered is erased and the hub refuses to
-  start. The maintenance name is refused alongside it so that the two names
-  follow one rule. An entry with no value and no valueFrom is the same empty
-  string to Kubernetes and is refused too. A non-empty value is accepted and
-  counts as a registry source; a valueFrom is accepted unread.
+  value. An empty variable is not a registry: SCION_IMAGE_REGISTRY is read
+  directly as the node env layer and an empty value sets nothing, and
+  SCION_MAINTENANCE_IMAGE_REGISTRY applies only to maintenance builds. An
+  empty entry is almost always a mistake, so it is refused rather than
+  ignored, and the two names follow one rule. An entry with no value and no
+  valueFrom is the same empty string to Kubernetes and is refused too. A
+  non-empty SCION_IMAGE_REGISTRY is accepted and counts as a registry source;
+  a valueFrom is accepted unread.
 
 Applied here, in the extraEnv guard, so that it also holds under
 config.existingSecret, where the settings file is the operator's but the
@@ -2450,7 +2450,7 @@ Refused in every form, literal or valueFrom, matched case-insensitively.
 {{- fail "hub.extraEnv may not set SCION_SERVER_HUB_CLASS: it would override server.hub.class, an input of the hub's --test-mode gate, without the chart seeing it. Set the hub class with hub.hubClass (or in your own settings file under config.existingSecret)." }}
 {{- end }}
 {{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
-{{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it. An empty SCION_IMAGE_REGISTRY also erases the rendered one, because the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go) and image_registry becomes \"\", so the hub refuses to start with no registry. Remove the entry, or give it a non-empty value or a valueFrom." $name) }}
+{{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it, and SCION_MAINTENANCE_IMAGE_REGISTRY applies only to maintenance image builds. Remove the entry, or give it a non-empty value or a valueFrom (for agent images, set SCION_IMAGE_REGISTRY or agents.imageRegistry)." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
@@ -3545,32 +3545,31 @@ runServerForeground calls requireImageRegistryForBroker
 is not configured, but the runtime broker requires it" unless one of these is
 non-empty:
 
-  1. SCION_IMAGE_REGISTRY in the environment
-  2. SCION_MAINTENANCE_IMAGE_REGISTRY in the environment
-  3. image_registry resolved from settings.yaml for the active profile
-     (VersionedSettings.ResolveImageRegistry: profiles.<active>.image_registry,
-     else the top-level image_registry)
+  1. SCION_IMAGE_REGISTRY in the environment (the node env layer, read
+     directly, never folded into the settings)
+  2. image_registry resolved from settings.yaml for the active profile
+     (profiles.<active>.image_registry, else the top-level image_registry)
 
 Those are the cases accepted here, read off the merged document and
-hub.extraEnv: agents.imageRegistry and config.extra both reach (3), and an
-extraEnv entry of either name with a non-empty value or a valueFrom reaches (1)
-or (2). A valueFrom is accepted unread because the chart cannot see what it
-resolves to.
+hub.extraEnv: agents.imageRegistry and config.extra both reach (2), and an
+SCION_IMAGE_REGISTRY extraEnv entry with a non-empty value or a valueFrom
+reaches (1). A valueFrom is accepted unread because the chart cannot see what
+it resolves to. SCION_MAINTENANCE_IMAGE_REGISTRY applies to maintenance image
+builds only (ptone/scion#3916) and is not a source; a render that sets only it
+is refused with a message naming the replacement.
 
-This is only correct because scion-hub.assertExtraEnv refuses the two env
-entries that would change (3) behind the file's back. The koanf env layer in
+This is only correct because scion-hub.assertExtraEnv refuses the env entry
+that would change (2) behind the file's back: the koanf env layer in
 LoadVersionedSettings applies SCION_* variables over settings.yaml, so
-SCION_ACTIVE_PROFILE would change which profile (3) reads, and an empty
-SCION_IMAGE_REGISTRY would overwrite the top-level image_registry with "". The
-chart refuses SCION_ACTIVE_PROFILE in hub.extraEnv outright and refuses either
-registry variable with an empty literal value, rather than modelling the env
-layer's precedence here. The hub's DB-backed settings overlay does not count: startRuntimeBroker
-installs it after this check has run.
+SCION_ACTIVE_PROFILE would change which profile (2) reads. The chart refuses
+it in hub.extraEnv outright rather than modelling the env layer's precedence
+here. The hub's DB-backed settings do not count: a hosted hub checks before
+they are read.
 
-Not the check described under --profile in the reserved-flag comments. That
-one, config.RequireImageRegistry in cmd/root.go, is skipped for the server
-subtree and never runs on hub start; this one is in the server itself and
-always does.
+Not the CLI pre-check the reserved-flag comments mention under --profile.
+That one, config.RequireImageRegistry in cmd/root.go, was removed with local
+mode and never ran on hub start; this one is in the server itself and always
+does.
 
 Not evaluated under config.existingSecret, where this define is not reached:
 the settings file is the operator's, and the hub's own check still applies.
@@ -3588,10 +3587,13 @@ same render is reported first.
 {{- end }}
 {{- end }}
 {{- $registryFromEnv := false }}
+{{- $maintenanceRegistryOnly := false }}
 {{- range $entry := .Values.hub.extraEnv }}
-{{- if has (toString (dig "name" "" $entry)) (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY") }}
 {{- if or (dig "value" "" $entry) (dig "valueFrom" "" $entry) }}
+{{- if eq (toString (dig "name" "" $entry)) "SCION_IMAGE_REGISTRY" }}
 {{- $registryFromEnv = true }}
+{{- else if eq (toString (dig "name" "" $entry)) "SCION_MAINTENANCE_IMAGE_REGISTRY" }}
+{{- $maintenanceRegistryOnly = true }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -3600,7 +3602,10 @@ same render is reported first.
 empty SCION_IMAGE_REGISTRY, or SCION_ACTIVE_PROFILE moving off the profile read
 here - and this Secret renders before the Deployment that runs the guard. */}}
 {{- include "scion-hub.assertExtraEnv" . }}
-{{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv." }}
+{{- if $maintenanceRegistryOnly }}
+{{- fail "hub.extraEnv sets only SCION_MAINTENANCE_IMAGE_REGISTRY, which now applies only to maintenance image builds and no longer supplies the agent image registry. Set agents.imageRegistry, image_registry through config.extra, or SCION_IMAGE_REGISTRY through hub.extraEnv (keep SCION_MAINTENANCE_IMAGE_REGISTRY only if maintenance builds need a different registry)." }}
+{{- end }}
+{{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY through hub.extraEnv." }}
 {{- end }}
 {{- $rendered }}
 {{- end }}

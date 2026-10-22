@@ -25,9 +25,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -40,9 +40,9 @@ func runtimeProfileFixture(t *testing.T, provenance string) (*Server, string, st
 	t.Helper()
 	srv := newDiscoveryTestServer(t, "docker")
 	srv.config.ForceRuntime = ""
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		return fakeKubernetesRuntime("cluster-saved", "ns-saved")
-	}
+	})
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, `schema_version: "1"
 active_profile: prov
@@ -81,47 +81,77 @@ runtimes:
 // TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime pins
 // ptone/scion#1799: rewriting agent-info.json's profile to one that selects
 // a different runtime must not change the runtime a provenance-recorded
-// agent starts on. That runtime decides whether the bare-image local-exists
-// check runs, and so whether the image_registry prefix is applied.
+// agent starts on, and the provisioned profile also outranks the Hub-sent
+// one. That runtime decides whether the bare-image local-exists check runs,
+// and so whether the image_registry prefix is applied.
 func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 	srv, projectDir, id := runtimeProfileFixture(t, `{"version": 1, "profile": "prov"}`)
 
-	saved := agent.GetSavedProfile(id, projectDir)
-	if saved != "saved" {
-		t.Fatalf("precondition: saved profile = %q, want saved", saved)
-	}
-	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: saved}
-	runtimeOpts, _, err := runtimeSelectionOpts(opts, id, false)
+	hub := "saved"
+	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}
+	runtimeOpts, provisioned, err := runtimeSelectionOpts(opts, id, false, hubSentProfile(projectDir, id, false, "", &hub))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtimeOpts.Profile != "prov" {
-		t.Fatalf("runtime-selection profile = %q, want the provisioned profile prov", runtimeOpts.Profile)
+	if runtimeOpts.Profile != "prov" || !provisioned {
+		t.Fatalf("runtime-selection profile = %q (provisioned %v), want the provisioned profile prov", runtimeOpts.Profile, provisioned)
 	}
 	if opts.Profile != "saved" {
 		t.Fatalf("runtimeSelectionOpts must not mutate opts; Profile = %q", opts.Profile)
 	}
-	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "docker" {
+	if _, rtType := managerAndType(srv.resolveManagerForOpts(runtimeOpts)); rtType != "docker" {
 		t.Fatalf("runtime = %q, want the provisioned docker runtime", rtType)
 	}
 }
 
-// TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile: with no provenance
-// file the saved profile still selects the runtime (pre-existing
-// behaviour), which also shows the saved profile would otherwise apply.
-func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
+// TestRuntimeSelectionOpts_LegacyAgentProfile: an agent with no provenance
+// file takes the Hub-sent profile; agent-info.json (which names "saved")
+// is never read. With no Hub profile (an older Hub) the provisioned agent
+// is refused with a re-provision error.
+func TestRuntimeSelectionOpts_LegacyAgentProfile(t *testing.T) {
 	srv, projectDir, id := runtimeProfileFixture(t, "")
-	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: agent.GetSavedProfile(id, projectDir)}
-	runtimeOpts, _, err := runtimeSelectionOpts(opts, id, false)
-	if err != nil {
-		t.Fatal(err)
+	opts := api.StartOptions{Name: id, ProjectPath: projectDir}
+	run := func(hub *string) (api.StartOptions, error) {
+		runtimeOpts, _, err := runtimeSelectionOpts(opts, id, false, hubSentProfile(projectDir, id, false, "", hub))
+		return runtimeOpts, err
 	}
-	if runtimeOpts.Profile != "saved" {
-		t.Fatalf("legacy runtime-selection profile = %q, want the saved profile", runtimeOpts.Profile)
-	}
-	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "kubernetes" {
-		t.Fatalf("legacy runtime = %q, want kubernetes", rtType)
-	}
+
+	t.Run("hub profile selects the runtime", func(t *testing.T) {
+		hub := "saved"
+		runtimeOpts, err := run(&hub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtimeOpts.Profile != "saved" {
+			t.Fatalf("legacy runtime-selection profile = %q, want the Hub-sent profile", runtimeOpts.Profile)
+		}
+		if _, rtType := managerAndType(srv.resolveManagerForOpts(runtimeOpts)); rtType != "kubernetes" {
+			t.Fatalf("legacy runtime = %q, want kubernetes", rtType)
+		}
+	})
+	t.Run("empty hub profile ignores agent-info.json", func(t *testing.T) {
+		hub := ""
+		runtimeOpts, err := run(&hub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtimeOpts.Profile != "" {
+			t.Fatalf("legacy runtime-selection profile = %q, want none (agent-info.json names saved)", runtimeOpts.Profile)
+		}
+	})
+	t.Run("no hub profile is refused", func(t *testing.T) {
+		_, err := run(nil)
+		var me *profileRecordMissingError
+		if !errors.As(err, &me) || !strings.Contains(err.Error(), "re-provision the agent") {
+			t.Fatalf("err = %v, want a re-provision profileRecordMissingError", err)
+		}
+	})
+	t.Run("not yet provisioned agent without hub profile runs with none", func(t *testing.T) {
+		runtimeOpts, _, err := runtimeSelectionOpts(api.StartOptions{Name: "fresh", ProjectPath: projectDir}, "fresh", false, hubSentProfile(projectDir, "fresh", false, "", nil))
+		if err != nil || runtimeOpts.Profile != "" {
+			t.Fatalf("fresh agent: profile %q, err %v; want none, nil", runtimeOpts.Profile, err)
+		}
+	})
 }
 
 // TestRuntimeSelectionOpts_UnusableProvenanceFailsClosed: an existing but
@@ -130,7 +160,7 @@ func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 func TestRuntimeSelectionOpts_UnusableProvenanceFailsClosed(t *testing.T) {
 	for _, body := range []string{"{not json", `{"profile": "prov"}`} {
 		_, projectDir, id := runtimeProfileFixture(t, body)
-		_, _, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}, id, false)
+		_, _, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}, id, false, func() (string, error) { return "saved", nil })
 		if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 			t.Fatalf("body %q: expected an actionable provenance error, got %v", body, err)
 		}
@@ -173,7 +203,7 @@ func strconvQuote(s string) string { return strconv.Quote(s) }
 
 // classificationFixture is a docker-default broker whose project maps
 // profile "local" to docker and "kube" to Kubernetes; the agent's
-// agent-info.json saves "kube". provenance, when
+// agent-info.json names "kube". provenance, when
 // non-empty, is written as the agent's broker-side image-provenance.json.
 func classificationFixture(t *testing.T, provenance string) (*Server, string, string) {
 	t.Helper()
@@ -181,7 +211,7 @@ func classificationFixture(t *testing.T, provenance string) (*Server, string, st
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", "kube", "kubernetes")
 	const name = "classified-agent"
-	writeSavedAgentProfile(t, dotScion, name, "kube")
+	writeAgentInfoProfile(t, dotScion, name, "kube")
 	agentDir := filepath.Join(dotScion, "agents", name)
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
@@ -196,9 +226,17 @@ func classificationFixture(t *testing.T, provenance string) (*Server, string, st
 
 func buildClassifiedStart(t *testing.T, srv *Server, dotScion, name string) (*startContext, error) {
 	t.Helper()
+	return buildClassifiedStartWithHubProfile(t, srv, dotScion, name, nil)
+}
+
+// buildClassifiedStartWithHubProfile is buildClassifiedStart for a start
+// request carrying hubProfile (nil: none, as from an older Hub).
+func buildClassifiedStartWithHubProfile(t *testing.T, srv *Server, dotScion, name string, hubProfile *string) (*startContext, error) {
+	t.Helper()
 	return srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        name,
 		ProjectPath: dotScion,
+		HubProfile:  hubProfile,
 		// No SCION_METADATA_MODE: the runtime-dependent default applies, the
 		// path an older hub that omits the mode would take.
 		ResolvedEnv: map[string]string{},
@@ -240,18 +278,42 @@ func TestBuildStartContext_CorruptProvenanceIsConflict(t *testing.T) {
 	}
 }
 
-// TestBuildStartContext_LegacyAgentClassifiesWithSavedProfile: an agent with
-// no provenance file keeps the saved-profile classification (pre-existing
-// behaviour): Kubernetes, with its passthrough default.
-func TestBuildStartContext_LegacyAgentClassifiesWithSavedProfile(t *testing.T) {
-	srv, dotScion, name := classificationFixture(t, "")
-	sc, err := buildClassifiedStart(t, srv, dotScion, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sc.RuntimeType != "kubernetes" || sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
-		t.Errorf("legacy classification = runtime %q mode %q, want kubernetes / passthrough", sc.RuntimeType, sc.Opts.Env["SCION_METADATA_MODE"])
-	}
+// TestBuildStartContext_LegacyAgentClassification: an agent with no
+// provenance file is classified with the Hub-sent profile ("kube":
+// Kubernetes, with its passthrough default); agent-info.json, which also
+// names "kube", is not read (an empty Hub profile classifies docker), and
+// with no Hub profile the provisioned agent is refused with 409.
+func TestBuildStartContext_LegacyAgentClassification(t *testing.T) {
+	t.Run("hub profile", func(t *testing.T) {
+		srv, dotScion, name := classificationFixture(t, "")
+		hub := "kube"
+		sc, err := buildClassifiedStartWithHubProfile(t, srv, dotScion, name, &hub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.RuntimeType != "kubernetes" || sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+			t.Errorf("legacy classification = runtime %q mode %q, want kubernetes / passthrough", sc.RuntimeType, sc.Opts.Env["SCION_METADATA_MODE"])
+		}
+	})
+	t.Run("empty hub profile", func(t *testing.T) {
+		srv, dotScion, name := classificationFixture(t, "")
+		hub := ""
+		sc, err := buildClassifiedStartWithHubProfile(t, srv, dotScion, name, &hub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.RuntimeType != "docker" {
+			t.Errorf("legacy classification = runtime %q, want docker (agent-info.json must not select kube)", sc.RuntimeType)
+		}
+	})
+	t.Run("no hub profile", func(t *testing.T) {
+		srv, dotScion, name := classificationFixture(t, "")
+		_, err := buildClassifiedStart(t, srv, dotScion, name)
+		sce, ok := err.(*startContextError)
+		if !ok || sce.Status != http.StatusConflict || !strings.Contains(sce.Message, "re-provision the agent") {
+			t.Fatalf("expected a 409 re-provision startContextError, got %v", err)
+		}
+	})
 }
 
 // TestRejectRuntimeClassificationMismatch: the late check refuses a start
@@ -285,6 +347,7 @@ func TestRejectRuntimeClassificationMismatch(t *testing.T) {
 // refused with 409 before the agent is stopped.
 func TestRestartAgent_ClassificationMismatchIsConflictBeforeStop(t *testing.T) {
 	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	changeLocalProfileAfterFirstLoad(srv)
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
 		t.Fatal("Start must not run on a classification mismatch")
 		return "", nil
@@ -351,12 +414,12 @@ runtimes:
 		ID: id, Name: id, ContainerID: id, ProjectPath: dotScion, Phase: "running",
 		Labels: map[string]string{"scion.name": id},
 	}}}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	auxCalls := 0
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		auxCalls++
 		return &runtime.ErrorRuntime{Err: errors.New("auxiliary runtime must not be used in this test")}
-	}
+	})
 	return srv, mgr, &auxCalls, dotScion
 }
 
@@ -392,16 +455,39 @@ func TestStartRestart_ProvenanceProfileSelectsDefaultRuntime(t *testing.T) {
 	}
 }
 
-// TestStartRestart_LegacyAgentFollowsSavedProfile: without a provenance file
-// the saved (agent-info.json) profile still selects the runtime, so the
-// Kubernetes auxiliary runtime is resolved (pre-existing behaviour).
-func TestStartRestart_LegacyAgentFollowsSavedProfile(t *testing.T) {
+// TestStartRestart_LegacyAgentProfile: without a provenance file the
+// Hub-sent profile selects the runtime ("saved" resolves the Kubernetes
+// auxiliary runtime). agent-info.json, which also names "saved", is not
+// read: an empty Hub profile runs on the default runtime, and a request
+// from an older Hub that sends no profile is refused with 409 before any
+// Stop or Start.
+func TestStartRestart_LegacyAgentProfile(t *testing.T) {
 	for _, op := range []string{"start", "restart"} {
-		t.Run(op, func(t *testing.T) {
+		t.Run(op+"/hub profile", func(t *testing.T) {
 			srv, _, auxCalls, dotScion := handlerProfileFixture(t, "")
-			postAgentOp(t, srv, op, `{"projectPath": `+strconvQuote(dotScion)+`}`)
+			postAgentOp(t, srv, op, `{"profile": "saved", "projectPath": `+strconvQuote(dotScion)+`}`)
 			if *auxCalls == 0 {
-				t.Errorf("expected the saved profile's Kubernetes runtime to be resolved for a legacy agent")
+				t.Errorf("expected the Hub-sent profile's Kubernetes runtime to be resolved for a legacy agent")
+			}
+		})
+		t.Run(op+"/empty hub profile", func(t *testing.T) {
+			srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, "")
+			w := postAgentOp(t, srv, op, `{"profile": "", "projectPath": `+strconvQuote(dotScion)+`}`)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+			}
+			if *auxCalls != 0 || mgr.startCalls != 1 {
+				t.Errorf("expected the default runtime to start the agent (agent-info.json must not select Kubernetes), got aux=%d start=%d", *auxCalls, mgr.startCalls)
+			}
+		})
+		t.Run(op+"/no hub profile", func(t *testing.T) {
+			srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, "")
+			w := postAgentOp(t, srv, op, `{"projectPath": `+strconvQuote(dotScion)+`}`)
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "has no broker-side record of its settings profile") || !strings.Contains(w.Body.String(), "re-provision the agent") {
+				t.Fatalf("expected 409 re-provision, got %d: %s", w.Code, w.Body.String())
+			}
+			if mgr.stopCalls != 0 || mgr.startCalls != 0 || *auxCalls != 0 {
+				t.Errorf("expected no Stop/Start/runtime resolution, got stop=%d start=%d aux=%d", mgr.stopCalls, mgr.startCalls, *auxCalls)
 			}
 		})
 	}
@@ -435,6 +521,10 @@ const sharedHubProjectID = "44444444-4444-4444-4444-444444444444"
 func sharedRestartFixture(t *testing.T, external bool) (*Server, *mockManager, *int) {
 	t.Helper()
 	srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, `{"version": 1, "profile": "saved"}`)
+	// The container carries the Hub project ID, so the project-scoped
+	// restart resolves it without a project-id file at its path.
+	mgr.agents[0].ProjectID = sharedHubProjectID
+	mgr.agents[0].Labels[projectkeys.LabelProjectID] = sharedHubProjectID
 	// (No project-id marker is written here: the broker locates the external
 	// root from the Hub project ID alone. That a marker which disagrees does not
 	// move it is pinned by config's TestAgentsRootForProject_HubProjectIDWinsOverMarker.)
@@ -502,14 +592,14 @@ func TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict(t *testing.T) 
 
 // TestStartAgent_ClassificationMismatchIsConflictBeforeStart is the start twin
 // of TestRestartAgent_ClassificationMismatchIsConflictBeforeStop. The legacy
-// agent's saved profile ("saved") maps to Kubernetes when buildStartContext
+// agent's Hub-sent profile ("saved") maps to Kubernetes when buildStartContext
 // classifies the runtime; the auxiliary-runtime resolution that classification
 // triggers then remaps "saved" to docker in the project settings, so the
 // handler's authoritative resolution sees docker. The two disagree, so the
 // start is refused with 409 and Start never runs.
 func TestStartAgent_ClassificationMismatchIsConflictBeforeStart(t *testing.T) {
 	srv, mgr, _, dotScion := handlerProfileFixture(t, "")
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		writeProjectSettings(t, dotScion, `schema_version: "1"
 active_profile: prov
 profiles:
@@ -522,8 +612,8 @@ runtimes:
     type: docker
 `)
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	}
-	body := `{"projectPath": ` + strconvQuote(dotScion) + `, "resolvedEnv": {"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}`
+	})
+	body := `{"profile": "saved", "projectPath": ` + strconvQuote(dotScion) + `, "resolvedEnv": {"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 	w := postAgentOp(t, srv, "start", body)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "differs from the runtime it resolves to") {
 		t.Fatalf("expected 409 classification mismatch, got %d: %s", w.Code, w.Body.String())
@@ -559,7 +649,7 @@ func TestRuntimeSelectionOpts_ExternalStateWithoutSharedFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := api.StartOptions{Name: name, ProjectPath: dotScion, Profile: "saved", HubProjectID: sharedHubProjectID}
-	runtimeOpts, _, err := runtimeSelectionOpts(opts, name, true)
+	runtimeOpts, _, err := runtimeSelectionOpts(opts, name, true, func() (string, error) { return "saved", nil })
 	if err != nil {
 		t.Fatal(err)
 	}

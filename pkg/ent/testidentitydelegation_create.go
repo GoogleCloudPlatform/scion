@@ -74,6 +74,48 @@ func (_c *TestIdentityDelegationCreate) SetExpiresAt(v time.Time) *TestIdentityD
 	return _c
 }
 
+// SetGrantorKind sets the "grantor_kind" field.
+func (_c *TestIdentityDelegationCreate) SetGrantorKind(v testidentitydelegation.GrantorKind) *TestIdentityDelegationCreate {
+	_c.mutation.SetGrantorKind(v)
+	return _c
+}
+
+// SetNillableGrantorKind sets the "grantor_kind" field if the given value is not nil.
+func (_c *TestIdentityDelegationCreate) SetNillableGrantorKind(v *testidentitydelegation.GrantorKind) *TestIdentityDelegationCreate {
+	if v != nil {
+		_c.SetGrantorKind(*v)
+	}
+	return _c
+}
+
+// SetHubID sets the "hub_id" field.
+func (_c *TestIdentityDelegationCreate) SetHubID(v string) *TestIdentityDelegationCreate {
+	_c.mutation.SetHubID(v)
+	return _c
+}
+
+// SetNillableHubID sets the "hub_id" field if the given value is not nil.
+func (_c *TestIdentityDelegationCreate) SetNillableHubID(v *string) *TestIdentityDelegationCreate {
+	if v != nil {
+		_c.SetHubID(*v)
+	}
+	return _c
+}
+
+// SetMarkerCreatedAt sets the "marker_created_at" field.
+func (_c *TestIdentityDelegationCreate) SetMarkerCreatedAt(v time.Time) *TestIdentityDelegationCreate {
+	_c.mutation.SetMarkerCreatedAt(v)
+	return _c
+}
+
+// SetNillableMarkerCreatedAt sets the "marker_created_at" field if the given value is not nil.
+func (_c *TestIdentityDelegationCreate) SetNillableMarkerCreatedAt(v *time.Time) *TestIdentityDelegationCreate {
+	if v != nil {
+		_c.SetMarkerCreatedAt(*v)
+	}
+	return _c
+}
+
 // SetRevokedAt sets the "revoked_at" field.
 func (_c *TestIdentityDelegationCreate) SetRevokedAt(v time.Time) *TestIdentityDelegationCreate {
 	_c.mutation.SetRevokedAt(v)
@@ -155,6 +197,14 @@ func (_c *TestIdentityDelegationCreate) defaults() {
 		v := testidentitydelegation.DefaultLabel
 		_c.mutation.SetLabel(v)
 	}
+	if _, ok := _c.mutation.GrantorKind(); !ok {
+		v := testidentitydelegation.DefaultGrantorKind
+		_c.mutation.SetGrantorKind(v)
+	}
+	if _, ok := _c.mutation.HubID(); !ok {
+		v := testidentitydelegation.DefaultHubID
+		_c.mutation.SetHubID(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := testidentitydelegation.DefaultID()
 		_c.mutation.SetID(v)
@@ -203,6 +253,17 @@ func (_c *TestIdentityDelegationCreate) check() error {
 	}
 	if _, ok := _c.mutation.ExpiresAt(); !ok {
 		return &ValidationError{Name: "expires_at", err: errors.New(`ent: missing required field "TestIdentityDelegation.expires_at"`)}
+	}
+	if _, ok := _c.mutation.GrantorKind(); !ok {
+		return &ValidationError{Name: "grantor_kind", err: errors.New(`ent: missing required field "TestIdentityDelegation.grantor_kind"`)}
+	}
+	if v, ok := _c.mutation.GrantorKind(); ok {
+		if err := testidentitydelegation.GrantorKindValidator(v); err != nil {
+			return &ValidationError{Name: "grantor_kind", err: fmt.Errorf(`ent: validator failed for field "TestIdentityDelegation.grantor_kind": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.HubID(); !ok {
+		return &ValidationError{Name: "hub_id", err: errors.New(`ent: missing required field "TestIdentityDelegation.hub_id"`)}
 	}
 	return nil
 }
@@ -267,6 +328,18 @@ func (_c *TestIdentityDelegationCreate) createSpec() (*TestIdentityDelegation, *
 	if value, ok := _c.mutation.ExpiresAt(); ok {
 		_spec.SetField(testidentitydelegation.FieldExpiresAt, field.TypeTime, value)
 		_node.ExpiresAt = value
+	}
+	if value, ok := _c.mutation.GrantorKind(); ok {
+		_spec.SetField(testidentitydelegation.FieldGrantorKind, field.TypeEnum, value)
+		_node.GrantorKind = value
+	}
+	if value, ok := _c.mutation.HubID(); ok {
+		_spec.SetField(testidentitydelegation.FieldHubID, field.TypeString, value)
+		_node.HubID = value
+	}
+	if value, ok := _c.mutation.MarkerCreatedAt(); ok {
+		_spec.SetField(testidentitydelegation.FieldMarkerCreatedAt, field.TypeTime, value)
+		_node.MarkerCreatedAt = &value
 	}
 	if value, ok := _c.mutation.RevokedAt(); ok {
 		_spec.SetField(testidentitydelegation.FieldRevokedAt, field.TypeTime, value)
@@ -401,6 +474,15 @@ func (u *TestIdentityDelegationUpsertOne) UpdateNewValues() *TestIdentityDelegat
 		}
 		if _, exists := u.create.mutation.ExpiresAt(); exists {
 			s.SetIgnore(testidentitydelegation.FieldExpiresAt)
+		}
+		if _, exists := u.create.mutation.GrantorKind(); exists {
+			s.SetIgnore(testidentitydelegation.FieldGrantorKind)
+		}
+		if _, exists := u.create.mutation.HubID(); exists {
+			s.SetIgnore(testidentitydelegation.FieldHubID)
+		}
+		if _, exists := u.create.mutation.MarkerCreatedAt(); exists {
+			s.SetIgnore(testidentitydelegation.FieldMarkerCreatedAt)
 		}
 	}))
 	return u
@@ -678,6 +760,15 @@ func (u *TestIdentityDelegationUpsertBulk) UpdateNewValues() *TestIdentityDelega
 			}
 			if _, exists := b.mutation.ExpiresAt(); exists {
 				s.SetIgnore(testidentitydelegation.FieldExpiresAt)
+			}
+			if _, exists := b.mutation.GrantorKind(); exists {
+				s.SetIgnore(testidentitydelegation.FieldGrantorKind)
+			}
+			if _, exists := b.mutation.HubID(); exists {
+				s.SetIgnore(testidentitydelegation.FieldHubID)
+			}
+			if _, exists := b.mutation.MarkerCreatedAt(); exists {
+				s.SetIgnore(testidentitydelegation.FieldMarkerCreatedAt)
 			}
 		}
 	}))

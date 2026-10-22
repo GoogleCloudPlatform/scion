@@ -17,6 +17,7 @@
     "shared/agent-tree-view.test.ts",
     "shared/deep-active-element.test.ts",
     "pages/chat-palette-shortcut.test.ts",
+    "pages/chat-palette-footer.test.ts",
     "pages/chat-hub-members.test.ts",
     "shared/chat/chat-thread-peer-project.test.ts",
     "shared/chat/chat-space-rail-unread-dms.test.ts",
@@ -35,7 +36,11 @@
     "pages/login.test.ts",
     "pages/admin-server-config-env-keys.test.ts",
     "pages/broker-capabilities-contract.test.ts",
-    "pages/admin-maintenance-reissue-scopes.test.ts"
+    "pages/admin-maintenance-reissue-scopes.test.ts",
+    "shared/log-viewer-batching.test.ts",
+    "shared/access-boundary-preview-expiry.test.ts",
+    "shared/code-editor-language.test.ts",
+    "shared/code-editor-language-race.test.ts"
   ],
   "exclude": []
 }

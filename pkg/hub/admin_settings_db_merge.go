@@ -129,6 +129,11 @@ type sectionMergeOptions struct {
 	// (seeded) row after env-overridden keys are dropped (endpoints drops
 	// the bootstrap hub_name, which applies without being written).
 	seededBase func(base map[string]json.RawMessage)
+	// requestFilter, when set, edits the request (its decoded document and
+	// body presence) against the base read from the same row, after the
+	// base rules above (endpoints drops an image_registry echo;
+	// filterEndpointsImageRegistry).
+	requestFilter func(base, next map[string]json.RawMessage, fp *fieldPresence)
 	// baseOut, when set, receives the base document from the same row
 	// read the merge uses, after the base rules above and the schema
 	// drops the write applies to carried keys, before the request is
@@ -176,6 +181,13 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		}
 	default:
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
+	}
+
+	if opts.requestFilter != nil {
+		if next == nil {
+			next = map[string]json.RawMessage{}
+		}
+		opts.requestFilter(base, next, fp)
 	}
 
 	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
@@ -594,13 +606,11 @@ func modelledSectionKey(section, sentKey string) (string, bool) {
 // store their keys at the koanf path of the same name, either bare
 // (agent_defaults: default_template) or under the section name
 // (telemetry: telemetry.cloud); for those, the key is modelled when that
-// path is one of the section's registered koanf paths. The few keys that
-// follow neither rule are listed in sectionKeyKoanfPathExtra.
+// path is one of the section's registered koanf paths. Keys that follow
+// neither rule (notifications: notification_channels) are mapped in
+// opsettings.
 func sectionKeyKoanfPath(section, key string) string {
 	if p := opsettings.KoanfPathFromSectionKey(section, key); p != "" {
-		return p
-	}
-	if p := sectionKeyKoanfPathExtra[section][key]; p != "" {
 		return p
 	}
 	sec := opsettings.SectionByName(section)
@@ -613,14 +623,6 @@ func sectionKeyKoanfPath(section, key string) string {
 		}
 	}
 	return ""
-}
-
-// sectionKeyKoanfPathExtra maps the section keys whose koanf path follows
-// neither rule of sectionKeyKoanfPath and that opsettings does not map
-// (KoanfPathFromSectionKey): notifications stores notification_channels
-// at server.notification_channels.
-var sectionKeyKoanfPathExtra = map[string]map[string]string{
-	"notifications": {"notification_channels": "server.notification_channels"},
 }
 
 // dropEnvOverriddenSectionKeys removes the stored keys of a section whose

@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -97,6 +99,19 @@ type Role struct {
 
 	// Streams schedules the re-checks of the user streams this relay holds.
 	Streams *StreamScheduler
+
+	// untrustedIngress counts dials whose ingress headers were not trusted.
+	untrustedIngress atomic.Uint64
+	// invalidIngressCap counts trusted ingress dials whose lifetime cap
+	// header was absent or invalid (cause ingress_cap_invalid).
+	invalidIngressCap atomic.Uint64
+
+	// tunnels are the tunnels this relay opened for its user sessions.
+	tunnels tunnelTable
+	// testHookTunnelEnded, when set (tests only, before any tunnel opens),
+	// runs after a tunnel's splice has ended and the tunnel is untracked
+	// and forgotten.
+	testHookTunnelEnded func()
 }
 
 // heldSession is one relay-held session's hub admission.
@@ -172,11 +187,89 @@ func writeUnavailable(w http.ResponseWriter, message, reason string) {
 	}})
 }
 
-// ServeHTTP serves GET /api/v1/conduit: the relay asks the hub to admit the
-// dialer with the credential headers it presented, and serves the session
-// as the principal the hub admitted. A hub refusal is passed on unchanged;
-// an unreachable hub is 503.
+// ServeHTTP serves GET /api/v1/conduit on the relay's public listener: a
+// direct dial. The ingress headers are never trusted here: a dial that
+// carries either is logged and counted (cause ingress_header_untrusted)
+// and admitted as direct.
 func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(relay.HeaderIngressInstance) != "" || r.Header.Get(relay.HeaderIngressLifetimeCap) != "" {
+		ro.ingressHeaderUntrusted("public listener")
+	}
+	ro.serve(w, r, relay.ArrivalDirect, "", 0)
+}
+
+// ServeIngress serves GET /api/v1/conduit proxied by a hub ingress over a
+// relay-peer leg (the internal listener). peer is the relay-peer id the
+// caller already authenticated as (relay.Relay.AuthenticatePeer). The dial
+// is an ingress arrival only when the ingress instance header names that
+// same peer; otherwise it is refused with 403 (cause
+// ingress_header_untrusted), never served as direct. Only then is the
+// ingress lifetime cap header read: a valid value lowers the session's
+// lifetime cap (never raises it); an absent or invalid one leaves the
+// relay's own cap (cause ingress_cap_invalid). The header is not covered
+// by the relay-peer MAC, and needs not be, since it can only shorten a
+// session (design §3.9, v2.21.53).
+func (ro *Role) ServeIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	instance := r.Header.Get(relay.HeaderIngressInstance)
+	if instance == "" || len(instance) > relay.MaxIngressInstanceLen || instance != peer {
+		ro.ingressHeaderUntrusted("ingress leg")
+		http.Error(w, "ingress instance missing or not the authenticated peer", http.StatusForbidden)
+		return
+	}
+	lifetimeCap, ok := ingressLifetimeCap(r.Header.Get(relay.HeaderIngressLifetimeCap))
+	if !ok {
+		n := ro.invalidIngressCap.Add(1)
+		ro.log.Warn("Conduit relay: ingress lifetime cap header absent or invalid; using this relay's cap",
+			"cause", "ingress_cap_invalid", "ingress_instance", instance, "count", n)
+	}
+	ro.serve(w, r, relay.ArrivalIngress, instance, lifetimeCap)
+}
+
+// ingressLifetimeCap parses the ingress lifetime cap header: a decimal
+// count of whole seconds (ASCII digits only, no sign) within
+// config.ConduitMinLifetimeCap and config.ConduitMaxLifetimeCap. It
+// reports false, with 0, for an absent or invalid value.
+func ingressLifetimeCap(v string) (time.Duration, bool) {
+	if v == "" || len(v) > 5 {
+		return 0, false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return 0, false
+		}
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
+	if d < config.ConduitMinLifetimeCap || d > config.ConduitMaxLifetimeCap {
+		return 0, false
+	}
+	return d, true
+}
+
+// ingressHeaderUntrusted logs and counts ingress headers this relay did
+// not trust (cause ingress_header_untrusted).
+func (ro *Role) ingressHeaderUntrusted(where string) {
+	n := ro.untrustedIngress.Add(1)
+	ro.log.Warn("Conduit relay: ingress headers not trusted on this dial", "cause", "ingress_header_untrusted", "where", where, "count", n)
+}
+
+// IngressHeaderUntrustedCount returns how many dials carried ingress
+// headers this relay did not trust.
+func (ro *Role) IngressHeaderUntrustedCount() uint64 { return ro.untrustedIngress.Load() }
+
+// IngressCapInvalidCount returns how many trusted ingress dials carried
+// an absent or invalid lifetime cap header.
+func (ro *Role) IngressCapInvalidCount() uint64 { return ro.invalidIngressCap.Load() }
+
+// serve admits a dial: the relay asks the hub to admit the dialer with the
+// credential headers it presented and how the dial arrived, and serves the
+// session as the principal the hub admitted, with lifetimeCap (0: the
+// relay's own cap) lowering the session's lifetime cap. A hub refusal is passed on
+// unchanged; an unreachable hub is 503.
+func (ro *Role) serve(w http.ResponseWriter, r *http.Request, arrival, ingressInstance string, lifetimeCap time.Duration) {
 	if r.URL.Path != ConduitPath {
 		http.NotFound(w, r)
 		return
@@ -187,7 +280,8 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ro.relay.Admitting() {
-		writeUnavailable(w, "This relay is not admitting conduit sessions", "conduit_not_serving")
+		// Always before Admit, so an ingress may re-pick on this reason.
+		writeUnavailable(w, "This relay is not admitting conduit sessions", relay.ReasonRelayNotAdmitting)
 		return
 	}
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") || !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
@@ -203,6 +297,8 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Host:            r.Host,
 		RawQuery:        r.URL.RawQuery,
 		Headers:         relay.ForwardCredentialHeaders(r.Header),
+		Arrival:         arrival,
+		IngressInstance: ingressInstance,
 	}, &adm)
 	var refusal *relay.HubRefusal
 	switch {
@@ -226,13 +322,15 @@ func (ro *Role) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := relay.Principal{
-		Kind:      adm.PrincipalKind,
-		ID:        adm.PrincipalID,
-		ProjectID: adm.ProjectID,
-		ExecScope: adm.ExecScope,
-		Agent:     relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
-		SessionID: sessionID,
-		GrantKeys: relay.WelcomeGrantKeys(adm.GrantKeys),
+		Kind:            adm.PrincipalKind,
+		ID:              adm.PrincipalID,
+		ProjectID:       adm.ProjectID,
+		ExecScope:       adm.ExecScope,
+		Agent:           relay.AgentIncarnationFacts{LaunchID: adm.AgentLaunchID, Generation: adm.AgentGeneration},
+		SessionID:       sessionID,
+		GrantKeys:       relay.WelcomeGrantKeys(adm.GrantKeys),
+		LifetimeCap:     lifetimeCap,
+		IngressInstance: ingressInstance,
 	}
 	if adm.TokenRunID != "" {
 		p.TokenRun = &relay.TokenRunBinding{RunID: adm.TokenRunID, Enforce: adm.TokenRunEnforce}
@@ -272,24 +370,74 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 	if err != nil {
 		return fail(http.StatusBadRequest, "invalid_request", "malformed request")
 	}
-	var out relay.HubRPCResponse
-	err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{AdmissionToken: f.ro.token(f.sessionID), RPC: b}, &out)
-	var refusal *relay.HubRefusal
-	switch {
-	case err == nil:
-		resp := &conduitv1.RpcResponse{}
-		if err := proto.Unmarshal(out.RPC, resp); err != nil {
-			return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+	// A tunnel the hub authorized is opened here (openTunnel). When its
+	// target turns out stale, the request goes back to the hub with that
+	// target excluded (or, for an owner relay that could not be reached,
+	// every session that relay holds), and the hub re-checks and mints for
+	// the session it resolves next.
+	isTunnel := req.GetMethod() == http.MethodPost && req.GetPath() == relay.TunnelsRPCPath
+	var (
+		exclude, excludeRelays []string
+		openTunnels            int
+	)
+	if isTunnel {
+		// The hub applies the session's tunnel cap to this count.
+		var release func()
+		openTunnels, release = f.ro.tunnels.reserve(f.sessionID)
+		defer release()
+	}
+	for attempt := 0; ; attempt++ {
+		var out relay.HubRPCResponse
+		err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{
+			AdmissionToken: f.ro.token(f.sessionID),
+			RPC:            b,
+			ExcludeTargets: exclude,
+			ExcludeRelays:  excludeRelays,
+			OpenTunnels:    openTunnels,
+			// Every tunnel this relay opens goes to its stream
+			// scheduler (openTunnel), so it lists tunnel_recheck.
+			Features: []string{relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck},
+		}, &out)
+		var refusal *relay.HubRefusal
+		switch {
+		case err == nil:
+			resp := &conduitv1.RpcResponse{}
+			if err := proto.Unmarshal(out.RPC, resp); err != nil {
+				return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+			}
+			if out.Tunnel == nil {
+				return resp
+			}
+			if !isTunnel {
+				// An instruction to open a tunnel answers only a tunnel
+				// request.
+				return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+			}
+			opened, err := f.ro.openTunnel(ctx, f.sessionID, resp, out.Tunnel)
+			var stale *tunnelStaleError
+			if errors.As(err, &stale) {
+				if attempt >= MaxTunnelReResolves {
+					opened = tunnelUnavailable(out.Tunnel)
+				} else {
+					if stale.relayUnreachable {
+						excludeRelays = append(excludeRelays, out.Tunnel.OwnerInstanceID)
+					} else {
+						exclude = append(exclude, out.Tunnel.TargetSessionID)
+					}
+					continue
+				}
+			}
+			opened.RequestId = req.GetRequestId()
+			return opened
+		case errors.As(err, &refusal):
+			if code := closeCodeOf(refusal); code != 0 {
+				// The hub no longer authorizes the session.
+				go f.ro.closeSession(f.sessionID, code, relay.ReasonUnauthenticated)
+			}
+			return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(refusal.Status), Body: refusal.Body}
+		default:
+			return fail(http.StatusServiceUnavailable, "unavailable", "the hub is temporarily unavailable")
 		}
-		return resp
-	case errors.As(err, &refusal):
-		if code := closeCodeOf(refusal); code != 0 {
-			// The hub no longer authorizes the session.
-			go f.ro.closeSession(f.sessionID, code, relay.ReasonUnauthenticated)
-		}
-		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(refusal.Status), Body: refusal.Body}
-	default:
-		return fail(http.StatusServiceUnavailable, "unavailable", "the hub is temporarily unavailable")
 	}
 }
 

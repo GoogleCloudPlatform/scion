@@ -87,13 +87,13 @@ func TestWriteGate(t *testing.T) {
 						t.Fatalf("step %d: allow paused = %v, want %v (err %v)", i, paused, s.wantPause, err)
 					}
 				case "401":
-					g.observe(http.StatusUnauthorized)
+					g.observeFrom(http.StatusUnauthorized, "", RefusedByNone)
 				case "403":
-					g.observe(http.StatusForbidden)
+					g.observeFrom(http.StatusForbidden, "", RefusedByNone)
 				case "500":
-					g.observe(http.StatusInternalServerError)
+					g.observeFrom(http.StatusInternalServerError, "", RefusedByNone)
 				case "200":
-					g.observe(http.StatusOK)
+					g.observeFrom(http.StatusOK, "", RefusedByNone)
 				case "refused":
 					g.refreshRefused()
 				case "reset":

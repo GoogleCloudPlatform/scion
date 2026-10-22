@@ -176,9 +176,10 @@ type UploadRequest struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
-	// UploadID names the staging directory a template's upload URLs write
-	// to; a client may send it back in the finalize request
-	// (ptone/scion#4221). Empty for resources that do not stage uploads.
+	// UploadID names the staging directory a template's or harness-config's
+	// upload URLs write to; a client may send it back in the finalize
+	// request (ptone/scion#4221, ptone/scion#4219). Empty for resources that
+	// do not stage uploads.
 	UploadID string `json:"uploadId,omitempty"`
 }
 
@@ -216,9 +217,10 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
-	// ContentHash is the content hash of the template row the URLs were
-	// signed from, so a client can cache the files under the hash they
-	// really have (ptone/scion#4221). Set for templates only.
+	// ContentHash is the content hash of the template or harness-config
+	// row the URLs were signed from, so a client can cache the files under
+	// the hash they really have (ptone/scion#4221, ptone/scion#4219). Set
+	// for templates and harness-configs.
 	ContentHash string `json:"contentHash,omitempty"`
 }
 
@@ -228,6 +230,11 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644",
+	// so a client can write the file with its executable bit
+	// (ptone/scion#5652). Hubs before that do not send it; clients treat
+	// a missing mode as "0644".
+	Mode string `json:"mode,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
@@ -1125,8 +1132,6 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Image:        source.Image,
-		Config:       source.Config,
 		Scope:        destScope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,

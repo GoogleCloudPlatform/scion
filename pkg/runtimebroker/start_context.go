@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,6 +61,12 @@ type startContext struct {
 	// found-on runtime on restart), which can differ from the broker's
 	// default runtime. The create path reports it to the hub.
 	RuntimeType string
+
+	// Resolution is the full runtime resolution behind Manager and
+	// RuntimeType (the same resolveExistingAgentManager call), with How
+	// settled for the operation (forCreate / forExistingAgent). The create
+	// path resolves its Kubernetes placement from it.
+	Resolution runtimeResolution
 
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
@@ -111,6 +118,11 @@ type startContextInputs struct {
 	// broker-side state is read from, the same one Start uses. A Config's
 	// own SharedWorkspace is used as well when present.
 	SharedWorkspace bool
+
+	// HubProfile is the profile a start or restart request carries (wire
+	// key profile; nil when an older Hub sent none). It is used only for
+	// an agent without an image provenance record (hubSentProfile).
+	HubProfile *string
 
 	// Project
 	ProjectPath string
@@ -393,20 +405,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// so resolving the manager here from a different, saved-profile-derived
 	// value would let a create run on one runtime while everything else
 	// about it — including the GCP identity classification above — is
-	// computed for another. Only start/restart fall back to the agent's own
-	// saved profile (agent.GetSavedProfile): their Config is nil (no profile
-	// to read from a request body that doesn't exist), and handlers.go's
-	// startAgent/restartAgent already resolve the saved profile themselves,
-	// re-running this same check after their own, later resolution.
+	// computed for another. Only start/restart use the existing agent's
+	// profile instead (classificationProfile): their Config carries none,
+	// and handlers.go's startAgent/restartAgent resolve the same profile
+	// themselves, re-running this same check after their own, later
+	// resolution.
 	//
 	// Start/restart classify the runtime with the provisioned profile
-	// recorded in broker-side image provenance when the agent has it, rather
-	// than the agent-info.json profile (GetSavedProfile): this classification
-	// picks the default GCP metadata mode
+	// recorded in broker-side image provenance when the agent has it, else
+	// with the Hub-sent profile (in.HubProfile); agent-info.json is never
+	// read for it. This classification picks the default GCP metadata mode
 	// when the hub sends none, the Kubernetes assign mapping, the hub
 	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
-	// file fails closed (409, re-provision); an agent without one keeps
-	// the saved profile.
+	// file fails closed (409, re-provision), and so does an agent without
+	// one when the Hub sent no profile (*profileRecordMissingError).
 	gcpIdentityProfile := ""
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
@@ -439,14 +451,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Create and a start without a saved profile stay non-strict, except
 	// that, on a co-located broker, a profile missing from the Hub's stored
 	// profiles is refused (errProfileUnresolved / errDefaultProfileUnresolved).
-	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
+	res, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
+	}, profileMode, in.PinnedRuntime)
+	mgr, dispatchRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+	if in.Operation == opCreate {
+		res = res.forCreate(in.Name)
+	} else {
+		res = res.forExistingAgent(in.Name)
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -1231,6 +1249,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		Resolution:                  res,
 		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,
@@ -1523,6 +1542,74 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 	return worktreePath != "" && projectRoot != "" && isStrictWorktreeChild(projectRoot, worktreePath)
 }
 
+// cleanupPartialWorktree removes the partial worktree a failed
+// provisioning left at worktreePath, and git's entry for it. It uses `git
+// worktree remove --force` (via SafeGitCommand), so the worktree's admin
+// metadata in the base's .git/worktrees/<id> is unregistered too: a bare
+// os.RemoveAll would leave a stale registration that makes git refuse to
+// recreate the worktree at that path on retry. If that fails, it removes the
+// directory and then only that worktree's entry. It never runs a
+// repository-wide prune, which would also drop the entries of other
+// agents' worktrees that this process cannot see (ptone/scion#5071).
+// Callers gate worktreePath with shouldCleanupPartialWorktree; the path check
+// is repeated here.
+func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agentID string) {
+	// Repeat the caller's gate here, so this function can only ever remove a
+	// path strictly inside <projectRoot>/worktrees, never that directory
+	// itself, the checkout, or anything outside it.
+	if !isStrictWorktreeChild(projectRoot, worktreePath) {
+		slog.Warn("worktree-per-agent: refusing to clean up a path that is not inside the shared checkout's worktrees directory",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
+	// The agent files guard checks the real location too: the worktree
+	// must really be inside the checkout, never the checkout itself. git
+	// gets its own path (it looks the worktree up by the path it
+	// registered); the directory fallback below removes the checked path.
+	// A path that is not there has nothing on disk to check or remove;
+	// only git's entry for it is cleaned up below. Any other Lstat result
+	// (a permission or not-a-directory error) goes through the guard.
+	checkedPath := worktreePath
+	if _, statErr := os.Lstat(worktreePath); !errors.Is(statErr, os.ErrNotExist) {
+		var guardErr error
+		if checkedPath, guardErr = agent.CheckAgentWorktreeRemoval(agentID, projectRoot, worktreePath); guardErr != nil {
+			slog.Warn("worktree-per-agent: refusing to clean up the partial worktree",
+				"agent_id", agentID, "path", worktreePath, "error", guardErr)
+			return
+		}
+	}
+	rm, rmCmdErr := provision.SafeGitCommand(ctx, projectRoot, "worktree", "remove", "--force", worktreePath)
+	var out []byte
+	var rmErr error
+	if rmCmdErr != nil {
+		rmErr = rmCmdErr
+	} else {
+		out, rmErr = rm.CombinedOutput()
+	}
+	if rmErr == nil {
+		slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
+	slog.Warn("worktree-per-agent: git worktree remove failed, removing the directory and its git entry",
+		"agent_id", agentID, "path", worktreePath,
+		"error", rmErr, "output", strings.TrimSpace(string(out)))
+	if cleanErr := os.RemoveAll(checkedPath); cleanErr != nil {
+		// The directory is (partly) still there, so its entry is not
+		// stale and is left in place; nothing else is touched.
+		slog.Warn("worktree-per-agent: failed to remove the partial worktree's directory; its git entry is left in place",
+			"agent_id", agentID, "path", worktreePath, "error", cleanErr)
+		return
+	}
+	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return provision.SafeGitCommand(ctx, projectRoot, args...)
+	}
+	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
+		slog.Warn("worktree-per-agent: could not remove the partial worktree's git entry",
+			"agent_id", agentID, "path", worktreePath, "error", err)
+	}
+}
+
 // validateMountedWorktree is the gate applied to the final resolved
 // workspace path for a worktree-per-agent dispatch, right before it is set
 // as opts.Workspace and mounted into the container. workspacePath itself —
@@ -1773,37 +1860,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree. Uses `git worktree remove --force` (via SafeGitCommand)
-		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
-		// unregistered too — a bare os.RemoveAll would leave a stale
-		// registration that makes git refuse to recreate the worktree at that
-		// path on retry. Falls back to os.RemoveAll + prune.
+		// worktree.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm, rmCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot,
-				"worktree", "remove", "--force", result.WorktreePath)
-			var out []byte
-			var rmErr error
-			if rmCmdErr != nil {
-				rmErr = rmCmdErr
-			} else {
-				out, rmErr = rm.CombinedOutput()
-			}
-			if rmErr != nil {
-				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
-					"agent_id", in.AgentID, "path", result.WorktreePath,
-					"error", rmErr, "output", strings.TrimSpace(string(out)))
-				if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
-					slog.Warn("worktree-per-agent: failed to clean up partial worktree",
-						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
-				}
-				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				if pruneCmd, pruneCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
-					_ = pruneCmd.Run()
-				}
-			} else {
-				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
-					"agent_id", in.AgentID, "path", result.WorktreePath)
-			}
+			cleanupPartialWorktree(ctx, result.ProjectRoot, result.WorktreePath, in.AgentID)
 		}
 		return false, "", nil
 	}
