@@ -282,6 +282,13 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 		util.Debugf("rerender: staged prompts for agent %s in the inputs record", in.AgentName)
 		return fp, "", nil
 	}
+	// The files the harness writes for prompts, whatever their content: a
+	// target this render no longer produces (a cleared system prompt with
+	// no template default) is removed, as the clear reverts to nothing.
+	targets, err := promptTargets(in.Harness)
+	if err != nil {
+		return "", "", err
+	}
 	err = write(func() error {
 		for rel, data := range files {
 			dst := filepath.Join(in.AgentHome, filepath.FromSlash(rel))
@@ -292,6 +299,14 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 				return err
 			}
 		}
+		for _, rel := range targets {
+			if _, rendered := files[rel]; rendered {
+				continue
+			}
+			if err := os.Remove(filepath.Join(in.AgentHome, filepath.FromSlash(rel))); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -299,6 +314,39 @@ func rerenderPrompts(in rerenderInputs, recorded string, write func(func() error
 	}
 	util.Debugf("rerender: wrote prompts for agent %s into the agent home", in.AgentName)
 	return fp, "", nil
+}
+
+// promptTargets returns the agent-home paths (slash-separated, relative)
+// harness h writes the instructions and the system prompt to, found by
+// rendering placeholder content into a scratch home.
+func promptTargets(h api.Harness) ([]string, error) {
+	scratch, err := os.MkdirTemp("", "scion-rerender-targets-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+	if err := h.InjectAgentInstructions(scratch, []byte("instructions")); err != nil {
+		return nil, err
+	}
+	if err := h.InjectSystemPrompt(scratch, []byte("system prompt")); err != nil {
+		return nil, err
+	}
+	files, err := readTree(scratch)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(files))
+	for rel := range files {
+		out = append(out, rel)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// rerenderSkippedWarning is the start warning for re-render keys a start
+// could not act on because the harness configuration did not resolve.
+func rerenderSkippedWarning(keys []string) string {
+	return strings.Join(keys, ", ") + ": not re-rendered at this start because the agent's harness configuration could not be resolved; they take effect at the next start that resolves it, or at the next reincarnation"
 }
 
 // rerenderSkills resolves and installs the agent's skills

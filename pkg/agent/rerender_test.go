@@ -258,7 +258,7 @@ func TestRerender_ContainerScriptPromptsGoToInputsRecord(t *testing.T) {
 }
 
 // TestRerender_Services writes changed services, and removes the services
-// file when the services are removed.
+// file when the agent's config has none.
 func TestRerender_Services(t *testing.T) {
 	f := newRerenderFixture(t)
 	h := &harness.Generic{}
@@ -271,22 +271,32 @@ func TestRerender_Services(t *testing.T) {
 	if got := readFileString(t, servicesFile); !strings.Contains(got, "postgres") {
 		t.Fatalf("services file = %q", got)
 	}
+	// Only a config with no services (a fresh generation; a start's merge
+	// never empties them, see TestStart_ClearsTheMergeKeepsAreNotRendered)
+	// removes the file.
 	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(h, []string{"services"}, &api.ScionConfig{}, &api.ScionConfig{ChangedFields: []string{"services"}}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(servicesFile); !os.IsNotExist(err) {
-		t.Fatalf("services file kept after the services were removed (err %v)", err)
+		t.Fatalf("services file kept for a config with no services (err %v)", err)
 	}
 }
 
-// countingSkillResolver resolves every reference to a one-file skill and
-// counts its calls.
+// countingSkillResolver resolves every reference to a one-file skill
+// (references sharing a URI collapse, as in the Hub resolver) and counts
+// its calls.
 type countingSkillResolver struct{ calls int }
 
 func (r *countingSkillResolver) Resolve(_ context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
 	r.calls++
 	out := &ResolveResult{}
+	seen := map[string]bool{}
 	for _, ref := range refs {
+		// Like the Hub resolver, references that share a URI collapse.
+		if seen[ref.URI] {
+			continue
+		}
+		seen[ref.URI] = true
 		name := ref.URI[strings.LastIndex(ref.URI, "/")+1:]
 		out.Resolved = append(out.Resolved, ResolvedSkill{
 			Name:  name,
@@ -453,4 +463,108 @@ func mergeIntoPersistedConfig(t *testing.T, agentDir string, inline *api.ScionCo
 		t.Fatal(err)
 	}
 	writeFileString(t, path, string(data))
+}
+
+// TestStart_ClearsTheMergeKeepsAreNotRendered pins, through the broker's
+// real merge of the hub's inline config into the persisted config, what a
+// start can and cannot apply for the re-rendered keys: a cleared
+// agent_instructions or services value and a removed skill reach neither
+// the persisted config nor the rendered files (the merge keeps an empty
+// value and appends skill references, and a re-render uninstalls nothing).
+// The hub reports exactly these edits as held for reincarnation.
+func TestStart_ClearsTheMergeKeepsAreNotRendered(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-skills", policyTestScripted+"skills_dir: .agents/skills\n")
+	e.template(t, "tplk", "harness_config: hc-skills\n")
+	mgr := policyTestManager(nil)
+	resolver := &countingSkillResolver{}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	if _, err := mgr.Start(ctx, api.StartOptions{Name: "kept", ProjectPath: e.scion, Template: "tplk", NoAuth: true}); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	agentDir := config.ResolveAgentDir(e.scion, "kept")
+	home := config.GetAgentHomePath(e.scion, "kept")
+	skillsDir := filepath.Join(home, ".agents", "skills")
+	start := func(inline *api.ScionConfig) {
+		t.Helper()
+		mergeIntoPersistedConfig(t, agentDir, inline)
+		opts := api.StartOptions{Name: "kept", ProjectPath: e.scion, NoAuth: true, InlineConfig: inline, RerenderKeys: api.RerenderConfigKeys(inline)}
+		if _, err := mgr.Start(ctx, opts); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+	}
+	changed := []string{"agent_instructions", "services", "skills"}
+	start(&api.ScionConfig{
+		AgentInstructions: "set instructions",
+		Services:          []api.ServiceSpec{{Name: "db", Command: []string{"postgres"}}},
+		Skills:            []api.SkillReference{{URI: "hub://skills/review"}, {URI: "hub://skills/test"}},
+		ChangedFields:     changed,
+	})
+	instructions := filepath.Join(home, ".scion", "harness", "inputs", "instructions.md")
+	services := filepath.Join(home, ".scion", servicesFileName)
+	if got := readFileString(t, instructions); !strings.Contains(got, "set instructions") {
+		t.Fatalf("instructions after the set = %q", got)
+	}
+	if got := readFileString(t, services); !strings.Contains(got, "postgres") {
+		t.Fatalf("services after the set = %q", got)
+	}
+	for _, name := range []string{"review", "test"} {
+		if _, err := os.Stat(filepath.Join(skillsDir, name, "SKILL.md")); err != nil {
+			t.Fatalf("skill %s not installed: %v", name, err)
+		}
+	}
+
+	// The hub clears agent_instructions and services and drops one skill.
+	start(&api.ScionConfig{
+		Skills:        []api.SkillReference{{URI: "hub://skills/review"}},
+		ChangedFields: changed,
+	})
+	if got := readFileString(t, instructions); !strings.Contains(got, "set instructions") {
+		t.Fatalf("a start applied the cleared instructions: %q", got)
+	}
+	if got := readFileString(t, services); !strings.Contains(got, "postgres") {
+		t.Fatalf("a start applied the cleared services: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(skillsDir, "test", "SKILL.md")); err != nil {
+		t.Fatalf("a start uninstalled the removed skill (the hub reports the removal held): %v", err)
+	}
+}
+
+// TestRerender_ClearedPromptRemovedForNonContainerHarness: for a harness
+// that writes prompts into the agent home, a system prompt the render no
+// longer produces (cleared, no template default) is removed, while the
+// instructions file is rewritten.
+func TestRerender_ClearedPromptRemovedForNonContainerHarness(t *testing.T) {
+	f := newRerenderFixture(t)
+	h := &harness.Generic{}
+	promptFile := filepath.Join(f.agentHome, ".scion", "system_prompt.md")
+	writeFileString(t, promptFile, "old prompt")
+	inline := &api.ScionConfig{ClearedFields: []string{"system_prompt"}}
+	if _, err := rerenderProvisionedFiles(context.Background(), f.inputs(h, []string{"system_prompt"}, &api.ScionConfig{}, inline, []*config.Template{{Name: "t", Path: t.TempDir()}})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(promptFile); !os.IsNotExist(err) {
+		t.Fatalf("a cleared system prompt stayed in the agent home (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.agentHome, "agents.md")); err != nil {
+		t.Fatalf("instructions not rendered: %v", err)
+	}
+}
+
+func TestPromptTargets(t *testing.T) {
+	got, err := promptTargets(&harness.Generic{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".scion/system_prompt.md", "agents.md"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("promptTargets(generic) = %v, want %v", got, want)
+	}
+}
+
+func TestRerenderSkippedWarning(t *testing.T) {
+	got := rerenderSkippedWarning([]string{"skills", "system_prompt"})
+	if !strings.HasPrefix(got, "skills, system_prompt: not re-rendered at this start") || !strings.Contains(got, "next reincarnation") {
+		t.Fatalf("warning = %q", got)
+	}
 }

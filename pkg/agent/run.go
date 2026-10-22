@@ -1022,6 +1022,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var hcIdentity *harnessConfigIdentity
 	if !resolveFailed {
 		hcIdentity = currentHarnessConfigIdentity(harnessConfigName, resolvedHCDir, opts.HarnessConfigID)
+	} else if len(opts.RerenderKeys) > 0 {
+		// The re-render below needs the resolved harness: say that the
+		// keys the hub reported applied at this start were not rendered.
+		if msg := rerenderSkippedWarning(opts.RerenderKeys); !slices.Contains(warnings, msg) {
+			slog.Warn(msg, "agent", opts.Name)
+			warnings = append(warnings, msg)
+		}
 	}
 	if !resolveFailed {
 		// An agent provisioned before the control plane recorded its inputs
