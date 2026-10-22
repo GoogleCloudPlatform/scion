@@ -466,3 +466,64 @@ func TestOutboxLockTimeoutHandoffReleases(t *testing.T) {
 	unlock()
 	_ = holder.Close()
 }
+
+// WP2 r4 O2: discarding an intent requires "absent" to be durable: if
+// staging cannot be synced after the truncate-back, the outbox holds
+// instead of discarding (a reappearing line would otherwise be unindexed).
+func TestOutboxDiscardRequiresDurableAbsence(t *testing.T) {
+	o := testOutbox(t)
+	calls := 0
+	o.fsyncFile = func(f *os.File) error {
+		calls++
+		return errInjectedSync // append sync, truncate sync, recovery sync all fail
+	}
+	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		t.Fatalf("append = %v; want held (absence not durable)", err)
+	}
+	if !o.Stats().HeldIntent {
+		t.Error("intent must be kept until absence is durable")
+	}
+	o.fsyncFile = func(f *os.File) error { return f.Sync() }
+	reopened, _ := OpenAnalyticsOutbox(o.Dir())
+	if reopened.Stats().HeldIntent {
+		t.Error("intent must resolve once staging syncs")
+	}
+	ev := mustAppend(t, reopened, requestIDDraft(5), AppendWritten)
+	if ev.ProducerSeq != 2 || len(stagingLines(t, reopened)) != 1 {
+		t.Errorf("retry seq %d lines %d; want 2 (gap for the lost attempt) and 1", ev.ProducerSeq, len(stagingLines(t, reopened)))
+	}
+}
+
+// WP2 r4 O3: a complete staging line the current build cannot accept is
+// dead-lettered (kept, counted), not dropped.
+func TestOutboxFinalizeDeadLettersInvalidLines(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:ok", 1), AppendWritten)
+	f, _ := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"schema_version":99,"event_type":"agent.usage"}` + "\n")
+	_ = f.Close()
+	if n, err := o.Finalize(); err != nil || n != 1 {
+		t.Fatalf("Finalize = %d, %v", n, err)
+	}
+	dl, _ := os.ReadFile(filepath.Join(o.Dir(), "dead_letter.jsonl"))
+	if !strings.Contains(string(dl), `"schema_version":99`) || o.Stats().PersistedDeadLetters != 1 {
+		t.Errorf("invalid line not kept: dead letters %q, count %d", dl, o.Stats().PersistedDeadLetters)
+	}
+}
+
+// WP2 r4 O5: hub ID resolution backs off while unresolved.
+func TestAnalyticsDrainerResolveBackoff(t *testing.T) {
+	o := testOutbox(t)
+	calls := 0
+	d := NewAnalyticsDrainer(o, (&capture{}).send, func(context.Context) (string, error) { calls++; return "", errors.New("no hub_id") })
+	clock := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	for i := 0; i < 5; i++ {
+		d.RunOnce(context.Background())
+		clock = clock.Add(500 * time.Millisecond)
+	}
+	if calls != 2 {
+		t.Errorf("resolver called %d times in 2.5 s, want 2 (backoff 1 s, then 2 s)", calls)
+	}
+}

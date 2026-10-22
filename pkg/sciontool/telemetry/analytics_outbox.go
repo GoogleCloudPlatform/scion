@@ -625,7 +625,7 @@ func (o *AnalyticsOutbox) truncateTo(name string, size int64) error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := f.Truncate(size); err != nil {
 		return fmt.Errorf("analytics outbox: truncating %s: %w", name, err)
 	}
@@ -739,6 +739,12 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 		}
 		return true, o.commitIntent(in)
 	}
+	// The line is absent -- but "absent" must be durable too (a truncate
+	// whose sync failed could reappear after a crash). Hold until staging
+	// syncs, as the commit branch does.
+	if err := o.syncStaging(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+	}
 	// The line did not survive: the observation is lost. Consume its seq so
 	// the loss is a visible gap downstream (the index is left untouched, so
 	// a source retry is a clean first sighting).
@@ -765,7 +771,7 @@ func (o *AnalyticsOutbox) syncStaging() error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := o.fsyncFile(f); err != nil {
 		return fmt.Errorf("analytics outbox: syncing staging: %w", err)
 	}
@@ -800,7 +806,7 @@ func (o *AnalyticsOutbox) lastStagingLine() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("analytics outbox: %w", err)
@@ -909,7 +915,7 @@ func analyticsIndexName(namespace, sourceKind, sourceEventID string) string {
 func lengthPrefixedHash(parts ...string) string {
 	h := sha256.New()
 	for _, p := range parts {
-		fmt.Fprintf(h, "%d:", len(p))
+		_, _ = fmt.Fprintf(h, "%d:", len(p))
 		h.Write([]byte(p))
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -934,7 +940,7 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 	if err != nil {
 		return -1, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// The pre-append size is the truncate-back point; without it nothing
 	// may be written (a wrong offset could cut committed lines).
 	info, err := f.Stat()
@@ -1142,7 +1148,7 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 	next, err := o.nextReadyNumber()
 	if err != nil {
 		return 0, err
@@ -1156,24 +1162,25 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 			line = bytes.TrimSuffix(line, []byte("\n"))
 			if len(line) > 0 {
 				var ev telemetrycontract.UsageEvent
-				if uerr := telemetrycontract.Unmarshal(line, &ev); uerr != nil {
+				final := line
+				uerr := telemetrycontract.Unmarshal(line, &ev)
+				if uerr == nil && ev.HubID == "" {
+					ev.HubID = hubID
+					final, uerr = telemetrycontract.Marshal(&ev)
+				}
+				if uerr != nil {
+					// A torn fragment, or a line this build cannot accept
+					// (e.g. written by an older build): never drop it --
+					// keep it in the dead-letter file (persisted count).
 					o.torn.Add(1)
+					if derr := o.deadLetter(line); derr != nil {
+						return derr
+					}
 				} else {
-					final := line
-					if ev.HubID == "" {
-						ev.HubID = hubID
-						var merr error
-						if final, merr = telemetrycontract.Marshal(&ev); merr != nil {
-							o.torn.Add(1)
-							final = nil
-						}
+					if _, werr := w.Write(append(final, '\n')); werr != nil {
+						return werr
 					}
-					if final != nil {
-						if _, werr := w.Write(append(final, '\n')); werr != nil {
-							return werr
-						}
-						n++
-					}
+					n++
 				}
 			}
 			if readErr != nil {
@@ -1728,7 +1735,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("analytics outbox: syncing %s: %w", dir, err)
 	}

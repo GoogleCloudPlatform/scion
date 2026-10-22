@@ -71,7 +71,7 @@ func NewHealthzHubIDResolver(endpoint string, client *http.Client) HubIDResolver
 		if err != nil {
 			return "", err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
 			return "", err
@@ -112,6 +112,11 @@ type AnalyticsDrainer struct {
 	backoff    time.Duration
 	retryAfter time.Time
 	lastExpiry time.Time
+
+	// resolveBackoff/resolveAfter pace hub ID resolution while unresolved
+	// (drainer goroutine only).
+	resolveBackoff time.Duration
+	resolveAfter   time.Time
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -177,14 +182,25 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	if ctx.Err() != nil {
 		return 0
 	}
-	if d.outbox.PinnedHubID() == "" && d.resolve != nil {
+	if d.outbox.PinnedHubID() == "" && d.resolve != nil && !d.now().Before(d.resolveAfter) {
 		rctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
 		id, err := d.resolve(rctx)
 		cancel()
+		if err == nil {
+			_, err = d.outbox.PinHubID(id)
+		}
 		if err != nil {
-			log.Debug("Analytics drainer: hub ID not resolved yet: %v", err)
-		} else if _, err := d.outbox.PinHubID(id); err != nil {
-			log.Debug("Analytics drainer: pinning hub ID: %v", err)
+			// Back off like sends do (1 s .. 5 min), so an agent whose hub
+			// never reports hub_id does not poll /healthz every interval.
+			if d.resolveBackoff == 0 {
+				d.resolveBackoff = analyticsBackoffMin
+			} else if d.resolveBackoff *= 2; d.resolveBackoff > analyticsBackoffMax {
+				d.resolveBackoff = analyticsBackoffMax
+			}
+			d.resolveAfter = d.now().Add(d.resolveBackoff)
+			log.Debug("Analytics drainer: hub ID not resolved yet (retry in %s): %v", d.resolveBackoff, err)
+		} else {
+			d.resolveBackoff, d.resolveAfter = 0, time.Time{}
 		}
 	}
 	if d.outbox.PinnedHubID() != "" {
