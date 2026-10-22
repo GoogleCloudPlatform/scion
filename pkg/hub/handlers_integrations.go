@@ -598,6 +598,11 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			InternalError(w)
 			return
 		}
+		// A stored Postgres row whose config is JSON null loads as a nil
+		// map; start from an empty map so the merge below cannot panic.
+		if existing == nil {
+			existing = make(map[string]string)
+		}
 
 		// Merge new settings into existing, filtering out any secret keys.
 		// A null value deletes the stored key.

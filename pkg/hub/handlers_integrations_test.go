@@ -867,6 +867,75 @@ func TestUpdateConfig_SettingsNullForUnstoredKeyIsNoOp(t *testing.T) {
 	assert.Equal(t, map[string]string{"webhook_listen": ":9094"}, stored)
 }
 
+// A config PUT for a plugin with no usable stored config stores the sent
+// keys. The YAML case has no config file yet. The Postgres case has a row
+// whose config is JSON null, which the provider loads as a nil map; the
+// merge must not write into that nil map.
+func TestUpdateConfig_NoStoredConfigStoresNewKeys(t *testing.T) {
+	t.Run("yaml_missing_file", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		configFile := filepath.Join(t.TempDir(), "telegram.yaml")
+
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{"config_file": configFile}
+
+		srv, st := testServer(t)
+		srv.pluginManager = mgr
+
+		createTestUserWithRole(t, st, tid("u1-nsc"), "admin-nsc@example.com", "admin", store.SystemRoleSuperAdmin)
+		admin := NewAuthenticatedUser(tid("u1-nsc"), "admin-nsc@example.com", "Admin", "admin", "cli")
+		body := `{"settings":{"webhook_listen":":9095","db_path":null}}`
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+		req = req.WithContext(integSessionContext(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		provider, err := config.NewYAMLConfigProvider(configFile)
+		require.NoError(t, err)
+		stored, err := provider.Load(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"webhook_listen": ":9095"}, stored)
+	})
+
+	t.Run("postgres_null_config_row", func(t *testing.T) {
+		if !enttest.Active() {
+			t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+		}
+		t.Setenv("HOME", t.TempDir())
+		client := enttest.NewClient(t)
+		ctx := context.Background()
+
+		// Saving a nil map stores the JSON literal null, which Load
+		// returns as a nil map with no error.
+		provider := pgprovider.NewPostgresConfigProvider(client, "discord")
+		require.NoError(t, provider.Save(ctx, nil))
+		loaded, err := provider.Load(ctx)
+		require.NoError(t, err)
+		require.Nil(t, loaded, "precondition: a null config row loads as a nil map")
+
+		mgr := newMockIntegrationManager()
+		mgr.plugins["discord"] = map[string]string{}
+		mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
+
+		srv := &Server{dbDriver: "postgres"}
+		srv.pluginManager = mgr
+		srv.entClient = client
+
+		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+		body := `{"settings":{"guild_id":"12345"}}`
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
+		req = req.WithContext(integSessionContext(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		stored, err := provider.Load(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"guild_id": "12345"}, stored)
+	})
+}
+
 func TestUpdateConfig_InstalledButNotLoaded(t *testing.T) {
 	// Regression test for the PUT /config 404: a freshly installed plugin whose
 	// LoadOne failed (required fields like bot_token missing) is registered in
