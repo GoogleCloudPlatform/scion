@@ -26,6 +26,11 @@
 /**
  * Returns the leaves of current that differ from base (plain objects are
  * compared key by key; arrays and scalars as whole values).
+ *
+ * Only keys present in current are reported: a key that is in base but not
+ * in current is not reported as a deletion. Callers pass objects of a fixed
+ * shape (every key always present, a cleared value as "", [], false or
+ * null), so a clear is a changed value, not a missing key.
  */
 export function diffPayload(
   current: Record<string, unknown>,

@@ -2065,6 +2065,9 @@ describe('scion-page-admin-server-config', () => {
     it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
       element = await createComponent(createFetchHandler(withLocal('file')));
       const el = element as any;
+      // A telemetry edit, so the save sends telemetry: an untouched file save
+      // leaves it out (ptone/scion#3913).
+      el.telemetryHubReportInterval = '30s';
       const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
       expect(telemetry).toHaveProperty('hub');
       expect(telemetry.local).toEqual(storedLocal);
@@ -2080,6 +2083,7 @@ describe('scion-page-admin-server-config', () => {
         )
       );
       const el = element as any;
+      el.telemetryHubReportInterval = '30s';
       const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
       expect(telemetry).toHaveProperty('hub');
       expect(telemetry).not.toHaveProperty('local');
@@ -5416,6 +5420,18 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
       expect(body.telemetry?.hub ?? {}).not.toHaveProperty('enabled');
     }
   );
+
+  it('a file-mode save with nothing set sends no empty telemetry blocks', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(unsetConfig('file'), bodies);
+    await save(element);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty('telemetry');
+
+    (element as any).telemetryCloudEndpoint = 'otel.example.com:4317';
+    await save(element);
+    expect(bodies[1]!.telemetry).toEqual({ cloud: { endpoint: 'otel.example.com:4317' } });
+  });
 
   it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {
     const bodies: Array<Record<string, any>> = [];

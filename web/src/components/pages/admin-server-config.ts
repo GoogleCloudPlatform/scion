@@ -73,6 +73,11 @@ const MASKED_VALUE = '********';
  * loaded one; null (Use default) is sent as null, which clears the stored
  * key (ptone/scion#3724).
  */
+/** True when obj has a key whose value is not undefined (null counts). */
+function hasDefinedValue(obj: Record<string, unknown>): boolean {
+  return Object.values(obj).some((v) => v !== undefined);
+}
+
 function putTriState(
   obj: Record<string, unknown>,
   key: string,
@@ -2959,7 +2964,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           this.loadedTelemetryCloudCloudLogging
         );
       }
-      telemetry.cloud = cloud;
+      // An all-empty block is left out, so settings.yaml gets no empty
+      // cloud: {} section.
+      if (hasDefinedValue(cloud)) telemetry.cloud = cloud;
     }
     if (ok('telemetry.hub.enabled')) {
       const hub: Record<string, unknown> = {
@@ -2968,7 +2975,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           : undefined,
       };
       putTriState(hub, 'enabled', this.telemetryHubEnabled, this.loadedTelemetryHubEnabled);
-      telemetry.hub = hub;
+      if (hasDefinedValue(hub)) telemetry.hub = hub;
     }
     if (Object.keys(telemetry).length > 0) {
       // A file-mode save replaces the whole telemetry object, so echo the
