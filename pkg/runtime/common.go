@@ -481,6 +481,32 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
 			addArg("--workdir", containerWorkspace)
+			// A workspace that is a subdirectory of the main checkout
+			// rather than a linked worktree (a project kept in a
+			// subdirectory of the repository) holds that project's .scion:
+			// it gets the read-only bind and the agents mask of the shared
+			// layout below. A linked worktree's .scion is the agent's own
+			// branch checkout, which the broker does not read.
+			if !isLinkedWorktree(config.Workspace) {
+				src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, containerWorkspace, config.RuntimeName != appleContainerRuntimeName)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					registerMount(src, tgt, true, true)
+					if isDir(src) {
+						if config.RuntimeName != appleContainerRuntimeName {
+							if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
+								runtimeLog().Warn("Could not create the in-project agents dir for its mask",
+									"agent", config.Name, "error", err)
+							}
+						}
+						if isDir(filepath.Join(src, "agents")) {
+							sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
+						}
+					}
+				}
+			}
 		} else if relWorkspace == "." {
 			// Shared workspace: workspace IS the repo root (e.g., shared git clone).
 			// Mount directly to /workspace so harnesses can trust a single path.

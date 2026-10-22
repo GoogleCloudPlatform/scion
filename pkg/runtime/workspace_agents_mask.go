@@ -134,3 +134,10 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 		return "", "", false, nil
 	}
 }
+
+// isLinkedWorktree reports whether dir is a linked git worktree: its .git
+// is a file pointing at the main repository's admin dir.
+func isLinkedWorktree(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil && info.Mode().IsRegular()
+}

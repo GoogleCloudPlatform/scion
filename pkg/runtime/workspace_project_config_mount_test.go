@@ -129,6 +129,30 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "repo")
 		ws := filepath.Join(root, ".scion", "agents", "me", "workspace")
 		mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
+		// A linked worktree's .git is a file.
+		writeFile(t, filepath.Join(ws, ".git"), "gitdir: ../../../../.git/worktrees/me\n")
+		cfg.RepoRoot, cfg.Workspace = root, ws
+		return cfg
+	}
+	// A project kept in a subdirectory of the repository: the workspace is
+	// that subdirectory of the main checkout, holding the project's .scion.
+	subdirProject := func(withAgents bool) projectConfigLayout {
+		return func(t *testing.T, cfg RunConfig) RunConfig {
+			root := filepath.Join(t.TempDir(), "repo")
+			ws := filepath.Join(root, "sub")
+			mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "templates"))
+			if withAgents {
+				mkdirs(t, filepath.Join(ws, ".scion", "agents", "other"))
+			}
+			cfg.RepoRoot, cfg.Workspace = root, ws
+			return cfg
+		}
+	}
+	subdirMarker := func(t *testing.T, cfg RunConfig) RunConfig {
+		root := filepath.Join(t.TempDir(), "repo")
+		ws := filepath.Join(root, "sub")
+		mkdirs(t, filepath.Join(root, ".git"))
+		writeFile(t, filepath.Join(ws, ".scion"), "project-id: x\n")
 		cfg.RepoRoot, cfg.Workspace = root, ws
 		return cfg
 	}
@@ -196,6 +220,9 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"plain, agent home under .scion/agents", plainHomeInside, ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
 			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
+			{"project in a repo subdirectory, agents dir exists", subdirProject(true), ".scion", "/repo-root/sub/.scion", "/repo-root/sub/.scion/agents", "", false, false},
+			{"project in a repo subdirectory, no agents dir", subdirProject(false), ".scion", "/repo-root/sub/.scion", "", "/repo-root/sub/.scion/agents", false, false},
+			{"project in a repo subdirectory, .scion marker", subdirMarker, "", "", "", "", true, false},
 			{"worktree", worktree, "", "", "", "", false, false},
 			{"git clone", gitClone, "", "", "", "", false, false},
 		} {
@@ -232,7 +259,12 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 				if tt.markerRO && rt != appleContainerRuntimeName {
 					// A marker file is bound read-only over itself on
 					// runtimes that can bind a single file.
-					roSrc, roTarget = ".scion", "/workspace/.scion"
+					containerWS := "/workspace"
+					if cfg.RepoRoot != "" && cfg.Workspace != cfg.RepoRoot {
+						rel, _ := filepath.Rel(cfg.RepoRoot, cfg.Workspace)
+						containerWS = "/repo-root/" + filepath.ToSlash(rel)
+					}
+					roSrc, roTarget = ".scion", containerWS+"/.scion"
 				}
 				if roTarget != "" {
 					src, err := filepath.EvalSymlinks(filepath.Join(cfg.Workspace, roSrc))
@@ -276,7 +308,7 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 					switch {
 					case args[i] == "--tmpfs":
 						gotMask = args[i+1]
-					case args[i] == "--mount" && strings.HasPrefix(args[i+1], "type=tmpfs,destination=/workspace"):
+					case args[i] == "--mount" && (strings.HasPrefix(args[i+1], "type=tmpfs,destination=/workspace") || strings.HasPrefix(args[i+1], "type=tmpfs,destination=/repo-root/")):
 						gotMask = strings.TrimPrefix(args[i+1], "type=tmpfs,destination=")
 					}
 				}
