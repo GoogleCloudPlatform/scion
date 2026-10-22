@@ -2208,6 +2208,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.HubClass != "" {
 				keys = append(keys, config.HubClassKey)
 			}
+			if hub.GCPProjectID != "" {
+				keys = append(keys, config.HubGCPProjectIDKey)
+			}
 			if hub.TestIdentities != nil {
 				keys = append(keys, config.TestIdentitiesKey)
 			}
