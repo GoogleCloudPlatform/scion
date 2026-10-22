@@ -604,15 +604,43 @@ func (s *AgentStore) withLifecycleTx(ctx context.Context, fn func(ts *AgentStore
 	return nil
 }
 
+// lifecycleWriteTx returns the client an observed writer writes with: its
+// own when it already runs in a transaction or no observer is installed,
+// otherwise a new transaction, so the row and its lifecycle rows commit
+// together. done rolls back an uncommitted own transaction;
+// commitLifecycleWriteTx commits it.
+func (s *AgentStore) lifecycleWriteTx(ctx context.Context, obs store.AgentWriteObserver) (client *ent.Client, tx *ent.Tx, done func(), err error) {
+	if obs == nil || s.inTx {
+		return s.client, s.entTx, func() {}, nil
+	}
+	tx, err = s.client.Tx(ctx)
+	if err != nil {
+		return nil, nil, nil, markTransient(fmt.Errorf("begin transaction: %w", err))
+	}
+	return tx.Client(), tx, func() { _ = tx.Rollback() }, nil
+}
+
+// commitLifecycleWriteTx commits tx when the writer opened it (it is not
+// the ambient transaction).
+func commitLifecycleWriteTx(tx, ambient *ent.Tx) error {
+	if tx == nil || tx == ambient {
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		return markTransient(fmt.Errorf("commit transaction: %w", err))
+	}
+	return nil
+}
+
 // lifecycleBeforeRow reads the full row an observed writer is about to
 // change, locked for update where the database supports row locks. It
 // returns nil when no observer is installed or the row does not exist.
-func (s *AgentStore) lifecycleBeforeRow(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID) (*store.Agent, error) {
+func lifecycleBeforeRow(ctx context.Context, client *ent.Client, obs store.AgentWriteObserver, uid uuid.UUID) (*store.Agent, error) {
 	if obs == nil {
 		return nil, nil
 	}
-	q := s.client.Agent.Query().Where(agent.IDEQ(uid))
-	if s.usesRowLocks() {
+	q := client.Agent.Query().Where(agent.IDEQ(uid))
+	if client.Driver().Dialect() == dialect.Postgres {
 		q = q.ForUpdate()
 	}
 	row, err := q.Only(ctx)

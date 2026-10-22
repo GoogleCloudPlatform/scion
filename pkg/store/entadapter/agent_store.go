@@ -916,23 +916,27 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 		return err
 	}
 	obs := s.lifecycle.load()
-	if obs != nil && !s.inTx {
-		return s.withLifecycleTx(ctx, func(ts *AgentStore) error { return ts.DeleteAgent(ctx, id) })
-	}
-	before, err := s.lifecycleBeforeRow(ctx, obs, uid)
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
 	if err != nil {
 		return err
 	}
-	err = s.client.Agent.DeleteOneID(uid).Exec(ctx)
+	defer done()
+	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
+	if err != nil {
+		return err
+	}
+	err = client.Agent.DeleteOneID(uid).Exec(ctx)
 	if err != nil {
 		return mapError(err)
 	}
 	if before != nil {
-		return observeAgentWrite(ctx, obs, s.client, s.entTx, store.AgentWrite{
+		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
 			Op: store.AgentWriteHardDelete, Before: before, Now: time.Now(),
-		})
+		}); err != nil {
+			return err
+		}
 	}
-	return nil
+	return commitLifecycleWriteTx(tx, s.entTx)
 }
 
 // lockAgentRowsBatch bounds the IDs locked by one statement. Batches are
