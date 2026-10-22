@@ -958,6 +958,14 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 // (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
 // an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
 // directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
+// tarCommand runs tar with a minimal environment: an inherited TAR_OPTIONS (for
+// example --exclude) would otherwise change what the round-trip tests see.
+func tarCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("tar", args...)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
+	return cmd
+}
+
 func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
 
 // With RUNNER_BUILD_CACHE_IN_RAM=true, /scratch/.cache is a link to a RAM dir; the
@@ -986,7 +994,7 @@ func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 
 	tarRun := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command("tar", args...).CombinedOutput()
+		out, err := tarCommand(args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("tar %v: %v\n%s", args, err, out)
 		}
@@ -1095,11 +1103,11 @@ func TestEntrypointCacheTarWholeDirectory(t *testing.T) {
 		{"-cPf", archive, "-C", ubuntuWorkspace, "../../../.cache"},
 		{"-xPf", archive, "-C", crWorkspace},
 	} {
-		if out, err := exec.Command("tar", args...).CombinedOutput(); err != nil {
+		if out, err := tarCommand(args...).CombinedOutput(); err != nil {
 			t.Fatalf("tar %v: %v\n%s", args, err, out)
 		}
 	}
-	if out, err := exec.Command("tar", "-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
+	if out, err := tarCommand("-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
 		t.Fatalf("archive lacks the ../../../.cache/ directory entry (err %v):\n%s", err, out)
 	}
 	h.checkHomeLinks() // the directory entry must not have replaced the link
