@@ -27,9 +27,9 @@
  *
  * Reconnection retries indefinitely; a tab that becomes visible reconnects
  * immediately. The first retry after a server-initiated close (`reconnect`,
- * or `superseded` with reason max_age) or a drop of a live connection waits a full-jitter delay, random(0, 2 s),
- * so the clients of a restarting hub instance do not all come back, and
- * refetch their lists, in the same second.
+ * or `superseded` with reason max_age) or a drop of a live connection waits
+ * a full-jitter delay, random(0, 2 s), so the clients of a restarting hub
+ * instance do not all come back, and refetch their lists, in the same second.
  *
  * With the experiment web.sse_hidden_tab_close on, a tab hidden for 60 s
  * closes its stream and does not reconnect until it is shown again; the
@@ -321,8 +321,11 @@ export class SSEClient extends EventTarget {
     // The hub closes a stream that reached its maximum age with
     // `event: superseded` and reason max_age (phase 1 of ptone/scion#5219).
     // Every stream of an instance can reach it in the same window, so it
-    // takes the same jittered reopen as `reconnect`. Other reasons are left
-    // to the stream ending on its own.
+    // takes the same jittered reopen as `reconnect`. Any other reason is not
+    // handled here: when the hub then ends the stream, onerror sees a live
+    // connection drop and reconnects through scheduleReconnect(true), within
+    // 0-2 s. Phase 1 must handle the same-tab supersede case itself (a
+    // reconnect with the same tab id would supersede the newer stream).
     this.eventSource.addEventListener('superseded', (event) => {
       if (es !== this.eventSource) return;
       let reason: unknown;
