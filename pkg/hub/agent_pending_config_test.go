@@ -173,7 +173,8 @@ func TestCloneAppliedConfigCopiesEnvDeeply(t *testing.T) {
 }
 
 // TestAgentEditability_HeldEdits: with held edits on, a running or
-// transitional agent's container keys are held and its provision-rendered
+// transitional agent's container keys are held and, with a broker that
+// does not re-render at start (the zero broker here), its provision-rendered
 // keys reincarnate, instead of locked; phases with no container are
 // unchanged.
 func TestAgentEditability_HeldEdits(t *testing.T) {

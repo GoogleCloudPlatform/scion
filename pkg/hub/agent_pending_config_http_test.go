@@ -1019,36 +1019,162 @@ func patchOutcome(t *testing.T, heldOn bool, caps *store.BrokerCapabilities, bod
 	}
 }
 
-// TestAgentPendingConfig_FlagOffMatchesRerenderBehaviour: with held edits
-// off, a provision-rendered edit of an agent with no container behaves as
-// re-render at start (ptone/scion#3982) defines it: on a re-rendering
-// broker it is applied with changed_fields and no warning; on an older
-// broker it is held for reincarnation with the reincarnation warning and
-// changed_fields still recorded. With held edits on, the re-rendering
-// broker's outcome is identical (written now, nothing pending).
-func TestAgentPendingConfig_FlagOffMatchesRerenderBehaviour(t *testing.T) {
-	rerender := &store.BrokerCapabilities{Reprovision: true, ChangedFields: true, ClearedFields: true}
+// TestAgentPendingConfig_NoContainerRerenderEditsMatchFlagOff: for an
+// agent with no container on a broker that re-renders at start
+// (changedFields) and applies clears (clearedFields), a provision-rendered
+// edit is written now with held edits on exactly as with them off: the
+// same disposition, warnings, changed_fields and cleared_fields, and
+// nothing pending. Cases: non-empty values, a system prompt clear (applied
+// through cleared_fields), an agent instructions clear and a skill removal
+// (both held for reincarnation with AE-11's warning). With held edits off
+// the outcome is AE-11's own (its tests in agent_config_rerender*_test.go
+// cover the rest); on an older broker, held edits off records the
+// reincarnation hold and changed_fields as AE-11 does.
+func TestAgentPendingConfig_NoContainerRerenderEditsMatchFlagOff(t *testing.T) {
+	capable := &store.BrokerCapabilities{Reprovision: true, ChangedFields: true, ClearedFields: true}
+	cases := []struct {
+		name string
+		cfg  map[string]interface{}
+	}{
+		{"values", map[string]interface{}{"system_prompt": "be brief", "agent_instructions": "run the tests first"}},
+		{"system prompt clear", map[string]interface{}{"system_prompt": nil}},
+		{"instructions clear", map[string]interface{}{"agent_instructions": ""}},
+		{"skill removal", map[string]interface{}{"skills": []map[string]interface{}{{"uri": "hub://skills/review"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]interface{}{"config": tc.cfg}
+			var off, on agentUpdateOutcome
+			t.Run("off", func(t *testing.T) { off = patchOutcome(t, false, capable, body) })
+			t.Run("on", func(t *testing.T) { on = patchOutcome(t, true, capable, body) })
+			assert.Equal(t, off, on, "held edits on: the no-container edit is written now, exactly as with the flag off")
+			assert.Empty(t, on.Pending)
+		})
+	}
+
 	older := &store.BrokerCapabilities{Reprovision: true}
-	body := map[string]interface{}{"config": map[string]interface{}{
+	offOlder := patchOutcome(t, false, older, map[string]interface{}{"config": map[string]interface{}{
 		"system_prompt": "be brief", "agent_instructions": "run the tests first",
-	}}
-
-	off := patchOutcome(t, false, rerender, body)
-	assert.Equal(t, []string{"config.agent_instructions", "config.system_prompt"}, off.Disposition.Applied)
-	assert.Empty(t, off.Disposition.HeldForReincarnate)
-	assert.Empty(t, off.Warnings)
-	assert.Contains(t, off.ChangedFields, "system_prompt")
-	assert.Contains(t, off.ChangedFields, "agent_instructions")
-	assert.Empty(t, off.Pending)
-
-	on := patchOutcome(t, true, rerender, body)
-	assert.Equal(t, off, on, "held edits on: a re-rendering broker's no-container edit is written now, exactly as with the flag off")
-
-	offOlder := patchOutcome(t, false, older, body)
+	}})
 	assert.Empty(t, offOlder.Disposition.Applied)
 	assert.Equal(t, []string{"config.agent_instructions", "config.system_prompt"}, offOlder.Disposition.HeldForReincarnate)
 	require.Len(t, offOlder.Warnings, 1, "%v", offOlder.Warnings)
 	assert.Contains(t, offOlder.Warnings[0], "rendered at the next reincarnation")
 	assert.Contains(t, offOlder.ChangedFields, "system_prompt", "recorded for a broker upgraded later")
 	assert.Empty(t, offOlder.Pending)
+}
+
+// heldFilterFixture is a running agent, with held edits on and its broker's
+// caps set to caps, whose inline config sets the provision-rendered keys,
+// two skills, a duration limit, two env keys and resource requests.
+func heldFilterFixture(t *testing.T, caps *store.BrokerCapabilities) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
+	t.Helper()
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setHeldEditsExperiment(t, srv, true)
+	setBrokerCaps(t, s, broker, caps)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseRunning)
+		a.AppliedConfig.Model = "old-model"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Harness:           "claude",
+			Model:             "old-model",
+			SystemPrompt:      "old prompt",
+			AgentInstructions: "old instructions",
+			Skills:            []api.SkillReference{{URI: "hub://skills/review"}, {URI: "hub://skills/test"}},
+			Services:          []api.ServiceSpec{{Name: "db", Command: []string{"postgres"}}},
+			MaxDuration:       "2h",
+			Env:               map[string]string{"KEEP": "1", "DROP": "2"},
+			Resources:         &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "1Gi"}},
+		}
+	})
+	return srv, s, disp, pendingReloadAgent(t, s, agent.ID)
+}
+
+// TestAgentPendingConfig_HeldSaveUsesTheStartRules: a held save reports
+// each edit by what the next start will do with it on the agent's broker,
+// with the rules a written-through edit gets (ptone/scion#3982, #4890,
+// #5676).
+func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
+	t.Run("re-rendering broker: a clear or skill removal is written at the next start but needs a reincarnation", func(t *testing.T) {
+		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"agent_instructions": "",
+			"skills":             []map[string]interface{}{{"uri": "hub://skills/review"}},
+		}})
+		assert.Empty(t, resp.Disposition.Held)
+		assert.Equal(t, []string{"config.agent_instructions", "config.skills"}, resp.Disposition.HeldForReincarnate)
+		require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+		assert.Equal(t, "config.agent_instructions, config.skills: the change is held and written at the next start; it takes effect at a reincarnation after that (a start does not apply a clear or a removed skill)", resp.Warnings[0])
+	})
+
+	t.Run("clearing broker: a clear and an env removal are held and reach cleared_fields at the next start", func(t *testing.T) {
+		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"max_duration": nil,
+			"env":          map[string]string{"KEEP": "1"},
+		}})
+		assert.Equal(t, []string{"config.env", "config.max_duration"}, resp.Disposition.Held)
+		assert.Empty(t, resp.Disposition.HeldForReincarnate)
+		assert.Empty(t, resp.Warnings)
+
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.Contains(t, starts[0].inline.ClearedFields, "max_duration")
+		assert.Contains(t, starts[0].inline.ClearedFields, api.ClearedEnvPathPrefix+"DROP")
+		assert.Empty(t, starts[0].inline.MaxDuration)
+		assert.NotContains(t, starts[0].inline.Env, "DROP")
+		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
+	})
+
+	t.Run("a resources edit that drops a sub-field needs a reincarnation", func(t *testing.T) {
+		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"resources": map[string]interface{}{"requests": map[string]string{"cpu": "1"}},
+		}})
+		assert.Empty(t, resp.Disposition.Held)
+		assert.Equal(t, []string{"config.resources"}, resp.Disposition.HeldForReincarnate)
+	})
+
+	t.Run("re-rendering broker: secrets stay pending through a start and never reach changed_fields", func(t *testing.T) {
+		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"secrets": []map[string]interface{}{{"key": "API_TOKEN"}},
+		}})
+		assert.Empty(t, resp.Disposition.Held)
+		assert.Equal(t, []string{"config.secrets"}, resp.Disposition.HeldForReincarnate)
+		require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+		assert.Equal(t, "config.secrets: "+heldNotRerenderedNote, resp.Warnings[0])
+
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.secrets"}))
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.NotContains(t, starts[0].inline.ChangedFields, "secrets")
+		assert.Empty(t, starts[0].inline.Secrets)
+		after := pendingReloadAgent(t, s, agent.ID)
+		require.NotNil(t, after.PendingConfig)
+		assert.Equal(t, []string{"config.secrets"}, pendingConfigKeys(after.PendingConfig))
+	})
+
+	t.Run("a skill removal pending from an earlier save is still reported against the applied config", func(t *testing.T) {
+		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"skills": []map[string]interface{}{{"uri": "hub://skills/review"}},
+		}})
+		assert.Equal(t, []string{"config.skills"}, first.Disposition.HeldForReincarnate)
+		// The next-run value is [review]; this save adds a skill, but the
+		// start applies [review, other] to the applied [review, test],
+		// which still removes test.
+		second := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"skills": []map[string]interface{}{{"uri": "hub://skills/review"}, {"uri": "hub://skills/other"}},
+		}})
+		assert.Empty(t, second.Disposition.Held, "the start will not apply the removal")
+		assert.Equal(t, []string{"config.skills"}, second.Disposition.HeldForReincarnate)
+		require.Len(t, second.Warnings, 1, "%v", second.Warnings)
+		assert.Contains(t, second.Warnings[0], "written at the next start")
+	})
 }

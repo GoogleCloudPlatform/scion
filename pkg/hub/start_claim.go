@@ -509,7 +509,8 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
 	// stillHeld are the pending config keys a container-creating start left
-	// pending (provision-rendered keys), reported once the start succeeded.
+	// pending (the provision-rendered keys the agent's broker does not
+	// re-render at start), reported once the start succeeded.
 	var stillHeld []string
 	// accepted: a broker accepted the start as an asynchronous launch.
 	accepted := false
