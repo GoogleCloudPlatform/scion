@@ -31,7 +31,12 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { navigateTo } from '../../client/navigation.js';
 import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
-import { principalLabel, principalName, projectName } from '../../client/principal-names.js';
+import {
+  principalLabel,
+  principalName,
+  projectName,
+  shortId,
+} from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
 import './artifact-publish-dialog.js';
@@ -310,6 +315,14 @@ export class ScionArtifactList extends LitElement {
     return principalLabel(item.ownerKind, item.ownerRef, name, this.currentUserId);
   }
 
+  /** A deleted owner: the name struck through, and the "(agent)" tag outside it (mock S1). */
+  private goneOwner(item: ArtifactListItem): TemplateResult {
+    const name = this.names.get(`${item.ownerKind}:${item.ownerRef}`) || shortId(item.ownerRef);
+    return html`<span class="owner-gone">${name}</span>${item.ownerKind === 'agent'
+        ? ' (agent)'
+        : ''}`;
+  }
+
   /** New artifact, only for a caller the list says may publish here. */
   private newButton(): TemplateResult | typeof nothing {
     if (!this.canCreate) return nothing;
@@ -401,11 +414,7 @@ export class ScionArtifactList extends LitElement {
                     : nothing}
                   ${item.key ? html`<span class="key">${item.key}</span>` : nothing}
                 </td>
-                <td>
-                  ${item.ownerDeleted
-                    ? html`<span class="owner-gone">${this.owner(item)}</span>`
-                    : this.owner(item)}
-                </td>
+                <td>${item.ownerDeleted ? this.goneOwner(item) : this.owner(item)}</td>
                 <td>v${item.currentSeq}</td>
                 <td class="muted">${formatInstant(item.updatedAt)}</td>
                 <td>

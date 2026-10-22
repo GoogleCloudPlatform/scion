@@ -799,7 +799,7 @@ describe('share dialog, retention mode (Retention and access)', () => {
     createdAt: '2026-10-03T12:00:00Z',
   };
 
-  it('S5: retention first, links with Revoke only, grants with Remove only', async () => {
+  it('S5: retention first, links with Revoke only, grants with Remove only (no steward clause)', async () => {
     mockServer({ links: [link('l-1', 3), link('l-2', 60)], grants: [HOME, PRIYA, RESEARCH] });
     const el = await mount(artifact(), 'retention');
     expect($(el, 'sl-dialog')!.getAttribute('label')).toBe(
@@ -831,6 +831,25 @@ describe('share dialog, retention mode (Retention and access)', () => {
     expect(grants[1]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
     expect(grants[2]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
     expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('S5: a steward is told to create links and give access with the CLI, not that only the owner can', async () => {
+    mockServer({ links: [link('l-1', 3)], grants: [HOME, PRIYA] });
+    const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
+    el.artifact = artifact();
+    el.currentUserId = 'user-me';
+    el.mode = 'retention';
+    el.shareAuthority = 'project_owner';
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+    expect(text).toContain('You can revoke links here. Create links with scion artifact share.');
+    expect(text).toContain('You can remove access here. Give access with scion artifact grants.');
+    expect(text).not.toContain('Only the owner');
+    // Still no way to create links or give access in the dialog itself.
+    expect($(el, '#ttl')).toBeNull();
+    expect($(el, '.picker')).toBeNull();
   });
 
   it('S5: Revoke and Remove act at once', async () => {

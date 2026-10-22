@@ -82,7 +82,7 @@ import type {
   PublishFile,
   ViewResponse,
 } from '../../client/artifacts.js';
-import { principalLabel, principalName } from '../../client/principal-names.js';
+import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import type { ScionCodeEditor } from '../shared/code-editor.js';
 import type { CriticView } from '../shared/artifact-markdown-frame.js';
@@ -755,6 +755,12 @@ export class ScionPageArtifactDetail extends LitElement {
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
 
+  /** A deleted owner: the name struck through, and the "(agent)" tag outside it (mock S1, S3). */
+  private goneOwner(kind: string, ref: string): TemplateResult {
+    const name = this.names.get(`${kind}:${ref}`) || shortId(ref);
+    return html`<span class="owner-gone">${name}</span>${kind === 'agent' ? ' (agent)' : ''}`;
+  }
+
   /** Delete… is offered exactly when the hub reports canRetire. */
   private get canRetire(): boolean {
     return this.data?.canRetire === true;
@@ -1112,6 +1118,7 @@ export class ScionPageArtifactDetail extends LitElement {
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
             .mode=${'retention'}
+            .shareAuthority=${this.data.shareAuthority ?? ''}
             ?open=${this.retentionOpen}
             @artifact-changed=${(e: CustomEvent<Artifact>): void => {
               if (this.data) this.data = { ...this.data, artifact: e.detail };
@@ -1224,9 +1231,7 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
         <div slot="meta" class="meta">
-          <span
-            >Owner: ${a.ownerDeleted ? html`<span class="owner-gone">${owner}</span>` : owner}</span
-          >
+          <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"

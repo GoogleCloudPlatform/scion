@@ -127,7 +127,13 @@ describe('artifact list', () => {
     // Beside Review pending, not instead of it.
     expect(gone!.textContent).toContain('Review pending');
     // The deleted agent's name cannot be looked up: its short id, struck through.
-    expect(gone!.querySelector('.owner-gone')!.textContent).toBe('agent-01… (agent)');
+    // Only the name is struck through; the (agent) tag stays outside (mock S1).
+    expect(gone!.querySelector('.owner-gone')!.textContent).toBe('agent-01…');
+    expect((gone as HTMLTableRowElement).cells[1]!.textContent).toContain('agent-01… (agent)');
+    // The badge's explanation is reachable by keyboard and screen readers.
+    const b = gone!.querySelector('sl-badge.owner-deleted')!;
+    expect(b.getAttribute('tabindex')).toBe('0');
+    expect(b.getAttribute('aria-label')).toContain('stays readable until a custodian deletes it');
     expect(live!.querySelector('sl-badge.owner-deleted')).toBeNull();
     expect(live!.querySelector('.owner-gone')).toBeNull();
   });

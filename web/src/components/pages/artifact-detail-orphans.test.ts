@@ -166,8 +166,17 @@ describe('artifact page: owner deleted and retirement', () => {
     expect(badge!.closest('sl-tooltip')!.getAttribute('content')).toContain(
       'The agent that owned this artifact was deleted.'
     );
+    // The name (here the short id: the agent cannot be looked up) is struck
+    // through; the (agent) tag is not.
     const gone = root.querySelector('.meta .owner-gone');
-    expect(gone!.textContent).toContain('(agent)');
+    expect(gone!.textContent).toBe('9d0e1f2a…');
+    expect(gone!.parentElement!.textContent!.replace(/\s+/g, ' ')).toContain(
+      'Owner: 9d0e1f2a… (agent)'
+    );
+    expect(badge!.getAttribute('tabindex')).toBe('0');
+    expect(badge!.getAttribute('aria-label')).toContain(
+      'The agent that owned this artifact was deleted.'
+    );
     expect(root.querySelector('.meta .expires')!.textContent!.replace(/\s+/g, ' ')).toContain(
       'Expires: Never'
     );
@@ -223,6 +232,7 @@ describe('artifact page: owner deleted and retirement', () => {
       open: boolean;
     };
     expect(dialog.mode).toBe('retention');
+    expect((dialog as unknown as { shareAuthority: string }).shareAuthority).toBe('project_owner');
     expect(dialog.open).toBe(true);
   });
 

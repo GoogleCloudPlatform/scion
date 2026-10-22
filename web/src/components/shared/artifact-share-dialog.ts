@@ -40,7 +40,9 @@
  * picker, no Create link) and the grants with Remove only (no search, no
  * Add, permissions as text; the home project's grant is shown and never
  * removable). It is kept separate from the page's entry point so other
- * callers can reuse it.
+ * callers can reuse it. Its hints follow shareAuthority: a steward is told
+ * to create links and give access with the CLI, any other caller that only
+ * the owner can.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -139,6 +141,13 @@ export class ScionArtifactShareDialog extends LitElement {
   @property({ type: String }) currentUserId = '';
   /** "review" limits the dialog to giving users review access. */
   @property({ type: String }) mode: ShareDialogMode = 'share';
+  /**
+   * In retention mode: the caller's steward clause (the GET's
+   * shareAuthority, "project_owner" or "delegator"). A steward may also
+   * create links and give access, from the CLI, and the hints say so; a
+   * caller without one (a custodian) is told only the owner can.
+   */
+  @property({ type: String }) shareAuthority = '';
 
   @state() private loading = false;
   @state() private loadError: string | null = null;
@@ -651,7 +660,7 @@ export class ScionArtifactShareDialog extends LitElement {
       <section aria-labelledby="links-heading">
         <h3 id="links-heading"><sl-icon name="link-45deg"></sl-icon>Share links</h3>
         ${this.retentionMode
-          ? html`<p class="hint">You can revoke links. Only the owner can create them.</p>`
+          ? html`<p class="hint">${this.retentionLinksHint()}</p>`
           : html`<p class="hint">
               Anyone with a link can view the current version without signing in. Links always
               expire.
@@ -897,13 +906,27 @@ export class ScionArtifactShareDialog extends LitElement {
     `;
   }
 
+  /** Retention mode's hint for share links, by what the caller may do elsewhere. */
+  private retentionLinksHint(): TemplateResult {
+    return this.shareAuthority
+      ? html`You can revoke links here. Create links with <code>scion artifact share</code>.`
+      : html`You can revoke links. Only the owner can create them.`;
+  }
+
+  /** Retention mode's hint for grants, by what the caller may do elsewhere. */
+  private retentionAccessHint(): TemplateResult {
+    return this.shareAuthority
+      ? html`You can remove access here. Give access with <code>scion artifact grants</code>.`
+      : html`You can remove access. Only the owner can give it.`;
+  }
+
   /** Retention mode's people section: the grants, with Remove only. */
   private renderAccessList(): TemplateResult {
     const others = this.grants.filter((g) => !g.home);
     return html`
       <section aria-labelledby="people-heading">
         <h3 id="people-heading"><sl-icon name="people"></sl-icon>People and projects</h3>
-        <p class="hint">You can remove access. Only the owner can give it.</p>
+        <p class="hint">${this.retentionAccessHint()}</p>
         ${this.grants.map((g) => this.renderGrantReadOnly(g))}
         ${others.length === 0
           ? html`<p class="empty">No other people or projects have access.</p>`

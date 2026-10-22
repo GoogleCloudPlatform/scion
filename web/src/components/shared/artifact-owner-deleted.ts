@@ -35,9 +35,19 @@ export const OWNER_DELETED_USER_TOOLTIP =
 /** The Owner deleted badge, with the tooltip that fits the owner's kind. */
 export function ownerDeletedBadge(ownerKind: string): TemplateResult {
   const tip = ownerKind === 'user' ? OWNER_DELETED_USER_TOOLTIP : OWNER_DELETED_TOOLTIP;
+  // The badge is focusable and carries the explanation as its accessible
+  // name, so keyboard and screen-reader users reach what the tooltip shows
+  // on hover.
   return html`<sl-tooltip content=${tip}>
-    <sl-badge class="owner-deleted" variant="neutral" pill>
-      <sl-icon name="person-x"></sl-icon>&nbsp;Owner deleted
+    <sl-badge
+      class="owner-deleted"
+      variant="neutral"
+      pill
+      tabindex="0"
+      role="note"
+      aria-label=${`Owner deleted. ${tip}`}
+    >
+      <sl-icon name="person-x" aria-hidden="true"></sl-icon>&nbsp;Owner deleted
     </sl-badge>
   </sl-tooltip>`;
 }
