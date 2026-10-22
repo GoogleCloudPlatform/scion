@@ -667,6 +667,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	warnings := templateEnvWarns.Warnings()
+	// Templates left at a hub-managed project's workspace root are no
+	// longer read; say so instead of silently resolving another template.
+	if w := config.LegacyProjectTemplatesWarning(opts.ProjectPath); w != "" {
+		slog.Warn("Project templates found at the old location", "agent", opts.Name, "warning", w)
+		warnings = append(warnings, w)
+	}
 
 	// The template env layer (ptone/scion#4524): recomputed from the live
 	// template chain on every start, never read from scion-agent.json, and
