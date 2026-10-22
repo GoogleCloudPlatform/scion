@@ -46,8 +46,8 @@ const (
 
 // Scope values reported for a credential.
 const (
-	// ScopeHub is an interactive user login (a stored OAuth login): the
-	// user's own permissions on the hub.
+	// ScopeHub is an interactive user login (a stored OAuth login) or the
+	// development token: the user's own permissions on the hub.
 	ScopeHub = "hub"
 	// ScopeUnknown is a credential whose scope the CLI holds no
 	// non-secret record of. The hub decides per tunnel.
@@ -108,15 +108,18 @@ type ScopeReporter interface {
 	Scope(cred Credential) string
 }
 
-// DefaultScope reports ScopeHub only for an interactive user login (a
-// stored OAuth login) and ScopeUnknown otherwise, including the
-// development token. It never reads the secret or guesses; unknown is
-// never treated as hub or as any broader scope.
+// DefaultScope reports ScopeHub for an interactive user login (a stored
+// OAuth login) and for the development token, which the hub accepts as
+// the development user with that user's own permissions, and ScopeUnknown
+// otherwise: a token from the environment may be a scoped user access
+// token. It never reads the secret or guesses; unknown is never treated as
+// hub or as any broader scope.
 type DefaultScope struct{}
 
 // Scope implements ScopeReporter.
 func (DefaultScope) Scope(cred Credential) string {
-	if cred.Kind == CredentialOAuth {
+	switch cred.Kind {
+	case CredentialOAuth, CredentialDev:
 		return ScopeHub
 	}
 	return ScopeUnknown
@@ -342,6 +345,8 @@ type client struct {
 	cur      *session
 	sessions []*session
 	tunnels  map[*tunnelEntry]struct{}
+	// listener is the open --local-port listener, or nil.
+	listener *ListenerRecord
 	started  time.Time
 	record   RecordWriter
 	pubSeq   uint64 // records built, guarded by mu
@@ -567,6 +572,9 @@ func (c *client) publish() {
 		}
 		rec.Tunnels = append(rec.Tunnels, tr)
 	}
+	if c.listener != nil {
+		rec.Listeners = []ListenerRecord{*c.listener}
+	}
 	c.mu.Unlock()
 	for id := range ids {
 		rec.SessionIDs = append(rec.SessionIDs, id)
@@ -677,6 +685,9 @@ func (c *client) runListener(ctx context.Context) error {
 	} else {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "Forwarding %s to port %d of agent %s\n", ln.Addr(), c.req.Port, c.req.Agent)
 	}
+	// The listener is listed in the status record while it accepts.
+	c.setListener(ln.Addr())
+	defer c.setListener(nil)
 	if c.req.Ready != nil {
 		c.req.Ready(ln.Addr())
 	}
@@ -724,8 +735,28 @@ func (c *client) runListener(ctx context.Context) error {
 	case err := <-c.lost:
 		return err
 	case err := <-fatal:
+		c.setListener(nil)
 		return c.stopAccepting(ctx, ln, acceptDone, &conns, &open, err)
 	}
+}
+
+// setListener records the listener accepting on addr, or none for nil,
+// and publishes the record.
+func (c *client) setListener(addr net.Addr) {
+	var l *ListenerRecord
+	if tcp, ok := addr.(*net.TCPAddr); ok {
+		l = &ListenerRecord{
+			Agent:     c.req.Agent,
+			Project:   c.req.Project,
+			Kind:      c.req.Kind(),
+			LocalPort: tcp.Port,
+			OpenedAt:  c.cfg.now().UTC(),
+		}
+	}
+	c.mu.Lock()
+	c.listener = l
+	c.mu.Unlock()
+	c.publish()
 }
 
 // stopAccepting ends a listener after a request failure no later

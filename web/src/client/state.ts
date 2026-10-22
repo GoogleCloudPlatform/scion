@@ -1217,6 +1217,14 @@ export class StateManager extends EventTarget {
       // Project lifecycle events: created, updated
       const projectData = data as Partial<Project> & { projectId?: string };
       const id = projectData.projectId || projectId;
+      // A project re-created with a previously deleted ID is live again:
+      // clear its tombstone, as the agent path does for a restore, so
+      // consumers that skip deleted IDs (the projects page merge) keep it
+      // (ptone/scion#5332). Only `created` clears it: an `updated` can be a
+      // late delta for the deleted project.
+      if (eventType === 'created') {
+        this.state.deletedProjectIds.delete(id);
+      }
       const existing = this.state.projects.get(id) || ({} as Project);
       const updated = { ...existing, ...projectData, id };
       if (!projectData._capabilities && existing._capabilities) {

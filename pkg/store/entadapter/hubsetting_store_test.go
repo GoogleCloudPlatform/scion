@@ -194,12 +194,15 @@ func TestListHubSettings(t *testing.T) {
 
 	list, err = s.ListHubSettings(ctx)
 	require.NoError(t, err)
-	assert.Len(t, list, 3)
+	assert.Len(t, list, 4)
 
-	// Should be ordered by section name.
-	assert.Equal(t, "access", list[0].Section)
-	assert.Equal(t, "maintenance", list[1].Section)
-	assert.Equal(t, "telemetry", list[2].Section)
+	// Should be ordered by section name. The operational-settings revision
+	// row comes with the sections (three operational writes so far).
+	assert.Equal(t, store.HubSettingsRevisionSection, list[0].Section)
+	assert.Equal(t, int64(3), list[0].Revision)
+	assert.Equal(t, "access", list[1].Section)
+	assert.Equal(t, "maintenance", list[2].Section)
+	assert.Equal(t, "telemetry", list[3].Section)
 }
 
 // =============================================================================

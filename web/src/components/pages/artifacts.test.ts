@@ -23,7 +23,11 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { ArtifactListItem, ArtifactListResponse } from '../../client/artifacts.js';
+import {
+  PUBLISH_CHECK_CONCURRENCY,
+  type ArtifactListItem,
+  type ArtifactListResponse,
+} from '../../client/artifacts.js';
 import type { ScionPageArtifacts } from './artifacts.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
@@ -443,7 +447,10 @@ describe('artifacts list page lifecycle', () => {
     });
     const el = await mount(true);
     expect(rows(el)).toHaveLength(1);
-    const lookups = m.urls.filter((u) => !u.startsWith('/api/v1/artifacts?'));
+    // The New artifact check's project list is not a name lookup.
+    const lookups = m.urls.filter(
+      (u) => !u.startsWith('/api/v1/artifacts?') && !u.startsWith('/api/v1/projects?')
+    );
     expect(lookups.filter((u) => /\/api\/v1\/(users|agents|projects)\/$/.test(u))).toEqual([]);
     expect(lookups).toEqual([]);
   });
@@ -480,6 +487,10 @@ function scriptedListFetch(): ScriptedList {
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      // The New artifact check's project list is not a name lookup.
+      if (url.startsWith('/api/v1/projects?')) {
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      }
       if (!url.startsWith('/api/v1/artifacts?')) {
         s.lookups.push(url);
         return Promise.resolve(new Response('{}', { status: 404 }));
@@ -598,5 +609,255 @@ describe('artifacts list page sharing', () => {
     expect(moved.textContent).not.toContain('Deleted project');
     expect(moved.querySelector('a.move')).toBeNull();
     expect(moved.querySelector('a[href="/projects/proj-9"]')).not.toBeNull();
+  });
+});
+
+describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
+  beforeAll(async () => {
+    await import('./artifacts.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  /**
+   * Mocks fetch: an empty artifact list, the projects the caller can see
+   * (or projectsStatus; 'hang' never answers), answering ?slug= with the
+   * matching project, and canCreate per project id in publishable (ids in
+   * hold never answer). signals collects the canCreate requests' signals.
+   */
+  function mockPublish(
+    projects: Array<{ id: string; name: string; slug: string }>,
+    publishable: Set<string>,
+    projectsStatus: number | 'hang' = 200,
+    opts: { hold?: Set<string>; signals?: AbortSignal[] } = {}
+  ): Mock {
+    const m: Mock = { urls: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        m.urls.push(url);
+        if (url.startsWith('/api/v1/projects?')) {
+          if (projectsStatus === 'hang') return new Promise<Response>(() => {});
+          if (projectsStatus !== 200) {
+            return Promise.resolve(
+              json({ error: { code: 'internal', message: 'boom' } }, projectsStatus)
+            );
+          }
+          const slug = new URL(url, 'http://x').searchParams.get('slug');
+          return Promise.resolve(
+            json({ projects: slug ? projects.filter((p) => p.slug === slug) : projects })
+          );
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          const scope = new URL(url, 'http://x').searchParams.get('scope');
+          if (!scope) return Promise.resolve(json({ artifacts: [] }));
+          if (init?.signal) opts.signals?.push(init.signal);
+          if (opts.hold?.has(scope)) return new Promise<Response>(() => {});
+          return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
+        }
+        return Promise.resolve(json({ error: { code: 'forbidden', message: 'denied' } }, 403));
+      })
+    );
+    return m;
+  }
+
+  const GLOBAL = { id: 'g-1', name: 'Global', slug: 'global' };
+  const WEB = { id: 'w-1', name: 'Web', slug: 'web' };
+
+  function newButton(el: ScionPageArtifacts): HTMLElement {
+    return el.shadowRoot!.querySelector('.header sl-button.new-artifact') as HTMLElement;
+  }
+
+  /** Shoelace is not registered here: read the attribute Lit sets. */
+  function disabled(e: Element): boolean {
+    return e.hasAttribute('disabled');
+  }
+
+  function scopedChecks(m: Mock): string[] {
+    return listUrls(m)
+      .map((p) => p.get('scope'))
+      .filter((s): s is string => !!s);
+  }
+
+  it('enables New artifact after one lookup and one check of the global project', async () => {
+    const others = Array.from({ length: 10 }, (_, i) => ({
+      id: `p-${i}`,
+      name: `P${i}`,
+      slug: `p${i}`,
+    }));
+    const m = mockPublish([...others, GLOBAL], new Set(['g-1', ...others.map((p) => p.id)]));
+    const el = await mount(true);
+    const btn = newButton(el);
+    expect(btn.textContent).toContain('New artifact');
+    expect(disabled(btn)).toBe(false);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+    // Only global is checked, and the project list is never paged: the one
+    // request is the exact lookup by slug (and has no mine=true, which
+    // would mean owned projects only).
+    expect(scopedChecks(m)).toEqual(['g-1']);
+    const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));
+    expect(projectCalls).toEqual(['/api/v1/projects?slug=global&limit=1']);
+  });
+
+  it('when global is not publishable, pages the projects and stops at the first pass', async () => {
+    const others = Array.from({ length: 20 }, (_, i) => ({
+      id: `p-${String(i).padStart(2, '0')}`,
+      name: `P${String(i).padStart(2, '0')}`,
+      slug: `p${i}`,
+    }));
+    const m = mockPublish([...others, GLOBAL], new Set(['p-00', 'p-15']));
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+    const checks = scopedChecks(m);
+    expect(checks[0]).toBe('g-1');
+    // The paged list holds global too, but it is not checked again.
+    expect(checks.filter((c) => c === 'g-1')).toHaveLength(1);
+    // Global, then one pool's worth: not all twenty.
+    expect(checks.length).toBeLessThanOrEqual(1 + PUBLISH_CHECK_CONCURRENCY);
+    const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));
+    expect(projectCalls).toEqual([
+      '/api/v1/projects?slug=global&limit=1',
+      '/api/v1/projects?limit=200',
+    ]);
+  });
+
+  it('cancels the running check when the page is removed', async () => {
+    const signals: AbortSignal[] = [];
+    mockPublish([GLOBAL], new Set(['g-1']), 200, { hold: new Set(['g-1']), signals });
+    const el = await mount(true);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+    el.remove();
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it('a stale check from an earlier mount cannot overwrite a newer result', async () => {
+    // The first mount's project list answers only after the second mount's
+    // check has finished, and would say "nowhere".
+    let releaseFirst: (r: Response) => void = () => {};
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.startsWith('/api/v1/projects?')) {
+          call++;
+          if (call === 1) return new Promise<Response>((r) => (releaseFirst = r));
+          return Promise.resolve(json({ projects: [GLOBAL] }));
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          const scope = new URL(url, 'http://x').searchParams.get('scope');
+          return Promise.resolve(json({ artifacts: [], canCreate: scope === 'g-1' }));
+        }
+        return Promise.resolve(json({}, 404));
+      })
+    );
+    const el = await mount(true);
+    el.remove();
+    document.body.appendChild(el);
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(false);
+    releaseFirst(json({ projects: [] }));
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(false);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+  });
+
+  it('follows the dialog when its finished load finds nowhere to publish', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 500);
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog')!;
+    dialog.dispatchEvent(new CustomEvent('artifact-publish-choices', { detail: { count: 0 } }));
+    await settle(el);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).not.toBeNull();
+  });
+
+  it('opens the publish dialog with the project picker', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']));
+    const el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog') as HTMLElement & {
+      open: boolean;
+      chooseProject: boolean;
+    };
+    expect(dialog.chooseProject).toBe(true);
+    expect(dialog.open).toBe(false);
+    newButton(el).click();
+    await settle(el);
+    expect(dialog.open).toBe(true);
+  });
+
+  it('disables New artifact with an explanation when there is nowhere to publish', async () => {
+    mockPublish([GLOBAL, WEB], new Set());
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    const tip = el.shadowRoot!.querySelector('sl-tooltip')!;
+    expect(tip.getAttribute('content')).toContain("can't publish in any of your projects");
+    // The wrapper takes focus and is a named, disabled button, so the reason
+    // is reachable from the keyboard and read out.
+    const wrap = tip.querySelector('[tabindex="0"]')!;
+    expect(wrap.getAttribute('role')).toBe('button');
+    expect(wrap.getAttribute('aria-disabled')).toBe('true');
+    expect(wrap.getAttribute('aria-label')).toContain("can't publish");
+    // The empty state says it too.
+    expect(el.shadowRoot!.querySelector('.empty-state .nowhere')!.textContent).toContain(
+      "can't publish"
+    );
+  });
+
+  it('disables New artifact for a user with no projects', async () => {
+    mockPublish([], new Set());
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).not.toBeNull();
+  });
+
+  it('keeps New artifact disabled, without the explanation, while checking', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 'hang');
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+  });
+
+  it('enables New artifact when the check fails (the dialog shows why)', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 500);
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+  });
+
+  it('lands on the new artifact page after publishing', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']));
+    const el = await mount(true);
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog')!;
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-published', {
+        detail: { artifact: { id: 'new-1', scopeRef: 'g-1' }, version: { seq: 1 } },
+      })
+    );
+    await settle(el);
+    document.removeEventListener('nav-click', onNav);
+    expect(paths).toEqual(['/projects/g-1/artifacts/new-1']);
+  });
+
+  it('does not check where to publish when the experiment is off', async () => {
+    const m = mockPublish([GLOBAL], new Set(['g-1']));
+    await mount(false);
+    expect(m.urls).toEqual([]);
   });
 });

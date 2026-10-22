@@ -61,6 +61,8 @@ const (
 	// agent_not_found, an unknown-RPC response, or the conduit endpoint
 	// refused or absent.
 	ExitNoTunnelSupport = 11
+	// ExitHangup is a hangup (SIGHUP).
+	ExitHangup = 129
 	// ExitInterrupted is an interrupt (SIGINT).
 	ExitInterrupted = 130
 	// ExitTerminated is a termination request (SIGTERM).
@@ -96,10 +98,13 @@ func CodeOf(err error) int {
 	return ExitError
 }
 
-// SignalExit returns the exit code for a process ended by sig: 130 for an
-// interrupt, 143 for a termination request, otherwise ExitError.
+// SignalExit returns the exit code for a process ended by sig: 129 for a
+// hangup, 130 for an interrupt, 143 for a termination request, otherwise
+// ExitError.
 func SignalExit(sig os.Signal) int {
 	switch sig {
+	case syscall.SIGHUP:
+		return ExitHangup
 	case os.Interrupt:
 		return ExitInterrupted
 	case syscall.SIGTERM:
