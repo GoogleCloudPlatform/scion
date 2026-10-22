@@ -833,3 +833,85 @@ func TestLifecycleStore2_ContainerMissing(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(error)[R1/1]", lcFull(f.events(a.ID)))
 }
+
+// TestLifecycleStore2_CrossReplicaHeartbeatDuringRestart is r5 N5 and 10b
+// item 2: R1 is closed at the stop leg, another replica's running heartbeat
+// for R2 lands between beginRun(R2) and the start write, and the failed
+// start leg then emits only launch_failed(restart_failed); R2 is never
+// closed as restart_stop_leg.
+func TestLifecycleStore2_CrossReplicaHeartbeatDuringRestart(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	require.NoError(t, f.cs.RecordRestartStopLeg(ctx, a.ID, "R1"))
+	f.mint(a.ID, "R2")
+	f.heartbeat(a.ID, "running", "R2")
+	rctx := lifecycleevents.WithStartOutcome(ctx, lifecycleevents.StartOutcomeRestartFailed)
+	f.status(rctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "R2"})
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped,restart_stop_leg)[R1/1] started@4[R2/1] launch_failed@5(restart_failed)[/1]",
+		lcFull(f.events(a.ID)))
+}
+
+// TestLifecycleStore2_AdoptionWhenOpenRunIsOlder is 10b item 5: the open
+// run is R1, a start mints R2 and the broker reports L: no rebind (the
+// open run is not R2); the first write for L supersedes R1, starts L, and
+// carries the R2 -> L adoption.
+func TestLifecycleStore2_AdoptionWhenOpenRunIsOlder(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.mint(a.ID, "R2")
+	ok, err := f.cs.CompareAndSwapAgentRunID(ctx, a.ID, "R2", "L1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	f.heartbeat(a.ID, "running", "L1")
+	evs := f.events(a.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[R1/1] started@4[L1/1]", lcFull(evs))
+	assert.Empty(t, evs[2].AdoptedFromLaunchID, "a closure of the older segment carries no adoption")
+	assert.Equal(t, "R2", evs[3].AdoptedFromLaunchID)
+	assert.NotEmpty(t, evs[2].RunChangedAt, "the mint of R2 was the run change")
+}
+
+// TestLifecycleStore2_ReincarnationFailsAfterMint is 10b item 7: a
+// reincarnation that minted R2 and then fails (writeFailedAgent: phase
+// error, state failed, configuration restored) closes R1 as superseded,
+// records the failed attempt without a launch_id, and the restored
+// configuration is metadata_changed (not a resolution); no reincarnated,
+// and R1 keeps generation 1.
+func TestLifecycleStore2_ReincarnationFailsAfterMint(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	cur, err := f.cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	_, err = f.cs.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, time.Now())
+	require.NoError(t, err)
+	f.update(lifecycleevents.WithConfigResolution(ctx), a.ID, func(a *store.Agent) {
+		a.Phase = "starting"
+		a.ReincarnationState = store.ReincarnationStatePending
+		a.AppliedConfig = &store.AgentAppliedConfig{Model: "next"}
+	})
+	f.mint(a.ID, "R2")
+	f.update(ctx, a.ID, func(a *store.Agent) {
+		a.Phase = "error"
+		a.ReincarnationState = store.ReincarnationStateFailed
+		a.AppliedConfig = nil
+	})
+	assert.Equal(t, "created@1[/1] started@2[R1/1] configured@3[/2] stopped@4(superseded)[R1/1] metadata_changed@5[R2/1] launch_failed@6(launch_error)[/1]",
+		lcFull(f.events(a.ID)))
+}
+
+// TestLifecycleStore2_RestartWithoutStopLeg is 10b item 9: a restart with
+// no broker stop leg records no RecordRestartStopLeg, so R1 is closed by
+// step 2 as superseded when the start write for R2 lands.
+func TestLifecycleStore2_RestartWithoutStopLeg(t *testing.T) {
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.mint(a.ID, "R2")
+	f.startWrite(a.ID)
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[R1/1] started@4[R2/1]", lcFull(f.events(a.ID)))
+}
