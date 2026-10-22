@@ -488,8 +488,8 @@ func (h *StatusHandler) releaseNotificationWaitOnRestart() error {
 }
 
 // isInPlaceSessionStart reports whether event is a session-start that
-// restarts the session inside the running harness (source clear or compact,
-// see hooks.ClassifySessionStart).
+// restarts the session inside the running harness (source clear, compact or
+// reload, see hooks.ClassifySessionStart).
 func isInPlaceSessionStart(event *hooks.Event) bool {
 	return event.Name == hooks.EventSessionStart && hooks.ClassifySessionStart(event.Data.Source) == hooks.SessionInPlace
 }
