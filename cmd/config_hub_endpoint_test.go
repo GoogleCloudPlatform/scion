@@ -43,12 +43,14 @@ func setupConfigHubTest(t *testing.T) {
 
 // resetConfigCommandFlags resets the flags of the config commands and the
 // root --global flag before and after the test, since pflag keeps values
-// across Execute calls.
+// across Execute calls. Only the commands' own flags are reset: after a run,
+// Flags() also holds the inherited root flags (--hub among them), and
+// resetting those would clear what the resolver filled in for the run.
 func resetConfigCommandFlags(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		for _, c := range []*cobra.Command{configSetCmd, configGetCmd, configUnsetCmd, configListCmd} {
-			c.Flags().VisitAll(func(f *pflag.Flag) {
+			c.LocalFlags().VisitAll(func(f *pflag.Flag) {
 				f.Changed = false
 				_ = f.Value.Set(f.DefValue)
 			})
