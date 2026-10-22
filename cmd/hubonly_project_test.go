@@ -184,6 +184,16 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			wantHub: ctxTestHub,
 		},
 		{
+			name: "--global with --project uses the --project value",
+			setup: func(t *testing.T) {
+				writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+				globalMode = true
+				projectPath = "bar"
+			},
+			want:    hubOnlyProject{ref: "bar", label: "bar", source: hubOnlySourceFlag},
+			wantHub: ctxTestHub,
+		},
+		{
 			name:    "--project global names a hub project",
 			setup:   func(t *testing.T) { projectPath = "global" },
 			want:    hubOnlyProject{ref: "global", label: "global", source: hubOnlySourceFlag},

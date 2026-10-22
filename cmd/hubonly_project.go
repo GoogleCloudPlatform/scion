@@ -51,16 +51,23 @@ type hubOnlyProject struct {
 // resolveHubOnlyProject returns the project for tunnel, ssh and ssh-config,
 // after resolveInvocationTarget filled projectPath. The precedence is that
 // of resolveInvocationTarget: --project, then the directory project, then
-// the current context ('scion use'). The global settings are never a
+// the current context ('scion use'). --global adds nothing: with
+// --project the --project value is used, without it there is no project.
+// The global settings are never a
 // directory project, and a local project id is never used for a directory
 // project that is not linked to a hub.
 func resolveHubOnlyProject() hubOnlyProject {
 	switch {
-	case globalMode:
+	case globalMode && (projectPath == "" || projectPath == "global"):
 		// --global names the global settings, which never give these
 		// commands a project; resolveInvocationTarget applies no context
-		// project either.
+		// project either. The root hook sets projectPath to global for
+		// --global alone before RunE.
 		return hubOnlyProject{}
+	case globalMode:
+		// --global with --project: --global gives no project, so the
+		// --project value is the hub project, as without --global.
+		return hubOnlyProject{ref: projectPath, label: projectPath, source: hubOnlySourceFlag}
 	case projectSource == targetSourceContext:
 		return hubOnlyProject{ref: projectPath, label: contextProjectSlug, source: hubOnlySourceContext}
 	case projectPath != "":
