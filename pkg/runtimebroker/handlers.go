@@ -2713,6 +2713,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// labelled with another agent's ID is a different agent that holds the
 	// name, so nothing is deleted. Checked before any side effect.
 	sharerKey, idMismatch := deleteSharerKey(hubAgentID, target.agentID, target.name)
+	if hubAgentID == "" && target.agentID != "" && !isSingleCleanPathElement(target.agentID) {
+		s.agentLifecycleLog.Warn("Agent delete: the runtime entry's agent_id label is not a valid path element; looking up the agent's worktree by name",
+			"agent_id", id, "project_id", agentProjectID, "container_id", target.containerID)
+	}
 	if idMismatch {
 		span.SetStatus(codes.Error, "agent ID mismatch")
 		s.agentLifecycleLog.Warn("Agent delete: the runtime entry belongs to another agent; nothing deleted",

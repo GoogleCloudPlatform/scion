@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -324,31 +325,42 @@ func TestDeleteAgent_InvalidAgentID_Refused(t *testing.T) {
 	}
 }
 
-// Files that belong to another run (ptone/scion#4771) are kept, and so are
-// the agent's sharer registry entry and worktree: the requested run's
-// container is deleted and nothing else.
-func TestDeleteAgent_FilesOfOtherRun_KeepsSharerAndWorktree(t *testing.T) {
-	f := newSharerFixture(t)
-	wt := f.provision(t, "uuid-a", "shared")
-	recordRun(t, f.scionDir, "dev-a", "run-new")
-	before := readFileBytes(t, f.marker("shared"))
-	f.mgr.agents = []api.AgentInfo{withRun(withAgentIDLabel(labelled("dev-a", "cid-old", scopeProjB, f.scionDir), "uuid-a"), "run-old")}
+// Files that belong to another run, or whose owner is unknown
+// (ptone/scion#4771), are kept, and so are the agent's sharer registry
+// entry and worktree: the requested run's container is deleted and nothing
+// else.
+func TestDeleteAgent_FilesNotThisRuns_KeepsSharerAndWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, scionDir string)
+	}{
+		{"another run's files", func(t *testing.T, scionDir string) { recordRun(t, scionDir, "dev-a", "run-new") }},
+		{"owner unknown", func(t *testing.T, scionDir string) { plantHostState(t, scionDir, "dev-a", `{"runId":`) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSharerFixture(t)
+			wt := f.provision(t, "uuid-a", "shared")
+			tc.plant(t, f.scionDir)
+			before := readFileBytes(t, f.marker("shared"))
+			f.mgr.agents = []api.AgentInfo{withRun(withAgentIDLabel(labelled("dev-a", "cid-old", scopeProjB, f.scionDir), "uuid-a"), "run-old")}
 
-	rec := doDelete(t, f.srv, "dev-a", "projectId="+scopeProjB+"&agentId=uuid-a&runId=run-old"+sharerDeleteFlags)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("got %d, want 204: %s", rec.Code, rec.Body.String())
-	}
-	if f.mgr.DeleteCalls() != 1 || f.mgr.LastDeleteContainerID() != "cid-old" {
-		t.Fatalf("got %d deletes, last %q; want the requested run's cid-old", f.mgr.DeleteCalls(), f.mgr.LastDeleteContainerID())
-	}
-	if f.mgr.LastDeleteFiles() {
-		t.Error("the delete removed files of another run")
-	}
-	if after := readFileBytes(t, f.marker("shared")); !bytes.Equal(before, after) {
-		t.Errorf("registry file changed: %s -> %s", before, after)
-	}
-	if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
-		t.Errorf("worktree removed: %v", err)
+			rec := doDelete(t, f.srv, "dev-a", "projectId="+scopeProjB+"&agentId=uuid-a&runId=run-old"+sharerDeleteFlags)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("got %d, want 204: %s", rec.Code, rec.Body.String())
+			}
+			if f.mgr.DeleteCalls() != 1 || f.mgr.LastDeleteContainerID() != "cid-old" {
+				t.Fatalf("got %d deletes, last %q; want the requested run's cid-old", f.mgr.DeleteCalls(), f.mgr.LastDeleteContainerID())
+			}
+			if f.mgr.LastDeleteFiles() {
+				t.Error("the delete removed files that are not the requested run's")
+			}
+			if after := readFileBytes(t, f.marker("shared")); !bytes.Equal(before, after) {
+				t.Errorf("registry file changed: %s -> %s", before, after)
+			}
+			if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
+				t.Errorf("worktree removed: %v", err)
+			}
+		})
 	}
 }
 
@@ -417,6 +429,44 @@ func TestSyncCreateFailure_RemovesWorktreeUnderHubAgentID(t *testing.T) {
 	}
 	if _, _, found, err := provision.FindBranchForAgent(base, "", "agent-a-id"); err != nil || found {
 		t.Errorf("the failure cleanup left the sharer registry entry (found=%v, err=%v)", found, err)
+	}
+}
+
+// An aborted async create launch removes the worktree and sharer registry
+// entry it provisioned under the hub agent ID.
+func TestCleanupLaunchFiles_RemovesWorktreeUnderHubAgentID(t *testing.T) {
+	requireWorktreeGit(t)
+	t.Setenv("SCION_HOST_UID", "")
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentDir := filepath.Join(projectDir, "agents", "agent-x")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(filepath.Dir(projectDir), "workspace")
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved:  provision.ResolvedWorkspace{HostPath: base, Backend: "local"},
+		Mode:      store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-id-x", AgentName: "agent-x",
+		GitClone: &api.GitCloneConfig{URL: initBareRepoWithCommit(t), Branch: "main"},
+	}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	wt := provision.WorktreePath(base, "agent-id-x")
+	if err := writeLaunchMarker(projectDir, false, "agent-x", "L1"); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+	rec := newLaunchRecord("L1", "agent-id-x", store.LaunchKindCreate, "", time.Now().Add(time.Minute), func() {})
+
+	if err := srv.cleanupLaunchFiles(rec, api.StartOptions{Name: "agent-x", ProjectPath: projectDir, RunID: "run-a"}, false, "agent-x"); err != nil {
+		t.Fatalf("cleanupLaunchFiles: %v", err)
+	}
+	if _, err := os.Lstat(wt); !os.IsNotExist(err) {
+		t.Errorf("the launch cleanup left the worktree: %v", err)
+	}
+	if _, _, found, err := provision.FindBranchForAgent(base, "", "agent-id-x"); err != nil || found {
+		t.Errorf("the launch cleanup left the sharer registry entry (found=%v, err=%v)", found, err)
 	}
 }
 

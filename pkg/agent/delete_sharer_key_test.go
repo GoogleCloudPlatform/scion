@@ -321,3 +321,35 @@ func TestDeleteAgentFilesFor_DefaultKeyIsName(t *testing.T) {
 	}
 	p.assertTornDown(t, "dev-a", "dev-a", wt, "shared")
 }
+
+// A locked worktree entry (a user's lock, or the lock an interrupted
+// "git worktree add" leaves) cannot be removed: the delete fails with the
+// registry entry and the agent directory kept, on every attempt, until the
+// entry is unlocked; the retry after that completes the teardown.
+func TestDeleteAgentFilesFor_LockedWorktreeEntry_FailsClosed(t *testing.T) {
+	p := newSharerKeyProject(t)
+	wt := p.add(t, "dev-a", "uuid-a", "shared")
+	if out, err := exec.Command("git", "-C", p.base, "worktree", "lock", wt).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree lock: %v\n%s", err, out)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err == nil {
+			t.Fatalf("attempt %d: expected the delete of a locked worktree to fail", attempt)
+		}
+		p.assertKept(t, "dev-a", "uuid-a", "shared")
+		if _, err := os.Stat(p.entry("uuid-a")); err != nil {
+			t.Errorf("attempt %d: git worktree entry removed: %v", attempt, err)
+		}
+	}
+
+	// The worktree directory is already gone, so remove the lock the way
+	// "git worktree unlock" does.
+	if err := os.Remove(filepath.Join(p.entry("uuid-a"), "locked")); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	if _, err := DeleteAgentFilesFor("dev-a", "uuid-a", p.projectPath, true); err != nil {
+		t.Fatalf("retry after unlock: %v", err)
+	}
+	p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+}
