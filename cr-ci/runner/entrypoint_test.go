@@ -309,11 +309,7 @@ type result struct {
 
 func (h *harness) run() result {
 	h.t.Helper()
-	cmd := exec.Command("bash", "entrypoint.sh")
-	cmd.Env = make([]string, 0, len(h.env))
-	for k, v := range h.env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd := h.entrypointCmd()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -1223,8 +1219,26 @@ func killEntrypoint(h *harness, cmd *exec.Cmd) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+	// The entrypoint's own process group (entrypointCmd: Setpgid): the entrypoint, its
+	// output watcher and its idle watchdog, which hold the test's stdout/stderr pipes.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+}
+
+// entrypointCmd returns the command that runs entrypoint.sh with the harness env, as
+// the leader of its own process group, so killEntrypoint can end it together with the
+// background processes it starts (output watcher, idle watchdog). WaitDelay bounds
+// Wait if a process that escaped the group still holds the output pipes.
+func (h *harness) entrypointCmd() *exec.Cmd {
+	cmd := exec.Command("bash", "entrypoint.sh")
+	cmd.Env = make([]string, 0, len(h.env))
+	for k, v := range h.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 30 * time.Second
+	return cmd
 }
 
 // signalStub waits until it is signalled, records the signal and exits with a
@@ -1245,10 +1259,7 @@ func TestEntrypointForwardsSignals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSuccessHarness(t)
 			h.setRunSh(stubRunShWith(signalStub))
-			cmd := exec.Command("bash", "entrypoint.sh")
-			for k, v := range h.env {
-				cmd.Env = append(cmd.Env, k+"="+v)
-			}
+			cmd := h.entrypointCmd()
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			if err := cmd.Start(); err != nil {
@@ -1376,10 +1387,7 @@ func TestEntrypointSignalDuringClaim(t *testing.T) {
 	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
 	h := newHarness(t, cs.URL)
 	h.env["CR_CLAIM_BACKOFF_SECONDS"] = "2"
-	cmd := exec.Command("bash", "entrypoint.sh")
-	for k, v := range h.env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd := h.entrypointCmd()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
@@ -1436,10 +1444,7 @@ touch "$out/ready"
 wait "$nap"
 exit 9
 `))
-		cmd := exec.Command("bash", "entrypoint.sh")
-		for k, v := range h.env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
+		cmd := h.entrypointCmd()
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
@@ -1508,7 +1513,9 @@ func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
 // (SIGTERM to run.sh), and the execution ends 0 with a distinct log line.
 func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
 	h := newSuccessHarness(t)
-	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "1"
+	// 3 s: the stub's recording prelude runs before its traps are set, and a TERM that
+	// came first would end it by default instead of through the trap.
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3"
 	h.setRunSh(stubRunShWith(signalStub))
 	res := h.run()
 	if res.exitCode != 0 {
@@ -1518,8 +1525,8 @@ func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
 		t.Errorf("run.sh received %q, want TERM from the idle watchdog", got)
 	}
 	for _, want := range []string{
-		"idle timeout: no job started within 1s of the container start; stopping the runner gracefully",
-		"idle_timeout: runner stopped after 1s without a job (run.sh exited 42); exiting 0",
+		"idle timeout: no job started within 3s of the container start; stopping the runner gracefully",
+		"idle_timeout: runner stopped after 3s without a job (run.sh exited 42); exiting 0",
 	} {
 		if !strings.Contains(res.stderr, want) {
 			t.Errorf("stderr does not contain %q:\n%s", want, res.stderr)
@@ -1576,7 +1583,7 @@ func TestEntrypointIdleTimeoutDoesNotDelayExit(t *testing.T) {
 // makes the race deterministic). The cancelled job must not pass for an idle stop.
 func TestEntrypointIdleTimeoutRacedJob(t *testing.T) {
 	h := newSuccessHarness(t)
-	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "1"
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3" // room for the stub's prelude before its trap
 	h.setRunSh(stubRunShWith(`trap 'echo "2026-10-22 21:00:01Z: Running job: lint"; echo TERM > "$out/signal"; exit 0' TERM
 for _ in $(seq 1 300); do sleep 0.1; done
 exit 9
