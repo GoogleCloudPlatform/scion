@@ -320,3 +320,33 @@ func TestDoNoRetry_CrossOriginRedirectNotFollowed(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthenticatedHTTPClient_CrossOriginRedirectDropsCallerScionHeaders(t *testing.T) {
+	for _, loc := range []string{"http://storage.test/landed", "http://hub.test:8080/landed", "/landed"} {
+		t.Run(hopLabel(loc), func(t *testing.T) {
+			rec := &hopRecorder{}
+			n := redirectNet(t, rec, loc)
+			c := n.client("http://hub.test", &BearerAuth{Token: "hub-token"})
+			req := newGet(t, "http://hub.test/start")
+			req.Header.Set("X-Scion-Run-Id", "caller-run")
+			req.Header.Set("X-Custom", "kept")
+			mustGet(t, c, req)
+
+			start, _ := rec.headers("hub.test/start")
+			if got := headerNames(start); got != "Authorization,X-Custom,X-Scion-Run-Id" {
+				t.Errorf("hub request headers = %s, want Authorization,X-Custom,X-Scion-Run-Id", got)
+			}
+			hop, want := strings.TrimPrefix(loc, "http://"), "X-Custom"
+			if loc == "/landed" {
+				hop, want = "hub.test/landed", "Authorization,X-Custom,X-Scion-Run-Id"
+			}
+			landed, ok := rec.headers(hop)
+			if !ok {
+				t.Fatalf("redirect to %s was not followed", loc)
+			}
+			if got := headerNames(landed); got != want {
+				t.Errorf("hop to %s carried headers %s, want %s", loc, got, want)
+			}
+		})
+	}
+}
