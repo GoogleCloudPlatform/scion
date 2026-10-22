@@ -250,13 +250,13 @@ creation"), so `broker_token` is deliberately absent from `broker.yaml`.
 
 ## Building the broker image
 
-The broker is the same `scion` binary the Hub uses (see `Dockerfile.hub`,
-which already builds `/usr/local/bin/scion` from `./cmd/scion/` with
-`ENTRYPOINT ["/usr/local/bin/scion"]`). Build and push an image from this
-repo:
+The broker is the same `scion` binary the Hub uses (see the repo-root
+`Dockerfile`, whose default target already builds `/usr/local/bin/scion`
+from `./cmd/scion/` with `ENTRYPOINT ["/usr/local/bin/scion"]`). Build and
+push an image from this repo:
 
 ```sh
-docker build -f Dockerfile.hub -t "${BROKER_IMAGE}" .
+docker build -f Dockerfile -t "${BROKER_IMAGE}" .
 docker push "${BROKER_IMAGE}"
 ```
 
