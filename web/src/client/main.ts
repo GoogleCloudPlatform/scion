@@ -62,7 +62,7 @@ import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/aut
 import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
-import { browserPath, stripBasePath } from './navigation.js';
+import { browserPath, mayLeave, stripBasePath, vetoPopState } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { installViewportFrame } from './viewport.js';
@@ -1573,6 +1573,8 @@ function setupRouter(): void {
       ++navigationId;
       return;
     }
+    // A page with unsaved changes may veto leaving it; nothing is rendered.
+    if (vetoPopState()) return;
     void renderRoute(appPath);
   });
 }
@@ -1586,6 +1588,8 @@ function navigateTo(path: string): void {
     if (path === '/terminals' || terminalAgentRoute.test(path)) void renderRoute(path);
     return;
   }
+  // A page with unsaved changes may veto leaving it.
+  if (!mayLeave()) return;
 
   // Prefix app-relative paths with the base path for the browser URL bar
   window.history.pushState({}, '', browserPath(path));

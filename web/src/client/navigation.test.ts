@@ -16,12 +16,15 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  addLeaveGuard,
   browserPath,
+  mayLeave,
   navigateTo,
   pushInPageFragment,
   pushUrl,
   replaceSearch,
   stripBasePath,
+  vetoPopState,
 } from './navigation.js';
 import { IN_PAGE_STATE_KEY, isInPagePop, type RouteShell } from './route-history.js';
 
@@ -162,5 +165,51 @@ describe('pushInPageFragment', () => {
     pushInPageFragment('#row-a', { row: 'a' }, { row: null });
     expect(replace).toHaveBeenCalledWith({ [IN_PAGE_STATE_KEY]: { row: null } }, '');
     replace.mockRestore();
+  });
+});
+
+describe('leave guards (ptone/scion#3460)', () => {
+  it('allows leaving with no guard, or when every guard allows it', () => {
+    expect(mayLeave()).toBe(true);
+    const remove = addLeaveGuard(() => true);
+    expect(mayLeave()).toBe(true);
+    expect(vetoPopState()).toBe(false);
+    remove();
+  });
+
+  it('vetoes leaving while a guard says stay, and not once it is removed', () => {
+    const guard = vi.fn(() => false);
+    const remove = addLeaveGuard(guard);
+    expect(mayLeave()).toBe(false);
+    expect(guard).toHaveBeenCalledTimes(1);
+    remove();
+    expect(mayLeave()).toBe(true);
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+
+  it('on a vetoed popstate, puts back the URL and state the page had when it added the guard', () => {
+    window.history.replaceState({ page: 'editor' }, '', '/admin/access-boundaries/new?step=2#top');
+    const remove = addLeaveGuard(() => false);
+    // Back has already moved the browser to the previous entry.
+    window.history.pushState({}, '', '/admin/access-boundaries');
+    const before = window.history.length;
+
+    expect(vetoPopState()).toBe(true);
+    expect(window.location.pathname).toBe('/admin/access-boundaries/new');
+    expect(window.location.search).toBe('?step=2');
+    expect(window.location.hash).toBe('#top');
+    expect(window.history.state).toEqual({ page: 'editor' });
+    expect(window.history.length).toBe(before + 1);
+    remove();
+  });
+
+  it('leaves the URL alone on a popstate every guard allows', () => {
+    window.history.replaceState({}, '', '/admin/access-boundaries/new');
+    const remove = addLeaveGuard(() => true);
+    window.history.pushState({}, '', '/admin/access-boundaries');
+
+    expect(vetoPopState()).toBe(false);
+    expect(window.location.pathname).toBe('/admin/access-boundaries');
+    remove();
   });
 });
