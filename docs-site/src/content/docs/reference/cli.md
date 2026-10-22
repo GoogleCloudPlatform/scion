@@ -124,8 +124,7 @@ Starting an **error**-phase agent still fails with a conflict: use
 place, the Hub applies only the task and `--attach`. Other configuration flags
 you set explicitly (for example `--type`, `--image`, `--harness-config`,
 `--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
-warning that names them. `--no-auth` on an existing agent is tracked in
-ptone/scion#1855.
+warning that names them.
 
 **Usage:** `scion start <agent-name> [task] [flags]`
 
@@ -265,6 +264,8 @@ failed start.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
     - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--model <model>`: Model to use, as with `scion start`: a size alias (`small`, `medium`, `large`, `extra-large`, or `S` / `M` / `L` / `XL`) or an explicit model ID. It beats the model in a `--config` file, the project default, the template and the Hub default.
+    - `--thinking-level <value>`: Thinking level, as with `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). It beats the thinking level in a `--config` file, the project default, the template and the Hub default. An invalid or empty value fails before contacting the Hub.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
     - `--broker <string>`: Preferred runtime broker ID or name.
     - `--label <key=value>`: Label for the agent (repeatable).
@@ -565,7 +566,7 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `create`):**
     - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
-    - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing. Requires the `hub.chat_thread_groups` experiment.
+    - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
@@ -575,7 +576,7 @@ Conversations are referenced using one of three forms:
 
 ### `scion conversation group`
 
-Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Requires the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/) (default off). On a Hub with the experiment off, every subcommand fails with `thread groups are not enabled on this hub (experiment hub.chat_thread_groups)`.
+Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Against an older Hub that does not serve thread groups (one with its former thread groups experiment off), every subcommand fails with `this hub does not serve thread groups: upgrade the hub, or turn on its thread groups experiment`.
 
 A `<group>` argument is a group ID, or a group name resolved within the project (`--project <id>`, defaulting to the current project) through the project's group list. Names are compared as the Hub compares them: trimmed and case-insensitive. A name that matches no group is an error. A name that matches more than one group (including an ID that is also another group's name) is an error that lists each match by name and ID; use the group ID then. An ID that is not in the project's list is looked up directly, and the Hub decides whether you can read it. A `<conversation-ref>` takes the same forms as the other `scion conversation` commands.
 
@@ -731,6 +732,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+If you supplied a handoff, the restored configuration's task is that handoff, headed by a note that
+the migration failed and the agent remains at its current generation. The next fresh start delivers
+it, so the agent is not handed the previous generation's handoff. With no handoff, the previous
+task is kept.
 
 While the migration is in progress, messages to the agent are saved to its history rather than
 delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
@@ -750,9 +755,10 @@ An interrupted migration is not resumed. For example, if the Hub restarts in the
 migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
 status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
 migration's patch flags. A migration that had not started yet fails within about 10 minutes with
-"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
-its patch flags are applied. A migration that had started fails after 30 minutes without progress.
-The Hub restores the previous configuration unless the new generation had already been provisioned.
+"reincarnation failed: did not start, so no changes were applied except that any handoff is
+carried forward for recovery; run reincarnate again". None of its patch flags are applied. A
+migration that had started fails after 30 minutes without progress. The Hub restores the previous
+configuration unless the new generation had already been provisioned.
 Until the migration fails, a new request for the agent is refused with `409`.
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
@@ -774,8 +780,9 @@ as stop, start, and restart); an agent can always reincarnate itself.
 - **Flags:**
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
-    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
-    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied. The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch; for legacy agents created before `createInputs` was recorded, any remaining inline env keys other than `SCION_AUTO_EXPOSE_PORTS` and adopted `TZ` are kept as explicit with a warning in the plan) without migrating anything.
+    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--force`: With `--broker <name|id>`, check a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Currently available with `--dry-run` only (executing a forced move that recreates the workspace returns `501 Not Implemented`).
     - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
@@ -832,12 +839,12 @@ the same NFS export, keeping its ID, slug, generation chain, and workspace. The 
 permissions, and operator notes are in
 [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
-The CLI first sends the same request as a dry run. The Hub runs nine checks in this order: workspace
-mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export,
-target profile, target health, access, agent-move capability (on both Runtime Brokers, with the source
-online), and capacity. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
-`429`, or `503`, and the CLI prints every check as passed, failed, or not evaluated. A refused move
-stops there, before anything changes. With `--dry-run` the CLI only prints the verdict and plan.
+The CLI first sends the same request as a dry run. The Hub runs eleven checks in this order:
+`runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`,
+`workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability` (on both Runtime
+Brokers, with the source online), and `capacity`. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
+`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
+stops there, before anything changes. With `--dry-run` (or `--dry-run --force`) the CLI only prints the verdict and plan.
 
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
 stops the agent on the source, moves its quota to the target, provisions it on the target (which first

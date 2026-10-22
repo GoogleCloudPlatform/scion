@@ -305,7 +305,7 @@ Replace `PROJECT` and `AGENT` with the target project slug and agent name. A suc
 
 ### 8. Docker deployment
 
-The Docker build requires `CGO_ENABLED=1` (for `go-sqlite3`). The default runtime image is `debian:bookworm-slim` (glibc). Alpine users must use a musl-compatible SQLite driver or switch to a glibc-based image.
+The bridge uses a pure-Go SQLite driver, so the Docker build sets `CGO_ENABLED=0` and needs no C toolchain. The default runtime image is `debian:bookworm-slim`; the binary does not depend on the image's C library.
 
 Build the image from the repository root (the Dockerfile expects the full repo context):
 

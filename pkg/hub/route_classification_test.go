@@ -99,6 +99,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/policies":                               "authenticated:policy-gone",
 	"/api/v1/policies/":                              "authenticated:policy-gone",
 	"/api/v1/users/me/groups":                        "authenticated:principal",
+	"/api/v1/users/me/visitor-grants":                "authenticated:visitor-grants",
+	"/api/v1/users/me/visitor-dms":                   "authenticated:visitor-dms",
 	"/api/v1/principals/":                            "authenticated:principal",
 	"/api/v1/users/me/injected-skills":               "authenticated:injected-skills",
 	"/api/v1/users/me/injected-skills/":              "authenticated:injected-skills",

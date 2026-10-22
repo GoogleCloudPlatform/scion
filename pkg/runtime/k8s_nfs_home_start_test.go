@@ -1013,7 +1013,7 @@ func TestSync_NFSHomePodSkipsHome(t *testing.T) {
 				t.Fatal(err)
 			}
 			var copied []string
-			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ bool) error {
+			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ bool, _ []string) error {
 				copied = append(copied, src+" -> "+dest)
 				return nil
 			}

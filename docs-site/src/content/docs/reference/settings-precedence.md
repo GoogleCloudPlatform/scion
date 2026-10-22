@@ -172,11 +172,15 @@ These are read by the Scion broker (or CLI) **to configure itself as a process**
 part of the agent settings chain at all, and an agent never sees them by this route.
 
 They enter through the koanf environment layer in `LoadVersionedSettings`
-(`pkg/config/settings_v1.go`), which is loaded **last** — after the embedded defaults, the global
+(`pkg/config/settings_v1.go`; `LoadSettings` and `LoadEffectiveSettings` both read through its layers via `loadVersionedSettings` in `pkg/config/settings_view.go`), loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
-Loaded last means **highest priority**: a `SCION_*` variable in the broker's process environment
-overrides every settings file. An exported but empty `SCION_*` variable counts as unset, so it never
-clears a value from a settings file.
+Legacy-format settings files (those without `schema_version`) are converted to the v1 shape at
+their own layer when read, keeping only keys whose legacy source key the file sets, and a versioned file's legacy camelCase `hub.projectId` is read as a fallback when
+`hub.project_id` is absent. Loaded last means **highest priority**: a `SCION_*` variable in the
+broker's process environment overrides every settings file. An exported but empty `SCION_*`
+variable counts as unset, so it never clears a value from a settings file. Inside a Hub-managed agent container (`SCION_AGENT_ID` set), `SCION_WORKSPACE_PATH` and `SCION_RUNTIME`, which the runtime sets for the agent, are ignored as settings overrides, so they do not override `workspace_path` or `runtime`. The retired
+`SCION_HUB_BROKER_ID`, `SCION_HUB_BROKER_TOKEN`, `SCION_HUB_BROKER_NICKNAME`, and `SCION_BUCKET_*`
+variables are not read.
 
 ```
 embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml
@@ -187,10 +191,10 @@ Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
 
-`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, in both settings
-loaders, and a warning names both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it
-sets the top-level `project_id`, and a `hub.project_id` from the settings files or the
-`project-id` file wins over it. When both variables are set, `SCION_HUB_PROJECT_ID` wins.
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, and a warning names
+both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it sets the top-level
+`project_id`, and a `hub.project_id` from the settings files or the `project-id` file wins over it.
+When both variables are set, `SCION_HUB_PROJECT_ID` wins.
 
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the
@@ -226,7 +230,7 @@ existing value.
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
 | `SCION_HARNESS` | harness name | **Guarded** — defers to an existing value |
-| `SCION_MODEL` | resolved model | **Guarded** — defers to an existing value |
+| `SCION_MODEL` | resolved model; also the harness's `--model` argument | **Guarded** — defers to an existing value (the hub-resolved model, or an explicit `--env`); a size alias in it is resolved |
 | `SCION_THINKING_LEVEL` | resolved thinking level | **Guarded** — defers to an existing value |
 | `SCION_CREATOR` | OS user who created the agent | **Guarded** — defers to an existing value |
 
@@ -797,6 +801,31 @@ through the harness-config's `model_aliases` and injects the result as `SCION_MO
 gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
 default itself: it resolves only an explicit tier.
 
+The model reaches the harness through one channel. When the hub resolved a model (any tier from
+the request down to the hub default), it sends it as `SCION_MODEL`, and the broker uses that value
+over its own config, the harness-config default included. The broker passes the same value to the
+harness as `--model`, so the environment and the command line never disagree. A size alias the hub
+could not resolve is resolved on the broker through the harness-config's `model_aliases` (or the
+harness's built-in table), never replaced by the broker's own model. An explicit `SCION_MODEL` in
+the request env (`--env`) also wins and reaches the command line.
+
+Because the hub `agent_defaults.default_model` now reaches the harness command line, it must be a
+model every harness that can use it accepts. A size alias (`small`, `medium`, `large`,
+`extra-large`) is portable; a concrete model ID of one vendor (for example a Claude model on a
+gemini-cli agent) makes that agent fail at launch.
+
+#### `Changed in this release` — argv `--model` follows the hub-resolved model
+
+**Before:** the broker built the harness's `--model` argument from its own config (the request's
+inline model, else its template or the harness-config default), while `SCION_MODEL` carried the
+hub-resolved model. A project or hub default model was therefore shown and exported as
+`SCION_MODEL` while the harness ran with the harness-config default (for example the `medium`
+model for codex and gemini-cli), and a size alias the hub could not resolve was replaced by the
+broker's own model.
+**After:** both carry one effective model: `SCION_MODEL` when set (hub-resolved or explicit),
+else the broker's own config model, with any alias resolved
+([ptone/scion#3914](https://github.com/ptone/scion/issues/3914)).
+
 #### `Changed in this release` — hub default model and thinking level sit below the template
 
 **Before:** the hub stamped `agent_defaults.default_model` and `default_thinking_level` into the
@@ -896,12 +925,6 @@ keep it at or above the CPU request.
 ### `Known gap` — `ScionConfig.Secrets` is inert
 
 The `secrets` field on `ScionConfig` is accepted and persisted but is not acted on.
-
-### `Known gap` — `default-model` and the argv path
-
-The project `scion.io/default-model` annotation and `InlineConfig.Model` do not reach the argv
-path for all harnesses. A model set this way can be persisted and displayed while the harness is
-launched without it.
 
 ### Container image and Kubernetes image pull policy — a separate chain from B1
 

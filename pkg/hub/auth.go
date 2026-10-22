@@ -605,6 +605,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid development token", nil)
 					return
 				}
+				// The development user's account status is checked here,
+				// on every request, as the hub user token arm checks any
+				// other user's (checkUserAccount).
+				if !admitDevUserAccount(ctx, cfg, log, w) {
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -697,6 +703,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
+						if !admitDevUserAccount(ctx, cfg, log, w) {
+							return
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -746,36 +755,33 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
 				if cfg.UserStore != nil {
-					u, uErr := cfg.UserStore.GetUser(ctx, claims.UserID)
-					if uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+					// The account must be active (checkUserAccount, the rule
+					// decide applies): a suspended account, an account with no
+					// user record (for example deleted after the token was
+					// issued; the token is self-contained) and an account in
+					// any other non-active status are refused.
+					u, uErr := checkUserAccount(ctx, cfg.UserStore, PrincipalContext{Kind: PrincipalKindUser, ID: claims.UserID})
+					switch refusal := classifyUserAccount(u, uErr); refusal {
+					case accountAllowed:
+					case accountLookupFault:
 						log.Error("JWT auth: user store lookup failed",
 							"user_id", claims.UserID, "error", uErr)
-						writeError(w, http.StatusServiceUnavailable, "store_error",
-							"unable to verify user status", nil)
+						writeAccountRefusal(w, refusal)
 						return
-					}
-					// NOTE: We intentionally check only for UserStatusSuspended rather
-					// than u.Status != UserStatusActive. The third status, UserStatusInvited,
-					// represents users in the onboarding flow who do not hold JWT tokens —
-					// they authenticate via the OAuth/invitation path, not the JWT path.
-					// Suspended is the only non-active state reachable with a cached JWT.
-					if uErr == nil && u.Status == store.UserStatusSuspended {
+					case accountSuspended:
 						log.Warn("JWT auth rejected: user is suspended",
 							"user_id", claims.UserID, "email", claims.Email)
-						writeError(w, http.StatusForbidden, "user_suspended",
-							"access denied: user account is suspended", nil)
+						writeAccountRefusal(w, refusal)
 						return
-					}
-					// A token whose subject has no user record (for example
-					// the account was deleted after the token was issued) is
-					// rejected here, like a suspended user. The token is
-					// self-contained, so authentication must not succeed for
-					// an identity that has no store record.
-					if errors.Is(uErr, store.ErrNotFound) {
+					case accountMissing:
 						log.Warn("JWT auth rejected: no user record for this token",
 							"user_id", claims.UserID)
-						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
-							"invalid access token: no user record for this token", nil)
+						writeAccountRefusal(w, refusal)
+						return
+					default:
+						log.Warn("JWT auth rejected: user is not active",
+							"reason", accountRefusalReason(refusal))
+						writeAccountRefusal(w, refusal)
 						return
 					}
 					// A federated account authenticates only with its

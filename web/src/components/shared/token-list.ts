@@ -649,6 +649,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:create',
+    label: 'project:create',
+    description:
+      'Create projects: project create, project register, and the new project of a clone',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'project:list',
     label: 'project:list',
     description: 'List projects',

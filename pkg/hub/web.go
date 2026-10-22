@@ -2842,6 +2842,8 @@ func isCreateCollectionPath(path string) bool {
 	return len(segs) == 3 && segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 }
 
+const devAuthLastLoginInterval = 5 * time.Minute
+
 // devAuthMiddleware auto-populates the session with the dev user identity
 // when a dev token is configured and no user is already in the session.
 func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
@@ -2901,6 +2903,13 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				}
 				if dbUser.DisplayName != "" {
 					devName = dbUser.DisplayName
+				}
+				// Throttle writes for clients that do not retain session cookies.
+				now := time.Now()
+				if dbUser.LastLogin.IsZero() || now.Sub(dbUser.LastLogin) > devAuthLastLoginInterval {
+					if err := ws.store.UpdateUserLastLogin(r.Context(), dbUser.ID, now); err != nil {
+						ws.logger().Warn("Failed to update dev-auth last login", "error", err)
+					}
 				}
 			}
 		}

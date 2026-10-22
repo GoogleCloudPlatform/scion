@@ -453,6 +453,21 @@ type AgentAppliedConfig struct {
 	// Observability only; never read by a decision path (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 
+	// Harness is the harness type the hub resolved for the agent at create
+	// (for example "claude"; see resolveAgentHarnessType in pkg/hub), so
+	// agent lists and events can derive the harness vendor without a
+	// harness-config lookup per agent. Empty on agents created before it
+	// was recorded, and when the harness did not resolve. Display only;
+	// the harness is a fixed key, so it does not change after create.
+	Harness string `json:"harness,omitempty"`
+	// ModelSize is the model size alias (small, medium, large or
+	// extra-large; short forms normalized) that Model held before the hub
+	// resolved it to a concrete model ID, from whichever precedence layer
+	// (request > project > template > hub) supplied it. Empty when the
+	// model was an explicit ID or unset, and on agents created before it
+	// was recorded. Display only.
+	ModelSize string `json:"modelSize,omitempty"`
+
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.
 	// For agent-created sub-agents, this is the creating agent's name.
@@ -823,6 +838,14 @@ const (
 // legitimate pre-upgrade groups.
 const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
 
+// AnnotationProjectActiveProfile is the project annotation that holds the
+// project's activeProfile setting. The hub writes it as a project setting
+// (pkg/hub keeps its own literal, projectSettingActiveProfile, which its
+// settings registry guard requires, and a pkg/hub test pins that the two
+// agree); readers outside pkg/hub, such as the rebuild preflight, use this
+// one.
+const AnnotationProjectActiveProfile = "scion.io/active-profile"
+
 // IsProjectMembersGroup reports whether g is a system project members group:
 // it belongs to a project and carries either members-group marker key with
 // the value "true".
@@ -1103,6 +1126,31 @@ type RuntimeBroker struct {
 	// has never reported it (an older broker).
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
 
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported
+	// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a;
+	// ptone/scion#3282). It is display data only: never used for
+	// placement, admission or dispatch. Nil means none was reported (a
+	// legacy row, or an older broker binary). It and the five fields below
+	// are written only by SetRuntimeBrokerPresentation and removed only by
+	// deleting the row; CreateRuntimeBroker and UpdateRuntimeBroker never
+	// write them.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	// RuntimeTargetPresentationObservedAt is the Hub time the stored
+	// presentation was last written or confirmed ("as reported at"),
+	// refreshed at most every PresentationObservedRefresh while unchanged.
+	RuntimeTargetPresentationObservedAt *time.Time `json:"runtimeTargetPresentationObservedAt,omitempty"`
+	// RuntimeTargetPresentationHash is the Hub-computed hash of the stored
+	// presentation. Never serialized.
+	RuntimeTargetPresentationHash string `json:"-"`
+	// PresentationEpoch and PresentationSeq are the fence of the last
+	// accepted presentation write (the reporting process's start time in
+	// Unix nanoseconds, and its heartbeat counter); PresentationFencedAt is
+	// the Hub time of that write. Never serialized.
+	PresentationEpoch    *int64     `json:"-"`
+	PresentationSeq      *int64     `json:"-"`
+	PresentationFencedAt *time.Time `json:"-"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -1150,6 +1198,34 @@ type RuntimeBroker struct {
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
 }
+
+// PresentationFenceRecovery is how long a flat Runtime Broker's stored
+// presentation fence must have gone without a fence-advancing write before
+// SetRuntimeBrokerPresentation accepts a write with a lower epoch. It is a
+// Hub constant, 10 times the default 30s heartbeat interval, because the Hub
+// does not know a remote broker's configured interval. A live process
+// advances the fence on every heartbeat, so concurrent writers stay fenced;
+// a new process whose epoch is behind a stored epoch (a host clock that ran
+// ahead) takes over after this long.
+const PresentationFenceRecovery = 5 * time.Minute
+
+// PresentationObservedRefresh is how often a confirmed, unchanged
+// presentation refreshes RuntimeTargetPresentationObservedAt.
+const PresentationObservedRefresh = 5 * time.Minute
+
+// PresentationOutcome is the result of SetRuntimeBrokerPresentation.
+type PresentationOutcome string
+
+const (
+	// PresentationWritten: the hash differed; the presentation, hash,
+	// fence and observed-at were written.
+	PresentationWritten PresentationOutcome = "written"
+	// PresentationConfirmed: the hash was unchanged; only the fence (and
+	// observed-at, when older than PresentationObservedRefresh) was written.
+	PresentationConfirmed PresentationOutcome = "confirmed"
+	// PresentationStale: the fence did not advance; nothing was written.
+	PresentationStale PresentationOutcome = "stale"
+)
 
 // Values of RuntimeBroker.GCPHostSource.
 const (
@@ -1610,8 +1686,8 @@ type User struct {
 
 	// Timestamps
 	Created   time.Time `json:"created"`
-	LastLogin time.Time `json:"lastLogin,omitempty"`
-	LastSeen  time.Time `json:"lastSeen,omitempty"`
+	LastLogin time.Time `json:"lastLogin,omitzero"`
+	LastSeen  time.Time `json:"lastSeen,omitzero"`
 }
 
 // IsTestFixture reports whether u is a hub-issued member-tier test fixture
@@ -2531,11 +2607,11 @@ type Group struct {
 }
 
 // GroupMember represents membership in a group.
-// Members can be either users or other groups (for nested group support).
+// Members can be users, other groups (for nested group support), or agents.
 type GroupMember struct {
 	GroupID    string    `json:"groupId"`    // The group this membership belongs to
-	MemberType string    `json:"memberType"` // "user" or "group"
-	MemberID   string    `json:"memberId"`   // User ID or Group ID
+	MemberType string    `json:"memberType"` // "user", "group", or "agent"
+	MemberID   string    `json:"memberId"`   // User ID, Group ID, or Agent ID
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`

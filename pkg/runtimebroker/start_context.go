@@ -440,11 +440,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Create and a start without a saved profile stay non-strict, except
 	// that, on a co-located broker, a profile missing from the Hub's stored
 	// profiles is refused (errProfileUnresolved / errDefaultProfileUnresolved).
-	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
+	res, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
 	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
+	mgr, dispatchRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err

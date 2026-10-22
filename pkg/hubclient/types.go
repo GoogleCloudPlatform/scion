@@ -380,6 +380,14 @@ type RuntimeBroker struct {
 	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
 	// single runtime target; nil for a profile-based Runtime Broker.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// RuntimeTargetPresentation is the publishable configuration a flat
+	// Runtime Broker instance last reported (FC4-a): its defaults for new
+	// agents, not the configuration of any agent and not a check of
+	// cluster permissions. Nil for a legacy Runtime Broker or when none
+	// was reported. RuntimeTargetPresentationObservedAt is when the Hub
+	// last saw it ("as reported at").
+	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -524,7 +532,7 @@ type User struct {
 	Status      string           `json:"status"`
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitempty"`
+	LastLogin   time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.

@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AGENT_CREATE_TRIGGERS,
   ALL_TRIGGERS,
   DEFAULT_TRIGGERS,
   defaultTriggersHint,
@@ -63,6 +64,12 @@ describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
       'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, or Halted.'
+    );
+  });
+
+  it('lists the agent-create triggers by display label', () => {
+    expect(defaultTriggersHint(AGENT_CREATE_TRIGGERS)).toBe(
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
     );
   });
 

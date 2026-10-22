@@ -690,8 +690,10 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 	if len(settings.Runtimes) != 0 {
 		t.Errorf("expected project settings.yaml to have no runtimes block, got %d runtimes", len(settings.Runtimes))
 	}
-	if settings.ActiveProfile != "local" {
-		t.Errorf("expected active_profile 'local', got %q", settings.ActiveProfile)
+	// The seed leaves active_profile unset so the project inherits the
+	// global active_profile (ptone/scion#3913).
+	if settings.ActiveProfile != "" {
+		t.Errorf("expected no active_profile in project settings.yaml, got %q", settings.ActiveProfile)
 	}
 }
 

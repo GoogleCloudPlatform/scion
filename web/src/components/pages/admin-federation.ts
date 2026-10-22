@@ -34,6 +34,7 @@ import {
   genericSaveErrorText,
   sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
+import { diffPayload } from '../../shared/settings-diff.js';
 import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
 import {
   renderConflictNotice,
@@ -78,6 +79,12 @@ export class ScionPageAdminFederation extends LitElement {
 
   // Trusted issuers list
   @state() private issuers: TrustedIssuerConfig[] = [];
+
+  // The federation values as loaded (after the defaults above were applied
+  // for keys GET left out). A save sends only the keys that differ from it,
+  // so a default is never written unless the user edits it, and a save
+  // leaves the keys it omits as stored (ptone/scion#3913).
+  private loadedFederation: Record<string, unknown> = {};
 
   // Add/Edit dialog state
   @state() private dialogOpen = false;
@@ -455,13 +462,16 @@ export class ScionPageAdminFederation extends LitElement {
           trusted_issuers?: TrustedIssuerConfig[];
         };
       };
-      if (data.federation) {
-        this.enabled = data.federation.enabled ?? false;
-        this.algorithms = data.federation.algorithms ?? ['RS256'];
-        this.refreshInterval = data.federation.refresh_interval ?? '1h';
-        this.debounceInterval = data.federation.debounce_interval ?? '5s';
-        this.issuers = data.federation.trusted_issuers ?? [];
-      }
+      // GET leaves the whole block out when federation is unconfigured;
+      // every field then shows its default (and is reset, so values from
+      // before a save that removed them do not linger).
+      const fed = data.federation ?? {};
+      this.enabled = fed.enabled ?? false;
+      this.algorithms = fed.algorithms ?? ['RS256'];
+      this.refreshInterval = fed.refresh_interval ?? '1h';
+      this.debounceInterval = fed.debounce_interval ?? '5s';
+      this.issuers = fed.trusted_issuers ?? [];
+      this.loadedFederation = this.federationFormValues();
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
@@ -469,24 +479,41 @@ export class ScionPageAdminFederation extends LitElement {
     }
   }
 
+  /** The form's federation values, keyed by their API names. */
+  private federationFormValues(): Record<string, unknown> {
+    return {
+      enabled: this.enabled,
+      trusted_issuers: this.issuers,
+      algorithms: this.algorithms,
+      refresh_interval: this.refreshInterval,
+      debounce_interval: this.debounceInterval,
+    };
+  }
+
+  /**
+   * The federation keys to save: only those that differ from the loaded
+   * values. A cleared key is still sent explicitly (false, [] or ''), which
+   * clears it on the hub.
+   */
+  private buildFederationPayload(): Record<string, unknown> {
+    return diffPayload(this.federationFormValues(), this.loadedFederation);
+  }
+
   private async save(): Promise<void> {
-    this.saving = true;
     this.error = null;
     this.saveError = null;
     this.successMessage = null;
+    const federation = this.buildFederationPayload();
+    if (Object.keys(federation).length === 0) {
+      this.showSuccess('No changes to save');
+      return;
+    }
+    this.saving = true;
     try {
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          federation: {
-            enabled: this.enabled,
-            trusted_issuers: this.issuers,
-            algorithms: this.algorithms,
-            refresh_interval: this.refreshInterval,
-            debounce_interval: this.debounceInterval,
-          },
-        }),
+        body: JSON.stringify({ federation }),
       });
       if (!res.ok) {
         const err = await this.classifySaveError(res);
@@ -499,19 +526,23 @@ export class ScionPageAdminFederation extends LitElement {
       }
       // Reload server state so server-side normalization is reflected
       await this.loadData(false);
-      this.successMessage = 'Federation config saved successfully';
-      if (this.successMessageTimer !== null) {
-        clearTimeout(this.successMessageTimer);
-      }
-      this.successMessageTimer = setTimeout(() => {
-        this.successMessage = null;
-        this.successMessageTimer = null;
-      }, 3000);
+      this.showSuccess('Federation config saved successfully');
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
       this.saving = false;
     }
+  }
+
+  private showSuccess(message: string): void {
+    this.successMessage = message;
+    if (this.successMessageTimer !== null) {
+      clearTimeout(this.successMessageTimer);
+    }
+    this.successMessageTimer = setTimeout(() => {
+      this.successMessage = null;
+      this.successMessageTimer = null;
+    }, 3000);
   }
 
   // --- Issuer CRUD ---

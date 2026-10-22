@@ -350,31 +350,38 @@ func parseAttachmentRefs(metadata map[string]string) []AttachmentRef {
 	return refs
 }
 
-// linkAttachmentRefs attaches recorded files to a persisted message. Failures
+// linkAttachmentRefs attaches recorded files to a persisted message and
+// returns the refs it linked, the ones the message's history lists. Failures
 // are logged, not returned: the message itself is already delivered.
-func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) {
+func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
 	if wcs == nil || messageID == "" {
-		return
+		return nil
 	}
+	var linked []AttachmentRef
 	for _, ref := range refs {
 		if ref.ID == "" {
 			continue
 		}
-		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil && log != nil {
-			log.Error("Failed to link attachment to message",
-				"message_id", messageID, "attachment", ref.ID, "error", err)
+		if err := wcs.LinkAttachmentToMessage(ctx, messageID, ref.ID); err != nil {
+			if log != nil {
+				log.Error("Failed to link attachment to message",
+					"message_id", messageID, "attachment", ref.ID, "error", err)
+			}
+			continue
 		}
+		linked = append(linked, ref)
 	}
+	return linked
 }
 
 // linkSenderOwnedAttachmentRefs is linkAttachmentRefs for refs taken from
 // message metadata. A ref is linked only when its attachment row belongs to
 // the sender: a file of the sender's project (senderProjectID), or a file
 // with no project uploaded by senderID. Anything else, and any lookup error,
-// is skipped and logged.
-func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) {
+// is skipped and logged. It returns the refs it linked.
+func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) []AttachmentRef {
 	if wcs == nil || messageID == "" {
-		return
+		return nil
 	}
 	owned := make([]AttachmentRef, 0, len(refs))
 	for _, ref := range refs {
@@ -398,7 +405,7 @@ func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messag
 		}
 		owned = append(owned, ref)
 	}
-	linkAttachmentRefs(ctx, wcs, messageID, owned, log)
+	return linkAttachmentRefs(ctx, wcs, messageID, owned, log)
 }
 
 // attachmentOwnedBySender reports whether a file belongs to a sender: a file

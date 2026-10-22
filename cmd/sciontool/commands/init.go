@@ -898,6 +898,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
 
+	// Publish what this process knows about its own agent credential for
+	// sciontool doctor. The first write happens here, before the child
+	// starts, so doctor never reads a state left by an earlier run as
+	// this one's. Only published when init runs as root.
+	credStateCtx, credStateCancel := context.WithCancel(context.Background())
+	defer credStateCancel()
+	hub.PublishCredentialState(credStateCtx, hubClient)
+
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
 	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {

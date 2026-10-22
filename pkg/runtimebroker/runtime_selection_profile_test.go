@@ -40,9 +40,9 @@ func runtimeProfileFixture(t *testing.T, provenance string) (*Server, string, st
 	t.Helper()
 	srv := newDiscoveryTestServer(t, "docker")
 	srv.config.ForceRuntime = ""
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		return fakeKubernetesRuntime("cluster-saved", "ns-saved")
-	}
+	})
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, `schema_version: "1"
 active_profile: prov
@@ -101,7 +101,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 	if opts.Profile != "saved" {
 		t.Fatalf("runtimeSelectionOpts must not mutate opts; Profile = %q", opts.Profile)
 	}
-	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "docker" {
+	if _, rtType := managerAndType(srv.resolveManagerForOpts(runtimeOpts)); rtType != "docker" {
 		t.Fatalf("runtime = %q, want the provisioned docker runtime", rtType)
 	}
 }
@@ -119,7 +119,7 @@ func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 	if runtimeOpts.Profile != "saved" {
 		t.Fatalf("legacy runtime-selection profile = %q, want the saved profile", runtimeOpts.Profile)
 	}
-	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "kubernetes" {
+	if _, rtType := managerAndType(srv.resolveManagerForOpts(runtimeOpts)); rtType != "kubernetes" {
 		t.Fatalf("legacy runtime = %q, want kubernetes", rtType)
 	}
 }
@@ -351,12 +351,12 @@ runtimes:
 		ID: id, Name: id, ContainerID: id, ProjectPath: dotScion, Phase: "running",
 		Labels: map[string]string{"scion.name": id},
 	}}}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	auxCalls := 0
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		auxCalls++
 		return &runtime.ErrorRuntime{Err: errors.New("auxiliary runtime must not be used in this test")}
-	}
+	})
 	return srv, mgr, &auxCalls, dotScion
 }
 
@@ -509,7 +509,7 @@ func TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict(t *testing.T) 
 // start is refused with 409 and Start never runs.
 func TestStartAgent_ClassificationMismatchIsConflictBeforeStart(t *testing.T) {
 	srv, mgr, _, dotScion := handlerProfileFixture(t, "")
-	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) runtime.Runtime {
 		writeProjectSettings(t, dotScion, `schema_version: "1"
 active_profile: prov
 profiles:
@@ -522,7 +522,7 @@ runtimes:
     type: docker
 `)
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	}
+	})
 	body := `{"projectPath": ` + strconvQuote(dotScion) + `, "resolvedEnv": {"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 	w := postAgentOp(t, srv, "start", body)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "differs from the runtime it resolves to") {

@@ -257,9 +257,15 @@ func (c *Client) CheckCredentialAccepted(ctx context.Context, token string) erro
 
 // CheckCurrentCredentialAccepted is CheckCredentialAccepted for the
 // client's own credential: the verified issue time is raised only if token
-// is still the in-memory credential when the hub's answer arrives.
+// is still the in-memory credential when the hub's answer arrives. The
+// result is recorded in the client's credential state for token (a check
+// of a candidate, CheckCredentialAccepted, is not recorded).
 func (c *Client) CheckCurrentCredentialAccepted(ctx context.Context, token string) error {
-	if err := c.checkCredential(ctx, token); err != nil {
+	err := c.checkCredential(ctx, token)
+	if c != nil && token != "" {
+		c.recordCheck(token, err)
+	}
+	if err != nil {
 		return err
 	}
 	c.noteVerified(token, true)

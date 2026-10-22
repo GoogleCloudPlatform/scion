@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -507,7 +508,7 @@ func newHookListServer(t *testing.T) (*Server, *hookListManager) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	return New(cfg, m, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}), m
+	return New(cfg, m, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{}), m
 }
 
 // Run-b's start finishes, creating c-b, between the stop's first lookup

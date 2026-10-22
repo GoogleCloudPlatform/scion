@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -90,7 +91,7 @@ runtimes:
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	return New(cfg, mgr, rt), mgr, globalScion
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, globalScion
 }
 
 // writeHarnessConfig writes a minimal harness-config dir under .scion/harness-configs/<name>.
