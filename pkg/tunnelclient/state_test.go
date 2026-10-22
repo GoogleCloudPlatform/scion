@@ -15,6 +15,7 @@
 package tunnelclient
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -353,7 +354,9 @@ func TestRunListsIdleListener(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
 	if recs, err := st.List(); err != nil || len(recs) != 0 {
 		t.Fatalf("records after the listener closed: %+v, %v", recs, err)
 	}
@@ -387,7 +390,9 @@ func TestListenerUnlistedWhenItStopsAccepting(t *testing.T) {
 	}
 
 	_ = open.Close()
-	<-done
+	if err := <-done; CodeOf(err) != ExitForbidden {
+		t.Fatalf("Run = %v (exit %d), want %d", err, CodeOf(err), ExitForbidden)
+	}
 }
 
 func assertKeys(t *testing.T, m map[string]any, want ...string) {
