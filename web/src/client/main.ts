@@ -961,7 +961,9 @@ async function init(): Promise<void> {
   // Start the feature-flag and onboarding-status fetches now so they overlap
   // the auth and component work below; both are awaited, together with the
   // timezone refresh, before the first render.
-  const featureFlagsReady = applyServerFeatureFlags();
+  // The hub embeds the experiment map in a signed-in shell's payload; with
+  // it, no experiments request is sent (ptone/scion#2489).
+  const featureFlagsReady = applyServerFeatureFlags(initialData?.experiments);
   const onboardingChecked = redirectIfOnboardingIncomplete();
 
   // Fetch current user from session if not provided by SSR

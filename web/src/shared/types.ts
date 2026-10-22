@@ -144,6 +144,11 @@ export interface PageData {
   data?: Record<string, unknown> | undefined;
   /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
   readinessMarks?: boolean | undefined;
+  /**
+   * The `experiments` map of GET /api/v1/experiments, as the hub answered
+   * the session user (ptone/scion#2489); present only for a signed-in shell
+   */
+  experiments?: Record<string, boolean> | undefined;
 }
 
 /**
