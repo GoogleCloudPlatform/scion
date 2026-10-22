@@ -156,8 +156,9 @@ const notificationWaitAgentsKey = "notificationWaitAgents"
 //
 //   - parentWaitNotification: the parent's own Notification (for example a
 //     permission prompt) is open.
-//   - parentWaitAgent: the parent's own AskUserQuestion or ExitPlanMode is
-//     open. A later parent Notification never changes it to
+//   - parentWaitAgent: the parent's own AskUserQuestion or ExitPlanMode,
+//     or a wait the agent set itself (sciontool status ask_user) before a
+//     sub-agent asked, is open. A later parent Notification never changes it to
 //     parentWaitNotification, as a Notification leaves an agent-set wait
 //     alone.
 //
@@ -300,12 +301,18 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 
 // setWaitingFromNotificationFor sets waiting_for_input, marks it as set by a
 // Notification event and, when owner (a sub-agent's agent_id) is not empty,
-// adds owner to the wait's owner list. A waiting_for_input the agent set
-// itself is left unchanged: a harness prompt must not turn it into a
-// notification-set wait that the prompt's answer would then clear. A
-// sub-agent's question (owner not empty) also leaves blocked, completed,
-// limits_exceeded and crashed unchanged and records no owner (see
-// isHeldNonWaitingActivity). The parent's own Notification (owner empty)
+// adds owner to the wait's owner list. The parent's own Notification (owner
+// empty) leaves a waiting_for_input the agent set itself unchanged: a
+// harness prompt must not turn it into a notification-set wait that the
+// prompt's answer would then clear. A sub-agent's question on such a wait
+// records the sub-agent as its owner and keeps the agent's own wait as
+// parentWaitAgent, the shape the parent's question takes when it comes
+// after the sub-agent's (see setParentQuestionWait). The parent's next
+// tool-start then clears only the parent's part, and the sub-agent's wait
+// lasts until its own event; the last owner's leaves the agent-set wait
+// again (see restoreParentWait). A sub-agent's question (owner not empty)
+// also leaves blocked, completed, limits_exceeded and crashed unchanged and
+// records no owner (see isHeldNonWaitingActivity). The parent's own Notification (owner empty)
 // leaves the terminal statuses limits_exceeded and crashed unchanged: a
 // notification is informational and must not clear how the agent ended. It
 // still replaces blocked and completed, since for some harnesses (for
@@ -316,7 +323,8 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 // owner list change.
 func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 	return h.update(func(info map[string]interface{}) bool {
-		if isAgentSetWaiting(info) {
+		agentSet := isAgentSetWaiting(info)
+		if agentSet && owner == "" {
 			return false
 		}
 		current, _ := info["activity"].(string)
@@ -338,6 +346,9 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 		}
 		if owner == "" && len(owners) > 0 && parent != parentWaitAgent {
 			parent = parentWaitNotification
+		}
+		if agentSet {
+			parent = parentWaitAgent
 		}
 
 		info["activity"] = string(state.ActivityWaitingForInput)
