@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { canGroup } from '../shared/groups';
+import { canGroup } from '../shared/groups.js';
 import {
   GroupsApiError,
   buildGroupsQuery,
@@ -30,7 +30,7 @@ import {
   listMembers,
   addMember,
   removeMember,
-} from './groups-api';
+} from './groups-api.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -312,7 +312,9 @@ describe('buildGroupsQuery()', () => {
   });
 
   it('omits undefined values', () => {
-    const url = buildGroupsQuery({ search: undefined, limit: undefined });
+    // Explicit undefined, as untyped callers may pass; the type forbids it.
+    const filter: unknown = { search: undefined, limit: undefined };
+    const url = buildGroupsQuery(filter as Parameters<typeof buildGroupsQuery>[0]);
     expect(url).toBe('/api/v1/groups');
   });
 
