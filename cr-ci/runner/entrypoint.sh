@@ -505,6 +505,15 @@ while :; do
   # wait returns early (128+n) when a trapped signal arrives while run.sh still runs.
   kill -0 "$runner_pid" 2>/dev/null || break
 done
+# If a trapped signal interrupted wait and run.sh exited before the kill -0 check,
+# runner_rc holds the interrupted wait's 128+n. Waiting once more returns run.sh's
+# real status, which bash keeps; 127 means it was already collected above.
+if wait "$runner_pid" 2>/dev/null; then
+  runner_rc=0
+else
+  rc=$?
+  ((rc == 127)) || runner_rc=$rc
+fi
 trap - TERM INT
 
 # Let the watcher drain the last lines (bounded: a process left holding the pipe

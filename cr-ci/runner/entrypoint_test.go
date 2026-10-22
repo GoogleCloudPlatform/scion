@@ -1391,3 +1391,55 @@ func TestEntrypointSignalDuringClaim(t *testing.T) {
 		t.Errorf("%d claim attempts after the signal, want the retries to stop", n)
 	}
 }
+
+// run.sh exiting immediately on the forwarded signal: the entrypoint's wait is
+// interrupted by the trap and run.sh may already be gone by the liveness check. The
+// exit code must still be run.sh's (42), not the interrupted wait's 128+15. (The race
+// is narrow; this guards the code path rather than forcing the interleaving.)
+func TestEntrypointSignalFastExitKeepsRunShCode(t *testing.T) {
+	for i := 0; i < 3; i++ { // a few rounds: the interleaving varies
+		h := newSuccessHarness(t)
+		h.setRunSh(stubRunShWith(`sleep 30 &
+nap=$!
+trap 'kill "$nap" 2>/dev/null; exit 42' TERM
+touch "$out/ready"
+wait "$nap"
+exit 9
+`))
+		cmd := exec.Command("bash", "entrypoint.sh")
+		for k, v := range h.env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ready := filepath.Join(h.stubOut, "ready")
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = cmd.Process.Kill()
+				t.Fatalf("stub never became ready; stderr:\n%s", stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		var exitErr *exec.ExitError
+		code := 0
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if code != 42 {
+			t.Fatalf("round %d: exit code = %d, want run.sh's 42; stderr:\n%s", i, code, stderr.String())
+		}
+	}
+}
