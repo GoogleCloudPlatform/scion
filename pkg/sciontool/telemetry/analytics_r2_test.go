@@ -206,3 +206,87 @@ func TestOutboxFinalizeLeftoverRotatedFile(t *testing.T) {
 		t.Errorf("sent = %q", c.lines)
 	}
 }
+
+// token-analyst-2 (b987f781) #1: with staging sync failing persistently,
+// a visible line is never committed as durable. The append is unresolved,
+// the outbox holds (no appends, nothing finalized), and after a "machine
+// crash" the reopened outbox decides from what actually survived.
+func TestOutboxPersistentSyncFailureHoldsThenResolves(t *testing.T) {
+	for _, lineSurvives := range []bool{false, true} {
+		o := testOutbox(t)
+		_, _ = o.PinHubID("hub")
+		o.fsyncFile = func(*os.File) error { return errInjectedSync }
+		o.truncateHook = func() error { return errInjectedSync }
+
+		_, err := o.AppendUsage(requestIDDraft(5))
+		if !errors.Is(err, ErrAnalyticsOutboxHeld) {
+			t.Fatalf("append under persistent sync failure = %v; want held", err)
+		}
+		st := o.Stats()
+		if !st.HeldIntent || st.Unresolved != 1 || st.PersistedAppendFailed != 0 {
+			t.Errorf("stats after unresolved append = %+v", st)
+		}
+		// Held: a new event cannot be appended (and is counted lost), and
+		// nothing is finalized behind the unresolved one.
+		if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:other", 1)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
+			t.Errorf("append while held = %v", err)
+		}
+		if n, err := o.Finalize(); n != 0 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
+			t.Errorf("Finalize while held = %d, %v", n, err)
+		}
+		staged, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
+		if len(staged) == 0 {
+			t.Fatal("premise: the uncertain line should be visible")
+		}
+		if !lineSurvives {
+			// The unsynced line is lost in the crash.
+			_ = os.Truncate(filepath.Join(o.Dir(), "staging.jsonl"), 0)
+		}
+
+		// Reopen after the crash with storage healthy.
+		reopened, err := OpenAnalyticsOutbox(o.Dir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reopened.Stats().HeldIntent {
+			t.Error("the intent must resolve once staging can be synced")
+		}
+		want := AppendWritten
+		if lineSurvives {
+			want = AppendCertainDuplicate
+		}
+		mustAppend(t, reopened, requestIDDraft(5), want)
+		if got := len(stagingLines(t, reopened)); got != 1 {
+			t.Errorf("lineSurvives=%v: staging lines = %d, want exactly 1", lineSurvives, got)
+		}
+	}
+}
+
+// token-analyst-2 (b987f781) #2: a malformed intent whose verified-request
+// line fully landed is re-indexed from the line itself, so the
+// retransmission is a certain duplicate -- no second line with that
+// event_id.
+func TestOutboxMalformedIntentWithLandedLineIsReindexed(t *testing.T) {
+	o := testOutbox(t)
+	o.crashAt = "line"
+	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, errSimulatedCrash) {
+		t.Fatalf("simulated crash = %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(o.Dir(), "intent"), []byte("{garbled"), 0o600)
+
+	reopened, err := OpenAnalyticsOutbox(o.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAppend(t, reopened, requestIDDraft(5), AppendCertainDuplicate)
+	next := mustAppend(t, reopened, draftUsage(telemetrycontract.SourceIdentityRequestID, "rid1:req-B", 1), AppendWritten)
+	if next.ProducerSeq != 2 {
+		t.Errorf("seq after re-index = %d, want 2 (re-derived from the landed line)", next.ProducerSeq)
+	}
+	if got := len(stagingLines(t, reopened)); got != 2 {
+		t.Errorf("staging lines = %d, want 2", got)
+	}
+	if reopened.Stats().CorruptIntents != 1 {
+		t.Errorf("corrupt intents = %d", reopened.Stats().CorruptIntents)
+	}
+}

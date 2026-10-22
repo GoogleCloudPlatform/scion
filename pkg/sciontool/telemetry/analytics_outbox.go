@@ -129,11 +129,13 @@ type AnalyticsOutboxStats struct {
 	Appended, CertainDuplicates, Overflow, AppendFailed int64
 	Finalized, Delivered, SendFailures, Torn            int64
 	HubIDMismatch, Conflicts, Quarantined, DeadLetters  int64
-	SyncUncertain, CorruptIntents                       int64
-	PersistedOverflow, PersistedOversize                int64
-	PersistedAppendFailed, PersistedDeadLetters         int64
-	PendingBytes, RetainedBytes                         int64
-	OldestPendingAge                                    time.Duration
+	SyncUncertain, CorruptIntents, Unresolved           int64
+	// HeldIntent is true while an unresolved append holds the outbox.
+	HeldIntent                                  bool
+	PersistedOverflow, PersistedOversize        int64
+	PersistedAppendFailed, PersistedDeadLetters int64
+	PendingBytes, RetainedBytes                 int64
+	OldestPendingAge                            time.Duration
 }
 
 // AnalyticsOutbox is a handle on one outbox directory. It is safe for use
@@ -156,7 +158,7 @@ type AnalyticsOutbox struct {
 	geteuid func() int
 	chown   func(path string, uid, gid int) error
 
-	deadLetters, syncUncertain, corruptIntents atomic.Int64
+	deadLetters, syncUncertain, corruptIntents, unresolved atomic.Int64
 
 	// fsyncFile and fsyncDir are the file and directory sync calls (test
 	// seams for sync faults).
@@ -176,6 +178,17 @@ type AnalyticsOutbox struct {
 type readyFile interface {
 	io.ReadSeekCloser
 }
+
+// ErrAnalyticsOutboxHeld means an in-flight append's line is visible in
+// staging but could not be made durable (staging sync keeps failing). The
+// intent is kept and appends and finalization are held until a later
+// operation can sync and commit it (or finds the line gone): an uncertain
+// event is never claimed durable, and nothing ships behind it.
+var ErrAnalyticsOutboxHeld = errors.New("analytics outbox: held on an unresolved append (staging sync failing)")
+
+// errAppendUnresolved wraps ErrAnalyticsOutboxHeld for the append whose own
+// line is the unresolved one (counted as unresolved, not as lost).
+var errAppendUnresolved = fmt.Errorf("this append is unresolved: %w", ErrAnalyticsOutboxHeld)
 
 // errSimulatedCrash is returned by appendUsage at a crashAt step (tests).
 var errSimulatedCrash = errors.New("analytics outbox: simulated crash")
@@ -245,7 +258,12 @@ func (o *AnalyticsOutbox) open() error {
 			return err
 		}
 	}
-	return o.recoverIntentLocked()
+	// A held outbox still opens (hooks need a handle to count failures);
+	// mutating operations stay blocked until the intent resolves.
+	if err := o.recoverIntentLocked(); err != nil && !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		return err
+	}
+	return nil
 }
 
 // mkdir creates d (whose parent must exist) if missing, chowns it, and
@@ -324,6 +342,9 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
 	outcome, err := o.appendUsage(ev)
 	switch {
+	case errors.Is(err, errAppendUnresolved):
+		// Not known lost: the intent persists and decides later.
+		o.unresolved.Add(1)
 	case err != nil:
 		o.appendFailed.Add(1)
 		// Persisted, lock-free evidence of the loss (a hook process's
@@ -484,10 +505,16 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 			}
 		}
 		landed, rerr := o.recoverIntent()
+		if errors.Is(rerr, ErrAnalyticsOutboxHeld) {
+			// Visible but not durable: neither accepted nor lost yet.
+			committed = true // seq stays with the intent
+			return 0, errAppendUnresolved
+		}
 		if rerr != nil {
 			return 0, errors.Join(err, rerr)
 		}
 		if landed {
+			// Synced and committed on the second attempt.
 			committed = true
 			o.syncUncertain.Add(1)
 			return AppendWritten, nil
@@ -584,10 +611,17 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 	}
 	var in appendIntent
 	if json.Unmarshal(b, &in) != nil || in.EventID == "" {
-		// Unreadable intent (atomic rename makes this unexpected): keep it
-		// for inspection as intent.corrupt-<unix nanos>, count it, and go
-		// on. Whether its line landed cannot be decided, so the staged
-		// line (if any) stays unindexed; the counter makes that visible.
+		// Unreadable intent (atomic rename makes this unexpected). Its line,
+		// if it landed, is staging's last complete line: re-derive that
+		// event's seq and index entry from the line itself (idempotent for
+		// an already indexed event), after making staging durable. Then
+		// keep the intent for inspection as intent.corrupt-<ns>.
+		if err := o.syncStaging(); err != nil {
+			return false, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+		}
+		if err := o.reindexLastStagingLine(); err != nil {
+			return false, err
+		}
 		o.corruptIntents.Add(1)
 		name := fmt.Sprintf("intent.corrupt-%d", o.now().UnixNano())
 		if err := os.Rename(o.path("intent"), o.path(name)); err != nil {
@@ -600,6 +634,12 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 		return false, err
 	}
 	if last == in.EventID {
+		// Visible is not durable: commit the index only after staging
+		// (and its directory entry) sync. Otherwise keep the intent and
+		// hold.
+		if err := o.syncStaging(); err != nil {
+			return true, fmt.Errorf("%w: %v", ErrAnalyticsOutboxHeld, err)
+		}
 		return true, o.commitIntent(in)
 	}
 	if err := os.Remove(o.path("intent")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -608,40 +648,30 @@ func (o *AnalyticsOutbox) recoverIntent() (landed bool, err error) {
 	return false, o.fsyncDir(o.dir)
 }
 
+// syncStaging fsyncs the staging file and the outbox directory, making a
+// visible staged line durable.
+func (o *AnalyticsOutbox) syncStaging() error {
+	f, err := os.Open(o.path("staging.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return o.fsyncDir(o.dir)
+	}
+	if err != nil {
+		return fmt.Errorf("analytics outbox: %w", err)
+	}
+	defer f.Close()
+	if err := o.fsyncFile(f); err != nil {
+		return fmt.Errorf("analytics outbox: syncing staging: %w", err)
+	}
+	return o.fsyncDir(o.dir)
+}
+
 // lastStagingEventID returns the event_id of the staging file's last
 // complete (newline-terminated) line, or "" if there is none or the file
 // ends in a torn fragment.
 func (o *AnalyticsOutbox) lastStagingEventID() (string, error) {
-	f, err := os.Open(o.path("staging.jsonl"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	size := info.Size()
-	if size == 0 {
-		return "", nil
-	}
-	start := size - analyticsMaxLineBytes - 1
-	if start < 0 {
-		start = 0
-	}
-	tail := make([]byte, size-start)
-	if _, err := f.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("analytics outbox: %w", err)
-	}
-	if tail[len(tail)-1] != '\n' {
-		return "", nil
-	}
-	body := tail[:len(tail)-1]
-	if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
-		body = body[i+1:]
+	body, err := o.lastStagingLine()
+	if err != nil || body == nil {
+		return "", err
 	}
 	var head struct {
 		EventID string `json:"event_id"`
@@ -650,6 +680,92 @@ func (o *AnalyticsOutbox) lastStagingEventID() (string, error) {
 		return "", nil
 	}
 	return head.EventID, nil
+}
+
+// lastStagingLine returns the staging file's last complete
+// (newline-terminated) line, or nil if there is none or the file ends in a
+// torn fragment.
+func (o *AnalyticsOutbox) lastStagingLine() ([]byte, error) {
+	f, err := os.Open(o.path("staging.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return nil, nil
+	}
+	start := size - analyticsMaxLineBytes - 1
+	if start < 0 {
+		start = 0
+	}
+	tail := make([]byte, size-start)
+	if _, err := f.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("analytics outbox: %w", err)
+	}
+	if tail[len(tail)-1] != '\n' {
+		return nil, nil
+	}
+	body := tail[:len(tail)-1]
+	if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
+		body = body[i+1:]
+	}
+	return body, nil
+}
+
+// reindexLastStagingLine makes sure the event on staging's last complete
+// line is reflected in seq and its occurrence index entry (count at least
+// its occurrence; its fingerprint recorded for a verified request ID). It
+// is idempotent for an event that is already indexed.
+func (o *AnalyticsOutbox) reindexLastStagingLine() error {
+	body, err := o.lastStagingLine()
+	if err != nil || body == nil {
+		return err
+	}
+	var ev telemetrycontract.UsageEvent
+	if telemetrycontract.Unmarshal(body, &ev) != nil {
+		return nil // torn or foreign: nothing to index
+	}
+	if cur, err := o.readInt("seq"); err != nil {
+		return err
+	} else if ev.ProducerSeq > cur {
+		if err := o.writeFileAtomic("seq", []byte(strconv.FormatInt(ev.ProducerSeq, 10))); err != nil {
+			return err
+		}
+	}
+	if ev.SourceIdentity == telemetrycontract.SourceIdentityNone {
+		return nil
+	}
+	name := analyticsIndexName(ev.ProducerNamespace, ev.SourceKind, ev.SourceEventID)
+	entry, err := o.readIndex(name)
+	if err != nil {
+		return err
+	}
+	changed := false
+	if entry.count < ev.SourceOccurrence {
+		entry.count, changed = ev.SourceOccurrence, true
+	}
+	if ev.SourceIdentity == telemetrycontract.SourceIdentityRequestID {
+		fp, err := usageSemanticFingerprint(&ev)
+		if err != nil {
+			return err
+		}
+		if !entry.has(fp) {
+			entry.fingerprints = append(entry.fingerprints, fp)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return o.writeIndex(name, entry)
 }
 
 // usageSemanticFingerprint hashes the event's source-determined content:
@@ -1264,6 +1380,10 @@ func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
 	s.DeadLetters = o.deadLetters.Load()
 	s.SyncUncertain = o.syncUncertain.Load()
 	s.CorruptIntents = o.corruptIntents.Load()
+	s.Unresolved = o.unresolved.Load()
+	if _, err := os.Stat(o.path("intent")); err == nil {
+		s.HeldIntent = true
+	}
 	s.PersistedOverflow, _ = o.readInt("overflow")
 	s.PersistedOversize, _ = o.readInt("oversize")
 	if info, err := os.Stat(o.path("append_failed")); err == nil {
