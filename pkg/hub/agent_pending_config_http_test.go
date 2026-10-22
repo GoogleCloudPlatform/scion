@@ -821,3 +821,42 @@ func TestAgentPendingConfig_StartRemovesUnappliableKeysWhenNothingFolds(t *testi
 	assert.Equal(t, []string{"config.max_turns", "config.no_such_key"}, keys)
 	assert.Equal(t, pendingDiscardTriggerUnappliable, trigger)
 }
+
+// TestAgentPendingConfig_PatchRemovesUnappliableKeysAndAudits: a config
+// PATCH of an agent with no container folds its pending config first; a
+// stored key that can never be applied is removed there and audited once
+// as discarded with trigger unappliable, and a valid provision-rendered key
+// stays pending.
+func TestAgentPendingConfig_PatchRemovesUnappliableKeysAndAudits(t *testing.T) {
+	srv, s, _, agent := heldEditsFixture(t, state.PhaseStopped)
+	cur := pendingReloadAgent(t, s, agent.ID)
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
+		"system_prompt": json.RawMessage(`"be brief"`),
+		"max_turns":     json.RawMessage(`"not a number"`),
+	}}
+	require.NoError(t, s.UpdateAgent(context.Background(), cur))
+
+	resp := patchPending(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": "patched-model"},
+	})
+	assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
+	require.NotNil(t, resp.PendingConfig)
+	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig))
+	stored := pendingReloadAgent(t, s, agent.ID)
+	require.NotNil(t, stored.PendingConfig)
+	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(stored.PendingConfig), "the removal is persisted")
+	assert.Equal(t, 3, stored.AppliedConfig.InlineConfig.MaxTurns, "the undecodable value is not applied")
+
+	discarded := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigDiscarded, 1)
+	require.Len(t, discarded, 1, "exactly one discarded audit")
+	keys, trigger := pendingAuditSummary(t, discarded[0])
+	assert.Equal(t, []string{"config.max_turns"}, keys)
+	assert.Equal(t, pendingDiscardTriggerUnappliable, trigger)
+	// No second record arrives later.
+	time.Sleep(200 * time.Millisecond)
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: mutationTypeAgentPendingConfigDiscarded, TargetID: agent.ID, Limit: 5,
+	})
+	require.NoError(t, err)
+	assert.Len(t, recs, 1)
+}
