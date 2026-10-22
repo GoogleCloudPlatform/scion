@@ -3820,6 +3820,12 @@ type AgentServiceAccountAssignmentStore interface {
 	// ErrAlreadyExists.
 	ReplaceAgentServiceAccountAssignment(ctx context.Context, a *AgentServiceAccountAssignment) error
 
+	// ReplaceAgentServiceAccountAssignmentWith is
+	// ReplaceAgentServiceAccountAssignment with the deactivation record of
+	// the replaced row given by d. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	ReplaceAgentServiceAccountAssignmentWith(ctx context.Context, a *AgentServiceAccountAssignment, d Deactivation) error
+
 	// GetActiveAgentServiceAccountAssignments returns the agent's active
 	// rows, oldest first. More than one row is a defect that readers treat
 	// as ambiguous.
@@ -3835,6 +3841,13 @@ type AgentServiceAccountAssignmentStore interface {
 	// deactivation record. A conflict with an active row surfaces as
 	// ErrAlreadyExists.
 	ReactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, cause EdgeDeactivationCause, opID string) (int, error)
+
+	// RemarkDeactivatedAgentServiceAccountAssignments replaces the
+	// deactivation record of the agent's inactive rows deactivated with
+	// cause under opID (only the row with ID rowID when rowID is set) by
+	// to. The rows stay inactive. to.Cause must satisfy
+	// ValidAssignmentDeactivationCause and to.OpID must be set.
+	RemarkDeactivatedAgentServiceAccountAssignments(ctx context.Context, agentID, rowID string, cause EdgeDeactivationCause, opID string, to Deactivation) (int, error)
 }
 
 // DelegationEdgeStore defines delegation edge persistence operations.

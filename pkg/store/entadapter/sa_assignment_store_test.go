@@ -166,7 +166,7 @@ func TestAgentSAAssignmentStore_DeactivateRejectsInvalidCause(t *testing.T) {
 	ctx := context.Background()
 	s := NewSAAssignmentStore(enttest.NewClient(t))
 	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, saAssignmentFixture("agent-a", "sa-1")))
-	for _, cause := range []store.EdgeDeactivationCause{"", store.EdgeDeactivationDelegatorDeleted, store.EdgeDeactivationReincarnateReplaced, "bogus"} {
+	for _, cause := range []store.EdgeDeactivationCause{"", store.EdgeDeactivationDelegatorDeleted, store.EdgeDeactivationProvenanceAdopted, "bogus"} {
 		_, err := s.DeactivateAgentServiceAccountAssignments(ctx, "agent-a", store.Deactivation{Cause: cause, OpID: "op-1"})
 		assert.ErrorIs(t, err, store.ErrInvalidInput, "cause %q", cause)
 	}
@@ -241,9 +241,131 @@ func TestDelegationEdgeStore_RejectsAssignmentCauses(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
 	seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "proj-a")
-	for _, cause := range []store.EdgeDeactivationCause{store.EdgeDeactivationSAReplaced, store.EdgeDeactivationSACleared} {
+	for _, cause := range []store.EdgeDeactivationCause{
+		store.EdgeDeactivationSAReplaced, store.EdgeDeactivationSACleared,
+		store.EdgeDeactivationReincarnateFailed, store.EdgeDeactivationReincarnatePendingSwept,
+		store.EdgeDeactivationReincarnateStaleSwept,
+	} {
 		_, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-a",
 			store.Deactivation{Cause: cause, OpID: "op-1"})
 		assert.ErrorIs(t, err, store.ErrInvalidInput, "cause %q", cause)
 	}
+}
+
+func TestAgentSAAssignmentStore_ReincarnationCausesAreValid(t *testing.T) {
+	for _, cause := range []store.EdgeDeactivationCause{
+		store.EdgeDeactivationReincarnateReplaced, store.EdgeDeactivationReincarnateFailed,
+		store.EdgeDeactivationReincarnatePendingSwept, store.EdgeDeactivationReincarnateStaleSwept,
+	} {
+		assert.True(t, store.ValidAssignmentDeactivationCause(cause), "cause %q", cause)
+	}
+	for _, cause := range []store.EdgeDeactivationCause{
+		store.EdgeDeactivationReincarnateFailed, store.EdgeDeactivationReincarnatePendingSwept,
+		store.EdgeDeactivationReincarnateStaleSwept,
+	} {
+		assert.False(t, store.ValidEdgeDeactivationCause(cause), "cause %q is assignment-only", cause)
+	}
+}
+
+func TestAgentSAAssignmentStore_ReplaceWithRecordsDeactivation(t *testing.T) {
+	ctx := context.Background()
+	s := NewSAAssignmentStore(enttest.NewClient(t))
+	first := saAssignmentFixture("agent-a", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, first))
+
+	at := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	second := saAssignmentFixture("agent-a", "sa-2")
+	second.ID = "6f1c1d0e-8a54-4d8c-9a2e-0c3c5e1b2a01"
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignmentWith(ctx, second,
+		store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, At: &at, OpID: second.ID}))
+
+	active, err := s.GetActiveAgentServiceAccountAssignments(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Len(t, active, 1, "exactly one active row")
+	assert.Equal(t, second.ID, active[0].ID, "the caller's row ID is kept")
+	old := allSAAssignmentsFor(t, s, "agent-a")[first.ID]
+	assert.False(t, old.Active)
+	assert.Equal(t, store.EdgeDeactivationReincarnateReplaced, old.Cause)
+	assert.Equal(t, second.ID, old.OpID)
+	require.NotNil(t, old.At)
+	assert.True(t, at.Equal(*old.At))
+}
+
+func TestAgentSAAssignmentStore_ReplaceWithRejectsInvalidDeactivation(t *testing.T) {
+	ctx := context.Background()
+	s := NewSAAssignmentStore(enttest.NewClient(t))
+	first := saAssignmentFixture("agent-a", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, first))
+	for _, d := range []store.Deactivation{
+		{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: "op-1"},
+		{Cause: store.EdgeDeactivationReincarnateReplaced},
+	} {
+		err := s.ReplaceAgentServiceAccountAssignmentWith(ctx, saAssignmentFixture("agent-a", "sa-2"), d)
+		assert.ErrorIs(t, err, store.ErrInvalidInput, "deactivation %+v", d)
+	}
+	active, err := s.GetActiveAgentServiceAccountAssignments(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Len(t, active, 1, "a refused replace changes nothing")
+	assert.Equal(t, first.ID, active[0].ID)
+}
+
+func TestAgentSAAssignmentStore_RemarkSelectsOnlyMatchingInactiveRows(t *testing.T) {
+	ctx := context.Background()
+	s := NewSAAssignmentStore(enttest.NewClient(t))
+	soft := store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-soft"}
+
+	// Two inactive rows under the same cause and op ID, plus an active row.
+	a := saAssignmentFixture("agent-a", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, a))
+	_, err := s.DeactivateAgentServiceAccountAssignments(ctx, "agent-a", soft)
+	require.NoError(t, err)
+	b := saAssignmentFixture("agent-a", "sa-2")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, b))
+	_, err = s.DeactivateAgentServiceAccountAssignments(ctx, "agent-a", soft)
+	require.NoError(t, err)
+	c := saAssignmentFixture("agent-a", "sa-3")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, c))
+	// Another agent's row under the same cause and op ID.
+	other := saAssignmentFixture("agent-b", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, other))
+	_, err = s.DeactivateAgentServiceAccountAssignments(ctx, "agent-b", soft)
+	require.NoError(t, err)
+
+	to := store.Deactivation{Cause: store.EdgeDeactivationReincarnateFailed, OpID: "op-rec"}
+
+	// A non-matching selector re-marks nothing.
+	n, err := s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", "", store.EdgeDeactivationAgentSoftDelete, "op-other", to)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+	n, err = s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", c.ID, store.EdgeDeactivationAgentSoftDelete, "op-soft", to)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "the active row is never selected")
+
+	// The row ID narrows the selection to one row.
+	n, err = s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", b.ID, store.EdgeDeactivationAgentSoftDelete, "op-soft", to)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	all := allSAAssignmentsFor(t, s, "agent-a")
+	assert.False(t, all[b.ID].Active, "a re-marked row stays inactive")
+	assert.Equal(t, store.EdgeDeactivationReincarnateFailed, all[b.ID].Cause)
+	assert.Equal(t, "op-rec", all[b.ID].OpID)
+	assert.NotNil(t, all[b.ID].At)
+	assert.Equal(t, store.EdgeDeactivationAgentSoftDelete, all[a.ID].Cause, "the other row keeps its record")
+	assert.True(t, all[c.ID].Active)
+
+	// Without a row ID every matching row of the agent is re-marked.
+	n, err = s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", "", store.EdgeDeactivationAgentSoftDelete, "op-soft", to)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, store.EdgeDeactivationReincarnateFailed, allSAAssignmentsFor(t, s, "agent-a")[a.ID].Cause)
+	assert.Equal(t, store.EdgeDeactivationAgentSoftDelete, allSAAssignmentsFor(t, s, "agent-b")[other.ID].Cause,
+		"another agent's row is untouched")
+
+	// Invalid causes or op IDs are refused.
+	_, err = s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", "", store.EdgeDeactivationAgentSoftDelete, "op-soft",
+		store.Deactivation{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: "x"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = s.RemarkDeactivatedAgentServiceAccountAssignments(ctx, "agent-a", "", store.EdgeDeactivationAgentSoftDelete, "",
+		to)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
