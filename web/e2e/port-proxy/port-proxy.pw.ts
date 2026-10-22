@@ -201,11 +201,18 @@ for (const transport of TRANSPORTS) {
         expect
           .soft(headers['x-scion-proxy-hint'], `${name} hint header`)
           .toBe('sandboxed-subresource');
+        expect.soft(headers['x-content-type-options'], `${name} nosniff`).toBe('nosniff');
+        expect.soft(headers['cache-control'], `${name} cache control`).toBe('no-store');
+        expect.soft(headers['access-control-allow-origin'], `${name} allow origin`).toBe('*');
         expect.soft(sent['cookie'], `${name} request cookie`).toBeUndefined();
-        const body = await res.text();
-        expect.soft(body.startsWith(NO_CREDENTIALS_BODY_START), `${name} body start`).toBe(true);
-        expect.soft(body, `${name} body docs link`).toContain(NO_CREDENTIALS_DOCS_ANCHOR);
       }
+      // The body is read from the module script's answer only: it is a CORS
+      // request, so its body reaches the page. The stylesheet and image are
+      // no-cors requests from an opaque origin, whose bodies the browser may
+      // withhold.
+      const body = await subs.get('app.js')!.text();
+      expect.soft(body.startsWith(NO_CREDENTIALS_BODY_START), 'app.js body start').toBe(true);
+      expect.soft(body, 'app.js body docs link').toContain(NO_CREDENTIALS_DOCS_ANCHOR);
       // The module never ran and the stylesheet never applied.
       await expect(page.locator('#probe')).toHaveText('');
       await expect(page.locator('#title')).not.toHaveCSS('color', 'rgb(0, 0, 255)');
