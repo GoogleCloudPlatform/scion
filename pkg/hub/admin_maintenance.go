@@ -393,6 +393,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			GCPProject: s.config.GCPProjectID,
+			ObjectPath: harnessConfigFileObjectPath,
 		}), nil
 	case "update-binary":
 		log.Debug("Resolved update-binary executor",
