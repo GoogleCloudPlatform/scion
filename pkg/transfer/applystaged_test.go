@@ -76,6 +76,16 @@ var plantedBucketEntries = map[string]string{
 	"proj/.scion/settings.yaml":            "evil: true\n",
 	"proj/.scion/templates/t/x.yaml":       "evil: true\n",
 	".DS_Store":                            "x",
+	// Case and invisible-character variants of the same entries.
+	".GIT/config":                    "[core]\n\thooksPath = /tmp/evil\n",
+	".Git/hooks/pre-commit":          "#!/bin/sh\nevil\n",
+	"sub/.GIT/config":                "[core]\n",
+	".git/objects/INFO/alternates":   "/host/other/objects\n",
+	".git/HOOKS/post-checkout":       "#!/bin/sh\nevil\n",
+	".SCION/settings.yaml":           "evil: true\n",
+	"proj/.Scion/settings.yaml":      "evil: true\n",
+	"proj/.\u017fcion/settings.yaml": "evil: true\n",
+	".g\u200cit/config":              "[core]\n",
 }
 
 func TestApplyStagedWorkspace_ContentSyncSemantics(t *testing.T) {

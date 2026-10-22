@@ -221,8 +221,11 @@ var ErrNotWorkspaceContent = errors.New("path is not workspace content")
 // metadata (.git at any depth) and project configuration (.scion at any
 // depth) are refused, so a download never writes into the destination's own
 // repository or project settings. All entries are checked before anything is
-// downloaded. Files are written through an os.Root opened on destDir, so
-// downloaded files are only ever written inside destDir.
+// downloaded. Files are written through an os.Root opened on destDir
+// without following symbolic links (a link on an entry's path fails the
+// download with ErrSymlinkInPath), so downloaded files are only ever written
+// inside destDir and never redirected within it. An existing file keeps its
+// mode; a new one gets 0644.
 // If progress is not nil, it is called after each file is downloaded.
 func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, destDir string, progress ProgressCallback) error {
 	for i, url := range urls {
@@ -251,7 +254,10 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 		if err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
 		}
-		if err := WriteFileInRoot(root, url.Path, content, 0644); err != nil {
+		// Written without following a symlink anywhere on the path: a
+		// link in the destination (even one inside it, for example into
+		// its .git) refuses the write rather than redirecting it.
+		if _, err := writeConfined(root, url.Path, content, 0644, refuseLinks); err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
 		}
 

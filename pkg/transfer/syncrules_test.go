@@ -91,6 +91,33 @@ func TestClassifyWorkspaceSyncPath(t *testing.T) {
 		{".DS_Store", false, WorkspaceSyncNever},
 		{"src/.DS_Store", false, WorkspaceSyncNever},
 
+		// Never: case variants (a case-insensitive receiver treats them as
+		// the real entry) and invisible-character variants.
+		{".GIT", true, WorkspaceSyncNever},
+		{".Git/config", false, WorkspaceSyncNever},
+		{".GIT/refs/heads/main", false, WorkspaceSyncNever},
+		{"sub/.GIT/hooks/pre-commit", false, WorkspaceSyncNever},
+		{"sub/.Git", false, WorkspaceSyncNever},
+		{".SCION/settings.yaml", false, WorkspaceSyncNever},
+		{"proj/.Scion/settings.yaml", false, WorkspaceSyncNever},
+		{".ds_store", false, WorkspaceSyncNever},
+		{".git/objects/INFO/alternates", false, WorkspaceSyncNever},
+		{".git/objects/Info", true, WorkspaceSyncNever},
+		{".git/OBJECTS/ab/cd", false, WorkspaceSyncNever},
+		{".git/Refs/heads/main", false, WorkspaceSyncNever},
+		{".git/head", false, WorkspaceSyncNever},
+		{".git/HOOKS/pre-commit", false, WorkspaceSyncNever},
+		{".git/refs/heads/.GIT", false, WorkspaceSyncNever},
+		{".git/refs/heads/.Scion/x", false, WorkspaceSyncNever},
+		{".\u017fcion/settings.yaml", false, WorkspaceSyncNever}, // long s folds to s
+		{"proj/.\u017fcion", true, WorkspaceSyncNever},
+		{".g\u200cit/config", false, WorkspaceSyncNever}, // zero-width non-joiner
+		{"sub/.gi\u200dt/hooks/x", false, WorkspaceSyncNever},
+		{".sc\u00adion/x", false, WorkspaceSyncNever}, // soft hyphen
+		{"x\u200c.go", false, WorkspaceSyncContent},
+		{"Git/HEAD", false, WorkspaceSyncContent},
+		{"scion/x", false, WorkspaceSyncContent},
+
 		// Never: non-canonical paths.
 		{"", false, WorkspaceSyncNever},
 		{"/etc/passwd", false, WorkspaceSyncNever},

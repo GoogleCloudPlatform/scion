@@ -354,3 +354,65 @@ func TestClient_DownloadFiles_RefusesNonContent(t *testing.T) {
 		})
 	}
 }
+
+// TestClient_DownloadFiles_RefusesLinksInsideDest checks that a symlink
+// inside the destination is not followed either: a directory link into the
+// checkout's own .git, or a file link to another file in the checkout.
+func TestClient_DownloadFiles_RefusesLinksInsideDest(t *testing.T) {
+	server := newContentServer(t)
+	client := NewClient(server.Client())
+
+	t.Run("directory link into .git", func(t *testing.T) {
+		dest := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dest, ".git", "hooks"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(".git/hooks", filepath.Join(dest, "tools")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		urls := []DownloadURLInfo{{Path: "tools/pre-commit", URL: server.URL + "/x"}}
+		if err := client.DownloadFiles(context.Background(), urls, dest, nil); !errors.Is(err, ErrSymlinkInPath) {
+			t.Fatalf("err = %v, want ErrSymlinkInPath", err)
+		}
+		if _, err := os.Lstat(filepath.Join(dest, ".git", "hooks", "pre-commit")); !os.IsNotExist(err) {
+			t.Errorf("write reached .git/hooks through an in-checkout link (err=%v)", err)
+		}
+	})
+
+	t.Run("file link", func(t *testing.T) {
+		dest := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dest, "real.txt"), []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real.txt", filepath.Join(dest, "alias.txt")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		urls := []DownloadURLInfo{{Path: "alias.txt", URL: server.URL + "/x"}}
+		if err := client.DownloadFiles(context.Background(), urls, dest, nil); !errors.Is(err, ErrSymlinkInPath) {
+			t.Fatalf("err = %v, want ErrSymlinkInPath", err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dest, "real.txt")); string(got) != "original" {
+			t.Errorf("real.txt = %q, written through a link", got)
+		}
+		if fi, err := os.Lstat(filepath.Join(dest, "alias.txt")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("the user's link was replaced: %v %v", fi, err)
+		}
+	})
+}
+
+// TestClient_DownloadFiles_RefusesCaseVariants checks the refusal on a
+// case-insensitive checkout's view: case variants of .git and .scion are
+// refused like the names themselves.
+func TestClient_DownloadFiles_RefusesCaseVariants(t *testing.T) {
+	server := newContentServer(t)
+	client := NewClient(server.Client())
+	for _, entry := range []string{".GIT/config", ".Git/hooks/pre-commit", "sub/.GIT/config", ".SCION/settings.yaml", "proj/.Scion/x", ".ds_store"} {
+		t.Run(entry, func(t *testing.T) {
+			dest := t.TempDir()
+			urls := []DownloadURLInfo{{Path: entry, URL: server.URL + "/x"}}
+			if err := client.DownloadFiles(context.Background(), urls, dest, nil); !errors.Is(err, ErrNotWorkspaceContent) {
+				t.Fatalf("err = %v, want ErrNotWorkspaceContent", err)
+			}
+		})
+	}
+}

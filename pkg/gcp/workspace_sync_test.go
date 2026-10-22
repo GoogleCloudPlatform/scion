@@ -47,6 +47,13 @@ var workspaceSyncCorpus = []string{
 	"sub/.git", "sub/.git/config", "sub/.git/HEAD", "sub/.git/refs/heads/main", "vendor/lib/.git/hooks/pre-commit",
 	".scion", ".scion/settings.yaml", ".scion/project-id", "sub/.scion", "sub/.scion/settings.yaml",
 	"a/b/.scion/templates/t/scion-agent.yaml", ".DS_Store", "src/.DS_Store",
+	// Case variants: a case-insensitive receiver treats them as the real
+	// entry.
+	".GIT", ".Git/config", ".GIT/HEAD", ".GIT/refs/heads/main", "sub/.GIT/hooks/pre-commit", "sub/.Git",
+	".SCION/settings.yaml", ".Scion", "proj/.sCiOn/settings.yaml", ".ds_store", "x/.DS_STORE",
+	".git/objects/INFO/alternates", ".git/objects/Info/http-alternates", ".git/OBJECTS/ab/cd",
+	".git/Refs/heads/main", ".git/head", ".git/Index", ".git/HOOKS/pre-commit", ".git/Config",
+	".git/refs/heads/.GIT", ".git/refs/heads/.Scion/x", ".git/objects/.Ds_Store", "Git/HEAD", "SCION/x",
 }
 
 // TestWorkspaceSyncRcloneRulesParity checks that the rclone rules the
