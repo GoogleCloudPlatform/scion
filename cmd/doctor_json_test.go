@@ -338,7 +338,9 @@ func TestDoctorJSON_MessagesAreOneLine(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &doc))
 	require.Len(t, doc.General.Checks, 1)
 	assert.Equal(t, "line one line two", doc.General.Checks[0].Message)
-	assert.Equal(t, "do  this", doc.General.Checks[0].Remediation)
+	// add() strips control characters except newline (the "\r" goes),
+	// then singleLine folds the remaining newline into one space.
+	assert.Equal(t, "do this", doc.General.Checks[0].Remediation)
 }
 
 func TestDoctorDisplayEndpoint(t *testing.T) {
