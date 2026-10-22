@@ -226,11 +226,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
+	// server.hub.class, server.hub.test_identities and
+	// server.hub.gcp_project_id are never API-writable, so they are not
+	// shown either: a client that echoes this body back must not send them.
 	resp.Server.Hub.HubClass = ""
 	resp.Server.Hub.TestIdentities = nil
+	resp.Server.Hub.GCPProjectID = ""
 	// Nor is the relay-peer secret, which is never returned.
 	if c := resp.Server.Hub.Conduit; c != nil {
 		c.PeerSecret = ""
@@ -1029,6 +1030,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
 		return
 	}
+	// telemetry.cloud.cloud_logging is read only at startup, before the
+	// settings database is opened: a changed value is refused, an unchanged
+	// echo of GET is dropped (ptone/scion#5664), in DB and workstation mode
+	// alike.
+	cl, err := s.checkCloudLoggingDBWrite(r.Context(), ops, rawBody)
+	if err != nil {
+		slog.Error("PUT server-config: failed to build GET view for the cloud_logging check", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+		return
+	}
+	if cl.refused {
+		writeCloudLoggingDBWriteRefused(w)
+		return
+	}
+	rawBody = cl.body
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)

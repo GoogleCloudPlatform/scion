@@ -32,11 +32,13 @@ import (
 // (phase A0), the workload issuer allowlist (phase X2, whose trust set
 // must not grow through the API), the proxy driver principals and driver
 // token audience (phase WS2, which decide who may carry test identity web
-// sessions behind the proxy), and the relay-peer secret (design §3.9:
-// never stored in the database or returned by the API). A key matches
-// itself and every key nested under it.
+// sessions behind the proxy), the relay-peer secret (design §3.9:
+// never stored in the database or returned by the API), and the hub's GCP
+// project, which selects the service-account minting project
+// (ptone/scion#4942). A key matches itself and every key nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
+	config.HubGCPProjectIDKey,
 	config.TestIdentitiesKey,
 	config.ProxyDriverPrincipalsKey,
 	config.ProxyDriverTokenAudienceKey,

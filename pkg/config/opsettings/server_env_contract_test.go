@@ -532,7 +532,6 @@ func globalConfigLeaf(key envContractKey) (leaf func(gc interface{}) (reflect.Va
 // Reasons used in envContractNoField.
 const (
 	noFieldGlobalConfigNotModeled = "GlobalConfig has no field for this key"
-	noFieldVersioned              = "VersionedSettings has no field for this key (the schema has no node for it)"
 )
 
 // envContractNoField lists the (consumer, key) pairs a struct consumer
@@ -576,7 +575,6 @@ var envContractNoField = map[string]string{
 	"globalconfig server.shared_dir_storage.nfs.storage_class":  noFieldGlobalConfigNotModeled,
 	"globalconfig server.shared_dir_storage.nfs.subpath_root":   noFieldGlobalConfigNotModeled,
 	"globalconfig server.shared_dir_storage.nfs.uid":            noFieldGlobalConfigNotModeled,
-	"versioned server.hub.gcp_project_id":                       noFieldVersioned,
 }
 
 // consumerInScope reports whether consumer reads key at all. The versioned
@@ -866,8 +864,6 @@ var envContractNoYAMLSeed = map[string]string{
 	"[legacy] GlobalConfig server.workspace_storage.nfs.storage_class":               noSeedLegacyServerOutsideKoanf,
 	"[legacy] GlobalConfig server.workspace_storage.nfs.subpath_root":                noSeedLegacyServerOutsideKoanf,
 	"[legacy] GlobalConfig server.workspace_storage.nfs.uid":                         noSeedLegacyServerOutsideKoanf,
-	"[settings] GlobalConfig server.hub.gcp_project_id": "the settings schema has no node for the key, " +
-		"so settings.yaml cannot hold it",
 }
 
 // structEmptyCheck checks that name="" is treated as unset by a struct
