@@ -170,6 +170,44 @@ func (h *Home) ReadFile(rel string, max int64) ([]byte, error) {
 	return data, nil
 }
 
+// ReadFileMode is ReadFile that also returns the permission bits of the
+// file it read, taken from the same open descriptor.
+func (h *Home) ReadFileMode(rel string, max int64) ([]byte, os.FileMode, error) {
+	parent, leaf, err := splitLeaf(rel)
+	if err != nil {
+		return nil, 0, err
+	}
+	fd, err := h.walk(parent, false, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	data, st, err := dirfd.ReadAtNoFollowStat(fd, leaf, max)
+	if err != nil {
+		return nil, 0, pathErr("read", h.path, append(parent, leaf), err)
+	}
+	return data, os.FileMode(st.Mode).Perm(), nil
+}
+
+// SyncDir fsyncs the directory rel ("." for the home itself), opened
+// without following a link at any component, so a rename into it is
+// durable.
+func (h *Home) SyncDir(rel string) error {
+	parts, err := splitRel(rel)
+	if err != nil {
+		return err
+	}
+	fd, err := h.walk(parts, false, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := unix.Fsync(fd); err != nil {
+		return pathErr("sync", h.path, parts, err)
+	}
+	return nil
+}
+
 // openParentIfPresent opens rel's parent for a removal. present is false
 // (with a nil error) when a component of the parent does not exist, so
 // there is nothing to remove.

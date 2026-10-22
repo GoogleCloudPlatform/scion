@@ -404,3 +404,30 @@ func TestRename(t *testing.T) {
 	}
 	f.checkOutside(t)
 }
+
+func TestReadFileModeAndSyncDir(t *testing.T) {
+	f := newFixture(t)
+	f.mkdir(t, "d")
+	if err := os.WriteFile(filepath.Join(f.home, "d/f"), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	data, mode, err := f.h.ReadFileMode("d/f", 10)
+	if err != nil || string(data) != "x" || mode != 0o640 {
+		t.Fatalf("ReadFileMode = %q, %v, %v", data, mode, err)
+	}
+	f.link(t, f.victim, "d/l")
+	if _, _, err := f.h.ReadFileMode("d/l", 10); err == nil {
+		t.Fatal("ReadFileMode followed a link leaf")
+	}
+	if err := f.h.SyncDir("."); err != nil {
+		t.Fatalf("SyncDir(.) = %v", err)
+	}
+	if err := f.h.SyncDir("d"); err != nil {
+		t.Fatalf("SyncDir(d) = %v", err)
+	}
+	f.link(t, f.outside, "ld")
+	if err := f.h.SyncDir("ld"); !isLinkRefusal(err) {
+		t.Fatalf("SyncDir(ld) = %v, want a link refusal", err)
+	}
+	f.checkOutside(t)
+}

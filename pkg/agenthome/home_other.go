@@ -155,6 +155,29 @@ func (h *Home) ReadFile(rel string, max int64) ([]byte, error) {
 	return data, nil
 }
 
+// ReadFileMode is ReadFile that also returns the file's permission bits.
+func (h *Home) ReadFileMode(rel string, max int64) ([]byte, os.FileMode, error) {
+	data, err := h.ReadFile(rel, max)
+	if err != nil {
+		return nil, 0, err
+	}
+	fi, err := h.root.Lstat(path.Clean(filepath.ToSlash(rel)))
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, fi.Mode().Perm(), nil
+}
+
+// SyncDir is a no-op on this platform (a directory cannot be fsynced on
+// Windows); it still refuses a linked directory component.
+func (h *Home) SyncDir(rel string) error {
+	parts, err := splitRel(rel)
+	if err != nil {
+		return err
+	}
+	return h.checkDirs(parts, false, 0)
+}
+
 func (h *Home) parentPresent(parent []string) (bool, error) {
 	if err := h.checkDirs(parent, false, 0); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
