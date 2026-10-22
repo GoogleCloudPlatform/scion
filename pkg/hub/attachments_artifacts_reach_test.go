@@ -37,6 +37,12 @@ import (
 // of it; nor may any other package of the module reference the opener. A
 // new caller fails this test and needs a security review.
 func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
 	callers := callersInPackage(t, ".")
 	want := map[string][]string{
 		"OpenBoundAttachment":     {"stageArtifactAttachment"},
@@ -144,10 +150,11 @@ func moduleSymbolReferences(t *testing.T, root, name string) []string {
 	return out
 }
 
-// nonTestGoFiles parses the package's non-test Go files in dir.
+// nonTestGoFiles parses the package's non-test Go files in dir and in each
+// existing guardScanSubdirs directory under it.
 func nonTestGoFiles(t *testing.T, dir string) (*token.FileSet, []*ast.File) {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
+	entries, err := readGuardScanDirs(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

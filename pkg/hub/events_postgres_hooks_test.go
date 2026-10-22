@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"strings"
 	"testing"
 )
@@ -36,7 +35,13 @@ var postgresEventPublisherTestHooks = map[string]bool{
 // package hub assigns a PostgresEventPublisher test hook, as an assignment
 // or as a composite-literal key, so every hook is nil outside tests.
 func TestPostgresEventPublisher_TestHooksSetOnlyInTests(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards PostgresEventPublisher test hook assignments.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards PostgresEventPublisher test hook assignments.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards PostgresEventPublisher test hook assignments.
+	entries, err := readGuardScanDirs(".")
 	if err != nil {
 		t.Fatal(err)
 	}
