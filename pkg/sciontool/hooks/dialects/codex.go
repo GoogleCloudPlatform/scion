@@ -59,6 +59,7 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 	if val, ok := data["success"]; ok {
 		if b, ok := val.(bool); ok {
 			event.Data.Success = b
+			event.Data.Failed = !b
 		}
 	}
 	if val, ok := data["error"]; ok {
