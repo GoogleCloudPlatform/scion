@@ -1444,3 +1444,31 @@ exit 9
 		}
 	}
 }
+
+// The runner-output FIFOs are set up before the claim: a failure there exits 2 with
+// the single-use claim token unspent (no claim request at all).
+func TestEntrypointFIFOSetupFailsBeforeClaim(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	h.env["CR_FIFO_TMPDIR"] = filepath.Join(h.home, "no-such-dir")
+	expectFailure(t, h, h.run(), 2, "cannot create a private temp directory")
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("%d claim requests, want none: the token must stay unspent", n)
+	}
+}
+
+// A failed claim (exit 3) removes the FIFO directory it created.
+func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusGone))
+	h := newHarness(t, cs.URL)
+	fifoRoot := filepath.Join(h.home, "fifos")
+	if err := os.Mkdir(fifoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.env["CR_FIFO_TMPDIR"] = fifoRoot
+	expectFailure(t, h, h.run(), 3, "410")
+	if left, _ := filepath.Glob(filepath.Join(fifoRoot, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the failed claim: %v", left)
+	}
+}

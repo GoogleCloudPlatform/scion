@@ -79,6 +79,7 @@ die() {
   local code=$1
   shift
   log "FATAL: $*"
+  [[ -n ${fifo_dir:-} ]] && rm -rf -- "$fifo_dir"
   exit "$code"
 }
 
@@ -306,6 +307,15 @@ if ((warmup)); then
   exit 0
 fi
 
+# The runner-output FIFOs (section 5) are created before the claim, so a failure here
+# still exits 2 with the single-use token unspent.
+fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
+  die "$EXIT_CONFIG" "cannot create a private temp directory"
+out_fifo="$fifo_dir/runner-output"
+done_fifo="$fifo_dir/watcher-done"
+listener_code_file="$fifo_dir/listener-exit-code"
+mkfifo -m 600 -- "$out_fifo" "$done_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
+
 # --- 4. Claim exchange (claim contract v2) -----------------------------------
 
 claim_url="$claim_base/internal/claim"
@@ -460,12 +470,6 @@ unset RUNNER_CLAIM_TOKEN
 #     silently stop working.
 # The JIT config is in run.sh's argv (the runner requires it); it is single use and
 # never printed.
-fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
-  die "$EXIT_CONFIG" "cannot create a private temp directory"
-out_fifo="$fifo_dir/runner-output"
-done_fifo="$fifo_dir/watcher-done"
-listener_code_file="$fifo_dir/listener-exit-code"
-mkfifo -m 600 -- "$out_fifo" "$done_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
 # Opened read-write, so neither side ever blocks on open.
 exec {done_fd}<>"$done_fifo"
 
