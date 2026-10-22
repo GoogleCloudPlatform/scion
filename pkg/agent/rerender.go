@@ -570,8 +570,9 @@ func fingerprintFiles(files map[string][]byte) string {
 	sort.Strings(names)
 	h := sha256.New()
 	for _, n := range names {
-		fmt.Fprintf(h, "%d:%s\n%d:", len(n), n, len(files[n]))
-		h.Write(files[n])
+		// Writes to a hash.Hash never return an error.
+		_, _ = fmt.Fprintf(h, "%d:%s\n%d:", len(n), n, len(files[n]))
+		_, _ = h.Write(files[n])
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
