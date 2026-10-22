@@ -67,8 +67,11 @@ type UsageAnalytics struct {
 
 	// openOnce/open defer opening the outbox to the first Record (hook
 	// processes: only a model-end event pays for the open and flock).
+	// failDir is the outbox directory, used to persist append_failed
+	// lock-free when the open itself fails.
 	openOnce sync.Once
 	open     func() (*AnalyticsOutbox, error)
+	failDir  string
 
 	droppedNoIdentity, invalid atomic.Int64
 }
@@ -83,10 +86,43 @@ func NewUsageAnalytics(outbox *AnalyticsOutbox, usageSource string) *UsageAnalyt
 	return &UsageAnalytics{outbox: outbox, usageSource: usageSource, now: time.Now}
 }
 
-// NewLazyUsageAnalytics returns a producer that opens its outbox (via open)
-// only on the first Record. If open fails, every Record returns the error.
-func NewLazyUsageAnalytics(open func() (*AnalyticsOutbox, error), usageSource string) *UsageAnalytics {
-	return &UsageAnalytics{open: open, usageSource: usageSource, now: time.Now}
+// NewLazyUsageAnalytics returns a producer that opens the outbox at dir
+// (owned by owner, see OpenAnalyticsOutboxOwned) only on the first Record.
+// If the open fails (for example a lock timeout while another process
+// holds the outbox), every Record still leaves persisted, lock-free
+// append_failed evidence in dir when dir exists, and returns the error.
+func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *UsageAnalytics {
+	return &UsageAnalytics{
+		open:        func() (*AnalyticsOutbox, error) { return OpenAnalyticsOutboxOwned(dir, owner) },
+		failDir:     dir,
+		usageSource: usageSource,
+		now:         time.Now,
+	}
+}
+
+// newFailedUsageAnalytics is a producer whose outbox could not be opened
+// (pipeline start): it records nothing but leaves the same evidence per
+// accepted increment as a failed lazy open.
+func newFailedUsageAnalytics(dir string, openErr error, usageSource string) *UsageAnalytics {
+	return &UsageAnalytics{
+		open:        func() (*AnalyticsOutbox, error) { return nil, openErr },
+		failDir:     dir,
+		usageSource: usageSource,
+		now:         time.Now,
+	}
+}
+
+// recordOpenFailure persists one append_failed byte in failDir (lock-free;
+// the lock may be what failed). Without an existing directory nothing can
+// be persisted and only the per-process invalid counter remains.
+func (a *UsageAnalytics) recordOpenFailure() {
+	if a.failDir == "" {
+		return
+	}
+	if info, err := os.Stat(a.failDir); err != nil || !info.IsDir() {
+		return
+	}
+	newOutboxHandle(a.failDir, nil).bumpAppendFailed()
 }
 
 func (a *UsageAnalytics) ensureOpen() error {
@@ -134,6 +170,7 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 	}
 	if err := a.ensureOpen(); err != nil {
 		a.invalid.Add(1)
+		a.recordOpenFailure()
 		return 0, err
 	}
 	outcome, err := a.outbox.AppendUsage(ev)

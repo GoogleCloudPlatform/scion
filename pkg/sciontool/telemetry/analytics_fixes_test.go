@@ -77,9 +77,7 @@ func TestAnalyticsRootInitAndAgentHookShareOutbox(t *testing.T) {
 	// Hook producer (agent side): resolves from its own HOME = agent home.
 	t.Setenv("HOME", agentHome)
 	hookHome, _ := os.UserHomeDir()
-	hookSide := NewLazyUsageAnalytics(func() (*AnalyticsOutbox, error) {
-		return OpenAnalyticsOutbox(AnalyticsOutboxDirFor(hookHome))
-	}, telemetrycontract.UsageSourceHooks)
+	hookSide := NewLazyUsageAnalytics(AnalyticsOutboxDirFor(hookHome), nil, telemetrycontract.UsageSourceHooks)
 	if _, err := hookSide.Record(UsageObservation{SourceKind: "hook.antigravity.model_end", Status: "success", Calls: 1,
 		Identity: telemetrycontract.SourceIdentityComposite, SourceEventID: CompositeSourceEventID("x"), TokenStatus: "not_reported"}); err != nil {
 		t.Fatal(err)
@@ -243,8 +241,10 @@ func TestOutboxAppendFailuresLeaveEvidence(t *testing.T) {
 func TestLazyUsageAnalyticsOpensOnFirstRecord(t *testing.T) {
 	setAnalyticsEnv(t, "opencode")
 	dir := filepath.Join(t.TempDir(), "home", ".scion", AnalyticsOutboxDirName)
+	a := NewLazyUsageAnalytics(dir, nil, telemetrycontract.UsageSourceHooks)
 	opened := 0
-	a := NewLazyUsageAnalytics(func() (*AnalyticsOutbox, error) { opened++; return OpenAnalyticsOutbox(dir) }, telemetrycontract.UsageSourceHooks)
+	inner := a.open
+	a.open = func() (*AnalyticsOutbox, error) { opened++; return inner() }
 	if _, err := os.Stat(dir); !os.IsNotExist(err) || opened != 0 {
 		t.Fatal("lazy producer touched the outbox before Record")
 	}

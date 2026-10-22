@@ -314,9 +314,13 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		home, _ := os.UserHomeDir()
 		dir = AnalyticsOutboxDirFor(home)
 	}
-	outbox, err := OpenAnalyticsOutboxOwned(dir, a.owner)
+	outbox, err := openAnalyticsOutboxTolerant(dir, a.owner)
 	if err != nil {
+		// No outbox: nothing can be delivered, but every accepted
+		// increment still leaves evidence (append_failed in dir when it
+		// exists, else the per-process invalid counter).
 		a.disabledReason = "outbox_unavailable"
+		a.native = newFailedUsageAnalytics(dir, err, telemetrycontract.UsageSourceNative)
 		log.Error("Usage analytics disabled: %v", err)
 		return
 	}

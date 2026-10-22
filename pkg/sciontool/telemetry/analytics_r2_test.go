@@ -473,9 +473,7 @@ func TestOutboxLockTimeoutHandoffReleases(t *testing.T) {
 // instead of discarding (a reappearing line would otherwise be unindexed).
 func TestOutboxDiscardRequiresDurableAbsence(t *testing.T) {
 	o := testOutbox(t)
-	calls := 0
-	o.fsyncFile = func(f *os.File) error {
-		calls++
+	o.fsyncFile = func(*os.File) error {
 		return errInjectedSync // append sync, truncate sync, recovery sync all fail
 	}
 	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
@@ -600,4 +598,113 @@ func TestOutboxLedgerSnapshotTracksWritePaths(t *testing.T) {
 	if _, err := fresh.LedgerSnapshot(); err == nil {
 		t.Error("malformed seq must be an error")
 	}
+}
+
+// WP2 r5 R1: a hook's lazy open that times out on the lock (another
+// process holds the outbox) still persists append_failed, lock-free.
+func TestLazyOpenLockTimeoutPersistsAppendFailed(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	o := testOutbox(t) // initialized outbox, as the pipeline leaves it
+	holder, err := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	hook := NewLazyUsageAnalytics(o.Dir(), nil, telemetrycontract.UsageSourceHooks)
+	_, err = hook.Record(UsageObservation{SourceKind: "hook.antigravity.model_end", Status: "success", Calls: 1, TokenStatus: "not_reported"})
+	if err == nil {
+		t.Fatal("record under a held lock succeeded")
+	}
+	_ = unix.Flock(int(holder.Fd()), unix.LOCK_UN)
+	_ = holder.Close()
+	fresh, err := OpenAnalyticsOutbox(o.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := fresh.LedgerSnapshot()
+	if err != nil || d.AppendFailedTotal != 1 || hook.Invalid() != 1 {
+		t.Errorf("append_failed = %d (err %v), invalid = %d; want 1 and 1", d.AppendFailedTotal, err, hook.Invalid())
+	}
+}
+
+// WP2 r5 R1 (pipeline side): a lock timeout at pipeline start does not
+// disable analytics when the outbox is already initialized.
+func TestPipelineOpenToleratesLockTimeout(t *testing.T) {
+	o := testOutbox(t)
+	holder, _ := os.OpenFile(filepath.Join(o.Dir(), "lock"), os.O_RDWR, 0)
+	_ = unix.Flock(int(holder.Fd()), unix.LOCK_EX)
+	tolerant, err := openAnalyticsOutboxTolerant(o.Dir(), nil)
+	_ = unix.Flock(int(holder.Fd()), unix.LOCK_UN)
+	_ = holder.Close()
+	if err != nil || tolerant == nil {
+		t.Fatalf("tolerant open under a held lock = %v", err)
+	}
+	mustAppend(t, tolerant, requestIDDraft(5), AppendWritten)
+}
+
+// Audit: a pipeline whose outbox cannot be opened still leaves evidence
+// for every accepted increment (here no directory can exist, so the
+// per-process invalid counter; with a directory, persisted append_failed).
+func TestAnalyticsStartFailureKeepsEvidence(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	blocker := filepath.Join(t.TempDir(), "file")
+	_ = os.WriteFile(blocker, nil, 0o600)
+	a := analyticsState{outboxDir: filepath.Join(blocker, "home", ".scion", AnalyticsOutboxDirName)}
+	a.start(context.Background(), &GCPExporter{})
+	if a.disabledReason != "outbox_unavailable" || a.native == nil || a.drainer != nil {
+		t.Fatalf("state = %+v", a)
+	}
+	d := bareUsageDeriver(claudeUsageRule{})
+	d.analytics = a.native
+	feed(d, claudeLogs(claudeRecord("", "1", 1_000, fullClaudeTokens)))
+	if a.native.Invalid() != 1 || d.Diagnostics().Derived != 1 {
+		t.Errorf("invalid = %d derived = %d; the counters keep working and the loss is counted", a.native.Invalid(), d.Diagnostics().Derived)
+	}
+}
+
+// Audit: a recovery I/O error at the start of an append consumes a seq,
+// like a hold, so the refused observation is a gap.
+func TestOutboxRecoveryErrorConsumesSeq(t *testing.T) {
+	o := testOutbox(t)
+	if err := os.Mkdir(filepath.Join(o.Dir(), "intent"), 0o700); err != nil { // unreadable intent
+		t.Fatal(err)
+	}
+	if _, err := o.AppendUsage(requestIDDraft(5)); err == nil {
+		t.Fatal("append with an unreadable intent succeeded")
+	}
+	_ = os.Remove(filepath.Join(o.Dir(), "intent"))
+	next := mustAppend(t, o, requestIDDraft(5), AppendWritten)
+	if next.ProducerSeq != 2 || o.Stats().PersistedAppendFailed != 1 {
+		t.Errorf("seq %d append_failed %d; want 2 (gap) and 1", next.ProducerSeq, o.Stats().PersistedAppendFailed)
+	}
+}
+
+// WP2 r5 O1: the delivered-at-timeout branch. The goroutine hands the lock
+// to the caller, and the caller's timer fires before the send; the caller
+// must take ownership and release. Hooks force this exact interleaving.
+func TestOutboxLockTimeoutDeliveredBranchReleases(t *testing.T) {
+	o := testOutbox(t)
+	o.lockWait = time.Millisecond
+	reached := make(chan struct{})
+	timedOut := make(chan struct{})
+	o.lockDeliveredHook = func() {
+		close(reached) // state == delivered
+		<-timedOut     // hold the send until the caller has timed out
+	}
+	o.lockTimeoutHook = func() {
+		<-reached // the timer fires only after the handoff
+		close(timedOut)
+	}
+	if _, err := o.lock(); !errors.Is(err, ErrAnalyticsOutboxLocked) {
+		t.Fatalf("lock() = %v; want a timeout through the delivered branch", err)
+	}
+	o.lockDeliveredHook, o.lockTimeoutHook = nil, nil
+	o.lockWait = 100 * time.Millisecond
+	unlock, err := o.lock()
+	if err != nil {
+		t.Fatalf("lock leaked after the delivered-branch timeout: %v", err)
+	}
+	unlock()
 }
