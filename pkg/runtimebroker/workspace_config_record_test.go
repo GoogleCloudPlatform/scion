@@ -316,10 +316,12 @@ func TestRecordHubProjectFilesChecked_ChangeDuringWriteRefused(t *testing.T) {
 func TestBrokerWorkspaceConfigChange(t *testing.T) {
 	ws := hubWorkspace(t)
 	entryMarker(t, ws)
-	own, err := observeWorkspaceConfigState(ws)
+	own, ownData, err := observeWorkspaceConfigStateData(ws)
 	if err != nil {
 		t.Fatal(err)
 	}
+	shadow, shadowData := own, []byte("project-id: "+recordHubID+"\nproject-slug: proj\ntype: shadow\n")
+	shadow.Detail = "shadow"
 	absent := workspaceConfigState{Kind: workspaceConfigAbsent}
 	dirNoID := workspaceConfigState{Kind: workspaceConfigDirectory}
 	dirHub := workspaceConfigState{Kind: workspaceConfigDirectory, Detail: recordHubID}
@@ -342,9 +344,18 @@ func TestBrokerWorkspaceConfigChange(t *testing.T) {
 		{"absent where marker", own, absent, "proj", false},
 		{"symlink", dirNoID, workspaceConfigState{Kind: workspaceConfigSymlink, Detail: "x"}, "proj", false},
 	} {
-		if got := brokerWorkspaceConfigChange(ws, tt.before, tt.after, recordHubID, tt.slug); got != tt.want {
+		data := ownData
+		if got := brokerWorkspaceConfigChange(tt.before, tt.after, data, recordHubID, tt.slug); got != tt.want {
 			t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
 		}
+	}
+	// A shadow marker, or marker bytes that do not parse, are not the
+	// broker's own write.
+	if brokerWorkspaceConfigChange(absent, shadow, shadowData, recordHubID, "proj") {
+		t.Error("a shadow marker accepted as the broker's write")
+	}
+	if brokerWorkspaceConfigChange(absent, own, []byte("{"), recordHubID, "proj") {
+		t.Error("unparseable marker bytes accepted")
 	}
 }
 

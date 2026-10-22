@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 // Workspace configuration records.
@@ -121,40 +122,49 @@ func (e *workspaceConfigChangedError) Error() string {
 
 // observeWorkspaceConfigState returns the state of <projectPath>/.scion.
 func observeWorkspaceConfigState(projectPath string) (workspaceConfigState, error) {
+	state, _, err := observeWorkspaceConfigStateData(projectPath)
+	return state, err
+}
+
+// observeWorkspaceConfigStateData is observeWorkspaceConfigState, also
+// returning, for a marker, the bytes its digest was computed from, so that
+// a caller validates exactly what it records.
+func observeWorkspaceConfigStateData(projectPath string) (workspaceConfigState, []byte, error) {
 	p := filepath.Join(projectPath, config.DotScion)
 	info, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return workspaceConfigState{Kind: workspaceConfigAbsent}, nil
+		return workspaceConfigState{Kind: workspaceConfigAbsent}, nil, nil
 	}
 	if err != nil {
-		return workspaceConfigState{}, err
+		return workspaceConfigState{}, nil, err
 	}
 	switch mode := info.Mode(); {
 	case mode&fs.ModeSymlink != 0:
 		target, err := os.Readlink(p)
 		if err != nil {
-			return workspaceConfigState{}, err
+			return workspaceConfigState{}, nil, err
 		}
-		return workspaceConfigState{Kind: workspaceConfigSymlink, Detail: target}, nil
+		return workspaceConfigState{Kind: workspaceConfigSymlink, Detail: target}, nil, nil
 	case mode.IsDir():
 		id, err := config.ReadProjectID(p)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return workspaceConfigState{}, err
+			return workspaceConfigState{}, nil, err
 		}
-		return workspaceConfigState{Kind: workspaceConfigDirectory, Detail: id}, nil
+		return workspaceConfigState{Kind: workspaceConfigDirectory, Detail: id}, nil, nil
 	case mode.IsRegular():
 		f, err := os.Open(p)
 		if err != nil {
-			return workspaceConfigState{}, err
+			return workspaceConfigState{}, nil, err
 		}
 		defer f.Close()
-		h := sha256.New()
-		if _, err := io.Copy(h, io.LimitReader(f, workspaceConfigMarkerMax)); err != nil {
-			return workspaceConfigState{}, err
+		data, err := io.ReadAll(io.LimitReader(f, workspaceConfigMarkerMax))
+		if err != nil {
+			return workspaceConfigState{}, nil, err
 		}
-		return workspaceConfigState{Kind: workspaceConfigMarker, Detail: hex.EncodeToString(h.Sum(nil))}, nil
+		sum := sha256.Sum256(data)
+		return workspaceConfigState{Kind: workspaceConfigMarker, Detail: hex.EncodeToString(sum[:])}, data, nil
 	default:
-		return workspaceConfigState{Kind: workspaceConfigOther, Detail: mode.Type().String()}, nil
+		return workspaceConfigState{Kind: workspaceConfigOther, Detail: mode.Type().String()}, nil, nil
 	}
 }
 
@@ -215,15 +225,17 @@ func (s *Server) withCheckedWorkspaceConfig(agentID, projectPath, projectID, slu
 	if !applies {
 		return nil
 	}
-	canonical, _, _, _ := workspaceConfigRecordFor(projectPath, projectID)
-	after, err := observeWorkspaceConfigState(canonical)
+	canonical, recordPath, _, _ := workspaceConfigRecordFor(projectPath, projectID)
+	after, markerData, err := observeWorkspaceConfigStateData(canonical)
 	if err != nil {
 		return &workspaceConfigChangedError{Path: canonical, Reason: "the entry cannot be read"}
 	}
-	if !brokerWorkspaceConfigChange(canonical, before, after, projectID, slug) {
+	if !brokerWorkspaceConfigChange(before, after, markerData, projectID, slug) {
 		return &workspaceConfigChangedError{Path: canonical, Recorded: before, Found: after}
 	}
-	if err := recordWorkspaceConfigState(projectPath, projectID); err != nil {
+	// The state just validated is what is recorded; the entry is not read
+	// again.
+	if err := writeWorkspaceConfigRecord(canonical, recordPath, projectID, after); err != nil {
 		// Without a record the next start would run unchecked.
 		return &workspaceConfigChangedError{Path: canonical, Reason: "the Runtime Broker could not record it: " + err.Error()}
 	}
@@ -235,19 +247,23 @@ func (s *Server) withCheckedWorkspaceConfig(agentID, projectPath, projectID, slu
 // change made by someone other than the broker must be caught.
 var afterWorkspaceConfigCheckHook func()
 
-// brokerWorkspaceConfigChange reports whether the .scion entry of the
-// workspace at canonical going from before to after is a change
-// recordHubProjectFiles makes: none; a marker for this Hub project and slug
-// written where there was none or where a stale one was; or this Hub
-// project ID written into a .scion directory that was already there.
-func brokerWorkspaceConfigChange(canonical string, before, after workspaceConfigState, hubProjectID, slug string) bool {
+// brokerWorkspaceConfigChange reports whether the .scion entry going from
+// before to after is a change the broker makes: none; a marker written
+// where there was none or where a stale one was, whose content (markerData,
+// the bytes after's digest covers) names this Hub project and slug and is
+// not a shadow marker; or this Hub project ID written into a .scion
+// directory that was already there.
+func brokerWorkspaceConfigChange(before, after workspaceConfigState, markerData []byte, hubProjectID, slug string) bool {
 	if after == before {
 		return true
 	}
 	switch {
 	case after.Kind == workspaceConfigMarker && (before.Kind == workspaceConfigAbsent || before.Kind == workspaceConfigMarker):
-		m, err := config.ReadProjectMarker(filepath.Join(canonical, config.DotScion))
-		return err == nil && m.ProjectID == hubProjectID && m.ProjectSlug == slug
+		var m config.ProjectMarker
+		if err := yaml.Unmarshal(markerData, &m); err != nil {
+			return false
+		}
+		return m.ProjectID == hubProjectID && m.ProjectSlug == slug && m.Type == "" && config.ValidateProjectID(m.ProjectID) == nil
 	case after.Kind == workspaceConfigDirectory && before.Kind == workspaceConfigDirectory:
 		return after.Detail == hubProjectID
 	default:
@@ -325,6 +341,12 @@ func recordWorkspaceConfigState(projectPath, hubProjectID string) error {
 	if err != nil {
 		return err
 	}
+	return writeWorkspaceConfigRecord(canonical, recordPath, hubProjectID, state)
+}
+
+// writeWorkspaceConfigRecord writes the record of state for the workspace
+// canonical and hubProjectID to recordPath (private, atomic).
+func writeWorkspaceConfigRecord(canonical, recordPath, hubProjectID string, state workspaceConfigState) error {
 	data, err := json.Marshal(workspaceConfigRecord{Version: workspaceConfigRecordVer, Path: canonical, HubProjectID: hubProjectID, State: state})
 	if err != nil {
 		return err
