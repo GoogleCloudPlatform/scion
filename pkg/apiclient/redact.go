@@ -389,14 +389,18 @@ func redactURLError(err error) error {
 
 // urlDetailsHidden replaces the error of a *url.Error whose URL
 // redactURLError masks whole. Its message is fixed, so no part of the URL
-// that the original error quotes is shown; errors.Is and errors.As, and
-// the Timeout and Temporary methods url.Error asks its Err for, still
-// reach the original error.
+// that the original error quotes is shown. It does not unwrap to the
+// original (code that walks to the innermost error and prints it would
+// show that text again), and so errors.As does not reach it; errors.Is,
+// and the Timeout and Temporary methods url.Error asks its Err for, are
+// answered from the original.
 type urlDetailsHidden struct{ err error }
 
 func (e *urlDetailsHidden) Error() string { return "details not shown for a masked URL" }
 
-func (e *urlDetailsHidden) Unwrap() error { return e.err }
+// Is reports whether the original error matches target (see errors.Is),
+// so checks such as errors.Is(err, context.DeadlineExceeded) still work.
+func (e *urlDetailsHidden) Is(target error) bool { return errors.Is(e.err, target) }
 
 // Timeout reports whether the original error is a timeout.
 func (e *urlDetailsHidden) Timeout() bool {

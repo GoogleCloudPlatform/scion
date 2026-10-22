@@ -365,9 +365,11 @@ func (fakeNetError) Temporary() bool { return true }
 
 // A *url.Error whose URL is masked whole shows a fixed message instead of
 // its error, but errors.Is, Timeout and Temporary still see the original
-// error.
+// error. Walking errors.Unwrap to the bottom never reaches an error whose
+// text shows the URL or the original message.
 func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
-	const raw = "https://tok_fake/Pw9q@hub.example.com/api"
+	const secret = "tok_fake/Pw9q"
+	const raw = "https://" + secret + "@hub.example.com/api"
 	for _, tc := range []struct {
 		name      string
 		inner     error
@@ -394,8 +396,23 @@ func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
 			t.Errorf("%s: Timeout() = %v, Temporary() = %v, want %v, %v", tc.name, ue.Timeout(), ue.Temporary(), tc.timeout, tc.temporary)
 		}
 		var ne fakeNetError
-		if tc.inner == (fakeNetError{}) && !errors.As(err, &ne) {
-			t.Errorf("%s: errors.As does not reach the original error", tc.name)
+		if errors.As(err, &ne) {
+			t.Errorf("%s: errors.As reaches the original error", tc.name)
+		}
+		depth := 0
+		for e := error(err); e != nil; e = errors.Unwrap(e) {
+			for i := 0; i+4 <= len(secret); i++ {
+				if strings.Contains(e.Error(), secret[i:i+4]) {
+					t.Errorf("%s: unwrapped error %d (%T) %q shows %q", tc.name, depth, e, e.Error(), secret[i:i+4])
+				}
+			}
+			if strings.Contains(e.Error(), tc.inner.Error()) {
+				t.Errorf("%s: unwrapped error %d (%T) %q shows the original message", tc.name, depth, e, e.Error())
+			}
+			depth++
+		}
+		if depth != 2 {
+			t.Errorf("%s: unwrap chain has %d errors, want 2 (the url.Error and its fixed error)", tc.name, depth)
 		}
 	}
 }
