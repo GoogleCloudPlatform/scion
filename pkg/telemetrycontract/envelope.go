@@ -353,8 +353,9 @@ func encodeNoHTMLEscape(v any) ([]byte, error) {
 //     invalid bytes to U+FFFD);
 //  4. Labels validate themselves as they are encoded (Labels.MarshalJSON);
 //  5. the produced bytes: every JSON number is an integer within
-//     ±MaxSafeInteger, and the envelope rebuilt from the object's exact
-//     top-level keys equals ev.AnalyticsEnvelope().
+//     ±MaxSafeInteger; no top-level key is a case or fold variant of an
+//     envelope field and no envelope field is null; and the envelope
+//     decoded from the exact top-level keys equals ev.AnalyticsEnvelope().
 func Marshal(ev Event) ([]byte, error) {
 	if err := validateEvent(ev); err != nil {
 		return nil, err
@@ -378,15 +379,15 @@ func Marshal(ev Event) ([]byte, error) {
 // Unmarshal decodes data into ev and validates the input bytes (integer
 // numbers, envelope keys) and the decoded event. Unknown fields are
 // ignored, so a consumer built against an older schema still decodes an
-// additively extended event. Like encoding/json it matches keys
-// case-insensitively (payload keys only: envelope keys must be exact, and a
-// case or fold variant, or a null envelope value, is an error), keeps the
-// last duplicate key, and decodes JSON null
-// on a non-pointer field as its zero value, so it is a decoder for
-// producer output, not a strict validator of third-party input. Likewise an
-// absent or null non-pointer list decodes as nil and is accepted here,
-// although Marshal would reject re-emitting it (a nil list is written as
-// null); a consumer that re-emits must set such lists to empty first.
+// additively extended event. Like encoding/json it matches payload keys
+// case-insensitively, keeps the last duplicate key, and decodes JSON null
+// on a non-pointer field as its zero value; envelope keys must be exact,
+// and a case or fold variant of one, or a null envelope value, is an error.
+// So it is a decoder for producer output, not a strict validator of
+// third-party input. Likewise an absent or null non-pointer list decodes
+// as nil and is accepted here, although Marshal would reject re-emitting
+// it (a nil list is written as null); a consumer that re-emits must set
+// such lists to empty first.
 func Unmarshal(data []byte, ev Event) error {
 	if ev == nil || isNilPointer(ev) {
 		return errors.New("telemetrycontract: nil event")
@@ -708,8 +709,9 @@ var envelopeWireNames = func() []string {
 const maxWireDepth = 128
 
 // checkWire validates encoded bytes: a JSON object whose numbers are all
-// integers within ±MaxSafeInteger, and whose envelope, rebuilt from the
-// exact top-level keys, equals want.
+// integers within ±MaxSafeInteger, with no top-level key that is a case or
+// fold variant of an envelope field, no null envelope field, and whose
+// envelope, decoded from the exact top-level keys, equals want.
 func checkWire(data []byte, want *Envelope) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()

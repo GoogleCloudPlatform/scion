@@ -1176,8 +1176,9 @@ const wireBase = `"schema_version":1,"event_type":"agent.usage","producer_namesp
 // checkWire binds the envelope only from exact keys. Case variants of an
 // envelope key (ASCII or Unicode simple folding, which encoding/json would
 // accept) are rejected even when their value matches; duplicate exact keys
-// resolve last-wins, exactly as before the single-decode change, and the
-// result must still equal the event's envelope.
+// resolve last-wins, except that a null envelope value is rejected (the
+// old per-field rebuild accepted a trailing null that matched an empty
+// field), and the result must still equal the event's envelope.
 func TestCheckWireExactKeysSingleDecode(t *testing.T) {
 	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
 	cases := []struct {
@@ -1236,6 +1237,11 @@ func TestCheckValuesLabelsTyped(t *testing.T) {
 	ok := &testEvent{Envelope: env, Labels: Labels{{"k", "v"}}}
 	if err := checkValues(reflect.ValueOf(ok), ""); err != nil {
 		t.Errorf("valid labels: %v", err)
+	}
+	// Every label is iterated: an invalid one after a valid one is found.
+	second := &testEvent{Envelope: env, Labels: Labels{{"a", "ok"}, {"b", "bad\xfe"}}}
+	if err := checkValues(reflect.ValueOf(second), ""); err == nil || !strings.Contains(err.Error(), "[1]") {
+		t.Errorf("invalid second label: err = %v, want it to name index [1]", err)
 	}
 }
 
