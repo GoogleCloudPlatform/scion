@@ -210,7 +210,7 @@ func verifyGrant(t *testing.T, tok []byte, pubs []grant.PublicKey, now time.Time
 // published and re-check key sets, and the same signer, whose grants
 // verify under the key set published before the rewrap.
 func TestConduitGrantRing_RewrapPreservesKeysActivationRetention(t *testing.T) {
-	_, st := testServer(t)
+	st := encStore(t)
 	ctx := context.Background()
 	clock := &conduitTestClock{now: rwT0}
 	kids := buildRotatedRing(t, st, clock)
@@ -277,7 +277,7 @@ func TestConduitGrantRing_RewrapPreservesKeysActivationRetention(t *testing.T) {
 
 			// Reading settled nothing new: the row is untouched.
 			after := grantRow(t, st)
-			assert.Equal(t, row.EncryptedValue, after.EncryptedValue)
+			assert.True(t, row.EncryptedValue == after.EncryptedValue, "reading rewrote the ring row")
 			assert.Equal(t, row.Version, after.Version)
 		})
 	}
@@ -317,8 +317,10 @@ func TestConduitGrantRing_Ed25519RotationAcrossReplicasOnV2(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, kids.pending, sa.KeyID, "the pending successor activated")
 
-	// Past the outgoing key's not_after: A rotates.
+	// Past the outgoing key's not_after. B warms its cache, then A rotates.
 	clock.Advance(2 * time.Minute) // +10m
+	_, err = kb.publicKeys(ctx)
+	require.NoError(t, err)
 	before := grantRow(t, st)
 	rot, err := ka.rotate(ctx, rwActivate, rwOverlap)
 	require.NoError(t, err)
@@ -326,9 +328,13 @@ func TestConduitGrantRing_Ed25519RotationAcrossReplicasOnV2(t *testing.T) {
 	assert.True(t, strings.HasPrefix(row.EncryptedValue, "enc:v2:k2:"), "the rotation is stored v2 under the active writer")
 	assert.Greater(t, row.Version, before.Version)
 
-	// B publishes the new key before it signs.
-	clock.Advance(conduitGrantKeyRefresh + time.Second) // +11m01s, before activation at +12m
+	// B's cached ring does not have the new key until it refreshes; then B
+	// publishes it before it signs.
 	pubsB, err := kb.publicKeys(ctx)
+	require.NoError(t, err)
+	assert.NotContains(t, publicKeyBytes(pubsB), rot.KeyID, "B's warm cache predates the rotation")
+	clock.Advance(conduitGrantKeyRefresh + time.Second) // +11m01s, before activation at +12m
+	pubsB, err = kb.publicKeys(ctx)
 	require.NoError(t, err)
 	assert.Contains(t, publicKeyBytes(pubsB), rot.KeyID, "B publishes the rotated-in key")
 	sb, err := kb.signer(ctx)
@@ -388,8 +394,8 @@ func TestConduitGrantRing_Ed25519RotationAcrossReplicasOnV2(t *testing.T) {
 	}
 
 	// A third replica on a newer writer key rotates: the ring is rewritten
-	// under k3. A replica holding only k2 cannot read it and refuses,
-	// without overwriting or recreating it.
+	// under k3. Nodes holding only k2 cannot read it and refuse, without
+	// overwriting or recreating it.
 	clock.Advance(rwActivate) // the last rotation's key is active, nothing pending
 	c := rwReplica(t, st, v2Cipher(t, "k3", "k2", "k3"), clock)
 	_, err = c.conduitGrantKeySet().rotate(ctx, rwActivate, rwOverlap)
@@ -397,23 +403,32 @@ func TestConduitGrantRing_Ed25519RotationAcrossReplicasOnV2(t *testing.T) {
 	k3Row := grantRow(t, st)
 	require.True(t, strings.HasPrefix(k3Row.EncryptedValue, "enc:v2:k3:"), "the newer writer stored the ring under k3")
 
-	// The k2-only node is grant keys over its cipher, not a Server: a
-	// Server's startup audit would (correctly) flag the unreadable row
-	// first; this checks the grant ring paths themselves.
+	// Two nodes without k3 must refuse:
+	//   - replica A, already running, whose cached ring (last read at +14m)
+	//     is past its refresh: it must not serve the stale cache;
+	//   - a cold node (grant keys over a k2-only cipher; a new Server's
+	//     startup audit would flag the unreadable row before these paths).
 	k2 := rwKeys(t, st, v2Cipher(t, "k2", "k2"), clock)
 	_, _, err = k2.store.Load(ctx)
 	assert.ErrorIs(t, err, errConduitGrantRingUnreadable)
 	assert.ErrorIs(t, err, secret.ErrUnknownKeyID)
-	_, err = k2.signer(ctx)
-	assert.ErrorIs(t, err, errConduitGrantRingUnreadable, "no signer from an unreadable ring")
-	_, err = k2.rotate(ctx, rwActivate, rwOverlap)
-	assert.Error(t, err, "no rotation over an unreadable ring")
-	err = k2.revoke(ctx, kids.active) // revocable on a readable ring (a retained key)
-	assert.Error(t, err, "no revocation over an unreadable ring")
-	_, err = k2.freshPublicKeys(ctx)
-	assert.Error(t, err, "nothing published from an unreadable ring")
+	for name, k := range map[string]*conduitGrantKeys{"running replica A": ka, "cold k2-only node": k2} {
+		_, err := k.signer(ctx)
+		assert.ErrorIs(t, err, errConduitGrantRingUnreadable, "%s: no signer from an unreadable ring (not a cached one)", name)
+		_, err = k.publicKeys(ctx)
+		assert.ErrorIs(t, err, errConduitGrantRingUnreadable, "%s: nothing published", name)
+		_, err = k.freshPublicKeys(ctx)
+		assert.Error(t, err, "%s: nothing freshly published", name)
+		_, err = k.recheckKeys(ctx)
+		assert.ErrorIs(t, err, errConduitGrantRingUnreadable, "%s: no re-check keys", name)
+		_, err = k.rotate(ctx, rwActivate, rwOverlap)
+		assert.Error(t, err, "%s: no rotation over an unreadable ring", name)
+		// kids.active is retained until +19m: revocable on a readable ring.
+		err = k.revoke(ctx, kids.active)
+		assert.Error(t, err, "%s: no revocation over an unreadable ring", name)
+	}
 	after := grantRow(t, st)
-	assert.Equal(t, k3Row.EncryptedValue, after.EncryptedValue, "the unreadable ring was overwritten")
+	assert.True(t, k3Row.EncryptedValue == after.EncryptedValue, "the unreadable ring was overwritten")
 	assert.Equal(t, k3Row.Version, after.Version)
 	ringK3, _, err := c.conduitGrantKeySet().store.Load(ctx)
 	require.NoError(t, err)
