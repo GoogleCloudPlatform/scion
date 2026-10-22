@@ -524,3 +524,34 @@ func TestSwapInheritedBudget(t *testing.T) {
 		})
 	}
 }
+
+// TestSwapTakerRecordAge: after a restart, the record made for the taker's own
+// runner (rebound to the displaced job) carries that runner's launch time, so a
+// later swap onto it logs the right budget.
+func TestSwapTakerRecordAge(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.addSameRepoRun(12)
+	h.queued(100, 10)
+	h.queued(101, 11) // cr-job-101, launched at t0 like cr-job-100
+	h.clock.Add(30 * time.Minute)
+	h = newHarness(t, harnessOpts{reuseFrom: h}) // restart: no records
+	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("first swap: %d %q", code, out)
+	}
+	// Job 102 now starts on cr-job-101 (rebound to job 100): that runner is 30 min old.
+	if code, out := h.webhook(inProgress(102, 12, testRepo, "cr-job-101")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("second swap: %d %q", code, out)
+	}
+	logs := h.logs.String()
+	var budgets []string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, `"event":"runner_swap"`) && strings.Contains(l, `"runner":"cr-job-101"`) {
+			budgets = append(budgets, l)
+		}
+	}
+	if len(budgets) != 1 || !strings.Contains(budgets[0], `"inherited_budget":"15m0s"`) {
+		t.Errorf("runner_swap for cr-job-101 = %q, want inherited_budget 15m0s (launched 30 min ago)", budgets)
+	}
+}

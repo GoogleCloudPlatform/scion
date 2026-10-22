@@ -83,7 +83,7 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 			taker := RunnerName(jobID)
 			switch tr := s.runners[taker]; {
 			case tr == nil:
-				s.runners[taker] = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, at: s.o.Now()}
+				s.runners[taker] = &runnerRecord{repo: serveRepo, serve: served, runID: rec.runID, at: s.launchedAt(ctx, v, taker)}
 			case !tr.reassigned:
 				tr.serve, tr.runID = served, rec.runID
 			}
