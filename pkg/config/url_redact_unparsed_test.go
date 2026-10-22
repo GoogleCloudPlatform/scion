@@ -74,3 +74,31 @@ func checkUnparsedURLCases(t *testing.T, fn string, redact func(string) string) 
 func TestRedactURL_Unparsed(t *testing.T) {
 	checkUnparsedURLCases(t, "RedactURL", RedactURL)
 }
+
+// In a text, a URL whose user info holds a '/', '?' or '#' shows only its
+// scheme and a mask, and the text around it is kept; a URL with an '@' in
+// its path is unchanged.
+func TestRedactURLsIn_UndelimitedUserInfo(t *testing.T) {
+	tests := []struct{ name, in, want, secret string }{
+		{"slash", `Get "https://alice:fake/Pw9q@hub.example.com/api": refused`, `Get "https://xxxxx": refused`, "fake/Pw9q"},
+		{"question mark", "dial https://alice:fake?Pw9q@hub.example.com/api: refused", "dial https://xxxxx: refused", "fake?Pw9q"},
+		{"hash", "hub at https://alice:fake#Pw9q@hub.example.com is down.", "hub at https://xxxxx is down.", "fake#Pw9q"},
+		{"user name with slash", "see https://tok_fake/Pw9q@hub.example.com/x, then", "see https://xxxxx, then", "tok_fake/Pw9q"},
+		{"two URLs", "https://alice:fake/Pw9q@one.example.com and https://two.example.com/u/@me", "https://xxxxx and https://two.example.com/u/@me", "fake/Pw9q"},
+		{"e-mail in a path", "see https://hub.example.com/users/a@b.example.com/profile now", "see https://hub.example.com/users/a@b.example.com/profile now", "-"},
+	}
+	for _, tc := range tests {
+		got := RedactURLsIn(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: RedactURLsIn(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+		if tc.secret == "-" {
+			continue
+		}
+		for i := 0; i+4 <= len(tc.secret); i++ {
+			if strings.Contains(got, tc.secret[i:i+4]) {
+				t.Errorf("%s: RedactURLsIn(%q) = %q, shows %q", tc.name, tc.in, got, tc.secret[i:i+4])
+			}
+		}
+	}
+}

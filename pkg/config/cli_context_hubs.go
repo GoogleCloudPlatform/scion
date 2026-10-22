@@ -114,7 +114,9 @@ func RedactURL(raw string) string {
 
 // RedactURLsIn returns text (for example an error message) with every
 // http(s) URL in it redacted as RedactURL does: its user info, and the
-// credential parameters of its query and fragment.
+// credential parameters of its query and fragment. A URL whose user info
+// cannot be delimited (see undelimitedUserInfo) shows only its scheme and
+// a mask.
 func RedactURLsIn(text string) string {
 	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
 		authority := textURLRe.FindString(m)
@@ -122,6 +124,11 @@ func RedactURLsIn(text string) string {
 		// Punctuation that ends a sentence is not part of the URL.
 		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
 		tail := rest[len(trimmed):]
+		// The whole URL, not its authority cut at the first '/', '?' or
+		// '#': user info containing one of those ends the authority early.
+		if full := authority + trimmed; undelimitedUserInfo(full, userInfoRe) {
+			return maskWholeURL(full) + tail
+		}
 		if strings.Contains(authority, "@") {
 			authority = RedactURL(authority)
 		}
