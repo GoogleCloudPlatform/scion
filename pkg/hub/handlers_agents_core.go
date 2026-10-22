@@ -5300,6 +5300,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, targetAgent) {
+			return
+		}
 
 		// Raw keystroke delivery through /message has been removed. A body
 		// carrying the retired raw field (top level or structured_message)

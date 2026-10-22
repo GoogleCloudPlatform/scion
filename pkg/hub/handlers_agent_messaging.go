@@ -1884,6 +1884,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	// An agent delegated credential sends a direct text message to the
+	// route's own agent only (delegatedMessageRequestRefusal); every other
+	// field is refused before anything is looked up or written. The hub
+	// sets the timestamp.
+	if isDelegatedAgentIdentity(GetIdentityFromContext(ctx)) {
+		if field := delegatedMessageRequestRefusal(&req); field != "" {
+			ValidationError(w, field+" is not available to a delegated credential", map[string]interface{}{"field": field})
+			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
+		}
+	}
+
 	// The retired end-of-turn assistant-reply type is dropped here too, as
 	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
 	// success, but never persisted, dispatched or published.
@@ -1924,6 +1938,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
 			structuredMsg.Sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			structuredMsg.Sender, structuredMsg.SenderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1946,6 +1962,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
 			sender = userSenderAddress(user)
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			sender, senderID = s.delegatedSenderAddress(ctx, delegated)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -4425,6 +4443,12 @@ func authenticatedSender(ctx context.Context) (kind, id string) {
 	}
 	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
 		return "agent", agent.ID()
+	}
+	// An agent delegated credential sends as its actor agent
+	// (.design/agent-delegation.md §14.5). Its request shape is limited to
+	// a direct message to the route's agent (delegatedMessageRequestRefusal).
+	if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+		return "agent", delegated.ID()
 	}
 	return "", ""
 }

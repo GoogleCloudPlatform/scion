@@ -3083,6 +3083,9 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, agent) {
+			return
+		}
 		// Raw keystroke delivery through /message has been removed; see
 		// the matching tombstone on the top-level route.
 		if s.rejectRetiredRawMessageBody(w, r, rawIngressProjectAgentMessage,

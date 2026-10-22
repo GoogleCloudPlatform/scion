@@ -69,7 +69,15 @@ var streamRecheckExemptCredentials = map[authzop.CredentialKind]string{
 // a token on an SSE or WebSocket entry point but is not in modes, and,
 // for a token-re-checked operation, an admitted credential kind that is
 // neither the token kind nor exempt.
-func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.OperationID]streamRecheckMode, exempt map[authzop.CredentialKind]string) []string {
+// streamRecheckExemptPerOperation names credential kinds exempt from the
+// token re-check on one operation only.
+var streamRecheckExemptPerOperation = map[authzop.OperationID]map[authzop.CredentialKind]string{
+	"agent.attach": {
+		authzop.CredentialDelegatedAgent: "an agent delegated credential is authorized at the PTY handshake and at reconnect only; an established session outlives the credential's expiry and revocation by design (.design/agent-delegation.md §16.6)",
+	},
+}
+
+func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.OperationID]streamRecheckMode, exempt map[authzop.CredentialKind]string, perOp map[authzop.OperationID]map[authzop.CredentialKind]string) []string {
 	var problems []string
 	for _, spec := range specs {
 		streaming := false
@@ -94,7 +102,7 @@ func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.Op
 			if ck == authzop.CredentialScopedUAT {
 				continue
 			}
-			if exempt[ck] == "" {
+			if exempt[ck] == "" && perOp[spec.ID][ck] == "" {
 				problems = append(problems, fmt.Sprintf("%s: admits credential %s, which the token re-check does not cover and no exemption names", spec.ID, ck))
 			}
 		}
@@ -111,7 +119,7 @@ func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.Op
 // select exactly the user access token kind, and the rule to reject an
 // unclassified stream operation and an uncovered credential kind.
 func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
-	assert.Empty(t, streamRecheckViolations(authzop.Catalog, streamRecheckOperations, streamRecheckExemptCredentials))
+	assert.Empty(t, streamRecheckViolations(authzop.Catalog, streamRecheckOperations, streamRecheckExemptCredentials, streamRecheckExemptPerOperation))
 
 	byID := map[authzop.OperationID]authzop.OperationSpec{}
 	for _, spec := range authzop.Catalog {
@@ -133,6 +141,17 @@ func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
 	for ck, reason := range streamRecheckExemptCredentials {
 		assert.NotEqual(t, authzop.CredentialScopedUAT, ck, "the token kind is re-checked, never exempt")
 		assert.NotEmpty(t, reason, "exemption %s states its rule", ck)
+	}
+	for id, kinds := range streamRecheckExemptPerOperation {
+		spec, ok := byID[id]
+		require.True(t, ok, "%s is a catalog operation", id)
+		_, recheck := streamRecheckOperations[id]
+		assert.True(t, recheck, "%s names its re-check", id)
+		for ck, reason := range kinds {
+			assert.NotEqual(t, authzop.CredentialScopedUAT, ck, "the token kind is re-checked, never exempt")
+			assert.NotEmpty(t, reason, "exemption %s on %s states its rule", ck, id)
+			assert.Contains(t, spec.Credentials, ck, "%s admits the exempt credential %s", id, ck)
+		}
 	}
 
 	// The helpers select the user access token kind and nothing else.
@@ -166,15 +185,15 @@ func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
 		Credentials: []authzop.CredentialKind{authzop.CredentialScopedUAT},
 		Bearer:      authzop.AdmitOn(authzop.BearerTargetAgentRecord, authzop.BearerBoundaryProject),
 	}
-	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{unclassified}, streamRecheckOperations, streamRecheckExemptCredentials), 1)
+	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{unclassified}, streamRecheckOperations, streamRecheckExemptCredentials, streamRecheckExemptPerOperation), 1)
 	uncovered := unclassified
 	uncovered.ID = "agent.logs.read"
 	uncovered.Credentials = []authzop.CredentialKind{authzop.CredentialScopedUAT, authzop.CredentialDelegatedAgent}
-	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{uncovered}, streamRecheckOperations, streamRecheckExemptCredentials), 1)
+	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{uncovered}, streamRecheckOperations, streamRecheckExemptCredentials, streamRecheckExemptPerOperation), 1)
 	selfAdmitted := unclassified
 	selfAdmitted.ID = "proof.stream.self"
 	selfAdmitted.Bearer = authzop.BearerDisposition{Kind: authzop.BearerAdmitSelf}
-	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{selfAdmitted}, streamRecheckOperations, streamRecheckExemptCredentials), 1,
+	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{selfAdmitted}, streamRecheckOperations, streamRecheckExemptCredentials, streamRecheckExemptPerOperation), 1,
 		"an admit_self stream operation also names its re-check")
 }
 

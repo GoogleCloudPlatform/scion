@@ -267,11 +267,11 @@ func (s *Server) authorizeAgentMessage(
 	}
 
 	// An agent delegated credential is decided before every ancestor,
-	// owner or system-plane allow and pierces no message mode. No grant can
-	// carry agent.message yet, so it is refused
+	// owner or system-plane allow and pierces no message mode
 	// (.design/agent-delegation.md §12.3).
 	if isDelegatedAgentIdentity(senderIdentity) {
-		return false, messageReasonSenderNotPermitted, nil
+		allowed, reason := s.authorizeDelegatedAgentMessage(ctx, senderIdentity, targetAgent)
+		return allowed, reason, nil
 	}
 
 	// ---- D8: system-plane messages bypass all mode checks ----
@@ -310,6 +310,44 @@ func (s *Server) authorizeAgentMessage(
 		return d.Allowed, d.Reason, &d
 	default:
 		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type()), nil
+	}
+}
+
+// messageReasonDelegatedModeNotPierced is the refusal of a delegated send
+// to an agent whose message mode only an ancestor, owner or project owner
+// may reach: a delegated credential pierces no message mode.
+const messageReasonDelegatedModeNotPierced = "delegated sender may not reach target agent message_mode"
+
+// authorizeDelegatedAgentMessage is the messaging decision for an agent
+// delegated credential. The target must be the agent routeGuard admitted
+// for agent.action.message, so mention, group and other fan-out targets
+// are refused. Then the delegated decision procedure decides agent.message
+// on the target through Decide. An allow reaches only a target whose
+// message mode is project or hub: the issuer's ancestry or ownership never
+// pierces a mode for the delegated sender. The reasons it returns are
+// fixed strings and never carry the decision's reason
+// (.design/agent-delegation.md §11.4).
+func (s *Server) authorizeDelegatedAgentMessage(ctx context.Context, sender Identity, target *store.Agent) (bool, string) {
+	if !delegatedRequestAdmittedFor(ctx, opAgentActionMessage, target) {
+		return false, messageReasonSenderNotPermitted
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(sender),
+		Credential: credentialContextForIdentity(sender),
+		Resource:   agentResource(target),
+		Action:     ActionMessage,
+		Permission: "agent.message",
+	})
+	if !decision.Allowed {
+		return false, messageReasonSenderNotPermitted
+	}
+	switch target.MessageMode {
+	case store.MessageModeProject, store.MessageModeHub:
+		return true, "agent delegation"
+	case store.MessageModeNone:
+		return false, "target agent message_mode is none"
+	default:
+		return false, messageReasonDelegatedModeNotPierced
 	}
 }
 

@@ -486,6 +486,9 @@ type adtFaults struct {
 	// a handler's checks and its write.
 	beforeGrantLock func(ctx context.Context, tx store.Store, id string) error
 	afterGrantLock  func(g *store.AgentDelegationGrant)
+	// expireCredential makes every delegated credential row read outside a
+	// transaction look expired, as it does once its lifetime has passed.
+	expireCredential bool
 }
 
 // adtFaultStore is the switch-gated store wrapper the agent delegation
@@ -532,6 +535,16 @@ func (s *adtFaultStore) GetAgentDelegationGrant(ctx context.Context, id string) 
 		return nil, f.grant
 	}
 	return s.Store.GetAgentDelegationGrant(ctx, id)
+}
+
+func (s *adtFaultStore) GetAgentDelegatedCredentialByKeyHash(ctx context.Context, keyHash string) (*store.AgentDelegatedCredential, error) {
+	cred, err := s.Store.GetAgentDelegatedCredentialByKeyHash(ctx, keyHash)
+	if f := s.active(); err == nil && f != nil && f.expireCredential {
+		expired := *cred
+		expired.ExpiresAt = time.Now().Add(-time.Second)
+		return &expired, nil
+	}
+	return cred, err
 }
 
 // adtFaultTx is the transaction-scoped side of adtFaultStore.

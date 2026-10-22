@@ -1058,9 +1058,9 @@
 | http_route | POST | `/api/v1/agents/{id}/message` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1106,9 +1106,9 @@
 |------|--------|---------|
 | websocket | GET | `/api/v1/agents/{id}/pty` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
