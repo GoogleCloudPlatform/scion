@@ -1000,8 +1000,9 @@ does not change that schema.
 
 ### 14.5 Messages
 
-A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug) and
-`SenderID = A` (from G.3-a), plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
+`SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 

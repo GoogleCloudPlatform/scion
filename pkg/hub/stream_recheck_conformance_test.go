@@ -64,11 +64,6 @@ var streamRecheckExemptCredentials = map[authzop.CredentialKind]string{
 	authzop.CredentialAgentJWT:   "an agent credential is bound to its running agent and project and is not a user access token; an agent caller is decided when the stream opens",
 }
 
-// streamRecheckViolations returns, for each operation in ops, every
-// problem with its streams' credential coverage: an operation that admits
-// a token on an SSE or WebSocket entry point but is not in modes, and,
-// for a token-re-checked operation, an admitted credential kind that is
-// neither the token kind nor exempt.
 // streamRecheckExemptPerOperation names credential kinds exempt from the
 // token re-check on one operation only.
 var streamRecheckExemptPerOperation = map[authzop.OperationID]map[authzop.CredentialKind]string{
@@ -77,6 +72,12 @@ var streamRecheckExemptPerOperation = map[authzop.OperationID]map[authzop.Creden
 	},
 }
 
+// streamRecheckViolations returns, for each operation in ops, every
+// problem with its streams' credential coverage: an operation that admits
+// a token on an SSE or WebSocket entry point but is not in modes, and,
+// for a token-re-checked operation, an admitted credential kind that is
+// neither the token kind nor exempt, globally (exempt) or for that
+// operation (perOp).
 func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.OperationID]streamRecheckMode, exempt map[authzop.CredentialKind]string, perOp map[authzop.OperationID]map[authzop.CredentialKind]string) []string {
 	var problems []string
 	for _, spec := range specs {

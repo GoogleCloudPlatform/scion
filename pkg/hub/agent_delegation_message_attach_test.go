@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,6 +117,12 @@ func TestAgentDelegatedMessage_SendsAsTheAgent(t *testing.T) {
 		assert.Equal(t, "agent:"+f.agentA.Slug, m.Sender, "the stored sender is the agent")
 		assert.Equal(t, f.agentA.ID, m.SenderID)
 		assert.NotEqual(t, f.alice.ID, m.SenderID, "the issuer is never the sender")
+		if assert.NotNil(t, m.SenderProjectID, "an agent-sender row carries the sender's project") {
+			assert.Equal(t, f.agentA.ProjectID, *m.SenderProjectID)
+		}
+		if assert.NotNil(t, m.RecipientProjectID) {
+			assert.Equal(t, f.agentB.ProjectID, *m.RecipientProjectID)
+		}
 	}
 }
 
@@ -342,6 +350,25 @@ func TestAgentDelegatedMessage_OnlyTheRouteTarget(t *testing.T) {
 	allowed, reason, _ := f.srv.authorizeAgentMessage(ctx, st.identity, b, false)
 	assert.True(t, allowed, reason)
 	assert.Len(t, decisions.delegated(), 1, "one decision for the route target")
+
+	// Message modes on the route target: hub allows like project; an empty
+	// mode denies, as on the user path; nothing is pierced.
+	for _, tc := range []struct {
+		mode   string
+		allow  bool
+		reason string
+	}{
+		{store.MessageModeHub, true, "agent delegation"},
+		{"", false, messageReasonDelegatedModeNotPierced},
+		{store.MessageModeLineage, false, messageReasonDelegatedModeNotPierced},
+		{store.MessageModeNone, false, "target agent message_mode is none"},
+	} {
+		moded := *b
+		moded.MessageMode = tc.mode
+		allowed, reason, _ := f.srv.authorizeAgentMessage(ctx, st.identity, &moded, false)
+		assert.Equal(t, tc.allow, allowed, "mode %q", tc.mode)
+		assert.Equal(t, tc.reason, reason, "mode %q", tc.mode)
+	}
 
 	// The agent read entry does not admit a send.
 	readEntry, ok := agentDelegationAdmissionFor(http.MethodGet, delegatedRouteID(AgentRouteRoot))
@@ -637,4 +664,85 @@ func TestAgentDelegatedAttach_ConduitPathRefusedBeforeUpgrade(t *testing.T) {
 		Via:      grant.ViaPTY,
 	})
 	assert.ErrorIs(t, err, errConduitForbidden)
+}
+
+// adtConduitDelegatedToken has the conduit fixture's owner issue a project
+// grant for agent:attach to its agent f.agent, and returns the delegated
+// credential f.agent exchanges for it.
+func adtConduitDelegatedToken(t *testing.T, f *ptyConduitFixture) string {
+	t.Helper()
+	ctx := context.Background()
+	adtSetExperiment(t, f.srv, true)
+	if f.agent.RunID == "" {
+		_, err := f.store.SetAgentRunID(ctx, f.agent.ID, uuid.NewString(), nil)
+		require.NoError(t, err)
+	}
+	actor, err := f.store.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	session, _, _, err := f.srv.userTokenService.GenerateTokenPair(f.owner.ID(), "owner@conduit.test", "Owner", store.UserRoleMember, ClientTypeWeb)
+	require.NoError(t, err)
+	do := func(path, token string, body map[string]interface{}) *httptest.ResponseRecorder {
+		buf, err := json.Marshal(body)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(buf))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	rec := do("/api/v1/agents/"+actor.ID+"/delegations", session, map[string]interface{}{
+		"boundary":    map[string]string{"kind": "project", "projectId": actor.ProjectID},
+		"permissions": []string{"agent:attach"}, "name": "conduit",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var grant AgentDelegationGrantResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &grant))
+	agentToken, err := f.srv.issueAgentTokenForTest(ctx, actor)
+	require.NoError(t, err)
+	rec = do("/api/v1/agents/"+actor.ID+"/delegations/"+grant.ID+"/exchange", agentToken,
+		map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out ExchangeAgentDelegationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	return out.Token
+}
+
+// TestAgentDelegatedAttach_ConduitPathRefusedThroughTheHandler: through the
+// real middleware, route guard and handler, a delegated attach whose path is
+// the agent's conduit path is refused before any upgrade. The preflight
+// answers 503 runtime_attach_unsupported with reason
+// delegated_credential_broker_path_only, the WebSocket handshake fails with
+// the same 503, and no terminal is spawned on the agent. The fixture owner
+// itself still attaches over that path.
+func TestAgentDelegatedAttach_ConduitPathRefusedThroughTheHandler(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	f.setBrokerRow(t, attachCaps(false), "")
+	f.startPTYAgent(t, f.public.URL)
+	status, path, _ := f.preflight(t)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, string(ptyPathAgent), path, "the owner takes the agent path")
+	token := adtConduitDelegatedToken(t, f)
+
+	req, err := http.NewRequest(http.MethodGet, f.ptyURL(), nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	var er ErrorResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&er))
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, wsprotocol.ErrCodeRuntimeAttachUnsupported, er.Error.Code)
+	assert.Equal(t, ptyReasonDelegatedBrokerOnly, er.Error.Details["reason"])
+
+	c, wsResp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.ptyURL(), "http"), http.Header{"Authorization": {"Bearer " + token}})
+	if c != nil {
+		_ = c.Close()
+	}
+	require.ErrorIs(t, err, websocket.ErrBadHandshake, "no WebSocket is upgraded")
+	require.NotNil(t, wsResp)
+	_ = wsResp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, wsResp.StatusCode)
+	assert.Empty(t, f.spawned, "no terminal was spawned on the agent")
 }

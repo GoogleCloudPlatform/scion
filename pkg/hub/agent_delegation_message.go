@@ -52,3 +52,14 @@ func (s *Server) delegatedSenderAddress(ctx context.Context, d *DelegatedAgentId
 	}
 	return "agent:" + slug, d.ID()
 }
+
+// delegatedSenderProjectID returns the project of the actor agent of a
+// delegated send, stamped as the stored message's SenderProjectID: the
+// request's loaded agent row, falling back to the identity's agent project.
+func delegatedSenderProjectID(ctx context.Context, d *DelegatedAgentIdentity) string {
+	if st := delegatedStateFromContext(ctx); st != nil && st.identity == d && st.agent != nil &&
+		st.agent.ID == d.ID() && st.agent.ProjectID != "" {
+		return st.agent.ProjectID
+	}
+	return d.AgentProjectID()
+}

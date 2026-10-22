@@ -2411,6 +2411,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderProjID := agentIdent.ProjectID()
 			storeMsg.SenderProjectID = &senderProjID
+		} else if delegated := delegatedAgentIdentityFromContext(ctx); delegated != nil {
+			// A delegated send is an agent-sender row: the actor agent's
+			// project, like every other agent-to-agent row.
+			senderProjID := delegatedSenderProjectID(ctx, delegated)
+			storeMsg.SenderProjectID = &senderProjID
 		}
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
