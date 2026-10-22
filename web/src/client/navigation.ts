@@ -80,67 +80,68 @@ export function navigateTo(path: string): void {
  */
 export function pushUrl(path: string): void {
   window.history.pushState({}, '', browserPath(path));
+  noteShownEntry();
 }
 
+/**
 /**
  * Asked before the router leaves the page on screen; returns true to let it
  * leave (e.g. once the user has confirmed), false to stay.
  */
 export type LeaveGuard = () => boolean;
 
-interface LeaveGuardEntry {
-  guard: LeaveGuard;
-  /** The browser URL and history state of the page when it added the guard. */
-  url: string;
-  state: unknown;
-}
+const leaveGuards = new Set<LeaveGuard>();
 
-const leaveGuards = new Set<LeaveGuardEntry>();
+/** The browser URL and history state of the entry on screen (see noteShownEntry). */
+let shownEntry: { url: string; state: unknown } | null = null;
 
 /**
- * Let a page veto leaving it through the router: a link, `navigateTo`, or
- * browser Back/Forward. The router asks before it renders anything, so a
- * veto leaves the page, and its unsaved state, as it is. A page leaving for
- * good (a full unload) is not covered; use `beforeunload` for that. Add the
- * guard once the page's URL is current (on connect) and remove it, with the
- * returned function, on disconnect: a vetoed Back/Forward puts back the URL
- * the page had when it added the guard.
+ * Record the current browser URL and history state as the entry on screen,
+ * for a vetoed Back/Forward to put back. The router calls it after each URL
+ * it writes or renders, and so do the URL helpers here and the terminal
+ * workspace's own URL updates.
  */
-export function addLeaveGuard(guard: LeaveGuard): () => void {
-  const entry: LeaveGuardEntry = {
-    guard,
+export function noteShownEntry(): void {
+  shownEntry = {
     url: `${window.location.pathname}${window.location.search}${window.location.hash}`,
     state: window.history.state,
   };
-  leaveGuards.add(entry);
-  return () => {
-    leaveGuards.delete(entry);
-  };
-}
-
-/** The first guard that vetoes leaving, asking each in turn. */
-function vetoingGuard(): LeaveGuardEntry | undefined {
-  for (const entry of Array.from(leaveGuards)) {
-    if (!entry.guard()) return entry;
-  }
-  return undefined;
-}
-
-/** For the router: whether the page on screen may be left. */
-export function mayLeave(): boolean {
-  return vetoingGuard() === undefined;
 }
 
 /**
- * For the router, on a popstate that would render another route: the
+ * Let a page veto leaving it through the router: a link, `navigateTo`, or
+ * browser Back/Forward. The router asks before it renders anything, and
+ * only for a navigation that would remove the page (not for the terminal
+ * workspace, which keeps it), so a veto leaves the page, and its unsaved
+ * state, as it is. A full unload is not covered; use `beforeunload` for
+ * that. Add the guard on connect and remove it, with the returned
+ * function, on disconnect.
+ */
+export function addLeaveGuard(guard: LeaveGuard): () => void {
+  leaveGuards.add(guard);
+  return () => {
+    leaveGuards.delete(guard);
+  };
+}
+
+/** For the router: whether every leave guard lets the page go, asking each in turn. */
+export function mayLeave(): boolean {
+  for (const guard of Array.from(leaveGuards)) {
+    if (!guard()) return false;
+  }
+  return true;
+}
+
+/**
+ * For the router, on a popstate that would remove the guarded page: the
  * browser has already moved to the other entry. When a guard vetoes, push
- * the guarded page's URL back as a new entry and return true; the router
- * must then not render.
+ * the entry that was on screen back as a new entry and return true; the
+ * router must then not render. (A vetoed Back so drops the forward entries;
+ * a vetoed Forward leaves the target entry below the restored one.)
  */
 export function vetoPopState(): boolean {
-  const vetoed = vetoingGuard();
-  if (!vetoed) return false;
-  window.history.pushState(vetoed.state, '', vetoed.url);
+  if (!shownEntry || mayLeave()) return false;
+  window.history.pushState(shownEntry.state, '', shownEntry.url);
   return true;
 }
 
@@ -154,6 +155,7 @@ export function replaceSearch(search: URLSearchParams | string): void {
   const qs = (typeof search === 'string' ? search : search.toString()).replace(/^\?/, '');
   const url = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
   window.history.replaceState(window.history.state, '', url);
+  noteShownEntry();
 }
 
 /**
@@ -183,4 +185,5 @@ export function pushInPageFragment(
     '',
     `${window.location.pathname}${window.location.search}${fragment}`
   );
+  noteShownEntry();
 }

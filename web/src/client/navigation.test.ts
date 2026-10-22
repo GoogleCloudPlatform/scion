@@ -20,6 +20,7 @@ import {
   browserPath,
   mayLeave,
   navigateTo,
+  noteShownEntry,
   pushInPageFragment,
   pushUrl,
   replaceSearch,
@@ -187,9 +188,11 @@ describe('leave guards (ptone/scion#3460)', () => {
     expect(guard).toHaveBeenCalledTimes(1);
   });
 
-  it('on a vetoed popstate, puts back the URL and state the page had when it added the guard', () => {
-    window.history.replaceState({ page: 'editor' }, '', '/admin/access-boundaries/new?step=2#top');
+  it('on a vetoed popstate, puts back the URL and state last noted as on screen', () => {
+    window.history.replaceState({ page: 'editor' }, '', '/admin/access-boundaries/new');
     const remove = addLeaveGuard(() => false);
+    // The page changes its own query after the guard was added.
+    replaceSearch('step=2');
     // Back has already moved the browser to the previous entry.
     window.history.pushState({}, '', '/admin/access-boundaries');
     const before = window.history.length;
@@ -197,7 +200,6 @@ describe('leave guards (ptone/scion#3460)', () => {
     expect(vetoPopState()).toBe(true);
     expect(window.location.pathname).toBe('/admin/access-boundaries/new');
     expect(window.location.search).toBe('?step=2');
-    expect(window.location.hash).toBe('#top');
     expect(window.history.state).toEqual({ page: 'editor' });
     expect(window.history.length).toBe(before + 1);
     remove();
@@ -205,6 +207,7 @@ describe('leave guards (ptone/scion#3460)', () => {
 
   it('leaves the URL alone on a popstate every guard allows', () => {
     window.history.replaceState({}, '', '/admin/access-boundaries/new');
+    noteShownEntry();
     const remove = addLeaveGuard(() => true);
     window.history.pushState({}, '', '/admin/access-boundaries');
 

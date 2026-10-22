@@ -23,7 +23,9 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BOOT_WAIT, bootMainAt } from './__fixtures__/main-boot.js';
+import { fakeTerminalWorkspaceModule } from './__fixtures__/terminal-workspace-fake.js';
 import { addLeaveGuard } from './navigation.js';
+import type { TerminalWorkspaceModule } from './terminal-workspace-loader.js';
 
 vi.mock('../components/pages/admin-users.js', () => {
   if (!customElements.get('scion-page-admin-users')) {
@@ -37,6 +39,10 @@ vi.mock('../components/pages/admin-groups.js', () => {
   }
   return {};
 });
+vi.mock('./terminal-workspace-loader.js', () => ({
+  loadTerminalWorkspace: (): Promise<TerminalWorkspaceModule> =>
+    Promise.resolve(fakeTerminalWorkspaceModule),
+}));
 
 const USERS = 'scion-page-admin-users';
 const GROUPS = 'scion-page-admin-groups';
@@ -108,17 +114,53 @@ describe('main.ts router leave guard', () => {
 
   it('a vetoed in-app navigation neither pushes an entry nor renders', async () => {
     await show('/admin/users', USERS);
-    const guard = vi.fn(() => false);
-    removers.push(addLeaveGuard(guard));
+    const refuse = vi.fn(() => false);
+    removers.push(addLeaveGuard(refuse));
     const entries = window.history.length;
 
     main.navigateTo('/admin/groups');
     await settled();
 
-    expect(guard).toHaveBeenCalledTimes(1);
+    expect(refuse).toHaveBeenCalledTimes(1);
     expect(window.history.length).toBe(entries);
     expect(window.location.pathname).toBe('/admin/users');
     expect(shown(USERS)).toBe(true);
     expect(shown(GROUPS)).toBe(false);
+  });
+
+  it('a guarded page left for the terminals and back: no prompt, the kept page is shown', async () => {
+    await show('/admin/groups', GROUPS);
+    const asked = vi.fn(() => false);
+    removers.push(addLeaveGuard(asked));
+    const outlet = document.getElementById('route-outlet')!;
+
+    main.navigateTo('/terminals');
+    expect(window.location.pathname).toBe('/terminals');
+    expect(outlet.hidden).toBe(true);
+    back('/admin/groups');
+    await settled();
+
+    expect(asked, 'guard asked on the terminal round trip').not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/admin/groups');
+    expect(outlet.hidden).toBe(false);
+    expect(shown(GROUPS)).toBe(true);
+  });
+
+  it('Back from the terminals past the kept page, then stay: the terminals URL is put back', async () => {
+    await show('/admin/groups', GROUPS);
+    const keep = vi.fn(() => false);
+    removers.push(addLeaveGuard(keep));
+    const outlet = document.getElementById('route-outlet')!;
+
+    main.navigateTo('/terminals');
+    expect(outlet.hidden).toBe(true);
+    back('/admin/users');
+    await settled();
+
+    expect(keep).toHaveBeenCalledTimes(1);
+    expect(window.location.pathname).toBe('/terminals');
+    expect(outlet.hidden).toBe(true);
+    expect(shown(GROUPS)).toBe(true);
+    expect(shown(USERS)).toBe(false);
   });
 });
