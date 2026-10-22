@@ -489,3 +489,73 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		t.Errorf("latest in a comment: valid file reported violations: %q", errs)
 	}
 }
+
+// agentImageDockerfiles returns the tracked Dockerfiles of agent images: the
+// image-build/ chain (core-base, thick-prep, scion-base, hub, omni) and the
+// harness images under harnesses/.
+func agentImageDockerfiles(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, f := range repoTrackedFiles(t) {
+		if !strings.HasPrefix(filepath.Base(f), "Dockerfile") {
+			continue
+		}
+		if strings.HasPrefix(f, "image-build/") || strings.HasPrefix(f, "harnesses/") {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no agent image Dockerfiles found under image-build/ or harnesses/")
+	}
+	return out
+}
+
+// checkNoImageTZ returns a violation for each ENV or ARG TZ in a Dockerfile's
+// stages. Agent images must not pin a timezone: the agent zone is set per
+// agent when the container starts (the hub is the TZ authority for
+// hub-dispatched agents), and an image-level TZ, even an empty one baked from
+// an unset build arg, sits outside that chain. A non-empty build arg would
+// silently pin every container built from the image. verify-base-contract.sh
+// asserts the same for the base images at build time; this static check also
+// covers the harness images, which do not run that script.
+func checkNoImageTZ(t *testing.T, name, content string) []string {
+	t.Helper()
+	var errs []string
+	for _, st := range parseDockerfileStages(t, content) {
+		for _, in := range st.instrs {
+			if in.cmd != "ENV" && in.cmd != "ARG" {
+				continue
+			}
+			for _, k := range envOrArgKeys(in.args) {
+				if k == "TZ" {
+					errs = append(errs, name+": "+in.cmd+" "+in.args+": agent images must not set TZ; the agent zone is set per agent at container start")
+				}
+			}
+		}
+	}
+	return errs
+}
+
+func TestAgentImageDockerfilesDoNotSetTZ(t *testing.T) {
+	for _, f := range agentImageDockerfiles(t) {
+		for _, e := range checkNoImageTZ(t, f, readRepoFile(t, f)) {
+			t.Error(e)
+		}
+	}
+}
+
+func TestNoImageTZCheckDetectsViolations(t *testing.T) {
+	base := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN true\n"
+	for name, src := range map[string]string{
+		"ARG TZ":          base + "ARG TZ\n",
+		"ENV TZ quoted":   base + "ENV TZ=\"$TZ\"\n",
+		"ENV TZ legacy":   base + "ENV TZ UTC\n",
+		"ENV TZ in a set": base + "ENV LANG=C.UTF-8 TZ=UTC\n",
+		"ARG TZ default":  base + "ARG TZ=Etc/UTC\n",
+	} {
+		expectViolation(t, name, checkNoImageTZ(t, "x/Dockerfile", src), "must not set TZ")
+	}
+	if errs := checkNoImageTZ(t, "x/Dockerfile", base+"ENV TZDIR=/usr/share/zoneinfo\nARG TZ_NOTE\n"); len(errs) != 0 {
+		t.Errorf("TZ-prefixed names reported as TZ: %q", errs)
+	}
+}
