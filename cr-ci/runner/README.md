@@ -115,6 +115,15 @@ this, in order:
    | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
    | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
 
+   **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
+   `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a
+   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`), made by
+   the same rules before `~/.cache` is linked to it. `~/.cache` still reads
+   `/scratch/.cache`, so the parity above holds and archive entries land in RAM.
+   The cache then counts against the memory limit
+   ([architecture](../docs/architecture.md#constraints)). Any other value than
+   `true` or `false` exits 2.
+
    It exports `GOCACHE`, `GOMODCACHE`, `GOPATH` and `GOLANGCI_LINT_CACHE` as
    on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
    `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.

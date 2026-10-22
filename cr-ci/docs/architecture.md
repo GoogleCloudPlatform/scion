@@ -309,9 +309,20 @@ so it is deferred.
   for a warm golangci-lint: the P6 PoC measured about 15-20 GiB on disk
   (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
   ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. Raise
-  the per-instance quota and use about 25 GiB (or keep the build cache in RAM),
-  and size the regional quota for `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`
+  the per-instance quota and use about 25 GiB, and size the regional quota for
+  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
+- **RAM build cache (`RUNNER_BUILD_CACHE_IN_RAM=true`):** the alternative for a
+  small `/scratch`. The entrypoint makes `/scratch/.cache` a link to a directory on
+  the in-memory root filesystem, so `~/.cache` (the Go build cache and
+  golangci-lint's analysis cache) lives in RAM while `~/.cache` still points to
+  `/scratch/.cache` (cache parity holds; tar follows links in parent components).
+  It counts against `RUNNER_MEMORY`: in P6 PoC run 4 the lint passed at 27.9 GB of
+  32 GiB (a ~21 GB compile plus the cache grown to ~9.5 GB), leaving about 4 GB.
+  Use it only at 32 GiB, and prefer the disk quota when available: the margin
+  shrinks as the cache or pkg/hub grows. A Cloud Run in-memory volume
+  (`--add-volume type=in-memory,size-limit=…`) would be an alternative with a hard
+  size cap, untested.
 
 ## Failure modes
 

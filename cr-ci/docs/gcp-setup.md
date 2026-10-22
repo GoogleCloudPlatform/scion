@@ -266,7 +266,9 @@ about 15-20 GiB on disk (the restored Go cache grows from 4.8 GB to about
 8-9.5 GB during the lint, plus a 1.1 GB workspace, about 1.3 GB of modules and
 up to 2 GB of Go temp dirs). Every lint run with 10 GiB ran out of space. Use
 about **25 GiB**, after raising the per-instance quota, or keep the build cache
-in RAM. A job above the per-instance quota is rejected at `deploy-job.sh`
+in RAM (`RUNNER_BUILD_CACHE_IN_RAM=true`, then `deploy-job.sh --apply`; it costs
+about 9.5 GB of the 32 GiB memory, see
+[architecture](architecture.md#constraints)). A job above the per-instance quota is rejected at `deploy-job.sh`
 ("Total size of ephemeral-disk volumes cannot exceed 10 GiB").
 
 To raise a quota (C15, `roles/cloudquotas.admin`; Google approves the request):

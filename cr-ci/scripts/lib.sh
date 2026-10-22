@@ -489,6 +489,10 @@ crci_validate_config() {
   [[ -n $n ]] && ((n > 100)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 100 GiB ephemeral-disk maximum"
   n=$(_crci_posint MAX_CONCURRENT_RUNNERS) || true
   [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"${CFG[MAX_CONCURRENT_RUNNERS]}\" is not a positive integer"
+  case ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} in
+    true | false) ;;
+    *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"${CFG[RUNNER_BUILD_CACHE_IN_RAM]}\" must be true or false" ;;
+  esac
 
   _crci_duration_check TASK_TIMEOUT $((60 * 1000)) $((168 * 3600 * 1000)) "1m" "168h"
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"

@@ -27,6 +27,10 @@
 # sections 1-3 (HOME, /scratch, HOME links, run.sh present) and exits 0 before any
 # claim; none of the env below is needed then.
 #
+# Optional env (set on the job by deploy-job.sh from config.env):
+#   RUNNER_BUILD_CACHE_IN_RAM  true: keep ~/.cache (Go build cache, analysis cache) in
+#                              RAM instead of on /scratch (section 3); default false
+#
 # Required env (set by the mediator as Cloud Run Job overrides):
 #   RUNNER_CLAIM_TOKEN  32 lowercase hex chars, single use
 #   MEDIATOR_URL        https origin of the mediator, no trailing slash
@@ -51,6 +55,8 @@
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
 #   CR_FIFO_TMPDIR           where the runner-output FIFOs go (default /tmp)
+#   CR_RAM_CACHE_DIR         RAM target of /scratch/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
+#                            (default /tmp/cr-ci-build-cache)
 #   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
@@ -65,6 +71,7 @@ runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
 backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
 metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
 expected_home=${CR_EXPECTED_HOME:-/home/runner}
+ram_cache_dir=${CR_RAM_CACHE_DIR:-/tmp/cr-ci-build-cache}
 
 log() { printf 'cr-ci-entrypoint: %s\n' "$*" >&2; }
 die() {
@@ -84,6 +91,12 @@ case ${RUNNER_WARMUP:-} in
   "" | 0) ;;
   1) warmup=1 ;;
   *) die "$EXIT_CONFIG" "RUNNER_WARMUP must be 1 or unset" ;;
+esac
+
+case ${RUNNER_BUILD_CACHE_IN_RAM:-false} in
+  true) cache_in_ram=1 ;;
+  false) cache_in_ram=0 ;;
+  *) die "$EXIT_CONFIG" "RUNNER_BUILD_CACHE_IN_RAM must be true or false" ;;
 esac
 
 if ((warmup)); then
@@ -227,6 +240,17 @@ ensure_link() {
 }
 
 ensure_link "$HOME/work" "$scratch/_work"
+if ((cache_in_ram)); then
+  # Optional RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true) for a small /scratch:
+  # /scratch/.cache itself becomes a link to a directory on the in-memory root
+  # filesystem. ~/.cache still points to /scratch/.cache, so cache parity holds:
+  # tar follows links in parent components, and an archive entry
+  # ../../../.cache/go-build/X lands in RAM. Everything under ~/.cache (the Go build
+  # cache, golangci-lint's analysis cache) then counts against the container's
+  # memory limit; see docs/architecture.md, "Constraints".
+  ensure_link "$scratch/.cache" "$ram_cache_dir"
+  log "build cache in RAM: $scratch/.cache -> $ram_cache_dir (counts against the memory limit)"
+fi
 ensure_link "$HOME/.cache" "$scratch/.cache"
 ensure_link "$HOME/go" "$scratch/go"
 unset XDG_CACHE_HOME

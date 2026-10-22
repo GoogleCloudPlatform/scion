@@ -177,6 +177,8 @@ var invalidCases = []struct {
 	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 	{EnvRunnerDiskGi, "0"},
 	{EnvRunnerDiskGi, "101"}, // above Cloud Run's 100 GiB per volume
+	{EnvRunnerBuildCacheInRAM, "yes"},
+	{EnvRunnerBuildCacheInRAM, "TRUE"},
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -312,6 +314,7 @@ var validCases = []map[string]string{
 	{EnvBuildStagingBucket: "my-org_cr-ci-staging"},
 	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
 	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
+	{EnvRunnerBuildCacheInRAM: "true"},
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation

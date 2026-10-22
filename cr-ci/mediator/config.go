@@ -43,6 +43,7 @@ const (
 	EnvAppPrivateKeySecretName = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
 	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
 	EnvClaimTTL                = "CLAIM_TTL"
+	EnvRunnerBuildCacheInRAM   = "RUNNER_BUILD_CACHE_IN_RAM"
 )
 
 // Cloud Run limits and contract defaults.
@@ -132,6 +133,7 @@ type Config struct {
 	AppPrivateKeySecretName string
 	WebhookSecretName       string
 	ClaimTTL                time.Duration
+	RunnerBuildCacheInRAM   bool // used by deploy-job.sh and the runner entrypoint only
 }
 
 // Defaults returns the default value of every optional variable. Required
@@ -167,6 +169,7 @@ func Defaults() map[string]string {
 		EnvAppPrivateKeySecretName: defaultAppKeySecret,
 		EnvWebhookSecretName:       defaultWebhookSecret,
 		EnvClaimTTL:                defaultClaimTTL,
+		EnvRunnerBuildCacheInRAM:   "false",
 	}
 }
 
@@ -328,6 +331,13 @@ func Load(getenv func(string) string) (*Config, error) {
 		fail(EnvRunnerDiskGi, "%d exceeds the %d GiB ephemeral-disk maximum", c.RunnerDiskGi, maxEphemeralDiskGi)
 	}
 	c.MaxConcurrentRunners = posInt(EnvMaxConcurrentRunners)
+	switch raw := get(EnvRunnerBuildCacheInRAM); raw {
+	case "true":
+		c.RunnerBuildCacheInRAM = true
+	case "false":
+	default:
+		fail(EnvRunnerBuildCacheInRAM, "%q must be true or false", raw)
+	}
 
 	if raw := get(EnvTaskTimeout); raw != "" {
 		d, err := time.ParseDuration(raw)

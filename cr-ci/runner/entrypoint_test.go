@@ -958,10 +958,23 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 // (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
 // an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
 // directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
-func TestEntrypointCacheTarRoundTrip(t *testing.T) {
+func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
+
+// With RUNNER_BUILD_CACHE_IN_RAM=true, /scratch/.cache is a link to a RAM dir; the
+// same archives must restore where Go reads, with the ~/.cache bytes in RAM.
+func TestEntrypointCacheTarRoundTripRAM(t *testing.T) { cacheTarRoundTrip(t, true) }
+
+func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
+	ramDir := filepath.Join(t.TempDir(), "ram-build-cache")
+	cacheRoot := filepath.Join(h.scratch, ".cache") // where ~/.cache bytes physically land
+	if inRAM {
+		h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+		h.env["CR_RAM_CACHE_DIR"] = ramDir
+		cacheRoot = ramDir
+	}
 	if res := h.run(); res.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
@@ -1013,18 +1026,23 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 	tarRun(append([]string{"-cPf", ubuntuTar, "-C", ubuntuWorkspace}, entries...)...)
 	tarRun("-xPf", ubuntuTar, "-C", crWorkspace)
 	for logical, physical := range map[string]string{
-		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(h.scratch, ".cache/go-build/ab/obj"),
+		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(cacheRoot, "go-build/ab/obj"),
 		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.scratch, "go/pkg/mod/cache/download/m/@v/v1.zip"),
-		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(h.scratch, ".cache/golangci-lint/x"),
+		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(cacheRoot, "golangci-lint/x"),
 	} {
 		if b, err := os.ReadFile(logical); err != nil || string(b) != "from-ubuntu" {
 			t.Errorf("ubuntu archive did not restore to %s (what Go reads): %v", logical, err)
 		}
-		if _, err := os.Lstat(physical); err != nil {
-			t.Errorf("restored bytes are not on the scratch disk at %s: %v", physical, err)
+		if b, err := os.ReadFile(physical); err != nil || string(b) != "from-ubuntu" {
+			t.Errorf("restored bytes are not physically at %s: %v", physical, err)
 		}
 	}
 	h.checkHomeLinks() // tar must not have replaced a link
+	if inRAM {
+		if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
+			t.Errorf("%s/.cache = %q (%v), want a link to %s after the restore", h.scratch, got, err, ramDir)
+		}
+	}
 
 	// cr-ci -> ubuntu-latest: an archive saved through the links restores under the
 	// plain HOME, not under /home/home/... or next to it.
@@ -1285,4 +1303,33 @@ func TestEntrypointWarmUpStillChecks(t *testing.T) {
 	h2, _ := warmupHarness(t)
 	h2.env["RUNNER_WARMUP"] = "yes"
 	expectFailure(t, h2, h2.run(), 2, "RUNNER_WARMUP must be 1 or unset")
+}
+
+func TestEntrypointBuildCacheInRAMValue(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "yes"
+	expectFailure(t, h, h.run(), 2, "RUNNER_BUILD_CACHE_IN_RAM must be true or false")
+}
+
+func TestEntrypointBuildCacheInRAMLinks(t *testing.T) {
+	h := newSuccessHarness(t)
+	ramDir := filepath.Join(t.TempDir(), "ram")
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+	h.env["CR_RAM_CACHE_DIR"] = ramDir
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
+		t.Errorf("%s/.cache = %q (%v), want a link to %s", h.scratch, got, err, ramDir)
+	}
+	h.checkHomeLinks() // ~/.cache still -> /scratch/.cache (parity)
+	for _, d := range []string{"go-build", "golangci-lint"} {
+		if fi, err := os.Stat(filepath.Join(ramDir, d)); err != nil || !fi.IsDir() {
+			t.Errorf("%s/%s was not created in RAM: %v", ramDir, d, err)
+		}
+	}
+	if !strings.Contains(res.stderr, "build cache in RAM") {
+		t.Errorf("stderr does not log RAM mode:\n%s", res.stderr)
+	}
 }
