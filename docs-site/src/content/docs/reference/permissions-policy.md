@@ -113,7 +113,7 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 ```
 
 1. **Authentication**: The caller is authenticated, establishing their principal type, principal ID, group memberships, and credentials (such as token type/scope).
-2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to (for a user principal, only when the user's account exists and is `active`).
+2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to (for a user principal, only when the user's account is `active`; a federated user with no account record is decided by its bindings alone).
 3. **Union Allowed Permissions**: The union of all permission IDs granted by these bindings forms the positive "allowed permissions" set.
 4. **Load Applicable AccessConstraints**: The engine queries all active, non-disabled AccessConstraints that match the principal (by principal ID, group closure, or `all_principals`) within the targeted scope.
 5. **Intersect Permissions**: The effective permission set is calculated as the intersection of the positive set and the maximum permitted ceilings.

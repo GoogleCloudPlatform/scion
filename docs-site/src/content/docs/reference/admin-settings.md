@@ -111,7 +111,7 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `conflicted` | The section that conflicted, with its expected and current revision. |
 | `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
 
-When a save hits `409 revision_conflict` after earlier sections were written, the Server Config conflict banner also shows which keys were saved before the conflict (`applied_keys` as applied now, `pending_restart` as applying after restart, and `skipped` under **Saved but not applied**) and updates the page's revision baseline for the sections in `applied` and `unchanged_revisions`.
+When a save hits `409 revision_conflict` after earlier sections were written, the Server Config conflict banner also lists the keys saved before the conflict: `applied_keys` under **Applied now**, `pending_restart` under **Saved; applies after restart**, and `skipped` under **Saved but not applied**.
 
 ### Layer-0 edits by deployment mode
 

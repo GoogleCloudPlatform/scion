@@ -26,7 +26,7 @@ start. The token carries the same scopes a refresh would.
 After writing the token, the Runtime Broker signals the agent's init process to reload it. If that
 signal cannot be delivered, the token is still in place, and the reset fails with
 `reload_unconfirmed` (HTTP 502) and the message "credential issued and written; the running agent
-did not confirm the reload". The CLI exits non-zero. Even when the signal does not arrive, `sciontool init` checks its credential file every few seconds (`SCION_CREDENTIAL_WATCH_INTERVAL`, default `3s`), verifies a newly written credential against the Hub, and adopts it once the Hub confirms it; run `sciontool doctor` inside the container to inspect `sciontool init`'s credential state (see [Diagnostics](/scion/local/agent-credentials/#diagnostics)). If the agent keeps failing to authenticate,
+did not confirm the reload". The CLI exits non-zero. Even when the signal does not arrive, `sciontool init` checks its credential file every 5 seconds, verifies a newly written credential against the Hub, and adopts it once the Hub confirms it; run `sciontool doctor` inside the container to inspect `sciontool init`'s credential state (see [Diagnostics](/scion/local/agent-credentials/#diagnostics)). If the agent keeps failing to authenticate,
 restart it.
 
 ### All running agents
