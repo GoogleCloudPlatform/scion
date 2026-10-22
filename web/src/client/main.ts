@@ -51,6 +51,7 @@ import { showToast } from '../utils/toast.js';
 import { FLAT_BROKERS_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
 import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
+import { apiFetch } from './api.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
 import {
@@ -398,7 +399,7 @@ async function ensureTerminalCoordinator(thisNav: number): Promise<TerminalCoord
  */
 async function fetchCurrentUser(): Promise<User | null> {
   try {
-    const res = await fetch('/auth/me', { credentials: 'include' });
+    const res = await apiFetch('/auth/me', { authErrors: 'caller' });
     if (!res.ok) return null;
     const data = (await res.json()) as AuthMeResponse;
     return {
@@ -447,7 +448,7 @@ async function fetchCurrentUser(): Promise<User | null> {
  */
 async function loadPreferredTimeZone(): Promise<void> {
   try {
-    const res = await fetch('/auth/me', { credentials: 'include' });
+    const res = await apiFetch('/auth/me', { authErrors: 'caller' });
     if (!res.ok) return;
     const data = (await res.json()) as AuthMeResponse;
     setPreferredTimeZone(data.preferences?.timezone);
@@ -911,7 +912,7 @@ async function redirectIfOnboardingIncomplete(): Promise<void> {
   const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
   if (skipRedirectPaths.includes(stripBasePath(window.location.pathname))) return;
   try {
-    const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
+    const statusRes = await apiFetch('/api/v1/system/status', { authErrors: 'caller' });
     if (statusRes.ok) {
       const status = (await statusRes.json()) as { complete?: boolean };
       if (!status.complete) {

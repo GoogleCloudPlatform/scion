@@ -22,10 +22,11 @@
  */
 
 import { setFeatureFlag, setServerFlags } from '../utils/feature-flags.js';
+import { apiFetch } from './api.js';
 
 /**
  * Parses `res` as JSON, returning `null` for a non-OK status or a body that
- * isn't valid JSON. A network error (a rejected `fetch()`) is not this
+ * isn't valid JSON. A network error (a rejected request) is not this
  * function's concern — it surfaces as a rejected promise and is handled by
  * the caller's `Promise.allSettled`.
  */
@@ -85,7 +86,7 @@ export function getPublicSettings(): Promise<Readonly<PublicSettings> | null> {
   const generation = publicSettingsGeneration;
   const request = (async (): Promise<PublicSettings | null> => {
     try {
-      const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/settings/public', { authErrors: 'caller' });
       const body = await okJsonOrNull(res);
       // Frozen: every caller shares this one object.
       const settings =
@@ -166,7 +167,7 @@ export async function applyServerFeatureFlags(embeddedExperiments?: unknown): Pr
     : null;
   const [pub, exp] = await Promise.allSettled([
     getPublicSettings(),
-    embedded ?? fetch('/api/v1/experiments', { credentials: 'include' }).then(okJsonOrNull),
+    embedded ?? apiFetch('/api/v1/experiments', { authErrors: 'caller' }).then(okJsonOrNull),
   ]);
 
   if (pub.status === 'fulfilled' && pub.value) {
