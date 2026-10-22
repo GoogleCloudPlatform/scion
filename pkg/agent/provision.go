@@ -47,8 +47,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrAgentProjectUnresolved is returned by DeleteAgentFiles when the
-// project path resolves to no existing project directory.
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles and
+// DeleteAgentFilesForHubProject when the project path resolves to no
+// existing project directory.
 var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
 
 // DeleteAgentFiles removes agentName's files in the project projectPath
@@ -56,7 +57,27 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // removeBranch, branch, and its external per-agent state). It never touches
 // another project's directories; the global project's agents are deleted
 // only when the global project is the target.
+//
+// It resolves the external per-agent state from the project-id marker only.
+// A caller that knows the Hub project ID the agent was started with uses
+// DeleteAgentFilesForHubProject, so delete resolves the agent's state
+// directory with the same Hub project ID lookup uses.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, "", removeBranch)
+}
+
+// DeleteAgentFilesForHubProject is DeleteAgentFiles for an agent started
+// with the Hub project ID hubProjectID. Besides everything DeleteAgentFiles
+// removes, it removes the agent's state directory as GetAgent and
+// ProvisionAgent resolve it from that ID (config.AgentDirForProject with
+// the shared-workspace root), when that is a different directory from the
+// ones DeleteAgentFiles already removes. An empty hubProjectID is exactly
+// DeleteAgentFiles.
+func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, hubProjectID, removeBranch)
+}
+
+func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
 	// Every path built below joins agentName onto some directory -- the
 	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
@@ -85,6 +106,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	branchDeleted := false
 	var repoRoot string
 	var externalAgentDir string
+	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -139,12 +161,18 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if layout.externalAgentsRoot != "" {
 			externalAgentDir = filepath.Join(layout.externalAgentsRoot, agentName)
 		}
+
+		hubAgentDir = hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir)
 	}
 
 	// Every removal below passes the guard (projectAgentFilesGuard): only
 	// the agent's own directories may be removed, never a project
 	// workspace. Each removal acts on the path the guard returns.
-	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName)
+	// hubAgentDir (when set) is one of the agent's own directories, the
+	// state dir ProvisionAgent's guard also trusts; it is verified like an
+	// extra root (anchored at its parent, not trusted when it resolves
+	// elsewhere). An empty hubAgentDir is ignored.
+	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName, hubAgentDir)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -448,13 +476,21 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// owned by a mapped subuid on the host, making them inaccessible to the
 	// normal user. If standard removal fails, try `podman unshare rm -rf`
 	// which enters the user namespace where the mapped UIDs are accessible.
-	if externalAgentDir != "" {
-		if _, err := os.Stat(externalAgentDir); err == nil {
-			extRemove, err := guard.check(externalAgentDir)
+	//
+	// The state dir resolved from the Hub project ID (hubAgentDir) is
+	// removed the same way: it holds a shared-workspace agent's state and
+	// no worktree. The guard trusts it as one of the agent's own
+	// directories (it is passed to the guard above).
+	for _, extDir := range []string{externalAgentDir, hubAgentDir} {
+		if extDir == "" {
+			continue
+		}
+		if _, err := os.Stat(extDir); err == nil {
+			extRemove, err := guard.check(extDir)
 			if err != nil {
 				return branchDeleted, fmt.Errorf("delete: %w", err)
 			}
-			util.Debugf("delete: removing external agent state dir: %s", externalAgentDir)
+			util.Debugf("delete: removing external agent state dir: %s", extDir)
 			if err := util.RemoveAllSafe(extRemove); err != nil {
 				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
 				unshareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -467,6 +503,30 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	}
 
 	return branchDeleted, nil
+}
+
+// hubStateDirToRemove returns the agent's state directory as lookup
+// resolves it from hubProjectID (agentStateDir: config.AgentDirForProject
+// with the shared-workspace root), for deleteAgentFiles to remove besides
+// the directories it removes anyway. The external dir from the project-id
+// marker (externalAgentDir) and <projectDir>/agents/<agentName> are
+// removed anyway, so when the directory is one of them it returns "", as
+// it does for an empty hubProjectID or a directory that cannot be resolved.
+func hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir string) string {
+	if hubProjectID == "" {
+		return ""
+	}
+	dir, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
+	if err != nil {
+		return ""
+	}
+	if externalAgentDir != "" && sameDir(dir, externalAgentDir) {
+		return ""
+	}
+	if sameDir(dir, filepath.Join(projectDir, "agents", agentName)) {
+		return ""
+	}
+	return dir
 }
 
 // persistedEmptyPerAgent reports whether the agent's persisted
@@ -668,7 +728,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // Agent names are unique only within a project, so entries that belong to
 // another project on the same broker are skipped: otherwise a running agent
 // with the same name elsewhere would make every reprovision of this one
-// refuse. The scoping is a post-filter (matchAgentProject), not a runtime
+// refuse. The scoping is a post-filter (mayBeProjectsEntry), not a runtime
 // label filter, so it fails closed: an entry whose project cannot be told
 // (legacy labels, project ID only on AgentInfo, or no project info at all)
 // still counts as this agent's container.
@@ -678,7 +738,7 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName
 		return false, err
 	}
 	for _, a := range agents {
-		if !matchAgentProject(a, projectName, projectID) {
+		if !mayBeProjectsEntry(a, projectName, projectID) {
 			continue
 		}
 		if a.Name == name || strings.TrimPrefix(a.Name, "/") == name || strings.EqualFold(a.Name, name) {
@@ -688,6 +748,35 @@ func (m *AgentManager) containerIsRunning(ctx context.Context, name, projectName
 		}
 	}
 	return false, nil
+}
+
+// mayBeProjectsEntry reports whether an entry may belong to the project, for
+// the running-container check above. That check refuses when in doubt, so it
+// skips only entries positively identified as another project's: by a
+// project ID (label, then field) that differs from projectID, or, when the
+// request or the entry has no ID, by a project name (label, then field) that
+// differs from projectName. Every other entry, including one with no project
+// information at all, counts. This is deliberately not matchAgentProject,
+// which decides which entry an operation may act on and so accepts only
+// entries proven to be the project's.
+func mayBeProjectsEntry(a api.AgentInfo, projectName, projectID string) bool {
+	if projectID != "" {
+		if labelProjectID := projectkeys.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
+			return labelProjectID == projectID
+		}
+		if a.ProjectID != "" {
+			return a.ProjectID == projectID
+		}
+	}
+	if projectName != "" {
+		if labelProject := projectkeys.ProjectNameFromLabels(a.Labels); labelProject != "" {
+			return labelProject == projectName
+		}
+		if a.Project != "" {
+			return a.Project == projectName
+		}
+	}
+	return true
 }
 
 // ErrReprovisionRefused wraps every refusal Reprovision returns (design §3.4
@@ -2137,11 +2226,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 3b: Resolve and install referenced skills from skill bank
 	var resolvedSkillsRecord *SkillResolutionRecord
-	if len(finalScionCfg.Skills) > 0 {
+	// Optional scion-platform:// entries are display-only: Step 3a2 installs
+	// those skills, so they are left out of resolution rather than logged as
+	// skipped on every start (ptone/scion#5431).
+	skillRefs := resolvableSkillRefs(finalScionCfg.Skills)
+	if len(skillRefs) > 0 {
 		resolver := SkillResolverFromContext(ctx)
 		if resolver == nil {
 			// S1: Fail closed for required skills
-			requiredURIs := collectRequiredSkillURIs(finalScionCfg.Skills)
+			requiredURIs := collectRequiredSkillURIs(skillRefs)
 			if len(requiredURIs) > 0 {
 				return "", "", nil, fmt.Errorf(
 					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
@@ -2149,7 +2242,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 						"  hint: connect to a Hub or mark skills as optional",
 					len(requiredURIs), strings.Join(requiredURIs, ", "))
 			}
-			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(finalScionCfg.Skills))
+			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skillRefs))
 		} else {
 			projectID := ResolveProjectIDFromContext(ctx)
 			if projectID == "" {
@@ -2161,18 +2254,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 
 			skillFetchStart := time.Now()
-			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
+			result, err := resolver.Resolve(ctx, skillRefs, resolveOpts)
 			slog.Info("provision: skill fetch complete", "agent", agentName,
 				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
-				"requested", len(finalScionCfg.Skills), "ok", err == nil)
+				"requested", len(skillRefs), "ok", err == nil)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
 
 			// S1 completeness: build requested URI set
-			requestedURIs := make(map[string]*api.SkillReference, len(finalScionCfg.Skills))
-			for i := range finalScionCfg.Skills {
-				requestedURIs[finalScionCfg.Skills[i].URI] = &finalScionCfg.Skills[i]
+			requestedURIs := make(map[string]*api.SkillReference, len(skillRefs))
+			for i := range skillRefs {
+				requestedURIs[skillRefs[i].URI] = &skillRefs[i]
 			}
 
 			resolvedURIs := make(map[string]bool)
@@ -3067,8 +3160,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if err != nil {
 		return true
 	}
+	// projectName is a slug, "global" or "unknown", never empty, so the
+	// match is scoped: without a project ID it accepts no entry.
 	for _, e := range entries {
-		if matchAgentProject(e, projectName, projectID) {
+		if matchAgentProject(e, projectName, scopeProjectID(projectID, opts.ProjectPath)) {
 			return true
 		}
 	}

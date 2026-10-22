@@ -175,44 +175,60 @@ func TestBuildStartContext_GlobalDirRefusalWritesNothing(t *testing.T) {
 }
 
 // The same refusal through the createAgent handler: a 409 response and no
-// change to any file under HOME.
+// change to any file under HOME, with the embedded default harness config
+// in effect. The refusal comes before the env-gather preflight and the
+// harness-config policy gate, which resolve the template chain and can
+// hydrate the default template under HOME (ptone/scion#5432). It used to
+// fail whenever a v1 global settings file was present.
 func TestCreateAgent_GlobalDirRefusalWritesNothing(t *testing.T) {
-	srv, _ := newTestServerWithProvisionCapture()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("SCION_PROJECT_ID", "")
-	globalDir := filepath.Join(home, ".scion")
-	if err := os.MkdirAll(globalDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	// With a default harness config (the embedded defaults set one), the
-	// handler resolves it, and hydrates the default template under HOME,
-	// before this refusal (ptone/scion#5432); clear it so the refusal
-	// itself is what is tested.
-	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	before := treeSnapshot(t, home)
+	for _, tc := range []struct {
+		name     string
+		settings string // global settings.yaml; "" writes none
+	}{
+		{name: "no global settings file"},
+		{name: "v1 global settings file", settings: "schema_version: \"1\"\n"},
+		{name: "v1 global settings with a default template", settings: "schema_version: \"1\"\ndefault_template: claude\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServerWithProvisionCapture()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_PROJECT_ID", "")
+			globalDir := filepath.Join(home, ".scion")
+			if err := os.MkdirAll(globalDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.settings != "" {
+				if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(tc.settings), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := treeSnapshot(t, home)
 
-	body := `{
-		"name": "x",
-		"id": "agent-uuid-gd-refused",
-		"slug": "x",
-		"projectId": ` + strconv.Quote(testOtherProjectID) + `,
-		"projectSlug": "web-app",
-		"projectPath": ` + strconv.Quote(globalDir) + `,
-		"provisionOnly": true,
-		"config": {"template": "claude"}
-	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+			body := `{
+				"name": "x",
+				"id": "agent-uuid-gd-refused",
+				"slug": "x",
+				"projectId": ` + strconv.Quote(testOtherProjectID) + `,
+				"projectSlug": "web-app",
+				"projectPath": ` + strconv.Quote(globalDir) + `,
+				"provisionOnly": true,
+				"config": {"template": "claude"}
+			}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
-	}
-	if after := treeSnapshot(t, home); !reflect.DeepEqual(before, after) {
-		t.Errorf("files under HOME changed:\nbefore: %v\nafter:  %v", before, after)
+			if w.Code != http.StatusConflict {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "global scion directory") {
+				t.Errorf("response does not name the refusal: %s", w.Body.String())
+			}
+			if after := treeSnapshot(t, home); !reflect.DeepEqual(before, after) {
+				t.Errorf("files under HOME changed:\nbefore: %v\nafter:  %v", before, after)
+			}
+		})
 	}
 }

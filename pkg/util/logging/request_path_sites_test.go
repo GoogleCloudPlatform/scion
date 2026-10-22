@@ -114,7 +114,6 @@ var requestPathSites = []requestPathSite{
 	{"lifecycle_hook_executor.go", "HTTPExecutor.recordAudit", "URL(bare)", 2, "not a request URL: a lifecycle hook action's configured URL (only its host is recorded)"},
 	{"maintenance_executors.go", "CheckForReleaseUpdates", "URL(bare)", 1, "not a request URL: a release's URL"},
 	{"perftrace_middleware.go", "perfHeadersAllowed", "URL.Path", 1, "comparison: decides whether timing headers may be added"},
-	{"project_webdav.go", "Server.handleProjectWebDAV", "URL.Path", 3, "routing: maps the WebDAV path onto the project files"},
 	{"pty_handlers.go", "Server.handleAgentPTY", "URL.Path", 1, "routing: extracts the agent id"},
 	{"redact.go", "IsCredentialURL", "URL(bare)", 1, "the redaction predicate"},
 	{"redact.go", "RedactURL", "URL(bare)", 1, "the redaction helper"},

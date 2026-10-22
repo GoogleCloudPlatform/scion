@@ -222,27 +222,24 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 //
-// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// bucket, runtimes, harnesses and profiles are not stored at the project
 // layer: GET never returns them, and a PUT that sets any of them (to a
 // non-null value) is refused with 400. They are configured in server or
-// Runtime Broker settings.
+// Runtime Broker settings, so this type has no fields for them
+// (ptone/scion#5360).
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
 	// keeps the stored value and an empty string clears it, so a client that
 	// does not manage the profile (the web settings page) cannot wipe it.
-	ActiveProfile          *string                `json:"activeProfile,omitempty"`
-	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
-	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
-	DefaultModel           string                 `json:"defaultModel,omitempty"`
-	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
-	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
-	AutoExposePortsEnabled *bool                  `json:"autoExposePortsEnabled,omitempty"`
-	Bucket                 *BucketConfig          `json:"bucket,omitempty"`
-	Runtimes               map[string]interface{} `json:"runtimes,omitempty"`
-	Harnesses              map[string]interface{} `json:"harnesses,omitempty"`
-	Profiles               map[string]interface{} `json:"profiles,omitempty"`
+	ActiveProfile          *string `json:"activeProfile,omitempty"`
+	DefaultTemplate        string  `json:"defaultTemplate,omitempty"`
+	DefaultHarnessConfig   string  `json:"defaultHarnessConfig,omitempty"`
+	DefaultHarnessAuth     string  `json:"defaultHarnessAuth,omitempty"`
+	DefaultModel           string  `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
+	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
 	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
@@ -349,13 +346,6 @@ type ProjectResourceSpec struct {
 type ProjectResourceList struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
-}
-
-// BucketConfig represents cloud storage configuration.
-type BucketConfig struct {
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
-	Prefix   string `json:"prefix,omitempty"`
 }
 
 // RuntimeBroker represents a runtime broker from the Hub API.

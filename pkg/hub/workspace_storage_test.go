@@ -537,7 +537,7 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 		slug, mountBase, tmpHome, "slug=", "local_path=", "volume_path=")
 
 	// Repeated resolutions must not repeat the warning: this runs on the
-	// WebDAV, clone and cache paths.
+	// workspace file, clone and cache paths.
 	for range 3 {
 		_, err := srv.hubManagedProjectPath(slug)
 		require.NoError(t, err)
@@ -1257,85 +1257,6 @@ func TestWorkspaceStorage_WriteVerifySurvivesRestart(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(path2, "persistent.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, testContent, data, "file content should survive simulated restart")
-}
-
-// ============================================================================
-// WebDAV Safety Gate Tests
-// ============================================================================
-
-func TestWebDAVSafetyGate_WriteMethodsBlocked(t *testing.T) {
-	srv, _ := testServer(t)
-	t.Setenv("K_SERVICE", "hub-service")
-
-	project, _ := createTestHubManagedProject(t, srv, "WebDAV Gate Test")
-
-	blockedMethods := []string{"PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH"}
-	for _, method := range blockedMethods {
-		t.Run(method, func(t *testing.T) {
-			rec := doRequest(t, srv, method,
-				fmt.Sprintf("/api/v1/projects/%s/dav/test.txt", project.ID), nil)
-			assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
-				"WebDAV %s should be blocked on Cloud Run with local backend", method)
-		})
-	}
-}
-
-// ============================================================================
-// Phase 2: WebDAV Lock Store Tests
-// ============================================================================
-
-func TestWebDAVLockStore_PerProject(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Create two projects
-	p1, _ := createTestHubManagedProject(t, srv, "Lock Project 1")
-	p2, _ := createTestHubManagedProject(t, srv, "Lock Project 2")
-
-	// Send PROPFIND requests to trigger lock store creation
-	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", p1.ID), nil)
-	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", p2.ID), nil)
-
-	// Both should now have lock stores, and they should be different instances
-	ls1, ok1 := srv.webdavLocks.Load(p1.ID)
-	ls2, ok2 := srv.webdavLocks.Load(p2.ID)
-	assert.True(t, ok1, "project 1 should have a lock store")
-	assert.True(t, ok2, "project 2 should have a lock store")
-	assert.NotNil(t, ls1, "project 1 lock store should not be nil")
-	assert.NotNil(t, ls2, "project 2 lock store should not be nil")
-	// Different projects should have independent lock stores
-	assert.True(t, ls1 != ls2, "different projects should have different lock stores")
-}
-
-func TestWebDAVLockStore_SameProjectSharesLocks(t *testing.T) {
-	srv, _ := testServer(t)
-
-	project, _ := createTestHubManagedProject(t, srv, "Lock Shared Project")
-
-	// First PROPFIND triggers lock store creation
-	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID), nil)
-	ls1, ok := srv.webdavLocks.Load(project.ID)
-	require.True(t, ok)
-
-	// Second request to same project should reuse the same lock store
-	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID), nil)
-	ls2, ok := srv.webdavLocks.Load(project.ID)
-	require.True(t, ok)
-
-	assert.Same(t, ls1, ls2, "same project should reuse the same lock store across requests")
-}
-
-func TestWebDAVSafetyGate_ReadMethodsAllowed(t *testing.T) {
-	srv, _ := testServer(t)
-	t.Setenv("K_SERVICE", "hub-service")
-
-	project, _ := createTestHubManagedProject(t, srv, "WebDAV Read Gate")
-
-	// PROPFIND (directory listing) should still work
-	rec := doRequest(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID), nil)
-	// PROPFIND returns 207 Multi-Status on success
-	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
-		"WebDAV PROPFIND should not be blocked on Cloud Run")
 }
 
 // The ephemeral-path warning is suppressed per slug for the life of the
