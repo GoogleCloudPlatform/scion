@@ -326,8 +326,9 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     tab: 'agent',
     label: 'Agent name',
     tier: 'T0',
-    help: 'The display name.',
+    help: 'The display name. It can be replaced, not emptied.',
     editOnly: true,
+    replaceOnlyInEdit: true,
   },
   {
     key: 'config.task',
@@ -839,8 +840,13 @@ export class ScionAgentConfigForm extends LitElement {
         return false;
       case 'gcp-identity':
         return !!this.gcpIdentity?.gcpIdentityUserSet;
-      default:
-        return isTouched(this.drafts[f.key]);
+      default: {
+        const d = this.drafts[f.key];
+        // A replace-only field emptied in edit mode is not an edit: the hub
+        // would keep the stored value, so nothing is pending.
+        if (this.mode === 'edit' && f.replaceOnlyInEdit && d && d.text.trim() === '') return false;
+        return isTouched(d);
+      }
     }
   }
 
@@ -999,10 +1005,6 @@ export class ScionAgentConfigForm extends LitElement {
       const d = this.drafts[f.key];
       if (!isTouched(d) || d.cleared || d.unlimited) continue;
       const text = d.text.trim();
-      if (f.control === 'name' && text === '') {
-        errors.push(`${f.label} cannot be empty.`);
-        continue;
-      }
       if (text === '') continue;
       if (f.control === 'timezone' && !isValidTimeZone(text)) {
         errors.push(`"${text}" is not a valid IANA timezone name.`);
@@ -1732,13 +1734,13 @@ export class ScionAgentConfigForm extends LitElement {
       ${Object.keys(this.resourceDrafts).length > 0
         ? html`<sl-button
             size="small"
-            class="clear"
+            class=${this.mode === 'edit' ? 'undo' : 'clear'}
             ?disabled=${off}
             @click=${() => {
               this.resourceDrafts = {};
               this.emitChange();
             }}
-            >Clear</sl-button
+            >${this.mode === 'edit' ? 'Undo' : 'Clear'}</sl-button
           >`
         : nothing}
     </div>`;

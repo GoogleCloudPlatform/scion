@@ -396,7 +396,7 @@ describe('agent edit page shared goldens (replayed by the hub tests)', () => {
     expect(patches().map((c) => c.body)).toEqual([golden('env')]);
   });
 
-  it('an emptied next task sends no PATCH', async () => {
+  it('an emptied next task is not an edit: Save stays disabled and nothing is sent', async () => {
     const agent = makeAgent('stopped', 5);
     agent.appliedConfig!.task = 'old task';
     const el = await mount(agent);
@@ -409,8 +409,17 @@ describe('agent edit page shared goldens (replayed by the hub tests)', () => {
     input.dispatchEvent(new Event('sl-input'));
     await flush(form);
     await flush(el);
+    expect(form.touchedKeys).toEqual([]);
+    expect(button(el, 'save')!.hasAttribute('disabled')).toBe(true);
     await click(el, 'save');
     expect(patches()).toEqual([]);
+  });
+
+  it('an emptied name is not an edit: Save stays disabled', async () => {
+    const el = await mount(makeAgent('stopped', 5));
+    await editField(el, 'name', { type: '' });
+    expect(formOf(el)!.touchedKeys).toEqual([]);
+    expect(button(el, 'save')!.hasAttribute('disabled')).toBe(true);
   });
 
   it('next task', async () => {

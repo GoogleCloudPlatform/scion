@@ -318,10 +318,13 @@ describe('name and labels apply immediately in every phase', () => {
     expect(el.collectTopLevel()).toEqual({ labels: {} });
   });
 
-  it('an emptied name is a validation error', async () => {
+  it('an emptied name is not an edit: no Clear, nothing sent, no error', async () => {
     const el = await mount('stopped');
+    expect(field(el, 'name').querySelector('sl-button.clear')).toBeNull();
     await typeInto(el, 'name', '  ');
-    expect(el.validate()).toEqual(['Agent name cannot be empty.']);
+    expect(el.touchedKeys).not.toContain('name');
+    expect(el.collectTopLevel()).toEqual({});
+    expect(el.validate()).toEqual([]);
   });
 });
 
@@ -534,6 +537,155 @@ describe('auto-expose source and inheritance in edit mode', () => {
     await el.updateComplete;
     expect(el.collectConfigPatch()).toEqual({});
   });
+});
+
+/**
+ * Edit-mode Clear, swept over the whole field table against what the hub's
+ * PATCH does with an empty value (ptone/scion#3975):
+ * - clear-null / clear-set / clear-empty: the hub records the clear (it
+ *   reverts to the inherited value, or reports it as taking effect at the
+ *   next reincarnation), so Clear is offered and sends null ("" for the
+ *   timezone pin, which unpins);
+ * - replace-only: the hub ignores an empty value (name; the task a start
+ *   sends), so no Clear, and an emptied control is not an edit;
+ * - undo: the control's button only discards the user's edit;
+ * - editor: rows are removed in the editor and the whole map is sent;
+ * - not-saveable: fixed, read-only, or disabled for this phase.
+ */
+const EDIT_CLEAR_SWEEP: Record<
+  string,
+  'clear-null' | 'clear-set' | 'clear-empty' | 'replace-only' | 'undo' | 'editor' | 'not-saveable'
+> = {
+  name: 'replace-only',
+  'config.task': 'replace-only',
+  projectId: 'not-saveable',
+  template: 'not-saveable',
+  harnessConfig: 'not-saveable',
+  runtimeBrokerId: 'not-saveable',
+  profile: 'not-saveable',
+  branch: 'not-saveable',
+  'config.model': 'clear-null',
+  'config.thinking_level': 'clear-set',
+  'config.image': 'clear-null',
+  'config.user': 'clear-null',
+  'config.telemetry': 'clear-null',
+  autoExpose: 'undo',
+  explicitTimezone: 'clear-empty',
+  agentRole: 'not-saveable',
+  messageMode: 'not-saveable',
+  'config.auth_selectedType': 'clear-null',
+  gcp_identity: 'not-saveable',
+  'config.system_prompt': 'not-saveable',
+  'config.agent_instructions': 'not-saveable',
+  'config.max_turns': 'clear-null',
+  'config.max_model_calls': 'clear-null',
+  'config.max_duration': 'clear-null',
+  'config.resources': 'undo',
+  'config.env': 'editor',
+  labels: 'editor',
+};
+
+describe('edit-mode Clear matches what the hub does with an empty value (field table sweep)', () => {
+  const STORED = {
+    task: 'old task',
+    model: 'm',
+    image: 'img',
+    user: 'u',
+    auth_selectedType: 'api-key',
+    max_turns: 5,
+    max_model_calls: 6,
+    max_duration: '1h',
+    telemetry: { enabled: true },
+    thinking_level: 40,
+    resources: { requests: { cpu: '1' } },
+  };
+  const mountStored = () =>
+    mount('stopped', {
+      values: STORED,
+      editValues: {
+        ...EDIT_VALUES,
+        explicitTimezone: 'Europe/Berlin',
+        explicitEnv: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      },
+    });
+
+  it('classifies every field of the table', () => {
+    expect(Object.keys(EDIT_CLEAR_SWEEP).sort()).toEqual(
+      mod.AGENT_CONFIG_FIELDS.map((f) => f.key).sort()
+    );
+  });
+
+  for (const [key, kind] of Object.entries(EDIT_CLEAR_SWEEP)) {
+    it(`${key}: ${kind}`, async () => {
+      const el = await mountStored();
+      const f = () => field(el, key);
+      const clearBtn = () => f().querySelector('sl-button.clear') as HTMLElement | null;
+      const def = mod.AGENT_CONFIG_FIELDS.find((d) => d.key === key)!;
+      switch (kind) {
+        case 'clear-null':
+        case 'clear-empty': {
+          expect(el.fieldSaveable(def)).toBe(true);
+          expect(clearBtn()).not.toBeNull();
+          expect(clearBtn()!.hasAttribute('disabled')).toBe(false);
+          clearBtn()!.click();
+          await el.updateComplete;
+          if (kind === 'clear-empty') {
+            expect(el.collectTopLevel()).toEqual({ explicitTimezone: '' });
+          } else {
+            const configKey = key.replace(/^config\./, '');
+            expect(el.collectConfigPatch()).toEqual({ [configKey]: null });
+          }
+          break;
+        }
+        case 'clear-set': {
+          const box = f().querySelector('sl-checkbox.set') as HTMLInputElement;
+          expect(box.hasAttribute('checked')).toBe(true);
+          box.checked = false;
+          box.dispatchEvent(new Event('sl-change'));
+          await el.updateComplete;
+          expect(el.collectConfigPatch()).toEqual({ thinking_level: null });
+          break;
+        }
+        case 'replace-only': {
+          expect(el.fieldSaveable(def)).toBe(true);
+          expect(clearBtn()).toBeNull();
+          await typeInto(el, key, '');
+          expect(el.touchedKeys).not.toContain(key);
+          expect(el.collectConfigPatch()).toEqual({});
+          expect(el.collectTopLevel()).toEqual({});
+          break;
+        }
+        case 'undo': {
+          expect(clearBtn()).toBeNull();
+          if (key === 'autoExpose') {
+            const sel = f().querySelector('sl-select') as HTMLElement & { value: string };
+            sel.value = 'false';
+            sel.dispatchEvent(new Event('sl-change'));
+          } else {
+            const input = f().querySelector('.sub sl-input') as HTMLInputElement;
+            input.value = '2';
+            input.dispatchEvent(new Event('sl-input'));
+          }
+          await el.updateComplete;
+          expect(clearBtn()).toBeNull();
+          const undo = f().querySelector('sl-button.undo') as HTMLElement;
+          expect(undo.textContent).toContain('Undo');
+          undo.click();
+          await el.updateComplete;
+          expect(el.touchedKeys).not.toContain(key);
+          break;
+        }
+        case 'editor':
+          expect(el.fieldSaveable(def)).toBe(true);
+          expect(clearBtn()).toBeNull();
+          break;
+        case 'not-saveable':
+          expect(el.fieldSaveable(def)).toBe(false);
+          expect(clearBtn() === null || clearBtn()!.hasAttribute('disabled')).toBe(true);
+          break;
+      }
+    });
+  }
 });
 
 describe('Clear on a field that only inherits', () => {
