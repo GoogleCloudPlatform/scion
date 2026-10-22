@@ -1708,12 +1708,12 @@ authDone:
 	}
 	preValidationWorkspace := effectiveWorkspace
 	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	// A refusal from detectRepoRoot is returned after the workspace source
+	// check below, which reports the more specific errors for the shapes it
+	// rejects; nothing between here and there sets up a mount.
+	var detectErr error
 	if repoRoot == "" {
-		var detectErr error
 		repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
-		if detectErr != nil && !emptyPerAgent {
-			return nil, detectErr
-		}
 	}
 	// Empty-per-agent (design #2703): the workspace is exactly the private
 	// agents/<slug>/workspace directory, never a git checkout, so no repo
@@ -1726,6 +1726,7 @@ authDone:
 			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
 		}
 		repoRoot = ""
+		detectErr = nil
 	}
 
 	// Reject a workspace source that is not an allowed workspace path before
@@ -1771,6 +1772,9 @@ authDone:
 			return nil, fmt.Errorf("%w (delete and recreate this agent, or restart it with an explicit --workspace, to use a workspace under the project's own directory)", err)
 		}
 		return nil, err
+	}
+	if detectErr != nil {
+		return nil, detectErr
 	}
 	effectiveWorkspace = resolvedWorkspace
 
