@@ -3093,6 +3093,9 @@ func projectRepoRoot(projectRoot string) string {
 	if projectRoot == "" {
 		return ""
 	}
+	// A project root that cannot be resolved has no repository root, on
+	// purpose: callers then mount the workspace plain or refuse, rather than
+	// walk up from an unresolved spelling of the path.
 	dir, err := filepath.EvalSymlinks(projectRoot)
 	if err != nil {
 		return ""
@@ -3149,6 +3152,9 @@ func resolvedPathWithin(p, root string) bool {
 	if p == "" || root == "" {
 		return false
 	}
+	// Both sides are compared in the same form on purpose (both resolved, or
+	// both as given): comparing a resolved path with an unresolved one can
+	// make a path whose symlinked components lead elsewhere look contained.
 	rp, errP := filepath.EvalSymlinks(p)
 	rr, errR := filepath.EvalSymlinks(root)
 	if errP != nil || errR != nil {
