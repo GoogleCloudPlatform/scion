@@ -664,6 +664,9 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	s.forgetBrokerBackfill(id)
+	// The broker's reservations are released after its row is gone (the
+	// release requires that), audited as the sweep does (ptone/scion#3994).
+	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
