@@ -167,8 +167,8 @@ type appleGateOpts struct {
 	// container's PATH lookup would, so a check whose first word were plain
 	// stat or plain env would record a shadow call. That is all the row
 	// shows by behaviour: the mock never resolves the later words, so the
-	// absolute /usr/bin/stat that env runs, and the empty environment
-	// (env -i), are pinned by the exact-argv test in
+	// absolute /usr/bin/stat and /bin/cat that env runs, and the empty
+	// environment (env -i), are pinned by the exact-argv test in
 	// TestAppleContainerRuntime_Run_AgentsMaskArgs only.
 	shadowPath bool
 	// mountinfo is what the mock prints for the read-only check (cat of
