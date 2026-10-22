@@ -1042,7 +1042,8 @@ for the image fields and the template: its create-time inline image (`agent-info
 `explicitImage` / `explicitImagePullPolicy`) ranks at the top tier, its template comes from
 `agent-info.json`, its Hub-sent or requested profile drives the override lookup, and the merged
 `scion-agent.json` value stands in for an unresolvable template. Its profile, harness config and
-runtime are never read from `agent-info.json` (below).
+runtime are not taken from `agent-info.json` for a start, a restart or the other uses listed
+below.
 
 On every start and restart, the Runtime Broker sets the start's profile to the profile recorded
 in the agent's image provenance (a flat broker has no profiles and skips this), so the

@@ -602,4 +602,4 @@ Agent records in the Hub use a `StateVersion` field for optimistic concurrency c
 
 ### Hub Database and Broker Files
 
-The Hub database is the source of truth for agent state. On the broker host, the per-agent files in the broker-side agent dir (`agents/<name>/scion-agent.json` and the image provenance record) hold the provisioned configuration and are what the broker reads when it starts, stops or reports an agent. `agents/<name>/home/agent-info.json` lives in the agent home, which the agent can write: the broker reads its status from it, but never the agent's profile, harness config or runtime.
+The Hub database is the source of truth for agent state. On the broker host, the per-agent files in the broker-side agent dir (`agents/<name>/scion-agent.json` and the image provenance record) hold the provisioned configuration and are what the broker reads when it starts, stops or reports an agent. `agents/<name>/home/agent-info.json` lives in the agent home, which the agent can write: the broker reads its status from it, but does not take the agent's profile, harness config or runtime from it to start, stop or list the agent.
