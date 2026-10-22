@@ -147,6 +147,15 @@ func (a *UsageAnalytics) DroppedNoIdentity() int64 {
 	return a.droppedNoIdentity.Load()
 }
 
+// Invalid counts events that could not be appended (outbox unavailable or
+// an append error); the outbox's own counters break the latter down.
+func (a *UsageAnalytics) Invalid() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.invalid.Load()
+}
+
 // Outbox returns the producer's outbox, opening it if lazy; nil if it
 // cannot be opened.
 func (a *UsageAnalytics) Outbox() *AnalyticsOutbox {
@@ -197,7 +206,7 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 		CacheWrite:          obs.CacheWrite,
 		Reasoning:           obs.Reasoning,
 		TokenStatus:         obs.TokenStatus,
-		MalformedFields:     obs.MalformedFields,
+		MalformedFields:     append([]string{}, obs.MalformedFields...), // always written
 		ReportedCostMicros:  obs.ReportedCostMicros,
 	}
 	if ev.Harness == "" {

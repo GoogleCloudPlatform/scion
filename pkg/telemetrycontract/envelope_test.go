@@ -425,7 +425,6 @@ func TestMarshalEnforcesLabelsWithoutEventValidate(t *testing.T) {
 			t.Errorf("%s labels marshaled through an event whose Validate skips them", name)
 		}
 	}
-
 }
 
 // --- allowlist (WP0 review r4) -------------------------------------------
@@ -433,26 +432,37 @@ func TestMarshalEnforcesLabelsWithoutEventValidate(t *testing.T) {
 // Nested is an allowed nested object.
 type Nested struct {
 	Name   string   `json:"name"`
-	Counts []int64  `json:"counts,omitempty"`
+	Counts []int64  `json:"counts"`
 	Flag   *bool    `json:"flag,omitempty"`
 	Labels *Labels  `json:"labels,omitempty"`
-	Tags   []string `json:"tags,omitempty"`
+	Tags   []string `json:"tags"`
 }
+
+func newNested(name string) Nested { return Nested{Name: name, Counts: []int64{}, Tags: []string{}} }
 
 // allowedEvent uses every allowlisted shape.
 type allowedEvent struct {
 	Envelope
-	S      string   `json:"s"`
-	B      bool     `json:"b"`
-	I      int64    `json:"i"`
-	U      uint32   `json:"u"`
-	P      *int64   `json:"p,omitempty"`
-	L      Labels   `json:"l"`
-	N      Nested   `json:"n"`
-	NP     *Nested  `json:"np,omitempty"`
-	NS     []Nested `json:"ns,omitempty"`
-	Strs   []string `json:"strs,omitempty"`
-	Ints16 []int16  `json:"ints16,omitempty"`
+	S      string    `json:"s"`
+	B      bool      `json:"b"`
+	I      int64     `json:"i"`
+	U      uint32    `json:"u"`
+	P      *int64    `json:"p,omitempty"`
+	L      Labels    `json:"l"`
+	N      Nested    `json:"n"`
+	NP     *Nested   `json:"np,omitempty"`
+	NS     []Nested  `json:"ns"`
+	Strs   []string  `json:"strs"`
+	Ints16 []int16   `json:"ints16"`
+	PS     *[]string `json:"ps,omitempty"`
+	PN     *[]Nested `json:"pn,omitempty"`
+}
+
+// validAllowed returns an allowedEvent with every list known (non-nil).
+func validAllowed(env Envelope) *allowedEvent {
+	np := newNested("x")
+	return &allowedEvent{Envelope: env, L: Labels{{"k", "v"}}, N: newNested("n"), NP: &np,
+		NS: []Nested{newNested("y")}, Strs: []string{}, Ints16: []int16{}}
 }
 
 func (e *allowedEvent) Validate() error { return nil }
@@ -505,7 +515,8 @@ func (e *rejectPtrEvent[T]) Validate() error { return nil }
 func TestCheckStructureAllowlist(t *testing.T) {
 	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
 	empty := Labels{}
-	ok := &allowedEvent{Envelope: env, L: Labels{{"k", "v"}}, NP: &Nested{Name: "x", Labels: &empty}, NS: []Nested{{Name: "y"}}}
+	ok := validAllowed(env)
+	ok.NP.Labels = &empty
 	if _, err := Marshal(ok); err != nil {
 		t.Fatalf("allowlisted event rejected: %v", err)
 	}
@@ -711,8 +722,14 @@ func TestCheckStructureEqualDepthTaggedConflict(t *testing.T) {
 	if strings.Contains(string(b), "agent_ref") {
 		t.Fatalf("premise: encoding/json was expected to drop agent_ref: %s", b)
 	}
-	if err := checkStructure(typ); err == nil {
-		t.Error("checkStructure accepted an equal-depth tagged conflict")
+	// Both forms are rejected by the root-pointer/named-struct rule (the
+	// StructOf type is unnamed); embeddings themselves are covered by
+	// TestCheckStructureRejectsOtherEmbeddings.
+	if err := checkStructure(typ); err == nil || !strings.Contains(err.Error(), "pointer to a named struct") {
+		t.Errorf("equal-depth conflict type: err = %v", err)
+	}
+	if err := checkStructure(reflect.PointerTo(typ)); err == nil || !strings.Contains(err.Error(), "pointer to a named struct") {
+		t.Errorf("pointer to equal-depth conflict type: err = %v", err)
 	}
 }
 
@@ -748,14 +765,17 @@ func (e *namedEnvelopeEvent) Validate() error { return nil }
 
 func TestMarshalRejectsDuplicateAndShadowedWireNames(t *testing.T) {
 	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
-	cases := map[string]Event{
-		"shadows event_type":   &shadowEvent{Envelope: env, EventType: EventTypeUsage},
-		"behind nil pointer":   &nilPtrConflictEvent{Envelope: env, AgentRef: "x"},
-		"named envelope field": &namedEnvelopeEvent{Env: env, Envelope: env},
+	cases := map[string]struct {
+		ev   Event
+		want string // the rule that fires under the allowlist
+	}{
+		"shadows event_type":   {&shadowEvent{Envelope: env, EventType: EventTypeUsage}, `wire name "event_type"`},
+		"behind nil pointer":   {&nilPtrConflictEvent{Envelope: env, AgentRef: "x"}, "only embedding allowed"},
+		"named envelope field": {&namedEnvelopeEvent{Env: env, Envelope: env}, "Envelope as a named field"},
 	}
-	for name, ev := range cases {
-		if _, err := Marshal(ev); err == nil {
-			t.Errorf("%s: Marshal accepted it", name)
+	for name, tc := range cases {
+		if _, err := Marshal(tc.ev); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
 		}
 	}
 	var dst shadowEvent
@@ -805,13 +825,13 @@ type stringOptStringEvent struct {
 
 func (e *stringOptStringEvent) Validate() error { return nil }
 
-type cycleNode struct {
-	Next *cycleNode `json:"next,omitempty"`
+type CycleNode struct {
+	Next *CycleNode `json:"next,omitempty"`
 }
 
 type cycleEvent struct {
 	Envelope
-	Node *cycleNode `json:"node,omitempty"`
+	Node *CycleNode `json:"node,omitempty"`
 }
 
 func (e *cycleEvent) Validate() error { return nil }
@@ -833,10 +853,11 @@ func TestMarshalTagRulesAndCycles(t *testing.T) {
 	if _, err := Marshal(&stringOptStringEvent{Envelope: env, Name: "x"}); err == nil {
 		t.Error(`",string" on a string field accepted`)
 	}
-	n := &cycleNode{}
+	n := &CycleNode{}
 	n.Next = n
-	if _, err := Marshal(&cycleEvent{Envelope: env, Node: n}); err == nil {
-		t.Error("a pointer cycle must be an error, not a stack overflow")
+	// A cyclic value needs a recursive type, which the allowlist rejects.
+	if _, err := Marshal(&cycleEvent{Envelope: env, Node: n}); err == nil || !strings.Contains(err.Error(), "recursive") {
+		t.Errorf("pointer cycle: err = %v", err)
 	}
 }
 
@@ -872,9 +893,10 @@ func TestLabelsMarshalJSONValidates(t *testing.T) {
 	}
 	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
 	bad := Labels{{"k", ""}, {"k", ""}}
-	ev := &allowedEvent{Envelope: env, NS: []Nested{{Name: "x", Labels: &bad}}}
-	if _, err := Marshal(ev); err == nil {
-		t.Error("invalid Labels nested in a slice of structs accepted")
+	ev := validAllowed(env)
+	ev.NS[0].Labels = &bad
+	if _, err := Marshal(ev); err == nil || !strings.Contains(err.Error(), "duplicate label") {
+		t.Errorf("invalid Labels nested in a slice of structs: err = %v", err)
 	}
 }
 
@@ -1045,5 +1067,101 @@ func TestUnmarshalRejectsInvalidUTF8Input(t *testing.T) {
 	var ev testEvent
 	if err := Unmarshal(data, &ev); err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Errorf("invalid UTF-8 input: err = %v", err)
+	}
+}
+
+// --- WP0 review r6: lists, reused decode targets, wire names -------------
+
+type omitListEvent struct {
+	Envelope
+	Caps []string `json:"caps,omitempty"`
+}
+
+func (e *omitListEvent) Validate() error { return nil }
+
+type listEvent struct {
+	Envelope
+	Caps  []string  `json:"caps"`
+	Maybe *[]string `json:"maybe,omitempty"`
+	Objs  *[]Nested `json:"objs,omitempty"`
+}
+
+func (e *listEvent) Validate() error { return nil }
+
+// R6-1: a list is always written ([] when known-empty), never null; an
+// unknown list is a nil *[]T, omitted.
+func TestListsFollowOmitPolicy(t *testing.T) {
+	env := NewEnvelope(EventTypeHealth, "h", "ns", testEventTS, testEventTS)
+	if err := checkStructure(reflect.TypeOf(&omitListEvent{})); err == nil || !strings.Contains(err.Error(), "known-empty list") {
+		t.Errorf("omitempty on a list: err = %v", err)
+	}
+	if err := checkStructure(reflect.TypeOf(&omitLabelsEvent{})); err == nil || !strings.Contains(err.Error(), "known-empty list") {
+		t.Errorf("omitempty on Labels: err = %v", err)
+	}
+	if _, err := Marshal(&listEvent{Envelope: env}); err == nil || !strings.Contains(err.Error(), "written as null") {
+		t.Errorf("nil list: err = %v", err)
+	}
+	got, err := Marshal(&listEvent{Envelope: env, Caps: []string{}})
+	if err != nil || !strings.Contains(string(got), `"caps":[]`) || strings.Contains(string(got), "maybe") || strings.Contains(string(got), "null") {
+		t.Errorf("known-empty list / unknown *[]T: %s, %v", got, err)
+	}
+	empty, objs := []string{}, []Nested{newNested("o")}
+	got, err = Marshal(&listEvent{Envelope: env, Caps: []string{"a"}, Maybe: &empty, Objs: &objs})
+	if err != nil || !strings.Contains(string(got), `"maybe":[]`) || !strings.Contains(string(got), `"objs":[{"name":"o"`) {
+		t.Errorf("pointer to empty list must write []: %s, %v", got, err)
+	}
+	var back listEvent
+	if err := Unmarshal(got, &back); err != nil || back.Maybe == nil || len(*back.Maybe) != 0 {
+		t.Errorf("round trip of *[]T: %+v, %v", back, err)
+	}
+
+	// N7-2: a non-nil pointer to a nil list, and a nil list nested in a
+	// struct inside a list, are both written-as-null cases.
+	if _, err := Marshal(&listEvent{Envelope: env, Caps: []string{}, Maybe: new([]string)}); err == nil || !strings.Contains(err.Error(), "written as null") {
+		t.Errorf("pointer to nil list: err = %v", err)
+	}
+	nested := validAllowed(env)
+	nested.NS[0].Tags = nil
+	if _, err := Marshal(nested); err == nil || !strings.Contains(err.Error(), "written as null") {
+		t.Errorf("nil list nested in a list element: err = %v", err)
+	}
+}
+
+// N6-1: Unmarshal into a reused value does not keep a previous row's fields.
+func TestUnmarshalZeroesReusedTarget(t *testing.T) {
+	var ev testEvent
+	first := `{"schema_version":1,"event_type":"agent.usage","event_id":"a","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":1,"maybe":5,"labels":[]}`
+	second := `{"schema_version":1,"event_type":"agent.usage","event_id":"b","producer_namespace":"ns","event_ts":"2026-10-22T00:00:00Z","observed_ts":"2026-10-22T00:00:00Z","count":2,"labels":[]}`
+	if err := Unmarshal([]byte(first), &ev); err != nil || ev.Maybe == nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := Unmarshal([]byte(second), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Maybe != nil {
+		t.Errorf("stale maybe=%d kept from the previous row; must be unknown", *ev.Maybe)
+	}
+}
+
+// N6-2: BigQuery-safe wire names.
+func TestWireNamesAreBigQuerySafe(t *testing.T) {
+	for _, bad := range []string{"2x", "9", "_table_x", "_file_name", "_partitiontime", "_row_timestamp", "__root__", "_colidentifier_a"} {
+		if isWireName(bad) {
+			t.Errorf("isWireName(%q) = true", bad)
+		}
+	}
+	for _, ok := range []string{"x2", "_private", "cache_read", "a"} {
+		if !isWireName(ok) {
+			t.Errorf("isWireName(%q) = false", ok)
+		}
+	}
+}
+
+// N6-3: a uint64 beyond int64 range is rejected on the wire.
+func TestMarshalRejectsHugeUint64(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	_, err := Marshal(&rejectEvent[uint64]{Envelope: env, V: 1 << 63})
+	if err == nil || !strings.Contains(err.Error(), "exactly representable") {
+		t.Errorf("uint64 1<<63: err = %v", err)
 	}
 }

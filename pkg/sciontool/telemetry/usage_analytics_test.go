@@ -79,6 +79,9 @@ type tokenView struct {
 }
 
 func tokensOf(ev telemetrycontract.UsageEvent) tokenView {
+	if len(ev.MalformedFields) == 0 {
+		ev.MalformedFields = nil // always written as []; compare as "none"
+	}
 	return tokenView{ev.Input, ev.Output, ev.CacheRead, ev.CacheWrite, ev.Reasoning,
 		ev.ReasoningOverlapsOutput != nil && *ev.ReasoningOverlapsOutput, ev.InputDerivation, ev.TokenStatus, ev.MalformedFields}
 }
@@ -651,5 +654,34 @@ func TestAnalyticsStateEndToEnd(t *testing.T) {
 	}
 	if telemetrycontract.AnalyticsLogID != "scion-analytics" {
 		t.Error("log ID drifted from the frozen name")
+	}
+}
+
+// WP0 r7 F1: a minimally populated event from each producer marshals.
+// Lists must be built non-nil (a nil list is a runtime Marshal error), so
+// a forgotten initializer fails here, not in a live emitter.
+func TestUsageEventMinimalFromBuilderMarshals(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("SCION_LAUNCH_ID", "")
+	t.Setenv("SCION_BROKER_ID", "")
+	for name, obs := range map[string]UsageObservation{
+		"native minimal": {SourceKind: "claude.api_error", Status: "error", Calls: 1, TokenStatus: "not_reported"},
+		"metric minimal": metricObservation(usageIncrement{Status: "success", Calls: 1}, "fp"),
+		"hook minimal":   {SourceKind: "hook.x.model_end", Status: "success", Calls: 1, TokenStatus: "not_reported"},
+	} {
+		a := &UsageAnalytics{usageSource: telemetrycontract.UsageSourceNative, now: time.Now}
+		ev, err := a.build(obs)
+		if err != nil {
+			t.Fatalf("%s: build: %v", name, err)
+		}
+		// Ledger fields the outbox would assign.
+		ev.EventID, ev.ProducerEpoch, ev.ProducerSeq, ev.SourceOccurrence = "u1-x", "ep", 1, 1
+		if ev.SourceIdentity == telemetrycontract.SourceIdentityNone {
+			ev.IdentityAmbiguous = true
+		}
+		if _, err := telemetrycontract.Marshal(ev); err != nil {
+			t.Errorf("%s: minimal event does not marshal: %v", name, err)
+		}
 	}
 }

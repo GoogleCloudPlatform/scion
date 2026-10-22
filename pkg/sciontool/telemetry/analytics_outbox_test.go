@@ -51,6 +51,7 @@ func draftUsage(identity, sourceEventID string, input int64) *telemetrycontract.
 		Input:               &input,
 		InputDerivation:     telemetrycontract.InputDerivationReported,
 		TokenStatus:         telemetrycontract.TokenStatusPartial,
+		MalformedFields:     []string{},
 	}
 	if identity == telemetrycontract.SourceIdentityNone {
 		ev.SourceEventID = ""
