@@ -44,12 +44,12 @@ A scope decides which agents receive a variable or secret, not which people can 
 | **Project** | Every agent in that Project, whoever starts it. |
 | **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)). |
 
-Hub, Broker and Project scope apply to child agents in the same way as to the agents users start directly.
+Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
 The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode.
 
-:::caution[Hub and Broker scope are shared]
-Hub-scope and Broker-scope variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
+:::caution[Hub and Broker scopes are shared]
+Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
 
 Store sensitive secrets at **User** scope, so that only your own agents receive them, or at **Project** scope. A Project-scoped secret is shared with every member of the Project: their agents receive it, and those agents can also read it at runtime (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval)).
 :::
