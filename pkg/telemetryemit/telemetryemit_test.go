@@ -144,7 +144,8 @@ func TestCloudLoggingSinkClassification(t *testing.T) {
 		{"unauthenticated", status.Error(codes.Unauthenticated, "no"), ClassBlocked, ReasonAuth},
 		{"token refresh", fmt.Errorf("refresh: %w", &oauth2.RetrieveError{}), ClassBlocked, ReasonAuth},
 		{"unavailable", status.Error(codes.Unavailable, "down"), ClassTransient, "unavailable"},
-		{"resource exhausted", status.Error(codes.ResourceExhausted, "quota"), ClassTransient, "resourceexhausted"},
+		{"resource exhausted", status.Error(codes.ResourceExhausted, "quota"), ClassTransient, "resource_exhausted"},
+		{"deadline", status.Error(codes.DeadlineExceeded, "slow"), ClassTransient, "deadline_exceeded"},
 		{"network", errors.New("connection reset"), ClassTransient, ReasonUnknown},
 	}
 	for _, tc := range cases {

@@ -233,8 +233,12 @@ func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
 	}
 	res.Dropped = d.reportDrops(trim)
 
-	if d.claimAllowed(now) {
-		rows, err := d.cfg.Store.ClaimLifecycleOutbox(ctx, d.cfg.Owner, now, now.Add(d.cfg.LeaseDuration), d.cfg.BatchSize)
+	if allowed, probe := d.claimAllowed(now); allowed {
+		batch := d.cfg.BatchSize
+		if probe {
+			batch = 1 // a blocked sink is probed with one row
+		}
+		rows, err := d.cfg.Store.ClaimLifecycleOutbox(ctx, d.cfg.Owner, now, now.Add(d.cfg.LeaseDuration), batch)
 		if err != nil {
 			return res, fmt.Errorf("claim: %w", err)
 		}
@@ -277,11 +281,14 @@ func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
 }
 
 // claimAllowed is false while the sink is blocked and its next probe is
-// not yet due.
-func (d *Drainer) claimAllowed(now time.Time) bool {
+// not yet due; probe reports that the claim is a blocked-sink probe.
+func (d *Drainer) claimAllowed(now time.Time) (allowed, probe bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return !d.blocked || !now.Before(d.nextProbe)
+	if !d.blocked {
+		return true, false
+	}
+	return !now.Before(d.nextProbe), true
 }
 
 // deliver emits one leased row. It returns whether it was delivered and

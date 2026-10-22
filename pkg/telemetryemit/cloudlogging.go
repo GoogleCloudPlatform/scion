@@ -120,6 +120,30 @@ func classifyCloudLoggingError(err error) error {
 	case codes.Unauthenticated:
 		return Blocked(ReasonAuth, err)
 	default:
-		return Transient(strings.ToLower(st.Code().String()), err)
+		return Transient(grpcReason(st.Code()), err)
+	}
+}
+
+// grpcReason is the snake_case metric reason of a transient gRPC code, so
+// one cause has one attribute value across the gRPC and non-gRPC paths
+// (deadline_exceeded, resource_exhausted, ...).
+func grpcReason(c codes.Code) string {
+	switch c {
+	case codes.DeadlineExceeded:
+		return "deadline_exceeded"
+	case codes.ResourceExhausted:
+		return "resource_exhausted"
+	case codes.FailedPrecondition:
+		return "failed_precondition"
+	case codes.OutOfRange:
+		return "out_of_range"
+	case codes.AlreadyExists:
+		return "already_exists"
+	case codes.NotFound:
+		return "not_found"
+	case codes.DataLoss:
+		return "data_loss"
+	default: // single-word codes: Unavailable, Aborted, Internal, Canceled, Unknown, Unimplemented
+		return strings.ToLower(c.String())
 	}
 }

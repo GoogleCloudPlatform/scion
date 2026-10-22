@@ -266,7 +266,9 @@ func TestDrainerBlockedSinkKeepsRows(t *testing.T) {
 		t.Fatal("claimed while blocked before the probe was due")
 	}
 	h.clock.Advance(backoffBase)
-	h.drain(d) // probe fails again: backoff doubles
+	if probe := h.drain(d); probe.Claimed != 1 { // probe fails again: backoff doubles
+		t.Fatalf("a blocked-sink probe claims one row, claimed %d", probe.Claimed)
+	}
 	h.clock.Advance(backoffBase)
 	if again := h.drain(d); again.Claimed != 0 {
 		t.Fatal("probe backoff did not grow")
@@ -275,8 +277,11 @@ func TestDrainerBlockedSinkKeepsRows(t *testing.T) {
 	blocked = false
 	mu.Unlock()
 	h.clock.Advance(2 * backoffBase)
-	if res := h.drain(d); res.Delivered != 2 {
-		t.Fatalf("after unblock delivered %d", res.Delivered)
+	if res := h.drain(d); res.Delivered != 1 {
+		t.Fatalf("the successful probe delivers its one row, delivered %d", res.Delivered)
+	}
+	if res := h.drain(d); res.Delivered != 1 {
+		t.Fatalf("after unblock the next pass delivers the rest, delivered %d", res.Delivered)
 	}
 	if b, _ := d.Blocked(); b || h.dcounter.Get(telemetryemit.MetricSinkBlocked, telemetryemit.ReasonPermission) != 0 {
 		t.Fatal("still blocked after a successful delivery")

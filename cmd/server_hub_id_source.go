@@ -15,28 +15,15 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
-
-// hubIDFile is the persisted workstation hub ID file in the global
-// directory (config.PersistentHubID writes it).
-const hubIDFile = "hub-id"
 
 // resolveHubIDSource reports where the hub's resolved ID came from
 // (lifecycleevents.HubIDSource*), mirroring config.ResolveHubIDFromEnv's
 // precedence. The lifecycle observer runs only on a stable ID (WP1
 // design 3.3).
 func resolveHubIDSource(pinned bool, resolvedID string) string {
-	persisted := ""
-	if dir, err := config.GetGlobalDir(); err == nil {
-		if b, err := os.ReadFile(filepath.Join(dir, hubIDFile)); err == nil {
-			persisted = string(b)
-		}
-	}
-	return lifecycleevents.ClassifyHubIDSource(pinned, cloudrunenv.ServiceName(), persisted, resolvedID)
+	return lifecycleevents.ClassifyHubIDSource(pinned, cloudrunenv.ServiceName(), config.ReadPersistedHubID(), resolvedID)
 }
