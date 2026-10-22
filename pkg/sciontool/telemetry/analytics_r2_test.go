@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -525,5 +526,78 @@ func TestAnalyticsDrainerResolveBackoff(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("resolver called %d times in 2.5 s, want 2 (backoff 1 s, then 2 s)", calls)
+	}
+}
+
+// WP3 interface: LedgerSnapshot reflects every write path's persisted
+// evidence, independently of the producing handle (a fresh handle reads
+// what another wrote), and MemoryStats touches no disk fields.
+func TestOutboxLedgerSnapshotTracksWritePaths(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-snap")
+
+	mustAppend(t, o, requestIDDraft(5), AppendWritten) // seq 1
+
+	failNextFileSync(o) // truncated back: lost, append_failed, seq 2
+	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:lost", 1))
+
+	calls := 0 // first sync fails, truncate stubbed to fail, recovery sync ok: sync_uncertain, seq 3
+	o.fsyncFile = func(f *os.File) error {
+		calls++
+		if calls == 1 {
+			return errInjectedSync
+		}
+		return f.Sync()
+	}
+	o.truncateHook = func() error { return errInjectedSync }
+	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:uncertain", 1))
+	o.truncateHook = nil
+
+	o.fsyncFile = func(f *os.File) error { return f.Sync() }
+	o.crashAt = "commit" // commit deferred: written, seq 4 (after the sync-uncertain case, so the leftover intent's recovery sync is not the injected fault)
+	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:deferred", 1))
+	o.crashAt = ""
+
+	big := draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:big", 1) // oversize, seq 5
+	big.SessionID = strings.Repeat("s", analyticsMaxLineBytes)
+	mustAppend(t, o, big, AppendOversize)
+
+	_, _ = o.Finalize()
+	_, _ = o.Drain(context.Background(), func(context.Context, []byte) error { return PermanentSendError(errors.New("no")) })
+
+	o.maxPending = 1 // overflow, seq 6
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:overflow", 1), AppendOverflow)
+
+	fresh, err := OpenAnalyticsOutbox(o.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := fresh.LedgerSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := OutboxLedger{
+		Dir: o.Dir(), Epoch: d.Epoch, LastSeq: 6, PinnedHubID: "hub-snap",
+		OverflowTotal: 1, OversizeTotal: 1, AppendFailedTotal: 1, DeadLettersTotal: 3,
+		SyncUncertainTotal: 1, CommitDeferredTotal: 1,
+		Held: false, PendingBytes: 0, RetainedBytes: d.RetainedBytes,
+	}
+	if d.Epoch == "" || d.RetainedBytes == 0 {
+		t.Errorf("epoch %q retained %d", d.Epoch, d.RetainedBytes)
+	}
+	if !reflect.DeepEqual(d, want) {
+		t.Errorf("snapshot\n got %+v\nwant %+v", d, want)
+	}
+	if m := fresh.MemoryStats(); m != (AnalyticsOutboxStats{}) {
+		t.Errorf("a fresh handle's MemoryStats must be all zero (no disk fields): %+v", m)
+	}
+	if s := fresh.Stats(); s.PersistedDeadLetters != 3 || s.PersistedAppendFailed != 1 {
+		t.Errorf("Stats must carry the snapshot: %+v", s)
+	}
+
+	// A malformed ledger file is an error, not a silent zero.
+	_ = os.WriteFile(filepath.Join(o.Dir(), "seq"), []byte("x"), 0o600)
+	if _, err := fresh.LedgerSnapshot(); err == nil {
+		t.Error("malformed seq must be an error")
 	}
 }

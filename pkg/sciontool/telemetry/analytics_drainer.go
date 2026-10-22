@@ -352,3 +352,17 @@ func (a *analyticsState) stop(ctx context.Context) {
 	a.drainer.Stop(sctx)
 	a.drainer = nil
 }
+
+// AnalyticsLedger returns the analytics outbox's on-disk ledger snapshot
+// and in-process counters; ok is false when analytics is disabled.
+func (p *Pipeline) AnalyticsLedger() (disk OutboxLedger, mem AnalyticsOutboxStats, ok bool, err error) {
+	if p == nil || p.analytics.native == nil {
+		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
+	}
+	o := p.analytics.native.Outbox()
+	if o == nil {
+		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
+	}
+	disk, err = o.LedgerSnapshot()
+	return disk, o.MemoryStats(), true, err
+}
