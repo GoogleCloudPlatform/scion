@@ -42,6 +42,11 @@ const mutationTypeAgentReincarnateAssignmentRestore = "agent_reincarnate_assignm
 //     reactivated, with its own source and frozen ceiling. When the agent had
 //     no assignment before the claim, none is active afterwards, which
 //     matches the restored configuration.
+//   - When the agent is soft-deleted and its soft delete deactivated the
+//     replacement, nothing becomes active: the replacement is re-marked with
+//     cause under the reincarnation ID and the replaced row is re-marked as
+//     deactivated by the soft delete, so a later restore of the agent returns
+//     the replaced row.
 //   - Otherwise (no restorable replacement, or a later write replaced or
 //     ended it) the rows are left as they are: a restore never acts against
 //     a later write. The restored configuration may then name another account
@@ -58,7 +63,7 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 		return fmt.Errorf("reincarnation assignment restore: read active assignment: %w", err)
 	}
 	failed := store.Deactivation{Cause: cause, At: &now, OpID: reincarnationID}
-	var deactivated, reactivated int
+	var deactivated, reactivated, remarked int
 	switch {
 	case len(rows) == 1 && rows[0].ID == reincarnationID:
 		if deactivated, err = tx.DeactivateAgentServiceAccountAssignments(ctx, agent.ID, failed); err != nil {
@@ -68,6 +73,23 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 		if err != nil {
 			return fmt.Errorf("reincarnation assignment restore: reactivate replaced assignment: %w", err)
 		}
+	case len(rows) == 0 && !agent.DeletedAt.IsZero() && agent.SoftDeleteOpID != "":
+		n, err := tx.RemarkDeactivatedAgentServiceAccountAssignments(ctx, agent.ID, reincarnationID,
+			store.EdgeDeactivationAgentSoftDelete, agent.SoftDeleteOpID, failed)
+		if err != nil {
+			return fmt.Errorf("reincarnation assignment restore: re-mark replacement: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		remarked = n
+		m, err := tx.RemarkDeactivatedAgentServiceAccountAssignments(ctx, agent.ID, "",
+			store.EdgeDeactivationReincarnateReplaced, reincarnationID,
+			store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: agent.SoftDeleteOpID})
+		if err != nil {
+			return fmt.Errorf("reincarnation assignment restore: re-mark replaced assignment: %w", err)
+		}
+		remarked += m
 	default:
 		return nil
 	}
@@ -76,7 +98,8 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 		Cause           string `json:"cause"`
 		Deactivated     int    `json:"deactivated"`
 		Reactivated     int    `json:"reactivated"`
-	}{reincarnationID, string(cause), deactivated, reactivated})
+		Remarked        int    `json:"remarked,omitempty"`
+	}{reincarnationID, string(cause), deactivated, reactivated, remarked})
 	if err != nil {
 		return err
 	}
