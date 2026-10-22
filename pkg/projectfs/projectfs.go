@@ -187,6 +187,17 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 	}
 }
 
+// Realize (design §P1) is deferred to phase 3 (fs-cleanup-arch R3): its
+// first callers are the k8s buildPod fold (ptone/scion#5823) and the
+// docker/podman/apple run arguments. The intended shape, so phases 3 and 5
+// implement one function rather than two:
+//
+//	func (l Layout) Realize(r Resolved, runtime RuntimeKind) (Realized, error)
+//
+// where Realized carries either a host bind mount (source HostPath, target
+// r.Target, read-only) or a pod volume plus volume mount (claim, SubPath,
+// target), and container targets are never computed by callers.
+
 // ErrNoMount is returned for a Mount the project does not declare.
 var ErrNoMount = errors.New("projectfs: mount is not declared for this project")
 
@@ -249,6 +260,8 @@ type Resolved struct {
 	HostPath string
 	// RelPath is HostPath relative to HostBase (shared backends).
 	RelPath string
+	// SubPathRoot is the Layout's effective subpath root (shared backends).
+	SubPathRoot string
 	// ServerPath is <export>/<RelPath> (shared backends with an export).
 	ServerPath string
 	// SubPath is the Kubernetes subPath (RelPath with forward slashes).
@@ -346,15 +359,17 @@ func (l Layout) AgentRoot(projectID, agent string) (Resolved, error) {
 
 // shared builds a Resolved for rel under a shared Layout.
 func (l Layout) shared(rel string, m Mount) Resolved {
+	root, _ := l.subPathRoot() // checked by every caller (ProjectRoot)
 	r := Resolved{
-		Backend:  l.Backend,
-		HostBase: l.HostBase,
-		HostPath: filepath.Join(l.HostBase, rel),
-		RelPath:  rel,
-		SubPath:  filepath.ToSlash(rel),
-		Target:   m.Target,
-		Kind:     m.Kind,
-		Name:     m.Name,
+		Backend:     l.Backend,
+		HostBase:    l.HostBase,
+		HostPath:    filepath.Join(l.HostBase, rel),
+		RelPath:     rel,
+		SubPathRoot: root,
+		SubPath:     filepath.ToSlash(rel),
+		Target:      m.Target,
+		Kind:        m.Kind,
+		Name:        m.Name,
 	}
 	if l.Share.Export != "" {
 		r.ServerPath = path.Join(l.Share.Export, filepath.ToSlash(rel))

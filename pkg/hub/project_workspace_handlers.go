@@ -392,7 +392,24 @@ type ProjectWorkspaceUploadResponse struct {
 // browsing a project can no longer bring directories into being as a side
 // effect.
 func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
-	return projectfs.OpenConfinedDir(base, createIfMissing)
+	fi, err := os.Lstat(base)
+	switch {
+	case err == nil:
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("refusing to serve %q: base path is a symlink", base)
+		}
+	case os.IsNotExist(err):
+		if !createIfMissing {
+			return nil, err
+		}
+		if mkErr := os.MkdirAll(base, 0755); mkErr != nil {
+			return nil, mkErr
+		}
+	default:
+		return nil, err
+	}
+
+	return os.OpenRoot(base)
 }
 
 // resolveProjectWorkspacePath determines the filesystem path of a project's
@@ -1143,12 +1160,15 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	// list, and a read or delete in one is a 404.
 	createIfMissing := r.Method == http.MethodPost || r.Method == http.MethodPut
 
-	// Refuse a write before opening (and so before creating) the directory
-	// when its storage is not durable on this hub.
-	if createIfMissing || r.Method == http.MethodDelete {
-		if s.sharedDirWriteGate(resolution).refuse(w) {
-			return
-		}
+	// Refuse a routed write (upload, write, delete) before opening, and so
+	// before creating, the directory when its storage is not durable on this
+	// hub. Unrouted method/path combinations still answer 405 below. The
+	// write handlers check the same gate again as defense in depth.
+	isWrite := (r.Method == http.MethodPost && filePath == "") ||
+		(r.Method == http.MethodPut && filePath != "") ||
+		(r.Method == http.MethodDelete && filePath != "")
+	if isWrite && s.sharedDirWriteGate(resolution).refuse(w) {
+		return
 	}
 
 	root, err := s.openSharedDirRoot(resolution, createIfMissing)
@@ -1197,19 +1217,18 @@ type sharedDirResolution struct {
 	ProviderCount int  // total project providers (for multi-broker warning)
 	IsLocal       bool // true when the hub itself can reach Path
 	// Resolved is the layout authority's answer for this shared dir
-	// (pkg/projectfs). Every handle on the directory is opened through
-	// Resolved.Open; its Backend also drives the Cloud Run write gate.
+	// (pkg/projectfs): its Backend, RelPath, HostBase and SubPathRoot are the
+	// one source for how the directory is opened, gated and removed. Every
+	// handle on the directory is opened through Resolved.Open.
 	Resolved projectfs.Resolved
-	// Backend is "nfs" when the shared dir is on the shared NFS tree
-	// (<subpath_root>/<project UUID>/shared-dirs/<name>); empty otherwise.
-	Backend string
-	// NFSHostBase is the symlink-resolved host base, NFSRelPath Path's path
-	// relative to it, and NFSSubPathRoot the effective subpath_root; set
-	// only when Backend == "nfs". shareddirs.DeleteSharedDir needs the
-	// subpath root and project ID as distinct path components.
-	NFSHostBase    string
-	NFSRelPath     string
-	NFSSubPathRoot string
+	// Source names the server block the Layout came from.
+	Source sharedDirLayoutSource
+}
+
+// onSharedBackend reports whether the shared dir is on the shared (nfs)
+// tree, <subpath_root>/<project UUID>/shared-dirs/<name>.
+func (r *sharedDirResolution) onSharedBackend() bool {
+	return r.Resolved.Backend == projectfs.BackendNFS
 }
 
 // openSharedDirRoot opens the resolved shared dir through the layout
@@ -1243,6 +1262,9 @@ const (
 // as on the brokers (Kubernetes gives those per-dir RWX claims); the Cloud
 // Run write gate then refuses shared-dir writes there.
 func (s *Server) sharedDirLayout() (projectfs.Layout, sharedDirLayoutSource, error) {
+	if err := s.config.SharedDirStorageError; err != nil {
+		return projectfs.Layout{}, sharedDirLayoutFromSharedDirStorage, err
+	}
 	if sd := s.config.SharedDirStorageConfig; sd != nil && sd.Backend != "" && sd.Backend != config.WorkspaceStorageBackendLocal {
 		if err := sd.Validate(); err != nil {
 			return projectfs.Layout{}, sharedDirLayoutFromSharedDirStorage, fmt.Errorf("server.shared_dir_storage: %w", err)
@@ -1298,69 +1320,53 @@ func sharedDirLayoutWarnings(ws *config.V1WorkspaceStorageConfig, sd *config.V1S
 		sdLayout.HostBase, sdLayout.SubPathRoot, sdLayout.Share.ID)}
 }
 
+// errSharedDirNotDeclared is returned for a shared dir the project does not
+// declare (projectfs.ErrNoMount). Its message is fixed and carries no path.
+var errSharedDirNotDeclared = errors.New("shared directory is not declared on this project")
+
 // resolveSharedDirPath resolves where a project's shared directory lives,
 // through the layout authority (pkg/projectfs) on the Layout from
 // sharedDirLayout.
 //
 // On a shared (nfs) Layout the shared dir is the one agents mount:
-// <subpath_root>/<project UUID>/shared-dirs/<name>, whether or not the
-// project has a co-located broker. The one exception follows the brokers:
-// when the Layout comes from server.workspace_storage, a git project linked
-// through the co-located broker keeps that broker's local path, because a
-// local-container broker keeps shared dirs local unless
-// server.shared_dir_storage is nfs.
+// <subpath_root>/<project UUID>/shared-dirs/<name>, for every project,
+// whether or not it has a co-located broker (design Q1, applied exactly).
+// Known gap until P3 (findings D9): a co-located Docker broker with only
+// server.workspace_storage nfs still keeps its agents' shared dirs on its
+// node's local disk.
 //
 // On the local Layout the path is today's slug-keyed layout: for a git
 // project with a co-located provider that has a LocalPath, the project's own
 // project-config root (config.GetSharedDirPath); otherwise the hub's project
 // record (resolveHubProjectSharedDirPath).
 func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Project, dirName string) (*sharedDirResolution, error) {
+	mount, err := projectfs.DeclaredSharedDir(project.SharedDirs, dirName, "")
+	if err != nil {
+		return nil, errSharedDirNotDeclared
+	}
+	return s.resolveSharedDirMount(ctx, project, mount)
+}
+
+// resolveSharedDirMount is resolveSharedDirPath for a shared-dir Mount the
+// caller already holds (the declaration DELETE resolves the declaration it
+// has just removed).
+func (s *Server) resolveSharedDirMount(ctx context.Context, project *store.Project, mount projectfs.Mount) (*sharedDirResolution, error) {
+	dirName := mount.Name
 	layout, source, err := s.sharedDirLayout()
 	if err != nil {
 		// May carry configuration detail; never shown to the client.
 		return nil, &sharedDirStorageResolveError{err: err}
 	}
 
-	// Providers matter only to git projects, and on a shared Layout only to
-	// the workspace_storage exception below.
-	var providers []store.ProjectProvider
-	providersLoaded := false
-	loadProviders := func() error {
-		if providersLoaded || project.GitRemote == "" {
-			return nil
-		}
-		var err error
-		if providers, err = s.store.GetProjectProviders(ctx, project.ID); err != nil {
-			slog.Warn("failed to get project providers for shared dir browsing", "project_id", project.ID, "error", err)
-			return fmt.Errorf("failed to resolve project providers")
-		}
-		providersLoaded = true
-		return nil
-	}
-
 	if layout.Backend == projectfs.BackendNFS {
-		keepLocal := false
-		if source == sharedDirLayoutFromWorkspaceStorage {
-			if err := loadProviders(); err != nil {
-				return nil, err
-			}
-			for _, p := range providers {
-				if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
-					keepLocal = true
-					break
-				}
-			}
+		resolution, err := resolveNFSSharedDir(layout, source, project, mount)
+		if err != nil {
+			// Every error here is marked as a storage resolution failure:
+			// its message may contain a resolved host path, and must not
+			// reach the client directly.
+			return nil, &sharedDirStorageResolveError{err: err}
 		}
-		if !keepLocal {
-			resolution, err := resolveSharedSharedDir(layout, source, project, dirName)
-			if err != nil {
-				// Every error here is marked as a storage resolution failure:
-				// its message may contain a resolved host path, and must not
-				// reach the client directly.
-				return nil, &sharedDirStorageResolveError{err: err}
-			}
-			return resolution, nil
-		}
+		return resolution, nil
 	}
 
 	if project.GitRemote == "" {
@@ -1370,12 +1376,16 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
-		return localSharedDirResolution(sdPath, 0), nil
+		return localSharedDirResolution(sdPath, 0, mount), nil
 	}
 
-	if err := loadProviders(); err != nil {
-		return nil, err
+	// Git-based project: find the co-located broker's local path for this project
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		slog.Warn("failed to get project providers for shared dir browsing", "project_id", project.ID, "error", err)
+		return nil, fmt.Errorf("failed to resolve project providers")
 	}
+
 	providerCount := len(providers)
 	embeddedIsProvider := false
 
@@ -1388,7 +1398,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 				if err != nil {
 					return nil, fmt.Errorf("failed to resolve shared directory path")
 				}
-				return localSharedDirResolution(sdPath, providerCount), nil
+				return localSharedDirResolution(sdPath, providerCount, mount), nil
 			}
 		}
 	}
@@ -1401,7 +1411,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
-		return localSharedDirResolution(sdPath, providerCount), nil
+		return localSharedDirResolution(sdPath, providerCount, mount), nil
 	}
 
 	return nil, fmt.Errorf("shared directory file browsing requires a co-located runtime broker")
@@ -1409,12 +1419,16 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 
 // localSharedDirResolution wraps a local-layout shared dir path, already
 // resolved through projectfs by its caller, for the shared-dir handlers.
-func localSharedDirResolution(sdPath string, providerCount int) *sharedDirResolution {
+func localSharedDirResolution(sdPath string, providerCount int, mount projectfs.Mount) *sharedDirResolution {
 	return &sharedDirResolution{
 		Path:          sdPath,
 		ProviderCount: providerCount,
 		IsLocal:       true,
-		Resolved:      projectfs.Resolved{Backend: projectfs.BackendLocal, HostPath: sdPath, Kind: projectfs.KindSharedDir},
+		Resolved: projectfs.Resolved{
+			Backend: projectfs.BackendLocal, HostPath: sdPath,
+			Target: mount.Target, Kind: mount.Kind, Name: mount.Name,
+		},
+		Source: sharedDirLayoutLocal,
 	}
 }
 
@@ -1432,16 +1446,15 @@ type sharedDirStorageResolveError struct{ err error }
 func (e *sharedDirStorageResolveError) Error() string { return e.err.Error() }
 func (e *sharedDirStorageResolveError) Unwrap() error { return e.err }
 
-// resolveSharedSharedDir resolves dirName for project on a shared Layout:
-// Layout.Resolve validates the shared dir name and the project ID and
-// confines the leaf to the project's shared-dirs/ (shareddirs.ConfineLeaf),
-// then Resolved.VerifyNoSymlinks refuses a leaf that already exists behind
-// a symlinked structural component. A leaf that does not exist yet is
-// returned as is: it can only be created through Resolved.Open, whose
-// O_NOFOLLOW walk refuses links on its own.
-func resolveSharedSharedDir(layout projectfs.Layout, source sharedDirLayoutSource, project *store.Project, dirName string) (*sharedDirResolution, error) {
-	resolved, err := layout.Resolve(projectfs.Project{ID: project.ID}, "",
-		projectfs.SharedDirMount(api.SharedDir{Name: dirName}, ""))
+// resolveNFSSharedDir resolves a shared dir Mount for project on a shared
+// Layout: Layout.Resolve validates the shared dir name and the project ID
+// and confines the leaf to the project's shared-dirs/ (shareddirs.ConfineLeaf),
+// then Resolved.VerifyNoSymlinks refuses a leaf that already exists behind a
+// symlinked structural component. A leaf that does not exist yet is returned
+// as is: it can only be created through Resolved.Open, whose O_NOFOLLOW walk
+// refuses links on its own.
+func resolveNFSSharedDir(layout projectfs.Layout, source sharedDirLayoutSource, project *store.Project, mount projectfs.Mount) (*sharedDirResolution, error) {
+	resolved, err := layout.Resolve(projectfs.Project{ID: project.ID}, "", mount)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
@@ -1449,18 +1462,11 @@ func resolveSharedSharedDir(layout projectfs.Layout, source sharedDirLayoutSourc
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
-	hostBase, err := resolved.ResolvedHostBase()
-	if err != nil {
-		return nil, fmt.Errorf("%s: resolve host base symlinks: %w", source, err)
-	}
 	return &sharedDirResolution{
-		Path:           path,
-		IsLocal:        true,
-		Resolved:       resolved,
-		Backend:        string(projectfs.BackendNFS),
-		NFSHostBase:    hostBase,
-		NFSRelPath:     resolved.RelPath,
-		NFSSubPathRoot: layout.SubPathRoot,
+		Path:     path,
+		IsLocal:  true,
+		Resolved: resolved,
+		Source:   source,
 	}, nil
 }
 

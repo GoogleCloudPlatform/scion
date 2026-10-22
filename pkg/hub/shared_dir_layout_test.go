@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -70,12 +71,16 @@ func TestSharedDirLayout_Precedence(t *testing.T) {
 		{"workspace gke-shared-volume stays local", &config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v"}}, nil, sharedDirLayoutLocal, "", ""},
 		{"workspace local", &config.V1WorkspaceStorageConfig{Backend: "local"}, nil, sharedDirLayoutLocal, "", ""},
 		{"invalid shared_dir_storage fails closed", ws, invalidNFSSharedDirStorageTestConfig(), sharedDirLayoutFromSharedDirStorage, "", "server.shared_dir_storage"},
+		{"unloadable settings file fails closed", ws, nil, sharedDirLayoutFromSharedDirStorage, "", "global settings unreadable"},
 		{"workspace nfs without shares", &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt"}}, nil, sharedDirLayoutFromWorkspaceStorage, "", "no NFS shares"},
 		{"workspace nfs without mount_root", &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "s"}}}}, nil, sharedDirLayoutFromWorkspaceStorage, "", "mount_root must be an absolute path"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := &Server{config: ServerConfig{WorkspaceStorageConfig: tt.ws, SharedDirStorageConfig: tt.sd}}
+			if tt.name == "unloadable settings file fails closed" {
+				srv.config.SharedDirStorageError = errors.New("server.shared_dir_storage: global settings unreadable")
+			}
 			layout, source, err := srv.sharedDirLayout()
 			assert.Equal(t, tt.wantSource, source)
 			if tt.wantErr != "" {
@@ -196,47 +201,101 @@ func TestSharedDirFiles_WorkspaceStorageNFS_RemoteLinkedProject(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedLinkedKeepsLocal: with the
-// Layout from server.workspace_storage, a git project linked through the
-// co-located broker keeps that broker's local path (local-container brokers
-// keep shared dirs local unless server.shared_dir_storage is nfs). On a
-// Cloud Run Service that local path is not durable, so writes are refused
-// before anything is created.
-func TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedLinkedKeepsLocal(t *testing.T) {
+// TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedProvidedProjects: Q1 is
+// applied exactly (fs-cleanup-arch R1): with the Layout from
+// server.workspace_storage, projects the co-located broker provides, a git
+// project linked with a LocalPath and a hub-native one, resolve to the uuid
+// tree like every other project, not to the broker's local slug tree.
+func TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedProvidedProjects(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
-	project := createTestGitProject(t, f.srv, "Embedded Linked", "github.com/test/embedded-linked")
-	addSharedDirToProject(t, f.srv, project.ID, "scratchpad")
 	ctx := context.Background()
 	b := &store.RuntimeBroker{
-		ID: tid("embedded-linked-broker"), Name: "embedded", Slug: "embedded-linked-broker",
+		ID: tid("embedded-provider-broker"), Name: "embedded", Slug: "embedded-provider-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, b))
+	f.srv.SetEmbeddedBrokerID(b.ID)
+
+	linked := createTestGitProject(t, f.srv, "Embedded Linked", "github.com/test/embedded-linked")
+	addSharedDirToProject(t, f.srv, linked.ID, "scratchpad")
 	localScion := filepath.Join(t.TempDir(), "proj", ".scion")
 	require.NoError(t, os.MkdirAll(localScion, 0o755))
 	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: localScion,
+		ProjectID: linked.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: localScion,
 	}))
-	f.srv.SetEmbeddedBrokerID(b.ID)
+	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status,
+	}))
+
 	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
 
-	rec := doRequest(t, f.srv, http.MethodPut, f.filesURL(project.ID, "scratchpad")+"/note.txt",
-		ProjectWorkspaceWriteRequest{Content: "hello"})
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	localLeaf := filepath.Join(filepath.Dir(localScion), "shared-dirs", "scratchpad")
-	_, err := os.Stat(filepath.Join(localLeaf, "note.txt"))
-	require.NoError(t, err, "the co-located broker's local path is kept")
-	_, err = os.Stat(filepath.Join(f.mountRoot, "share1", "projects"))
-	assert.True(t, os.IsNotExist(err), "the nfs tree is not touched")
+	for name, project := range map[string]*store.Project{"git linked": linked, "hub-native": f.project} {
+		t.Run(name, func(t *testing.T) {
+			rec := doRequest(t, f.srv, http.MethodPut, f.filesURL(project.ID, "scratchpad")+"/note.txt",
+				ProjectWorkspaceWriteRequest{Content: "hello"})
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			_, err := os.Stat(filepath.Join(f.mountRoot, "share1", "projects", project.ID, "shared-dirs", "scratchpad", "note.txt"))
+			require.NoError(t, err, "the write lands in the uuid tree")
+		})
+	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(localScion), "shared-dirs"))
+	assert.True(t, os.IsNotExist(err), "the co-located broker's local tree is not used")
+	_, err = os.Stat(resolveTestSharedDirPath(t, f.project, "scratchpad"))
+	assert.True(t, os.IsNotExist(err), "the hub's local slug tree is not used")
+}
 
-	t.Setenv("K_SERVICE", "scion-hub")
-	require.NoError(t, os.RemoveAll(localLeaf))
-	rec = doRequest(t, f.srv, http.MethodPut, f.filesURL(project.ID, "scratchpad")+"/note.txt",
-		ProjectWorkspaceWriteRequest{Content: "hello"})
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "shared_dir_writes_unavailable")
-	_, err = os.Stat(localLeaf)
-	assert.True(t, os.IsNotExist(err), "a refused write must not create the directory")
+// TestSharedDirConfigDelete_WorkspaceStorageNFS_LeafKept: removing a shared
+// dir declaration on a hub whose shared dirs are on the workspace export
+// (only server.workspace_storage nfs) removes the declaration but leaves the
+// leaf, which agents mount, in place until the lifecycle phase owns that
+// deletion (ptone/scion#5835). Sibling shared dirs and the slug tree are
+// untouched.
+func TestSharedDirConfigDelete_WorkspaceStorageNFS_LeafKept(t *testing.T) {
+	f := newSharedDirLayoutFixture(t)
+	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	sharedDirs := filepath.Join(f.mountRoot, "share1", "projects", f.project.ID, "shared-dirs")
+	for _, dir := range []string{"scratchpad", "custom"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(sharedDirs, dir), 0o2775))
+		require.NoError(t, os.WriteFile(filepath.Join(sharedDirs, dir, "data.txt"), []byte(dir), 0o644))
+	}
+
+	rec := doRequest(t, f.srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/custom", f.project.ID), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := f.s.GetProject(context.Background(), f.project.ID)
+	require.NoError(t, err)
+	for _, d := range got.SharedDirs {
+		assert.NotEqual(t, "custom", d.Name, "the declaration is removed")
+	}
+	for _, dir := range []string{"scratchpad", "custom"} {
+		b, err := os.ReadFile(filepath.Join(sharedDirs, dir, "data.txt"))
+		require.NoError(t, err, "%s: agent data on the workspace export must survive", dir)
+		assert.Equal(t, dir, string(b))
+	}
+	_, err = os.Stat(resolveTestSharedDirPath(t, f.project, "custom"))
+	assert.True(t, os.IsNotExist(err), "nothing is created or removed under the slug tree")
+}
+
+// TestSharedDirConfigDelete_SharedDirStorageNFS_LeafRemoved: with
+// server.shared_dir_storage nfs the declaration DELETE still removes exactly
+// that leaf (unchanged behaviour), leaving its siblings.
+func TestSharedDirConfigDelete_SharedDirStorageNFS_LeafRemoved(t *testing.T) {
+	f := newSharedDirLayoutFixture(t)
+	f.srv.config.SharedDirStorageConfig = sharedDirNFSStorage(f.mountRoot, "sdshare")
+	sharedDirs := filepath.Join(f.mountRoot, "sdshare", "projects", f.project.ID, "shared-dirs")
+	for _, dir := range []string{"scratchpad", "custom"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(sharedDirs, dir), 0o2775))
+		require.NoError(t, os.WriteFile(filepath.Join(sharedDirs, dir, "data.txt"), []byte(dir), 0o644))
+	}
+
+	rec := doRequest(t, f.srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/custom", f.project.ID), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+	_, err := os.Stat(filepath.Join(sharedDirs, "custom"))
+	assert.True(t, os.IsNotExist(err), "the removed declaration's leaf is deleted")
+	_, err = os.Stat(filepath.Join(sharedDirs, "scratchpad", "data.txt"))
+	assert.NoError(t, err, "sibling shared dirs are untouched")
 }
 
 // TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused pins the write gate
@@ -275,6 +334,10 @@ func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 
 	rec = doRequest(t, f.srv, http.MethodGet, url, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, "reads are not gated")
+
+	require.NoError(t, os.MkdirAll(resolveTestSharedDirPath(t, f.project, "scratchpad"), 0o755))
+	rec = doRequest(t, f.srv, http.MethodDelete, url, nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "an unrouted DELETE still answers 405, not the write gate's 503")
 }
 
 // TestSharedDirFiles_LocalLayout_SlugPathUnchanged is the T1 regression

@@ -16,6 +16,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -51,4 +52,32 @@ func NFSLayout(nfs *V1NFSConfig) (projectfs.Layout, error) {
 		UID: nfs.UID,
 		GID: nfs.GID,
 	}, nil
+}
+
+// LoadHubSharedDirStorage reads server.shared_dir_storage the way the
+// brokers' agent-start path does: from the global settings file only,
+// through LoadGlobalSettings (no SCION_ environment provider, no DB overlay,
+// never a project's settings.yaml), so the hub and its brokers resolve shared
+// dirs from the same source. The hub calls it once at startup.
+//
+// It returns (nil, nil) when the block is genuinely unset. It fails closed
+// with an error when the file plausibly configures the block but cannot be
+// used: it fails to load and mentions shared_dir_storage, or it loaded as the
+// legacy format and mentions the key without a block being loaded.
+func LoadHubSharedDirStorage() (*V1SharedDirStorageConfig, error) {
+	gs, _, err := LoadGlobalSettings()
+	if err != nil {
+		if GlobalSettingsMentions("shared_dir_storage") {
+			return nil, fmt.Errorf("server.shared_dir_storage: global settings unreadable: %w", err)
+		}
+		return nil, nil
+	}
+	if gs == nil || gs.Server == nil || gs.Server.SharedDirStorage == nil {
+		if GlobalSettingsIsLegacyFormat() && GlobalSettingsMentions("shared_dir_storage") {
+			return nil, errors.New(
+				"server.shared_dir_storage: global settings mention it but it was not loaded (missing schema_version \"1\"?)")
+		}
+		return nil, nil
+	}
+	return gs.Server.SharedDirStorage, nil
 }

@@ -1202,14 +1202,6 @@ type GlobalConfig struct {
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
 
-	// SharedDirStorage is server.shared_dir_storage from the hub's own
-	// global settings (and SCION_SERVER_SHARED_DIR_STORAGE_*), loaded once
-	// at startup with the rest of the server config. Layer-0: the DB and
-	// project settings cannot set it. The hub's shared-dir browser places
-	// shared dirs on its nfs block when backend is nfs (design fs-cleanup
-	// P1; P3 folds it into server.project_storage).
-	SharedDirStorage *V1SharedDirStorageConfig `json:"-" yaml:"-" koanf:"-"`
-
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
 	NativeChat *V1NativeChatConfig `json:"-" yaml:"-" koanf:"-"`
@@ -2329,7 +2321,6 @@ type globalConfigEnvOverlay struct {
 	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
 	Server                             struct {
 		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
-		SharedDirStorage *V1SharedDirStorageConfig `koanf:"shared_dir_storage"`
 		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
 	} `koanf:"server"`
 }
@@ -2353,14 +2344,12 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	var ov globalConfigEnvOverlay
 	ov.Telemetry = gc.TelemetryConfig
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
-	ov.Server.SharedDirStorage = gc.SharedDirStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
 		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
-	gc.SharedDirStorage = ov.Server.SharedDirStorage
 	gc.NativeChat = ov.Server.NativeChat
 	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
 		gc.DefaultScratchpad = v

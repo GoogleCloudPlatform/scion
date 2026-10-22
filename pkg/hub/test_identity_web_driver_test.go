@@ -528,9 +528,9 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",
 		"resolveAsNeededForKeys d.secretBackend",
+		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
-		"resolveSharedSharedDir layout",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")
 	assert.Equal(t, []string{
 		"Exchange s.validator",

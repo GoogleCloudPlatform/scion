@@ -183,6 +183,12 @@ func TestProjectAndAgentRoot(t *testing.T) {
 	if want := "/mnt/nfs/hub-a/projects/" + testPID; pr.HostPath != want {
 		t.Errorf("ProjectRoot.HostPath = %q, want %q", pr.HostPath, want)
 	}
+	if pr.SubPathRoot != "projects" {
+		t.Errorf("ProjectRoot.SubPathRoot = %q, want projects", pr.SubPathRoot)
+	}
+	if d, err := (Layout{Backend: BackendNFS, HostBase: "/m"}).ProjectRoot(testPID); err != nil || d.SubPathRoot != DefaultSubPathRoot {
+		t.Errorf("default SubPathRoot = %q, %v", d.SubPathRoot, err)
+	}
 	ar, err := l.AgentRoot(testPID, "dev-1")
 	if err != nil {
 		t.Fatal(err)

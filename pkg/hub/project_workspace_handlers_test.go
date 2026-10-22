@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1426,9 +1427,15 @@ func TestSharedDirFiles_InvalidNFSBlock_FailsClosed_FixedMessage(t *testing.T) {
 		"unknown backend":    {Backend: "NFS"},
 		"relative mount_root": {Backend: "nfs", NFS: &config.V1NFSConfig{
 			MountRoot: "relative", Shares: []config.V1NFSShare{{ID: "nfs-export"}}}},
+		"unloadable settings file": nil,
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv.config.SharedDirStorageConfig = cfg
+			srv.config.SharedDirStorageError = nil
+			if cfg == nil {
+				// config.LoadHubSharedDirStorage failed closed at startup.
+				srv.config.SharedDirStorageError = errors.New("server.shared_dir_storage: global settings unreadable")
+			}
 			buf := captureAuditLogs(t)
 			rec := doRequest(t, srv, http.MethodGet, url, nil)
 			assert.Equal(t, http.StatusConflict, rec.Code, "an unusable nfs block must fail closed, not serve the local layout")
@@ -1609,7 +1616,7 @@ func TestResolveSharedDirPath_NFS_TraversalInputs_Refused(t *testing.T) {
 		"traversal-shaped dirName, valid projectID": {"pid-1", "../x"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			project := &store.Project{ID: tc.projectID, Slug: "p"}
+			project := &store.Project{ID: tc.projectID, Slug: "p", SharedDirs: []api.SharedDir{{Name: tc.dirName}}}
 			resolution, err := srv.resolveSharedDirPath(context.Background(), project, tc.dirName)
 			require.Error(t, err)
 			var storageErr *sharedDirStorageResolveError

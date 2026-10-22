@@ -459,7 +459,6 @@ var globalConfigOutsideKoanf = map[string]string{
 	"project_defaults.default_scratchpad":     "DefaultScratchpad",
 	"quotas.enforce_broker_quotas":            "EnforceBrokerQuotas",
 	"server.native_chat":                      "NativeChat",
-	"server.shared_dir_storage":               "SharedDirStorage",
 	"server.workspace_storage":                "WorkspaceStorage",
 	"telemetry":                               "TelemetryConfig",
 }
@@ -570,6 +569,13 @@ var envContractNoField = map[string]string{
 	"globalconfig server.message_broker.enabled":                noFieldGlobalConfigNotModeled,
 	"globalconfig server.message_broker.type":                   noFieldGlobalConfigNotModeled,
 	"globalconfig server.message_broker.types":                  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.backend":            noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.gid":            noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_options":  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_root":     noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.storage_class":  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.subpath_root":   noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.uid":            noFieldGlobalConfigNotModeled,
 	"versioned server.hub.gcp_project_id":                       noFieldVersioned,
 }
 
@@ -847,13 +853,6 @@ const noSeedLegacyServerOutsideKoanf = "legacy mode has no file that holds a koa
 // value unchanged. Checked in both directions.
 var envContractNoYAMLSeed = map[string]string{
 	"[legacy] GlobalConfig server.native_chat.enabled":                               noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.backend":                        noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.gid":                        noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.mount_options":              noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.mount_root":                 noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.storage_class":              noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.subpath_root":               noSeedLegacyServerOutsideKoanf,
-	"[legacy] GlobalConfig server.shared_dir_storage.nfs.uid":                        noSeedLegacyServerOutsideKoanf,
 	"[legacy] GlobalConfig server.workspace_storage.backend":                         noSeedLegacyServerOutsideKoanf,
 	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.subpath_root":    noSeedLegacyServerOutsideKoanf,
 	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.volume_name":     noSeedLegacyServerOutsideKoanf,

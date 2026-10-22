@@ -61,7 +61,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 		}
 		return shareddirs.OpenAnchoredRoot(base, r.RelPath)
 	case BackendLocal:
-		return OpenConfinedDir(r.HostPath, create)
+		return openConfinedDir(r.HostPath, create)
 	default:
 		return nil, fmt.Errorf("projectfs: cannot open a directory on backend %q", r.Backend)
 	}
@@ -114,10 +114,10 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 	return got, nil
 }
 
-// OpenConfinedDir opens dir as an *os.Root, refusing a dir whose own final
+// openConfinedDir opens dir as an *os.Root, refusing a dir whose own final
 // component is a symlink. With create, a missing dir is created (0755);
 // without it, a missing dir is an fs.ErrNotExist-compatible error.
-func OpenConfinedDir(dir string, create bool) (*os.Root, error) {
+func openConfinedDir(dir string, create bool) (*os.Root, error) {
 	fi, err := os.Lstat(dir)
 	switch {
 	case err == nil:
