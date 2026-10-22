@@ -130,7 +130,9 @@ func (sup brokerStartSupport) heldProvisionEdits(provision []string, old, req *a
 }
 
 // skillReferencesRemoved reports whether req leaves out a skill reference
-// (URI and install name) that old lists.
+// that old lists, compared by base URI (without a version specifier) and
+// install name, as the broker deduplicates references: a version change of
+// a skill replaces it at the same destination, so it is not a removal.
 func skillReferencesRemoved(old, req *api.ScionConfig) bool {
 	if old == nil {
 		return false
@@ -138,11 +140,11 @@ func skillReferencesRemoved(old, req *api.ScionConfig) bool {
 	kept := map[[2]string]bool{}
 	if req != nil {
 		for _, r := range req.Skills {
-			kept[[2]string{r.URI, r.As}] = true
+			kept[[2]string{api.SkillBaseURI(r.URI), r.As}] = true
 		}
 	}
 	for _, r := range old.Skills {
-		if !kept[[2]string{r.URI, r.As}] {
+		if !kept[[2]string{api.SkillBaseURI(r.URI), r.As}] {
 			return true
 		}
 	}
@@ -220,12 +222,18 @@ func envKeysRecorded(keys, recorded []string) bool {
 
 // droppedEnvKeys returns the keys of old's env that a request presenting
 // env (present["env"]) leaves out, sorted; nil when env is not present.
+// The auto-expose keys and TZ are left out, as removedConfigEntries leaves
+// them out: the hub derives them for each start rather than taking them
+// from the inline env.
 func droppedEnvKeys(old, req *api.ScionConfig, present map[string]bool) []string {
 	if !present["env"] || old == nil {
 		return nil
 	}
 	var out []string
 	for k := range old.Env {
+		if autoExposeEnvKeys[k] || k == agentTZEnvKey {
+			continue
+		}
 		if req == nil {
 			out = append(out, k)
 			continue
@@ -280,7 +288,7 @@ func (sup brokerStartSupport) reincarnateOnlyEditWarnings(provision, cleared []s
 	if !sup.ChangedFields || len(provision) == 0 {
 		return reincarnateOnlyEditWarnings(provision, cleared)
 	}
-	out := []string{strings.Join(provision, ", ") + ": stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a cleared agent_instructions or services value or a removed skill)"}
+	out := []string{strings.Join(provision, ", ") + ": stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a clear the broker cannot apply or a removed skill)"}
 	return append(out, reincarnateOnlyEditWarnings(nil, cleared)...)
 }
 

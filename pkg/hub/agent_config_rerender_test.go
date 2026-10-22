@@ -100,6 +100,9 @@ func TestBrokerStartSupport_AppliesAtStart(t *testing.T) {
 	renamed := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a"}, {URI: "hub://skills/b"}}}
 	assert.Equal(t, []string{"config.skills"}, with.heldProvisionEdits([]string{"config.skills"}, two, one, nil))
 	assert.Equal(t, []string{"config.skills"}, with.heldProvisionEdits([]string{"config.skills"}, two, renamed, nil), "a changed install name removes the old one")
+	pinned := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a@v1"}}}
+	repinned := &api.ScionConfig{Skills: []api.SkillReference{{URI: "hub://skills/a@v2"}}}
+	assert.Empty(t, with.heldProvisionEdits([]string{"config.skills"}, pinned, repinned, nil), "a version change replaces the skill at the same destination")
 	assert.Empty(t, with.heldProvisionEdits([]string{"config.skills"}, one, two, nil))
 }
 
@@ -226,13 +229,15 @@ func TestDroppedEnvKeys(t *testing.T) {
 	assert.Equal(t, []string{"A", "B", "C"}, droppedEnvKeys(old, &api.ScionConfig{}, present))
 	assert.Nil(t, droppedEnvKeys(old, &api.ScionConfig{}, map[string]bool{"model": true}), "env not in the request drops nothing")
 	assert.Nil(t, droppedEnvKeys(nil, &api.ScionConfig{}, present))
+	withDerived := &api.ScionConfig{Env: map[string]string{"A": "1", "SCION_AUTO_EXPOSE_PORTS": "true", "TZ": "UTC"}}
+	assert.Equal(t, []string{"A"}, droppedEnvKeys(withDerived, &api.ScionConfig{}, present), "auto-expose keys and TZ are derived per start, not dropped")
 }
 
 func TestBrokerStartSupport_RerenderWarnings(t *testing.T) {
 	with := brokerStartSupport{ChangedFields: true}
 	got := with.reincarnateOnlyEditWarnings([]string{"config.services"}, []string{"config.model"})
 	require.Len(t, got, 2)
-	assert.Equal(t, "config.services: stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a cleared agent_instructions or services value or a removed skill)", got[0])
+	assert.Equal(t, "config.services: stored now; rendered at the next reincarnation (a start does not render secrets, and does not apply a clear the broker cannot apply or a removed skill)", got[0])
 	assert.Contains(t, got[1], "config.model: cleared now")
 	assert.Equal(t, reincarnateOnlyEditWarnings([]string{"config.services"}, nil), brokerStartSupport{}.reincarnateOnlyEditWarnings([]string{"config.services"}, nil))
 	assert.Equal(t, reincarnateOnlyEditWarnings(nil, []string{"config.model"}), with.reincarnateOnlyEditWarnings(nil, []string{"config.model"}))
