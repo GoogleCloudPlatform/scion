@@ -1191,6 +1191,8 @@ func TestCheckWireExactKeysSingleDecode(t *testing.T) {
 		{"unicode fold variant (long s)", `{"schema_version":1,"event_type":"agent.usage","producer_name` + "ſ" + `pace":"ns","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:05:00Z","event_id":"u"}`, false},
 		{"duplicate exact key, last matches", `{` + wireBase + `,"event_id":"x","event_id":"u"}`, true},
 		{"duplicate exact key, last differs", `{` + wireBase + `,"event_id":"u","event_id":"x"}`, false},
+		{"duplicate exact key, last null", `{` + wireBase + `,"event_id":"u","event_id":null}`, false},
+		{"null envelope field", `{` + wireBase + `,"event_id":"u","hub_id":null}`, false},
 		{"case variant of a payload key is not an envelope concern", `{` + wireBase + `,"event_id":"u","count":1,"Count":2}`, true},
 	}
 	for _, tc := range cases {
@@ -1202,8 +1204,11 @@ func TestCheckWireExactKeysSingleDecode(t *testing.T) {
 	// Unmarshal applies the same rule to input: a case-variant envelope key
 	// is rejected rather than silently bound.
 	var ev testEvent
-	if err := Unmarshal([]byte(`{`+wireBase+`,"event_id":"u","Event_ID":"u","count":0,"labels":[]}`), &ev); err == nil {
-		t.Error("Unmarshal accepted a case-variant envelope key")
+	if err := Unmarshal([]byte(`{`+wireBase+`,"event_id":"u","Event_ID":"u","count":0,"labels":[]}`), &ev); err == nil || !strings.Contains(err.Error(), "case variant") {
+		t.Errorf("Unmarshal with a case-variant envelope key: err = %v", err)
+	}
+	if err := Unmarshal([]byte(`{`+wireBase+`,"event_id":"u","event_id":null,"count":0,"labels":[]}`), &ev); err == nil || !strings.Contains(err.Error(), "is null") {
+		t.Errorf("Unmarshal with a trailing null duplicate: err = %v", err)
 	}
 }
 
@@ -1237,7 +1242,7 @@ func TestCheckValuesLabelsTyped(t *testing.T) {
 func BenchmarkMarshal(b *testing.B) {
 	ev := fullTestEvent()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := Marshal(ev); err != nil {
 			b.Fatal(err)
 		}

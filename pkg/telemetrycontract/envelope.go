@@ -379,7 +379,9 @@ func Marshal(ev Event) ([]byte, error) {
 // numbers, envelope keys) and the decoded event. Unknown fields are
 // ignored, so a consumer built against an older schema still decodes an
 // additively extended event. Like encoding/json it matches keys
-// case-insensitively, keeps the last duplicate key, and decodes JSON null
+// case-insensitively (payload keys only: envelope keys must be exact, and a
+// case or fold variant, or a null envelope value, is an error), keeps the
+// last duplicate key, and decodes JSON null
 // on a non-pointer field as its zero value, so it is a decoder for
 // producer output, not a strict validator of third-party input. Likewise an
 // absent or null non-pointer list decodes as nil and is accepted here,
@@ -665,19 +667,13 @@ func checkValues(v reflect.Value, path string) error {
 	case reflect.Slice:
 		if v.Type() == labelsType {
 			// The allowlist admits exported fields only, so the value is
-			// always interfaceable; the reflective path is a defensive
-			// fallback that cannot panic.
-			if v.CanInterface() {
-				for i, l := range v.Interface().(Labels) {
-					if !utf8.ValidString(l.Key) || !utf8.ValidString(l.Value) {
-						return fmt.Errorf("telemetrycontract: field %s[%d] is not valid UTF-8", path, i)
-					}
-				}
-				return nil
+			// always interfaceable; the guard turns a violated invariant
+			// into an error instead of a reflect panic.
+			if !v.CanInterface() {
+				return fmt.Errorf("telemetrycontract: internal: labels at %s not interfaceable", path)
 			}
-			for i := 0; i < v.Len(); i++ {
-				l := v.Index(i)
-				if !utf8.ValidString(l.FieldByName("Key").String()) || !utf8.ValidString(l.FieldByName("Value").String()) {
+			for i, l := range v.Interface().(Labels) {
+				if !utf8.ValidString(l.Key) || !utf8.ValidString(l.Value) {
 					return fmt.Errorf("telemetrycontract: field %s[%d] is not valid UTF-8", path, i)
 				}
 			}
@@ -732,10 +728,16 @@ func checkWire(data []byte, want *Envelope) error {
 	// (Unicode simple folding, e.g. "ſ" for "s"), so first reject any
 	// top-level key that folds to an envelope field name without being
 	// exactly it. After that, one struct decode can only bind exact keys.
-	for k := range top {
+	for k, v := range top {
 		for _, name := range envelopeWireNames {
 			if k != name && strings.EqualFold(k, name) {
 				return fmt.Errorf("telemetrycontract: wire key %q is a case variant of envelope field %q", k, name)
+			}
+			// null is never written for an envelope field (unknowns are
+			// omitted), and a struct decode would treat it as "keep the
+			// earlier value" for a duplicate key; reject it.
+			if k == name && v == nil {
+				return fmt.Errorf("telemetrycontract: envelope field %q is null", name)
 			}
 		}
 	}
