@@ -3780,18 +3780,33 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 					// Nothing was sent: the agent's saved placement is
 					// inconsistent. Its workload stays running on the
 					// Runtime Broker with no agent record left.
-					s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
-						"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", refusal.Code,
-						"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
-						"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
+					s.logProjectDeletePlacementRefusal(agent, refusal.Code)
 				} else {
 					s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
 						"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 				}
 			}
+		} else if dispatcher != nil && agent.IsPinned() {
+			// A pinned agent with no Runtime Broker assigned: its saved
+			// placement is inconsistent (requirePinnedPlacement answers
+			// runtime_target_pin_stale), so nothing is dispatched, and
+			// any workload it has on the Runtime Broker it is pinned to
+			// is left running with no agent record.
+			s.logProjectDeletePlacementRefusal(agent, ErrCodeRuntimeTargetPinStale)
 		}
 		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
 	}
+}
+
+// logProjectDeletePlacementRefusal logs, at error, a project delete's agent
+// that was not deleted on any Runtime Broker because its saved placement is
+// inconsistent (code is the placement refusal's): the agent, its Runtime
+// Broker and its pin, so an operator can remove the workload by hand.
+func (s *Server) logProjectDeletePlacementRefusal(agent *store.Agent, code string) {
+	s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
+		"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", code,
+		"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
+		"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
 }
 
 // deleteStorageFiles deletes external storage files for templates and

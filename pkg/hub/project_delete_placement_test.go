@@ -23,10 +23,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +120,78 @@ func TestProjectDelete_PlacementCheckFailureLeavesAgentUnflagged(t *testing.T) {
 	err = checkProjectAgentsDeletedTx(context.Background(), f.s, f.project.ID)
 	require.ErrorAs(t, err, &refused)
 	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refused.agents[0].PlacementRefusal)
+}
+
+// --- project delete dispatch log (ptone/scion#4964) --------------------------
+
+const projectDeletePlacementLogMsg = "project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker"
+
+// The project delete's broker dispatch sends nothing for an agent whose
+// saved placement is inconsistent and logs one error naming the agent, its
+// Runtime Broker and its pin: for an agent the dispatcher refuses, and for
+// a pinned agent with no Runtime Broker, which is never dispatched. An
+// unpinned agent with no Runtime Broker logs no such error.
+func TestDispatchAgentDeletions_PlacementRefusalLogged(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		agent    func(f *flatHubFixture) *store.Agent
+		wantLog  bool
+		wantCode string
+	}{
+		{
+			name: "dispatcher refuses a stale pin",
+			agent: func(f *flatHubFixture) *store.Agent {
+				return f.stalePinnedAgent(t, "pd-log-stale", string(state.PhaseRunning))
+			},
+			wantLog:  true,
+			wantCode: ErrCodeRuntimeTargetPinStale,
+		},
+		{
+			name: "pinned agent with no Runtime Broker",
+			agent: func(f *flatHubFixture) *store.Agent {
+				a := f.pinnedAgent(t, "pd-log-empty", string(state.PhaseRunning))
+				a.RuntimeBrokerID = ""
+				require.NoError(t, f.s.UpdateAgent(ctx, a))
+				got := mustGetAgent(t, f.s, a.ID)
+				require.True(t, got.IsPinned())
+				return got
+			},
+			wantLog:  true,
+			wantCode: ErrCodeRuntimeTargetPinStale,
+		},
+		{
+			name: "unpinned agent with no Runtime Broker",
+			agent: func(f *flatHubFixture) *store.Agent {
+				return f.unpinnedAgentOn(t, "pd-log-unpinned", "", string(state.PhaseCreated))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			a := tc.agent(f)
+			logs := &levelLogHandler{}
+			f.srv.agentLifecycleLog = slog.New(logs)
+
+			f.srv.dispatchAgentDeletions(ctx, []store.Agent{*a})
+
+			assert.False(t, f.client.deleteCalled, "nothing is sent")
+			recs := logs.named(projectDeletePlacementLogMsg)
+			if !tc.wantLog {
+				assert.Empty(t, recs)
+				return
+			}
+			require.Len(t, recs, 1)
+			r := recs[0]
+			assert.Equal(t, slog.LevelError, r.level)
+			assert.Equal(t, a.ID, r.attrs["agent_id"])
+			assert.Equal(t, a.Slug, r.attrs["agent"])
+			assert.Equal(t, a.ProjectID, r.attrs["project_id"])
+			assert.Equal(t, tc.wantCode, r.attrs["code"])
+			assert.Equal(t, a.RuntimeBrokerID, r.attrs["broker"])
+			assert.Equal(t, a.PinnedRuntimeBrokerID, r.attrs["pinned_runtime_broker_id"])
+			assert.Equal(t, a.PinnedRuntimeTargetID, r.attrs["pinned_runtime_target_id"])
+			assert.NotEmpty(t, r.attrs["pinned_runtime_target_id"])
+		})
+	}
 }
