@@ -490,8 +490,9 @@ type pendingSharedDirBackendChange struct {
 	gs       *config.VersionedSettings
 	dirs     []api.SharedDir
 	rec      *sharedDirStorageRecord // nil when the agent has no record yet
-	// createdProfile is the profile in the agent's agent-info.json before
-	// Reprovision re-renders it, used when the request names no profile.
+	// createdProfile is the profile recorded in the agent's broker-side
+	// image provenance before Reprovision re-renders it ("" when there is
+	// none), used when the request names no profile.
 	createdProfile string
 }
 
@@ -517,7 +518,11 @@ func prepareSharedDirBackendChange(ctx context.Context, projectDir, agentDir str
 	if err != nil {
 		return nil, err
 	}
-	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec, createdProfile: GetSavedProfile(opts.Name, opts.ProjectPath)}, nil
+	createdProfile := ""
+	if p, err := readImageProvenance(agentDir); err == nil && p != nil {
+		createdProfile = p.Profile
+	}
+	return &pendingSharedDirBackendChange{agentDir: agentDir, gs: gs, dirs: dirs, rec: rec, createdProfile: createdProfile}, nil
 }
 
 // record writes the changed record. An agent without a record first gets

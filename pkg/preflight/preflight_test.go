@@ -239,3 +239,12 @@ func TestProfileFindingSeverity(t *testing.T) {
 		}
 	}
 }
+
+// TestNewDefaultRegistry pins the built-in check list: exactly the
+// settings.profiles check runs.
+func TestNewDefaultRegistry(t *testing.T) {
+	rep := NewDefaultRegistry().RunAll(context.Background(), Env{})
+	if len(rep.Checks) != 1 || rep.Checks[0] != ProfilesCheckName {
+		t.Fatalf("checks = %v, want exactly [%s]", rep.Checks, ProfilesCheckName)
+	}
+}

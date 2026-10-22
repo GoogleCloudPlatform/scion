@@ -42,6 +42,8 @@ func writeAgentConfig(t *testing.T, projectDir, agentName string, cfg api.ScionC
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("failed to write scion-agent.json: %v", err)
 	}
+	// Provisioning records the agent's (here: no) profile broker-side too.
+	writeProvisionedProfile(t, projectDir, agentName, "")
 	return cfgPath
 }
 

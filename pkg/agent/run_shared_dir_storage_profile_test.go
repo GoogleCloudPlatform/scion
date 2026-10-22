@@ -459,7 +459,13 @@ func TestStartSharedDirStorage_SettingsLoadFailureNotRecorded(t *testing.T) {
 	f.writeRawGlobalSettings(t, "schema_version: \"1\"\nprofiles: [unclosed\n")
 
 	var broken sdsCapture
-	_, err := NewManager(newSDSMockRuntime("kubernetes", &broken)).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
+	// The agent runtime server resolves Kubernetes placement before every
+	// start (ptone/scion#5085); without that a Kubernetes start refuses to
+	// run on unreadable global settings, which is not what this test is
+	// about.
+	brokenOpts := sdsStartOpts(f, "gke-agent", "gke")
+	brokenOpts.PlacementResolved = true
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &broken)).Start(context.Background(), brokenOpts)
 	require.NoError(t, err)
 	require.Equal(t, 1, broken.ran)
 	assert.Nil(t, broken.cfg.SharedDirStorage)

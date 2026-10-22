@@ -408,10 +408,10 @@ func TestRun_StartSyncPassesAgentsExcludes(t *testing.T) {
 			rt.homeSync = func(context.Context, string, string, string, string, []string) error { return nil }
 			var mu sync.Mutex
 			var workspaceSyncs [][]string
-			rt.syncTransfer = func(_ context.Context, _, _, _, dest string, toPod bool, excludes []string) error {
+			rt.syncTransfer = func(_ context.Context, _, _, _, dest string, excludes []string) error {
 				mu.Lock()
 				defer mu.Unlock()
-				if toPod && dest == "/workspace" {
+				if dest == "/workspace" {
 					workspaceSyncs = append(workspaceSyncs, excludes)
 				}
 				return nil

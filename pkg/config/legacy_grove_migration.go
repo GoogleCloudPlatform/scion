@@ -44,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -402,7 +403,13 @@ var renameDir = func(oldname, newname string) error {
 // own symlink, and moves on without reporting anything either way. Never
 // returns an error that should abort startup; every problem is reported via
 // report instead.
+//
+// It does nothing while internal/writesonread is set: a read-only command
+// leaves the layout as it is.
 func MigrateLegacyGlobalLayout(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	for _, root := range legacyGlobalRoots {
 		migrateLegacyGlobalRoot(scionHome, root, report)
 	}
@@ -424,7 +431,14 @@ var migrateLegacyGlobalLayoutOnce sync.Once
 // but only the first call in the process has any effect. Mirrors
 // WarnRemovedLegacyEnvOnce, which the same two boot hooks already share for
 // the same reason.
+//
+// While internal/writesonread is set it returns without using up the
+// Once, so a process that sets the switch never makes a later boot
+// migration in the same process a silent no-op.
 func MigrateLegacyGlobalLayoutOnce(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	migrateLegacyGlobalLayoutOnce.Do(func() {
 		MigrateLegacyGlobalLayout(scionHome, report)
 	})
@@ -919,6 +933,11 @@ func migrateLegacyYAMLKeysLocked(file, path string, renames []legacyYAMLKeyRenam
 		return nil // no legacy keys present (or malformed YAML): no write
 	}
 	overrides := legacyValueOverrides(actions)
+	if writesonread.Disabled() {
+		// A read-only command: keep the legacy value in memory, as for a
+		// busy lock below, and leave the file (and its directory) as it is.
+		return overrides
+	}
 
 	if uid, ok := fileOwnerUID(info); ok && uid != geteuid() {
 		reportActionsSkipped(report, st, actions, path, "owned by another user")
