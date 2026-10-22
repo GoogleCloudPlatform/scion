@@ -68,8 +68,12 @@ start. Four job keys are different: `system_prompt`, `agent_instructions`, `skil
 `services` are rendered into files in the agent home when the agent is provisioned. The hub
 records which of them an edit changed (`changed_fields`), and a Runtime Broker with the
 `changedFields` capability renders those files again at the next start. It renders a key again
-only when the result differs from its last render, so a change made inside the agent to one of
-those files is overwritten only when the hub's value for that key changes again. A cleared key
+only when the result differs from its last render, so a change made inside the agent to the
+installed skills, the services file, or the prompt files of a harness that reads them from the
+agent home is overwritten only when the hub's value for that key changes again (container-script
+harnesses still rebuild their managed instruction block at every start). A start does not apply
+a clear the merge into the stored config keeps (an empty `agent_instructions` or `services`, an
+emptied skill list) or a removed skill; those wait for the next reincarnation. A cleared key
 reverts to the inherited value (`cleared_fields`) at the next start on a Runtime Broker with the
 `clearedFields` capability; a cleared `system_prompt` is rendered again from the template. With
 an older Runtime Broker these edits apply at the next reincarnation, as before. See `PATCH /:id`
