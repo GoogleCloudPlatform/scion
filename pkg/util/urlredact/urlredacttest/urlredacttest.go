@@ -71,7 +71,11 @@ var Columns = []struct{ Name, Const, Runner string }{
 	// pkg/hub/handlers_skills_discover.go, so the table stays light. It does
 	// not use the shared rule, but it shows no row's secret (it accepts only
 	// the host github.com, then drops the user info), so it is checked like a
-	// migrated column: any future leak fails its test.
+	// migrated column: any future leak fails its test. It shows no leak
+	// because of an incidental functional gate (the host must equal
+	// "github.com"), not because the code redacts; if that gate is widened
+	// (an allowlist, a pattern, other forges), this column must be measured
+	// again.
 	{HubSkillsDiscoverBase, "HubSkillsDiscoverBase", "pkg/util/urlredact/hub_skills_discover_copy_test.go"},
 }
 
