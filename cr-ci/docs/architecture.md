@@ -300,8 +300,12 @@ so it is deferred.
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
   [matrix, X6](permissions-matrix.md#5-design-corrections-and-open-items)).
-- **Ephemeral-disk quota:** the regional default is 100 GiB, which is why
-  `MAX_CONCURRENT_RUNNERS` defaults to 5 with 20 GiB disks. Raise both
+- **Ephemeral-disk quota and size:** the regional default quota is 100 GiB,
+  which fits `MAX_CONCURRENT_RUNNERS` 5 (up to 10) with the default 10 GiB
+  disks. `RUNNER_DISK_GI` is at most 10: the Cloud Run server rejected larger
+  ephemeral-disk totals per instance in the P6 deploy, although the volume
+  API documents up to 100 GiB. The design's 20-25 GiB `/scratch` is not
+  available; 10 GiB covers the lint job's caches and checkout (design 1.2). Raise both
   together after a quota increase.
 
 ## Failure modes

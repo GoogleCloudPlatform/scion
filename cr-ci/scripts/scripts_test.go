@@ -401,7 +401,7 @@ func TestIdempotentSecondRun(t *testing.T) {
 	}{
 		{"bootstrap-gcp.sh", nil, []string{"add-iam-policy-binding"}},
 		{"build-runner-image.sh", []string{"--tag", "golden"}, nil},
-		{"deploy-job.sh", []string{"--tag", "golden"}, []string{"run jobs update cr-gh-runner-8c32g", "--clear-volumes --clear-volume-mounts --add-volume=name=scratch,type=ephemeral-disk,size=20Gi"}},
+		{"deploy-job.sh", []string{"--tag", "golden"}, []string{"run jobs update cr-gh-runner-8c32g", "--clear-volumes --clear-volume-mounts --add-volume=name=scratch,type=ephemeral-disk,size=10Gi"}},
 		{"deploy-mediator.sh", []string{"--tag", "golden"}, []string{"run deploy cr-runner-mediator"}},
 		{"deploy-scheduler.sh", nil, []string{"scheduler jobs update http cr-runner-reconciler"}},
 	} {

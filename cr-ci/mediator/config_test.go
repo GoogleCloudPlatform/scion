@@ -47,7 +47,7 @@ func TestLoadDefaults(t *testing.T) {
 		RunnerCPU:               8,
 		RunnerMemory:            "32Gi",
 		RunnerMemoryMi:          32 * 1024,
-		RunnerDiskGi:            20,
+		RunnerDiskGi:            10,
 		MaxConcurrentRunners:    5,
 		TaskTimeout:             45 * time.Minute,
 		ArtifactRepo:            "cr-runners",
@@ -74,7 +74,7 @@ func TestLoadOverridesAndMultipleRepos(t *testing.T) {
 	env[EnvTargetRepos] = " owner-a/repo.one , Owner-B/repo_two "
 	env[EnvRunnerCPU] = "4"
 	env[EnvRunnerMemory] = "16384Mi"
-	env[EnvRunnerDiskGi] = "100"
+	env[EnvRunnerDiskGi] = "8"
 	env[EnvTaskTimeout] = "2h"
 	env[EnvMaxConcurrentRunners] = "20"
 	c, err := Load(getenvFrom(env))
@@ -85,7 +85,7 @@ func TestLoadOverridesAndMultipleRepos(t *testing.T) {
 	if !reflect.DeepEqual(c.TargetRepos, wantRepos) {
 		t.Errorf("TargetRepos = %v, want %v", c.TargetRepos, wantRepos)
 	}
-	if c.RunnerCPU != 4 || c.RunnerMemoryMi != 16384 || c.RunnerDiskGi != 100 || c.TaskTimeout != 2*time.Hour || c.MaxConcurrentRunners != 20 {
+	if c.RunnerCPU != 4 || c.RunnerMemoryMi != 16384 || c.RunnerDiskGi != 8 || c.TaskTimeout != 2*time.Hour || c.MaxConcurrentRunners != 20 {
 		t.Errorf("overrides not applied: %+v", c)
 	}
 }
@@ -176,7 +176,8 @@ var invalidCases = []struct {
 	{EnvRunnerMemory, "99999999999999999999Mi"},
 	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 	{EnvRunnerDiskGi, "0"},
-	{EnvRunnerDiskGi, "101"},
+	{EnvRunnerDiskGi, "11"},
+	{EnvRunnerDiskGi, "20"}, // the old default; above the 10 GiB Cloud Run accepted in P6
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -301,7 +302,7 @@ func TestExampleEnvMatchesContract(t *testing.T) {
 // validCases are configs (changes to validEnv) that Load must accept.
 var validCases = []map[string]string{
 	{},
-	{EnvTargetRepos: " owner-a/repo.one , Owner-B/repo_two ", EnvRunnerCPU: "4", EnvRunnerMemory: "16384Mi", EnvRunnerDiskGi: "100", EnvTaskTimeout: "2h", EnvMaxConcurrentRunners: "20"},
+	{EnvTargetRepos: " owner-a/repo.one , Owner-B/repo_two ", EnvRunnerCPU: "4", EnvRunnerMemory: "16384Mi", EnvRunnerDiskGi: "10", EnvTaskTimeout: "2h", EnvMaxConcurrentRunners: "20"},
 	{EnvTargetRepos: strings.Repeat("a", 39) + "/repo," + strings.Repeat("a-", 19) + "a/repo"},
 	{EnvMediatorURL: "https://cr-runner-mediator-abc123-uc.a.run.app/"},
 	{EnvGitHubInstallScope: "org", EnvTargetRepos: "some-org/a,SOME-ORG/b"},

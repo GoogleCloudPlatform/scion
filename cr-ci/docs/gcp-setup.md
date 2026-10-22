@@ -244,7 +244,9 @@ the Cloud Scheduler docs). Newer projects have it by default.
 
 Runner executions consume the regional Cloud Run ephemeral-disk quota as
 `RUNNER_DISK_GI` x running executions. The default quota of 100 GiB per region
-fits the defaults (5 x 20 GiB). To raise `MAX_CONCURRENT_RUNNERS`:
+fits the defaults (5 x 10 GiB) with room for 10 runners. `RUNNER_DISK_GI` is
+at most 10: the Cloud Run server rejected larger ephemeral-disk totals per
+instance in the P6 deploy. To raise `MAX_CONCURRENT_RUNNERS`:
 
 1. In the console (IAM & Admin > Quotas), filter for Cloud Run Admin API
    quotas in `REGION`: ephemeral disk, and the CPU and memory allocation

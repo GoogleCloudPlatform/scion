@@ -49,7 +49,10 @@ const (
 const (
 	maxOwnerLen              = 39
 	maxCloudRunTaskTimeout   = 168 * time.Hour
-	maxEphemeralDiskGi       = 100
+	// maxEphemeralDiskGi: the Cloud Run server rejected an ephemeral-disk
+	// total above 10 GiB per instance in the P6 deploy (deploy-demo-test),
+	// although the volume API documents up to 100 GiB.
+	maxEphemeralDiskGi       = 10
 	maxCloudRunMemoryMi      = 32 * 1024
 	minCloudRunMemoryMi      = 512
 	defaultRunnerLabel       = "scion-cr-8c32g"
@@ -58,7 +61,7 @@ const (
 	defaultMediatorImageName = "cr-runner-mediator"
 	defaultRunnerCPU         = "8"
 	defaultRunnerMemory      = "32Gi"
-	defaultRunnerDiskGi      = "20"
+	defaultRunnerDiskGi      = "10"
 	defaultMaxConcurrent     = "5"
 	defaultTaskTimeout       = "45m"
 	defaultArtifactRepo      = "cr-runners"
