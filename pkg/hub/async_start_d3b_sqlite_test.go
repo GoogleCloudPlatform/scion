@@ -269,7 +269,7 @@ type deleteHoldBeginStore struct {
 }
 
 func (s *deleteHoldBeginStore) BeginStartLaunch(ctx context.Context, agentID, _ string, _ time.Duration, _ store.BeginLaunchOptions) (string, error) {
-	a, err := s.Store.GetAgent(ctx, agentID)
+	a, err := s.GetAgent(ctx, agentID)
 	require.NoError(s.t, err)
 	s.minted = a.RunID
 	claimForTest(s.t, s.Store, agentID, store.DeletionStateDeleting, time.Minute)
@@ -1198,7 +1198,7 @@ type newerIntentOnRevertStore struct {
 
 func (s *newerIntentOnRevertStore) RevertRunIntent(ctx context.Context, agentID string, from store.RunIntent, at time.Time, to store.RunIntent) (bool, error) {
 	if s.fault.Active() && agentID == s.agentID && s.fired.CompareAndSwap(false, true) {
-		if _, _, err := s.Store.SwapRunIntent(ctx, agentID, store.RunIntentRunning); err != nil {
+		if _, _, err := s.SwapRunIntent(ctx, agentID, store.RunIntentRunning); err != nil {
 			return false, err
 		}
 	}
