@@ -880,6 +880,11 @@ each, with a test:
     create resource;
   - every key has at least one catalog operation that admits the delegated credential, and every
     such operation's permission is a key.
+  The effect guard covers every catalog operation, apart from the operations listed in
+  `permissions.AgentDelegationSharedKeyExemptions`: operations that share a delegable key but are never
+  admitted for the delegated credential (today `project.broadcast`, which shares `project.read`), as
+  with the `agent.attach` operations that are not admitted. A test fails if a listed operation is ever
+  admitted.
 - **v1 set (decided by ptone, 2026-09-30).** Exact reviewed permission IDs only, with no wildcard
   or read-family expansion:
 
