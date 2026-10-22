@@ -92,6 +92,16 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
 		return
 	}
+	// A conduit PTY stream keeps this identity: for a hub user token it
+	// carries the session generation the request was authenticated with. A
+	// hub user token request without one is refused, never defaulted
+	// (conduitCaptureSessionGeneration).
+	captured, ok := conduitCaptureSessionGeneration(ctx, identity)
+	if !ok {
+		refuseConduitUncapturedSessionGeneration(w)
+		return
+	}
+	identity = captured
 
 	// Get agent details
 	agent, err := s.store.GetAgent(ctx, agentID)
