@@ -65,6 +65,14 @@ type sectionState struct {
 	// requireExperiment runs per request), so parsing once here rather than
 	// per read matters.
 	ExperimentsOverrides map[string]bool
+
+	// settingsRev is the operational-settings revision the entry is known
+	// at: the revision of the Refresh read that cached it, or the revision
+	// of the Update that wrote it (0 for a store without revisions).
+	// Unlike Revision (a counter on the row, restarted at 1 when a deleted
+	// row is created again), it is global and only grows, so it orders an
+	// entry against a write of the same section (ptone/scion#5762).
+	settingsRev int64
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -230,6 +238,15 @@ type Layer1Snapshot struct {
 	// file snapshot, a store that keeps none, or a database with no
 	// operational write yet.
 	Revision int64
+
+	// Seq is the OperationalSettings cache sequence the snapshot was built
+	// at: it grows with every change of the cache, including a write
+	// cached at a revision below the cached high-water mark, which leaves
+	// Revision unchanged (ptone/scion#5762). ApplySnapshot orders
+	// DB-backed snapshots by (Revision, Seq), so a snapshot built before
+	// such a write never overwrites the writer's self-apply. 0 for a
+	// snapshot not built by OperationalSettings.Snapshot.
+	Seq uint64
 }
 
 // settingsUpdatedSubject is the LISTEN/NOTIFY subject used to propagate
@@ -301,6 +318,21 @@ type OperationalSettings struct {
 	// section). Guarded by mu.
 	revision int64
 
+	// readRev is the revision of the last Refresh read taken into the
+	// cache. Every section absent from the cache was absent at readRev (a
+	// read holds every operational write up to its revision), unless a
+	// later write cached it. Guarded by mu.
+	readRev int64
+	// tombstones records, for a section DeleteSection evicted, the
+	// revision of the delete, so a missing entry after a later delete can
+	// be told apart from a section that was never cached. An accepted
+	// Refresh clears them all: its read is at or above every one of them.
+	// Guarded by mu.
+	tombstones map[string]int64
+	// cacheSeq grows with every change of the cache or of revision; the
+	// snapshot carries it (Layer1Snapshot.Seq). Guarded by mu.
+	cacheSeq uint64
+
 	// writeGuard, when set, is asked before every section write or delete
 	// (Update, DeleteSection); a non-nil error refuses the write. The
 	// server installs the test-admin policy guard here
@@ -350,6 +382,7 @@ func NewOperationalSettings(
 		envOverrides:   envOverrides,
 		envKoanf:       envKoanf,
 		cache:          make(map[string]sectionState),
+		tombstones:     make(map[string]int64),
 	}
 }
 
@@ -447,7 +480,10 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 			"read_revision", readRevision, "cached_revision", o.revision)
 		return nil, readRevision, false, nil
 	}
+	revisionRaised := readRevision != o.revision
 	o.revision = readRevision
+	o.readRev = readRevision
+	clear(o.tombstones)
 
 	seen := make(map[string]bool, len(rows))
 
@@ -491,6 +527,7 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 			Origin:               row.Origin,
 			Malformed:            malformed,
 			ExperimentsOverrides: experimentsOverrides,
+			settingsRev:          readRevision,
 		}
 	}
 
@@ -501,8 +538,25 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 			delete(o.cache, name)
 		}
 	}
+	if revisionRaised || len(changed) > 0 {
+		o.cacheSeq++
+	}
 
 	return changed, readRevision, true, nil
+}
+
+// knownAtLocked is the operational-settings revision at which the cache's
+// view of section is known: the entry's settingsRev when it is cached,
+// otherwise the later of its delete tombstone and the last accepted read
+// (the section was absent then). A write of section at a revision at or
+// above it is newer than everything the cache holds for that section and
+// can be cached directly; one below it is superseded by a newer read,
+// write or delete of the same section (ptone/scion#5762). Caller holds mu.
+func (o *OperationalSettings) knownAtLocked(section string) int64 {
+	if entry, ok := o.cache[section]; ok {
+		return entry.settingsRev
+	}
+	return max(o.tombstones[section], o.readRev)
 }
 
 // experimentsOverridesFor returns the parsed "experiments" section overrides
@@ -544,6 +598,7 @@ func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool
 func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	o.mu.RLock()
 	revision := o.revision
+	seq := o.cacheSeq
 	dbSections := make(map[string]json.RawMessage, len(o.cache))
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
@@ -597,6 +652,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	snap := buildSnapshotFromKoanf(merged)
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
+	snap.Seq = seq
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -730,14 +786,16 @@ func (o *OperationalSettings) Update(
 	}
 	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
-	// A cached revision above this write's was raised by a newer local
-	// write or a newer read, after this write committed. The cache may
-	// still lack this write (an Update of another section raises the
-	// revision but caches only its own section), and writing this row
-	// could replace a newer value of the same section. So the cache is
-	// not written here; instead the store is read again below, before the
-	// self-apply (ptone/scion#4457).
-	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.revision
+	// The write is cached directly when its revision is at or above the
+	// revision the cache knows this section at (knownAtLocked): the cache
+	// then holds nothing newer for the section, even when the cached
+	// high-water mark is above the write because of other sections. Below
+	// it, a newer read, write or delete of the same section is already
+	// cached, so writing this row would replace newer state; the cache is
+	// not written, and the store is read again below, before the
+	// self-apply (ptone/scion#4457, ptone/scion#5762). A store without
+	// revisions (0) is cached directly, as before.
+	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.knownAtLocked(section)
 	if !reread {
 		o.cache[section] = sectionState{
 			Value:                result.Value,
@@ -747,10 +805,13 @@ func (o *OperationalSettings) Update(
 			Origin:               result.Origin,
 			Malformed:            malformed,
 			ExperimentsOverrides: experimentsOverrides,
+			settingsRev:          result.SettingsRevision,
 		}
+		delete(o.tombstones, section)
 		if result.SettingsRevision > o.revision {
 			o.revision = result.SettingsRevision
 		}
+		o.cacheSeq++
 	}
 	o.mu.Unlock()
 	if reread {
@@ -803,17 +864,25 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	}
 
 	o.mu.Lock()
-	// As in Update: with the cached revision above the delete's, the cache
-	// is not changed here and the store is read again before the
-	// self-apply. Revision 0 (a store or section without a revision) never
-	// skips the cache delete, and also re-reads, since nothing orders it
-	// against the cache (ptone/scion#4457).
-	reread := deleteRevision == 0 || deleteRevision < o.revision
-	if deleteRevision == 0 || deleteRevision >= o.revision {
+	// As in Update: a delete at or above the revision the cache knows the
+	// section at is applied to the cache directly, with a tombstone so a
+	// later-arriving older write of the section cannot resurrect it;
+	// below it, the cache already holds newer state of the section and the
+	// store is read again before the self-apply. Revision 0 (a store or
+	// section without a revision) never skips the cache delete, and also
+	// re-reads, since nothing orders it against the cache
+	// (ptone/scion#4457, ptone/scion#5762).
+	direct := deleteRevision > 0 && deleteRevision >= o.knownAtLocked(section)
+	reread := !direct
+	if deleteRevision == 0 || direct {
 		delete(o.cache, section)
+		if direct {
+			o.tombstones[section] = deleteRevision
+		}
 		if deleteRevision > o.revision {
 			o.revision = deleteRevision
 		}
+		o.cacheSeq++
 	}
 	o.mu.Unlock()
 	if reread {
@@ -842,7 +911,8 @@ const refreshThroughAttempts = 3
 // refreshThrough re-reads the store until a read at or above writeRevision
 // is taken into the cache, so the cache holds the write that got
 // writeRevision before the writer's self-apply. Update and DeleteSection
-// call it, outside o.mu, when the cached revision is above their write's.
+// call it, outside o.mu, when the cache already holds newer state of the
+// written section than their write (knownAtLocked).
 // Any accepted read qualifies: it is at or above the cached revision,
 // which was above writeRevision, and a read at revision N holds every
 // operational write up to N. A read is discarded only when another write
@@ -1346,6 +1416,9 @@ type settingsApplyState struct {
 	// lastRevision is the highest Layer1Snapshot.Revision applied.
 	// Guarded by mu.
 	lastRevision int64
+	// lastSeq is the Layer1Snapshot.Seq of the last DB-backed snapshot
+	// applied at lastRevision (ptone/scion#5762). Guarded by mu.
+	lastSeq uint64
 }
 
 // staleLocked reports whether snap is older than the last snapshot
@@ -1356,11 +1429,37 @@ type settingsApplyState struct {
 // skipped as well. A file snapshot (FromOperationalSettings false) has no
 // revision and is always applied: it occurs only on a hub without
 // OperationalSettings, where no DB-backed snapshot is ever applied and
-// lastRevision stays 0. An equal revision is applied again, so the
-// double apply of a write (self-apply and the propagation event) stays
-// harmless. Caller holds mu.
+// lastRevision stays 0. At an equal revision the cache sequence decides
+// (Layer1Snapshot.Seq): a snapshot built before a write that was cached
+// below the high-water mark, which leaves the revision unchanged, is older
+// than the writer's self-apply and is skipped (ptone/scion#5762). An equal
+// revision and sequence is applied again, so the double apply of a write
+// (self-apply and the propagation event) stays harmless. A snapshot not
+// built by OperationalSettings.Snapshot carries Seq 0 and is ordered by
+// revision alone, as before. Caller holds mu.
 func (a *settingsApplyState) staleLocked(snap Layer1Snapshot) bool {
-	return snap.FromOperationalSettings && snap.Revision < a.lastRevision
+	if !snap.FromOperationalSettings {
+		return false
+	}
+	if snap.Revision != a.lastRevision {
+		return snap.Revision < a.lastRevision
+	}
+	return snap.Seq != 0 && snap.Seq < a.lastSeq
+}
+
+// recordLocked records snap as applied when it is DB-backed and newer
+// than the last snapshot applied. Caller holds mu and has checked
+// staleLocked.
+func (a *settingsApplyState) recordLocked(snap Layer1Snapshot) {
+	if !snap.FromOperationalSettings {
+		return
+	}
+	if snap.Revision > a.lastRevision {
+		a.lastRevision = snap.Revision
+		a.lastSeq = snap.Seq
+	} else if snap.Revision == a.lastRevision && snap.Seq > a.lastSeq {
+		a.lastSeq = snap.Seq
+	}
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -1389,9 +1488,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			"skipped_stale":    true,
 		}
 	}
-	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
-		s.settingsApply.lastRevision = snap.Revision
-	}
+	s.settingsApply.recordLocked(snap)
 
 	applied := []string{}
 
@@ -1868,9 +1965,7 @@ func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if s.settingsApply.staleLocked(snap) {
 		return
 	}
-	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
-		s.settingsApply.lastRevision = snap.Revision
-	}
+	s.settingsApply.recordLocked(snap)
 
 	if s.maintenanceBreakGlass() {
 		_, msg := s.maintenance.State()
