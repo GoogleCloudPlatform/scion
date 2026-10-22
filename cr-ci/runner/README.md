@@ -301,5 +301,6 @@ covers:
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
   mediator.
 
-Lint the script with `shellcheck -x runner/entrypoint.sh` and
-`bash -n runner/entrypoint.sh`.
+Lint the script with `bash -n runner/entrypoint.sh` and both shellcheck runs in
+[scripts/README.md, "Static checks"](../scripts/README.md#static-checks)
+(upstream CI's 0.9.0 invocation and 0.11.0 `--norc -x`).
