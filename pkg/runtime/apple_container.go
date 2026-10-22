@@ -131,7 +131,7 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 		v, below, ok := appleCLIVersion(ctx, r.Command)
 		if ok && below {
 			floor := appleMaskMinVersionString()
-			return "", fmt.Errorf("container CLI %s is older than %s: the nested mounts at %s rely on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(append(slices.Clone(roTargets), maskTargets...), ", "), floor)
+			return "", fmt.Errorf("container CLI %s is older than %s: the nested mounts at %s rely on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(append(roTargets, maskTargets...), ", "), floor)
 		}
 		if ok {
 			cliVersion = v

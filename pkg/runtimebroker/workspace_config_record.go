@@ -191,7 +191,7 @@ func workspaceConfigRecordFor(projectPath, hubProjectID string) (canonical, reco
 // recordHubProjectFilesChecked runs recordHubProjectFiles inside
 // withCheckedWorkspaceConfig. The caller holds the workspace lock.
 func (s *Server) recordHubProjectFilesChecked(ctx context.Context, in startContextInputs) error {
-	return s.withCheckedWorkspaceConfig(in.AgentID, in.ProjectPath, in.ProjectID, in.ProjectSlug, func() {
+	return s.withCheckedWorkspaceConfig(in.ProjectPath, in.ProjectID, in.ProjectSlug, func() {
 		s.recordHubProjectFiles(ctx, in)
 	})
 }
@@ -201,7 +201,7 @@ func (s *Server) recordHubProjectFilesChecked(ctx context.Context, in startConte
 // is recorded as the broker's own change. The caller holds the workspace
 // lock.
 func (s *Server) alignHubManagedProjectIdentityChecked(ctx context.Context, agentID, projectPath, slug, projectID string) error {
-	return s.withCheckedWorkspaceConfig(agentID, projectPath, projectID, slug, func() {
+	return s.withCheckedWorkspaceConfig(projectPath, projectID, slug, func() {
 		s.alignHubManagedProjectIdentity(ctx, agentID, projectPath, slug, projectID)
 	})
 }
@@ -213,7 +213,7 @@ func (s *Server) alignHubManagedProjectIdentityChecked(ctx context.Context, agen
 // afterwards only by a change the broker itself makes
 // (brokerWorkspaceConfigChange). Any other difference, such as a marker
 // replaced while the broker was writing, is refused and not recorded.
-func (s *Server) withCheckedWorkspaceConfig(agentID, projectPath, projectID, slug string, write func()) error {
+func (s *Server) withCheckedWorkspaceConfig(projectPath, projectID, slug string, write func()) error {
 	before, applies, err := checkWorkspaceConfigRecordState(projectPath, projectID)
 	if err != nil {
 		return err
