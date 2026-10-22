@@ -1513,3 +1513,59 @@ func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyFilePermissions_RefusesUnsafeEntries checks that manifest modes
+// from a request never reach repository metadata, project configuration,
+// paths outside the workspace or symlink targets, and never set setuid,
+// setgid or sticky bits.
+func TestApplyFilePermissions_RefusesUnsafeEntries(t *testing.T) {
+	srv := New(DefaultServerConfig(), &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+	ws, outside := t.TempDir(), t.TempDir()
+	for rel, content := range map[string]string{
+		".git/hooks/pre-commit": "#!/bin/sh\n",
+		"proj/.scion/x":         "x",
+		"run.sh":                "#!/bin/sh\n",
+	} {
+		p := filepath.Join(ws, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(ws, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	err := srv.applyFilePermissions(ws, []transfer.FileInfo{
+		{Path: ".git/hooks/pre-commit", Mode: "0755"},
+		{Path: "proj/.scion/x", Mode: "0777"},
+		{Path: "../" + filepath.Base(outside) + "/secret", Mode: "0777"},
+		{Path: "link", Mode: "0777"},
+		{Path: "run.sh", Mode: "6755"},
+	})
+	if err == nil {
+		t.Error("expected an error for the refused entries")
+	}
+	for rel, want := range map[string]os.FileMode{
+		".git/hooks/pre-commit": 0o644,
+		"proj/.scion/x":         0o644,
+	} {
+		fi, err := os.Stat(filepath.Join(ws, rel))
+		if err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%s mode = %v (err %v), want %o", rel, fi.Mode().Perm(), err, want)
+		}
+	}
+	if fi, _ := os.Stat(secret); fi.Mode().Perm() != 0o600 {
+		t.Errorf("symlink target mode changed to %o", fi.Mode().Perm())
+	}
+	fi, _ := os.Stat(filepath.Join(ws, "run.sh"))
+	if fi.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 || fi.Mode().Perm() != 0o755 {
+		t.Errorf("run.sh mode = %v, want 0755 without setuid/setgid", fi.Mode())
+	}
+}

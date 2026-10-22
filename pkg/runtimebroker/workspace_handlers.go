@@ -456,29 +456,58 @@ func uploadManifest(ctx context.Context, bucket, storagePath string, manifest *t
 }
 
 // applyFilePermissions applies file mode permissions from the manifest.
+// The manifest comes with the request, so each entry is checked first: its
+// path must be canonical (transfer.ValidateRelPath) and workspace content
+// (no .git or .scion entry), and the target must be a regular file, reached
+// through an os.Root on the workspace without following a symlink at the
+// final element. Only the permission bits are applied (never setuid,
+// setgid or sticky). Entries that fail a check are skipped and reported as
+// the first error.
 func (s *Server) applyFilePermissions(workspacePath string, files []transfer.FileInfo) error {
 	var firstErr error
+	fail := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	root, err := os.OpenRoot(workspacePath)
+	if err != nil {
+		return fmt.Errorf("failed to open workspace: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 
 	for _, file := range files {
 		if file.Mode == "" {
 			continue
 		}
-
-		fullPath := filepath.Join(workspacePath, file.Path)
+		if err := transfer.ValidateRelPath(file.Path); err != nil {
+			fail(fmt.Errorf("invalid path %q: %w", file.Path, err))
+			continue
+		}
+		if !transfer.IsWorkspaceSyncContent(file.Path, false) {
+			fail(fmt.Errorf("%s: %w", file.Path, transfer.ErrNotWorkspaceContent))
+			continue
+		}
 
 		// Parse octal mode string (e.g., "0644")
 		var mode fs.FileMode
 		if _, err := fmt.Sscanf(file.Mode, "%o", &mode); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("invalid mode %s for %s: %w", file.Mode, file.Path, err)
-			}
+			fail(fmt.Errorf("invalid mode %s for %s: %w", file.Mode, file.Path, err))
 			continue
 		}
 
-		if err := os.Chmod(fullPath, mode); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to chmod %s: %w", file.Path, err)
-			}
+		info, err := root.Lstat(file.Path)
+		if err != nil {
+			fail(fmt.Errorf("failed to chmod %s: %w", file.Path, err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fail(fmt.Errorf("failed to chmod %s: not a regular file", file.Path))
+			continue
+		}
+		if err := root.Chmod(file.Path, mode&fs.ModePerm); err != nil {
+			fail(fmt.Errorf("failed to chmod %s: %w", file.Path, err))
 			continue
 		}
 	}
