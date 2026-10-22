@@ -112,3 +112,26 @@ func TestLegacyProjectTemplatesWarning(t *testing.T) {
 		}
 	}
 }
+
+// A hub-managed workspace root (below the global projects directory) that
+// has no .scion entry has no project template tier: its own templates/
+// directory is not read, and the warning names the .scion location.
+func TestFindTemplateInProjectPath_HubWorkspaceWithoutScion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".scion", "projects", "proj")
+	mkTemplate(t, filepath.Join(root, "templates", "at-root"))
+	if tpl, err := FindTemplateInProjectPath("at-root", root); err == nil {
+		t.Errorf("at-root resolved to %+v; a hub workspace root without .scion has no project tier", tpl)
+	}
+	w := LegacyProjectTemplatesWarning(root)
+	if !strings.Contains(w, "at-root") || !strings.Contains(w, filepath.Join(root, ".scion", "templates")) {
+		t.Errorf("warning %q", w)
+	}
+	// Outside the hub projects directory the path is used as given.
+	plain := filepath.Join(t.TempDir(), "configs")
+	mkTemplate(t, filepath.Join(plain, "templates", "t1"))
+	if tpl, err := FindTemplateInProjectPath("t1", plain); err != nil || tpl.Scope != "project" {
+		t.Errorf("t1 = (%+v, %v)", tpl, err)
+	}
+}

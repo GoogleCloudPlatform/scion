@@ -5824,7 +5824,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if len(hydratedHarnessConfigPath) > 0 {
 			hydratedHCPath = hydratedHarnessConfigPath[0]
 		}
-		if hcProjectDir := harnessConfigProjectDir(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
+		if hcProjectDir := harnessConfigProjectTier(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
 			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
@@ -6495,7 +6495,7 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	if cliFlag == "" && req.Config != nil && req.Config.Template != "" {
 		tpl := req.Config.Template
 		if req.ProjectPath != "" {
-			if _, err := config.FindHarnessConfigDir(tpl, req.ProjectPath); err == nil {
+			if _, err := config.FindHarnessConfigDir(tpl, harnessConfigProjectTier(req.ProjectPath)); err == nil {
 				cliFlag = tpl
 			}
 		}
@@ -7362,6 +7362,11 @@ func resolveProjectSettingsDir(projectPath string) string {
 				return resolved
 			}
 		}
+		return candidate
+	}
+	if isHubManagedProjectPath(projectPath) {
+		// A hub-managed workspace root without a .scion entry has no
+		// project settings; its own settings file is workspace content.
 		return candidate
 	}
 	if config.GetSettingsPath(projectPath) != "" {

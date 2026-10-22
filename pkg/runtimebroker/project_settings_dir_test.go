@@ -59,3 +59,52 @@ func TestBuildProjectFilterForHub_IgnoresWorkspaceRootSettings(t *testing.T) {
 		t.Error("hub-b filter excludes p1")
 	}
 }
+
+// A hub-managed workspace root without a .scion entry: neither its own
+// settings file nor its own harness-configs/ directory is read (no
+// project tier), including the env-gather harness-config name probe.
+func TestHubWorkspaceWithoutScion_NoRootConfigRead(t *testing.T) {
+	// newTestServer sets its own HOME; this test's HOME is set after it.
+	srv := newTestServer(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".scion", "projects", "proj")
+	if err := os.MkdirAll(filepath.Join(root, "harness-configs", "tplx"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "harness-configs", "tplx", "config.yaml"), []byte("harness: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings.yaml"), []byte("hub:\n  endpoint: https://root.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := resolveProjectSettingsDir(root), filepath.Join(root, ".scion"); got != want {
+		t.Errorf("resolveProjectSettingsDir = %q, want %q", got, want)
+	}
+	if ep := hubEndpointFromProjectSettings(root); ep != "" {
+		t.Errorf("hub endpoint %q read from the workspace root", ep)
+	}
+	if tier := harnessConfigProjectTier(root); tier != "" {
+		t.Errorf("harness-config project tier = %q, want none", tier)
+	}
+	req := CreateAgentRequest{ProjectPath: root, Config: &CreateAgentConfig{Template: "tplx"}}
+	if name := srv.resolveHarnessConfigForEnvGather(req, nil); name == "tplx" {
+		t.Error("the env-gather probe took the template name from the workspace root's harness-configs/")
+	}
+
+	// With a .scion directory, the project tier is that directory.
+	if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(root, ".scion"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tier := harnessConfigProjectTier(root); tier != want {
+		t.Errorf("harness-config project tier = %q, want %q", tier, want)
+	}
+	if name := srv.resolveHarnessConfigForEnvGather(req, nil); name == "tplx" {
+		t.Error("the env-gather probe took the template name from the workspace root's harness-configs/ (with .scion)")
+	}
+}

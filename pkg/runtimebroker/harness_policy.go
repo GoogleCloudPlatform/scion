@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -273,8 +274,8 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 	if templateForChain == "" && req.Config != nil {
 		templateForChain = req.Config.Template
 	}
-	if projectDir != "" {
-		hcDir, err := config.ResolveHarnessConfigDir("", name, projectDir, templateChainPaths(templateForChain, req.ProjectPath)...)
+	if tier := harnessConfigProjectTier(req.ProjectPath); projectDir != "" {
+		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(templateForChain, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
 			return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 		}
@@ -314,6 +315,24 @@ func policyHarnessConfigName(req CreateAgentRequest, settings *config.VersionedS
 // global directory. If resolution fails the path is returned as given
 // (launch fails on the same error).
 func harnessConfigProjectDir(projectPath string) string {
+	return resolvedHarnessConfigProjectDir(projectPath)
+}
+
+// harnessConfigProjectTier is the project tier directory of a harness-config
+// lookup by name: harnessConfigProjectDir, except "" (no project tier) for a
+// hub-managed workspace root that has no .scion entry. That root's own
+// harness-configs/ directory is workspace content, never project
+// configuration.
+func harnessConfigProjectTier(projectPath string) string {
+	if projectPath != "" && filepath.Base(projectPath) != config.DotScion && isHubManagedProjectPath(projectPath) {
+		if _, err := os.Lstat(filepath.Join(projectPath, config.DotScion)); err != nil {
+			return ""
+		}
+	}
+	return harnessConfigProjectDir(projectPath)
+}
+
+func resolvedHarnessConfigProjectDir(projectPath string) string {
 	if dir, err := config.GetResolvedProjectDir(projectPath); err == nil && dir != "" {
 		return dir
 	}

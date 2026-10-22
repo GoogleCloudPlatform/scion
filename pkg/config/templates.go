@@ -477,10 +477,11 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
-	projectTemplatesDir := filepath.Join(projectTemplatesRoot(projectPath), "templates")
-	path := filepath.Join(projectTemplatesDir, name)
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: "project"}, nil
+	if root := projectTemplatesRoot(projectPath); root != "" {
+		path := filepath.Join(root, "templates", name)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return &Template{Name: name, Path: path, Scope: "project"}, nil
+		}
 	}
 
 	// Fall back to global templates
@@ -501,13 +502,20 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 // hub-managed project, ~/.scion/projects/<slug>) resolves to the project's
 // .scion directory, or the external directory a .scion marker file names,
 // as ResolveProjectPath does; the workspace root's own templates/ directory
-// is ordinary workspace content and never a template source. Any other
-// path, including a .scion directory itself, is used as given.
+// is ordinary workspace content and never a template source; such a root
+// with no .scion entry at all, below the hub projects directory, has no
+// project tier ("" is returned). Any other path, including a .scion
+// directory itself, is used as given.
 func projectTemplatesRoot(projectPath string) string {
 	if filepath.Base(projectPath) == DotScion {
 		return projectPath
 	}
 	if _, err := os.Lstat(filepath.Join(projectPath, DotScion)); err != nil {
+		if isUnderHubProjectsDir(projectPath) {
+			// A hub-managed workspace root without a .scion entry has no
+			// project template tier.
+			return ""
+		}
 		return projectPath
 	}
 	resolved, _, err := ResolveProjectPath(projectPath)
@@ -515,6 +523,28 @@ func projectTemplatesRoot(projectPath string) string {
 		return projectPath
 	}
 	return resolved
+}
+
+// isUnderHubProjectsDir reports whether p lies below the global
+// directory's projects/ directory, where hub-managed workspaces live.
+func isUnderHubProjectsDir(p string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	projects := filepath.Join(globalDir, "projects")
+	if resolved, err := filepath.EvalSymlinks(projects); err == nil {
+		projects = resolved
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	rel, err := filepath.Rel(projects, abs)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
@@ -532,6 +562,10 @@ func LegacyProjectTemplatesWarning(projectPath string) string {
 	if root == projectPath {
 		return ""
 	}
+	newDir := filepath.Join(root, "templates")
+	if root == "" {
+		newDir = filepath.Join(projectPath, DotScion, "templates")
+	}
 	legacyDir := filepath.Join(projectPath, "templates")
 	entries, err := os.ReadDir(legacyDir)
 	if err != nil {
@@ -547,7 +581,7 @@ func LegacyProjectTemplatesWarning(projectPath string) string {
 		return ""
 	}
 	return fmt.Sprintf("Warning: templates in %s (%s) are no longer used; project templates are read from %s. Move them there, or upload them to the hub",
-		legacyDir, strings.Join(names, ", "), filepath.Join(root, "templates"))
+		legacyDir, strings.Join(names, ", "), newDir)
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the
