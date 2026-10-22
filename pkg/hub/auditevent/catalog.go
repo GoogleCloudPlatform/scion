@@ -135,7 +135,8 @@ var catalog = []CatalogEntry{{
 	// resource ID, when present, is the caller's CLAIMED broker ID from
 	// the X-Scion-Broker-ID header: unauthenticated, and admitted only
 	// within the resource.id bound (otherwise omitted with
-	// broker_id_invalid=true). The event is never dropped for it.
+	// broker_id_invalid=true, or when it holds a Unicode format (Cf) rune
+	// (R15)). The event is never dropped for it.
 	// The event is pre-authentication and caller-claimed: failure_code only
 	// classifies why the request was rejected, and neither it nor
 	// resource.id authenticates or identifies the caller.

@@ -3,7 +3,7 @@
 Date: 2026-10-22 UTC. Workstream: ptone/scion#2401 (tracker #2369).
 Base: `fce92df9f2d2b888912645b679beda6a3c147f3b`. Design of record: the EM's
 P4 slice-1 design receipt (architect handoff S1.1-S1.9, EM questions Q1-Q10,
-rulings R12, R13 and R14). This is a deliberately **partial** P4: it is not full
+rulings R12, R13, R14 and R15). This is a deliberately **partial** P4: it is not full
 P4 and not P3 completion, and audit activation stays held.
 
 ## What changed
