@@ -1160,6 +1160,53 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		assert.Equal(t, []string{"config.secrets"}, pendingConfigKeys(after.PendingConfig))
 	})
 
+	t.Run("a key a start never applies stays held for reincarnation even when set back to its applied value", func(t *testing.T) {
+		// A broker without changedFields: no provision-rendered key is
+		// applied at a start.
+		srv, s, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true})
+		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"system_prompt": "new"}})
+		assert.Equal(t, []string{"config.system_prompt"}, first.Disposition.HeldForReincarnate)
+		back := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"system_prompt": "old prompt"}})
+		assert.Empty(t, back.Disposition.Held, "a start does not apply the system prompt on this broker")
+		assert.Equal(t, []string{"config.system_prompt"}, back.Disposition.HeldForReincarnate)
+		require.Len(t, back.Warnings, 1, "%v", back.Warnings)
+		assert.Equal(t, "config.system_prompt: "+heldProvisionNote, back.Warnings[0])
+
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.system_prompt"}))
+		after := pendingReloadAgent(t, s, agent.ID)
+		require.NotNil(t, after.PendingConfig)
+		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(after.PendingConfig))
+	})
+
+	t.Run("secrets set back to the applied value stay held for reincarnation on a re-rendering broker", func(t *testing.T) {
+		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+			"secrets": []map[string]interface{}{{"key": "API_TOKEN"}},
+		}})
+		assert.Equal(t, []string{"config.secrets"}, first.Disposition.HeldForReincarnate)
+		// The applied config has no secrets: this save sets them back.
+		back := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"secrets": nil}})
+		assert.Empty(t, back.Disposition.Held, "a start never applies secrets")
+		assert.Equal(t, []string{"config.secrets"}, back.Disposition.HeldForReincarnate)
+		require.Len(t, back.Warnings, 1, "%v", back.Warnings)
+		assert.Equal(t, "config.secrets: "+heldNotRerenderedNote, back.Warnings[0])
+	})
+
+	t.Run("re-sending a pending removal is not an edit and warns about nothing", func(t *testing.T) {
+		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
+		body := map[string]interface{}{"config": map[string]interface{}{
+			"skills": []map[string]interface{}{{"uri": "hub://skills/review"}},
+		}}
+		first := patchPending(t, srv, agent.ID, body)
+		assert.Equal(t, []string{"config.skills"}, first.Disposition.HeldForReincarnate)
+		again := patchPending(t, srv, agent.ID, body)
+		assert.Empty(t, again.Disposition.Held)
+		assert.Empty(t, again.Disposition.HeldForReincarnate)
+		assert.Empty(t, again.Warnings, "the value equals the next-run value: nothing to report")
+	})
+
 	t.Run("a skill removal pending from an earlier save is still reported against the applied config", func(t *testing.T) {
 		srv, _, _, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ChangedFields: true})
 		first := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{

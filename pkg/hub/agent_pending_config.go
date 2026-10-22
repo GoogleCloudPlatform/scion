@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -280,6 +281,15 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 			delete(removed, k)
 		}
 	}
+	// A changed key a start never applies on this broker (a provision key
+	// it does not re-render; secrets always) stays pending whatever it is
+	// set to, even back to its applied value: it waits for a reincarnation.
+	for _, k := range changed {
+		if f, ok := agentEditFieldByKey[k]; ok && !sup.startApplies(f) && !slices.Contains(provision, k) {
+			provision = append(provision, k)
+		}
+	}
+	sort.Strings(provision)
 	notApplied := map[string]bool{}
 	for _, k := range provision {
 		notApplied[k] = true
