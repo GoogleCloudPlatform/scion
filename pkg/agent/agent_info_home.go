@@ -33,21 +33,16 @@ import (
 // is replaced, never written through.
 
 // agentInfoFileName is agent-info.json, in the agent home.
-const agentInfoFileName = "agent-info.json"
+const agentInfoFileName = agenthome.AgentInfoFile
 
 // maxAgentInfoSize bounds an agent-info.json read.
-const maxAgentInfoSize = 4 << 20
+const maxAgentInfoSize = agenthome.MaxAgentInfoSize
 
 // readHomeAgentInfo reads agent-info.json from the agent home at agentHome,
-// confined to the home. A missing home or file satisfies
-// errors.Is(err, fs.ErrNotExist).
+// confined to the home (agenthome.ReadAgentInfo). A missing home or file
+// satisfies errors.Is(err, fs.ErrNotExist).
 func readHomeAgentInfo(agentHome string) ([]byte, error) {
-	home, err := agenthome.Open(agentHome)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = home.Close() }()
-	return home.ReadFile(agentInfoFileName, maxAgentInfoSize)
+	return agenthome.ReadAgentInfo(agentHome)
 }
 
 // updateHomeAgentInfo performs a read-modify-write of agent-info.json in the

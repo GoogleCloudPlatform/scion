@@ -22,6 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 // fixture is a home plus an "outside" directory holding a file the tests
@@ -428,6 +433,48 @@ func TestReadFileModeAndSyncDir(t *testing.T) {
 	f.link(t, f.outside, "ld")
 	if err := f.h.SyncDir("ld"); !isLinkRefusal(err) {
 		t.Fatalf("SyncDir(ld) = %v, want a link refusal", err)
+	}
+	f.checkOutside(t)
+}
+
+func TestReadAgentInfo_RefusesLinkHardLinkAndFIFO(t *testing.T) {
+	f := newFixture(t)
+	// Missing: ErrNotExist (home and file).
+	if _, err := ReadAgentInfo(filepath.Join(f.home, "nohome")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing home: err = %v", err)
+	}
+	if _, err := ReadAgentInfo(f.home); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: err = %v", err)
+	}
+	p := filepath.Join(f.home, AgentInfoFile)
+
+	f.link(t, f.victim, AgentInfoFile)
+	if data, err := ReadAgentInfo(f.home); err == nil || data != nil {
+		t.Fatalf("link: ReadAgentInfo = %q, %v; want refused", data, err)
+	}
+	_ = os.Remove(p)
+
+	if err := os.Link(f.victim, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAgentInfo(f.home); !errors.Is(err, dirfd.ErrNotSingleLinkRegular) {
+		t.Fatalf("hard link: err = %v, want ErrNotSingleLinkRegular", err)
+	}
+	_ = os.Remove(p)
+
+	// A FIFO is refused without blocking (no writer ever opens it).
+	if err := unix.Mkfifo(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := ReadAgentInfo(f.home); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, dirfd.ErrNotSingleLinkRegular) {
+			t.Fatalf("FIFO: err = %v, want ErrNotSingleLinkRegular", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("FIFO: ReadAgentInfo blocked")
 	}
 	f.checkOutside(t)
 }

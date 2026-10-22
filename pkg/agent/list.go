@@ -186,7 +186,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
-			if fi, err := os.Stat(agentInfoJSON); err == nil {
+			if fi, err := os.Lstat(agentInfoJSON); err == nil {
 				agents[i].LastSeen = fi.ModTime()
 			}
 
@@ -384,7 +384,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents
-				if fi, err := os.Stat(agentInfoJSON); err == nil {
+				if fi, err := os.Lstat(agentInfoJSON); err == nil {
 					agentEntry.LastSeen = fi.ModTime()
 				}
 

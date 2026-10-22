@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -182,4 +183,123 @@ func TestReadHomeAgentInfo_LinkRefused(t *testing.T) {
 		t.Fatalf("missing home: err = %v, want ErrNotExist", err)
 	}
 	f.checkConfined(t)
+}
+
+// writeOutsideInfo replaces the outside file's content and refreshes the
+// fixture's snapshot.
+func (f *agentInfoFixture) writeOutsideInfo(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(f.outsideInfo, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.before = outsideSnapshot(t, f.outside)
+}
+
+func (f *agentInfoFixture) plantFIFO(t *testing.T) {
+	t.Helper()
+	_ = os.Remove(f.infoPath)
+	if err := syscall.Mkfifo(f.infoPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// within fails the test if fn does not return within 10 s (a FIFO read
+// that blocks).
+func within(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { fn(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s blocked on a FIFO at agent-info.json", what)
+	}
+}
+
+func TestReadSavedAgentInfo_LinkAndFIFOUnreadable(t *testing.T) {
+	f := newAgentInfoFixture(t)
+	f.writeOutsideInfo(t, `{"name":"x","profile":"`+outsideInfoMarker+`"}`)
+	f.plantLink(t)
+	info, st := readSavedAgentInfo(f.agentName, f.projectDir)
+	if info != nil || st != SavedProfileUnreadable {
+		t.Fatalf("link: readSavedAgentInfo = %+v, %v; want nil, SavedProfileUnreadable", info, st)
+	}
+	if GetSavedProfile(f.agentName, f.projectDir) == outsideInfoMarker {
+		t.Fatal("GetSavedProfile returned the profile of the file outside the home")
+	}
+	f.requireLink(t)
+	f.checkConfined(t)
+
+	f.plantFIFO(t)
+	within(t, "readSavedAgentInfo", func() {
+		if info, st := readSavedAgentInfo(f.agentName, f.projectDir); info != nil || st != SavedProfileUnreadable {
+			t.Errorf("FIFO: readSavedAgentInfo = %+v, %v; want nil, SavedProfileUnreadable", info, st)
+		}
+	})
+	f.checkConfined(t)
+}
+
+func TestReadStoredAgentRecord_LinkAndFIFORefused(t *testing.T) {
+	f := newAgentInfoFixture(t)
+	f.plantLink(t)
+	if rec := readStoredAgentRecord(f.home); rec != nil {
+		t.Fatalf("link: readStoredAgentRecord = %+v; want nil (outside record not read)", rec)
+	}
+	f.checkConfined(t)
+	f.plantFIFO(t)
+	within(t, "readStoredAgentRecord", func() {
+		if rec := readStoredAgentRecord(f.home); rec != nil {
+			t.Errorf("FIFO: readStoredAgentRecord = %+v; want nil", rec)
+		}
+	})
+}
+
+func TestRetainedAgentInfoMarked_LinkAndFIFORefused(t *testing.T) {
+	f := newAgentInfoFixture(t)
+	f.writeOutsideInfo(t, `{"name":"x","phase":"`+softDeletedPhase+`"}`)
+	f.plantLink(t)
+	if retainedAgentInfoMarked(f.infoPath) {
+		t.Fatal("link: the soft-delete mark of the file outside the home was used")
+	}
+	f.checkConfined(t)
+	f.plantFIFO(t)
+	within(t, "retainedAgentInfoMarked", func() {
+		if retainedAgentInfoMarked(f.infoPath) {
+			t.Error("FIFO: marked = true")
+		}
+	})
+}
+
+func TestLegacyAgentInfoRunID_LinkAndFIFORefused(t *testing.T) {
+	f := newAgentInfoFixture(t)
+	f.writeOutsideInfo(t, `{"name":"x","runId":"outside-run-1"}`)
+	f.plantLink(t)
+	if got := legacyAgentInfoRunID(f.projectDir, f.agentName); got != "" {
+		t.Fatalf("link: legacyAgentInfoRunID = %q; want \"\" (outside file not read)", got)
+	}
+	f.checkConfined(t)
+	f.plantFIFO(t)
+	within(t, "legacyAgentInfoRunID", func() {
+		if got := legacyAgentInfoRunID(f.projectDir, f.agentName); got != "" {
+			t.Errorf("FIFO: legacyAgentInfoRunID = %q", got)
+		}
+	})
+	// Control: the same content as a regular file in the home is read.
+	_ = os.Remove(f.infoPath)
+	if err := os.WriteFile(f.infoPath, []byte(`{"name":"x","runId":"outside-run-1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := legacyAgentInfoRunID(f.projectDir, f.agentName); got != "outside-run-1" {
+		t.Fatalf("regular file: legacyAgentInfoRunID = %q; want outside-run-1", got)
+	}
+}
+
+func TestUpdateAgentConfig_AgentInfoFIFODoesNotBlock(t *testing.T) {
+	f := newAgentInfoFixture(t)
+	f.plantFIFO(t)
+	within(t, "UpdateAgentConfig", func() {
+		if err := UpdateAgentConfig(f.agentName, f.projectDir, "running", "", ""); !errors.Is(err, dirfd.ErrNotSingleLinkRegular) {
+			t.Errorf("err = %v, want a FIFO refused", err)
+		}
+	})
 }

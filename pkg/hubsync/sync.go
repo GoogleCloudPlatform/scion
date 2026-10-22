@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -1610,9 +1611,11 @@ func GetLocalAgents(projectPath string) ([]string, error) {
 func getLocalAgentInfo(projectPath, agentName string) *api.AgentInfo {
 	agentDir := filepath.Join(projectPath, "agents", agentName)
 
-	// Try agent-info.json first (written by the container at runtime)
-	agentInfoPath := filepath.Join(agentDir, "home", "agent-info.json")
-	if data, err := os.ReadFile(agentInfoPath); err == nil {
+	// Try agent-info.json first (written by the container at runtime),
+	// read confined to the agent home (agenthome.ReadAgentInfo).
+	agentHome := filepath.Join(agentDir, "home")
+	agentInfoPath := filepath.Join(agentHome, agenthome.AgentInfoFile)
+	if data, err := agenthome.ReadAgentInfo(agentHome); err == nil {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err == nil {
 			applyFileTimestampFallback(&info, agentInfoPath)

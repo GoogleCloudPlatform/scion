@@ -58,6 +58,32 @@ var ErrLinkComponent = errors.New("agenthome: refusing a symbolic link as a dire
 // directory.
 var ErrNotDirectory = errors.New("agenthome: directory component is not a directory")
 
+// AgentInfoFile is the agent record file in the agent home.
+const AgentInfoFile = "agent-info.json"
+
+// MaxAgentInfoSize bounds a read of AgentInfoFile by ReadAgentInfo.
+const MaxAgentInfoSize = 4 << 20
+
+// ReadFileAt opens the agent home at homePath, reads rel (Home.ReadFile:
+// no link followed at any component or at the leaf, a non-regular file such
+// as a FIFO refused without blocking, and on unix a file with more than one
+// hard link refused) up to max bytes, and closes the home. A missing home
+// or file satisfies errors.Is(err, fs.ErrNotExist).
+func ReadFileAt(homePath, rel string, max int64) ([]byte, error) {
+	h, err := Open(homePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = h.Close() }()
+	return h.ReadFile(rel, max)
+}
+
+// ReadAgentInfo reads AgentInfoFile from the agent home at homePath with
+// ReadFileAt, up to MaxAgentInfoSize bytes.
+func ReadAgentInfo(homePath string) ([]byte, error) {
+	return ReadFileAt(homePath, AgentInfoFile, MaxAgentInfoSize)
+}
+
 // Limits bounds a tree copied into the home by InstallTree. A zero field is
 // not checked.
 type Limits struct {
