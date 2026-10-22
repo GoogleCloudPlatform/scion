@@ -47,6 +47,7 @@ import type {
   SettingsConflict,
   SettingsFieldError,
   SettingsSaveError,
+  SettingsSkippedKey,
 } from '../../shared/settings-save-errors.js';
 import {
   renderConflictNotice,
@@ -465,10 +466,8 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-interface SkippedKey {
-  key: string;
-  reason: string;
-}
+/** A changed key that was saved but is not in use, with the reason. */
+type SkippedKey = SettingsSkippedKey;
 
 interface ReloadResult {
   applied?: string[];
@@ -3529,6 +3528,37 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
+   * The saved keys of a settings save, as the success notice and the 409
+   * conflict banner both list them: applied to the running hub now, saved
+   * but taking effect only after a restart, and saved but not in use. One
+   * renderer, so the two cannot drift apart. An empty list renders nothing.
+   */
+  private renderSavedKeyLists(
+    applied: string[],
+    pending: string[],
+    skipped: SkippedKey[]
+  ): ReturnType<typeof html> {
+    return html`
+      ${applied.length > 0
+        ? html`<div class="applied applied-keys">Applied now: ${applied.join(', ')}</div>`
+        : nothing}
+      ${pending.length > 0
+        ? html`<div class="restart pending-restart">
+            Saved; applies after restart: ${pending.join(', ')}
+          </div>`
+        : nothing}
+      ${skipped.length > 0
+        ? html`<div class="skipped skipped-keys">
+            Saved but not applied:
+            <ul>
+              ${skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+            </ul>
+          </div>`
+        : nothing}
+    `;
+  }
+
+  /**
    * The keys the sections written before a 409 conflict saved
    * (ptone/scion#4467): those sections stay saved, so a restart-required key
    * among them must still be shown.
@@ -3540,22 +3570,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <div class="conflict-saved">
         <div>Changes to the other sections were saved before the conflict:</div>
-        ${c.appliedKeys.length > 0
-          ? html`<div class="applied-keys">Applied now: ${c.appliedKeys.join(', ')}</div>`
-          : nothing}
-        ${c.pendingRestart.length > 0
-          ? html`<div class="pending-restart">
-              Saved; applies after restart: ${c.pendingRestart.join(', ')}
-            </div>`
-          : nothing}
-        ${c.skipped.length > 0
-          ? html`<div class="skipped-keys">
-              Saved but not applied:
-              <ul>
-                ${c.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
-              </ul>
-            </div>`
-          : nothing}
+        ${this.renderSavedKeyLists(c.appliedKeys, c.pendingRestart, c.skipped)}
       </div>
     `;
   }
@@ -3625,22 +3640,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${reloaded.length > 0
           ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
           : nothing}
-        ${r.applied_keys && r.applied_keys.length > 0
-          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
-          : nothing}
-        ${r.pending_restart && r.pending_restart.length > 0
-          ? html`<div class="restart pending-restart">
-              Saved; applies after restart: ${r.pending_restart.join(', ')}
-            </div>`
-          : nothing}
-        ${r.skipped && r.skipped.length > 0
-          ? html`<div class="skipped skipped-keys">
-              Saved but not applied:
-              <ul>
-                ${r.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
-              </ul>
-            </div>`
-          : nothing}
+        ${this.renderSavedKeyLists(r.applied_keys ?? [], r.pending_restart ?? [], r.skipped ?? [])}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
           : nothing}
