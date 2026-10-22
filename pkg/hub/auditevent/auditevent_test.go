@@ -697,8 +697,9 @@ func TestRenderIsRaceSafeAgainstMutationOfBuilderInputAliases(t *testing.T) {
 func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 	t.Parallel()
 
-	entries := Catalog()
-	require.Len(t, entries, 2)
+	require.Len(t, Catalog(), catalogEntryCount)
+	createEntry, ok := catalogEntry("access_boundary", "create")
+	require.True(t, ok)
 	assert.Equal(t, []CatalogEntry{{
 		Family:                 "access_boundary",
 		Action:                 "create",
@@ -724,14 +725,15 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 			{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 		},
 		Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
-	}}, entries[:1])
+	}}, []CatalogEntry{createEntry})
 }
 
 func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
 	t.Parallel()
 
-	entries := Catalog()
-	require.Len(t, entries, 2)
+	require.Len(t, Catalog(), catalogEntryCount)
+	decideEntry, ok := catalogEntry("authorization", "decide")
+	require.True(t, ok)
 	assert.Equal(t, CatalogEntry{
 		Family:                  "authorization",
 		Action:                  "decide",
@@ -748,7 +750,7 @@ func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
 		},
 		OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "denied_by", Type: PayloadString, MaxBytes: 64}},
 		Destinations:          []Destination{DestinationStructuredLog},
-	}, entries[1])
+	}, decideEntry)
 
 	for _, kind := range []string{"project", "agent"} {
 		for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
@@ -937,14 +939,15 @@ func TestCatalogAdditionalResourceKindsAreDefensiveCopies(t *testing.T) {
 	t.Parallel()
 
 	want := Catalog()
-	require.Len(t, want, 2)
-	assert.Nil(t, want[0].AdditionalResourceKinds)
-	require.Equal(t, []string{"agent"}, want[1].AdditionalResourceKinds)
+	createIndex := catalogIndex(t, want, "access_boundary", "create")
+	decideIndex := catalogIndex(t, want, "authorization", "decide")
+	assert.Nil(t, want[createIndex].AdditionalResourceKinds)
+	require.Equal(t, []string{"agent"}, want[decideIndex].AdditionalResourceKinds)
 	for _, boundary := range []string{"enumeration", "lookup"} {
 		t.Run(boundary, func(t *testing.T) {
 			var entry CatalogEntry
 			if boundary == "enumeration" {
-				entry = Catalog()[1]
+				entry = Catalog()[decideIndex]
 			} else {
 				var ok bool
 				entry, ok = catalogEntry("authorization", "decide")
@@ -1230,6 +1233,22 @@ func assertValidationErrorDoesNotRetain(t *testing.T, err error, field, rule, ca
 	assert.NotContains(t, field, canary)
 	assert.NotContains(t, rule, canary)
 	assert.NotContains(t, fmt.Sprintf("%#v", err), canary)
+}
+
+// catalogEntryCount is the number of declared catalog actions.
+const catalogEntryCount = 6
+
+// catalogIndex returns the position of family/action in an enumerated
+// catalog snapshot, so tests do not depend on declaration order.
+func catalogIndex(t *testing.T, entries []CatalogEntry, family, action string) int {
+	t.Helper()
+	for i, entry := range entries {
+		if entry.Family == family && entry.Action == action {
+			return i
+		}
+	}
+	require.Failf(t, "catalog entry missing", "%s/%s", family, action)
+	return -1
 }
 
 func validCreateEvent(t *testing.T) EnvelopeV1 {

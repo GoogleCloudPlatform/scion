@@ -109,6 +109,109 @@ var catalog = []CatalogEntry{{
 	},
 	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
 }, {
+	// History-only: the envelope is validated and mapped to one
+	// access_constraint_history row inside the update transaction. It is
+	// never dispatched to a log sink.
+	Family:                 "access_boundary",
+	Action:                 "update",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// History-only: one row per constraint disabled by RecoveryService,
+	// written in that constraint's own transaction. Never dispatched.
+	Family:                 "access_boundary",
+	Action:                 "recovery_disable",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// History-only: one row per constraint re-enabled by RecoveryService,
+	// written in that constraint's own transaction. Never dispatched.
+	Family:                 "access_boundary",
+	Action:                 "recovery_enable",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationHistory},
+}, {
+	// Structured-log only: deleting a constraint cascades its history, so a
+	// delete has no history row. This log event is dispatched after commit,
+	// best-effort, and is not a persisted record.
+	Family:                 "access_boundary",
+	Action:                 "delete",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
+	ResourceKind:           "access_constraint",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "before_revision", Type: PayloadInt64}},
+	Destinations:          []Destination{DestinationStructuredLog},
+}, {
 	Family:                  "authorization",
 	Action:                  "decide",
 	AllowedPairs:            []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},

@@ -45,8 +45,8 @@ type GovernanceService struct {
 	logger    *slog.Logger
 	auditSink auditevent.Sink
 
-	// auditWriter is the legacy update/delete audit path. CREATE uses the
-	// transactionally persisted typed event and auditSink below.
+	// auditWriter is the legacy delete audit path. CREATE and UPDATE persist
+	// a typed history row in the mutation's transaction instead.
 	auditWriter *BoundaryAuditWriter
 
 	// eventBus publishes invalidation events after successful mutations.
@@ -281,9 +281,9 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Steps b, i, j: apply the mutation. CREATE additionally persists its
-	// purpose-specific history from one typed envelope in the same transaction.
-	// Update/delete remain on their existing milestone path.
+	// Steps b, i, j: apply the mutation. CREATE and UPDATE persist their
+	// purpose-specific history row from one typed envelope in the same
+	// transaction as the mutation. Delete remains on its existing path.
 	var beforeState *store.AccessConstraint
 	var result *CommitResult
 	var committedAuditEvent *auditevent.EnvelopeV1
@@ -297,16 +297,9 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		committedAuditEvent = &event
 
 	case "update":
-		// Capture the before-state so we can restore on audit failure.
-		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+		updateResult, err := gs.updateAccessConstraintWithAudit(ctx, req, classification)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load constraint before update: %w", err)
-		}
-		beforeState = existing
-
-		updated, err := gs.store.UpdateAccessConstraint(ctx, req.Draft, req.BaseRevision)
-		if err != nil {
-			if err == store.ErrRevisionConflict {
+			if errors.Is(err, store.ErrRevisionConflict) {
 				return nil, &GovernanceError{
 					Code:    ErrCodeStaleAuthorizationPreview,
 					Message: "constraint was modified by another operation since preview",
@@ -314,11 +307,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 			}
 			return nil, fmt.Errorf("update failed: %w", err)
 		}
-		result = &CommitResult{
-			Constraint:     updated,
-			Operation:      "update",
-			Classification: classification,
-		}
+		result = updateResult
 
 	case "delete":
 		// Re-read to verify revision and capture before-state for rollback.
@@ -359,7 +348,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	// TODO: Replace compensating actions with true atomic commit when
 	// Store.RunInTx is added — compensating actions have a second failure
 	// window (the compensating write itself can fail).
-	if req.Operation != "create" && gs.auditWriter != nil {
+	if req.Operation == "delete" && gs.auditWriter != nil {
 		constraintID := req.ConstraintID
 		if result.Constraint != nil && constraintID == "" {
 			constraintID = result.Constraint.ID
