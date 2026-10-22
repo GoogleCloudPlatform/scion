@@ -62,8 +62,7 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // untrustedContentSandboxCSP is sent on hub responses whose bytes are written
 // by users or agents rather than by the hub: workspace and shared-dir files
 // (above all ?view=true HTML and SVG, which would otherwise render on the
-// hub's origin with the viewer's session), the project WebDAV endpoint that
-// serves the same workspace, and chat attachments. Anything that
+// hub's origin with the viewer's session), and chat attachments. Anything that
 // can write into a project, including its agents, could otherwise act as
 // whoever opens the file. A sandboxed document gets an opaque origin: its
 // scripts still run, so generated reports and visualisations keep working,
@@ -364,6 +363,83 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 	return os.OpenRoot(base)
 }
 
+// resolveProjectWorkspacePath determines the filesystem path of a project's
+// workspace as the hub serves it (file API, archive, resource import). For
+// hub-managed and shared-workspace projects, this is the hub-managed workspace
+// directory. For linked projects it is the co-located broker's local path when
+// there is one, and otherwise the hub's cached copy of the remote workspace.
+//
+// Empty-per-agent projects (design #2703) also resolve to the hub project
+// directory here, although their agents never mount it: each agent gets a
+// private, broker-local directory. This is intentionally left unguarded in
+// P1; the web UI hides the Files tab for this mode (P5).
+func (s *Server) resolveProjectWorkspacePath(ctx context.Context, project *store.Project) (string, error) {
+	// Hub-managed projects (no git remote) always have a managed workspace
+	if project.GitRemote == "" {
+		path, err := s.hubManagedProjectPath(project.Slug)
+		if err != nil {
+			return "", projectPathResolveError(err, "failed to resolve project path")
+		}
+		return path, nil
+	}
+
+	// Shared-workspace git projects have a managed workspace on the hub
+	if project.IsSharedWorkspace() {
+		path, err := s.hubManagedProjectPath(project.Slug)
+		if err != nil {
+			return "", projectPathResolveError(err, "failed to resolve project path")
+		}
+		return path, nil
+	}
+
+	// Linked projects: check if there's a co-located broker with a local path
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve project providers")
+	}
+
+	// Git projects with no providers have no accessible workspace — the workspace
+	// lives on broker machines and no broker has registered for this project yet.
+	if len(providers) == 0 {
+		return "", fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
+	}
+
+	// Check for co-located (embedded) broker with a local path
+	for _, p := range providers {
+		if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
+			// Co-located broker: serve from local filesystem directly
+			return p.LocalPath, nil
+		}
+	}
+
+	// Remote linked project: serve from the hub's cached copy.
+	// The cache is populated via cache/refresh or cache/notify endpoints.
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
+	if err != nil {
+		return "", projectPathResolveError(err, "failed to resolve project cache path")
+	}
+
+	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
+	// The client should trigger a cache/refresh to populate it.
+	if !s.hasProjectCache(project.Slug) {
+		slog.Debug("linked project cache not yet populated",
+			"project_id", project.ID, "slug", project.Slug)
+	}
+
+	return cachePath, nil
+}
+
+// projectPathResolveError returns a generic error for a failed project path
+// resolution. Callers show its text to clients, so it does not include the
+// filesystem path. A workspace storage timeout is still wrapped
+// (errWorkspaceContentTimeout) so callers can map it to 503.
+func projectPathResolveError(err error, msg string) error {
+	if errors.Is(err, errWorkspaceContentTimeout) {
+		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
+	}
+	return errors.New(msg)
+}
+
 // notAccessible responds to a path that os.Root refused to resolve.
 //
 // os.Root reports a refused symlink escape as a *fs.PathError that is
@@ -385,13 +461,13 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - DELETE (filePath!="") → delete file
 //
 // For empty-per-agent projects (design #2703) this serves the hub project
-// directory, which their agents do not see (see resolveProjectWebDAVPath).
+// directory, which their agents do not see (see resolveProjectWorkspacePath).
 // Unguarded in P1; the web UI hides the Files tab for this mode (P5).
 func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -492,7 +568,9 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
 	// Parse multipart form
-	if err := r.ParseMultipartForm(maxUploadTotalSize); err != nil {
+	cleanup, err := parseMultipartUpload(r, s.uploadFormMaxMemory())
+	defer cleanup()
+	if err != nil {
 		if err.Error() == "http: request body too large" {
 			BadRequest(w, "Request body exceeds 100MB limit")
 			return
@@ -755,7 +833,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	}
 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -1271,8 +1349,11 @@ func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution 
 	}
 	if globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil {
 		// A file that loaded successfully as v1 is authoritative: no block
-		// means genuinely unset. Only a LEGACY-format file that mentions the
-		// key can silently drop it, gated by GlobalSettingsIsLegacyFormat.
+		// means genuinely unset. A legacy-format file is converted with its
+		// server block kept (ptone/scion#3919), so a real block loads above;
+		// one that mentions the key but loaded no block (for example a
+		// misplaced or commented-out block) fails closed, gated by
+		// GlobalSettingsIsLegacyFormat.
 		if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			return nil, true, fmt.Errorf(
 				"server.shared_dir_storage: global settings mention it but it was not loaded (missing schema_version \"1\"?)")
@@ -1587,14 +1668,8 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 // isProjectWorkspaceSubPath reports whether a project subpath addresses the
 // project workspace. Membership in this set is what routes a request through
 // handleProjectWorkspaceRoutes, and therefore through its authorization gate.
-//
-// The "dav" arm is a prefix match rather than an exact-or-slash match because
-// that is what this dispatcher has always done. It is wider than it looks —
-// "davos" routes to WebDAV too — but narrowing it here would change routing in
-// the same change that adds a security gate, and those want separate review.
 func isProjectWorkspaceSubPath(subPath string) bool {
-	return strings.HasPrefix(subPath, "dav") ||
-		subPath == "sync/status" ||
+	return subPath == "sync/status" ||
 		subPath == "workspace" ||
 		strings.HasPrefix(subPath, "workspace/")
 }
@@ -1603,18 +1678,12 @@ func isProjectWorkspaceSubPath(subPath string) bool {
 // request needs.
 //
 // Anything that is not a plain read is treated as a write. That is deliberately
-// the blunt choice: WebDAV's verb set is open-ended, and a verb this function
-// has never heard of is far more likely to be a mutation than a read. Being
-// wrong in the restrictive direction returns a 403 to someone who should have
-// been allowed; being wrong in the permissive direction is the bug this change
-// exists to fix.
-//
-// Every WebDAV verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) is
-// deliberately a write, including PROPFIND and LOCK. This was a
-// maintainer decision. The cost is that a read-only principal cannot mount or
-// browse the workspace over WebDAV; it can still read through GET on
-// workspace/files and the archive endpoint. Reclassifying a verb as a read is
-// a one-line change here and in TestProjectWorkspaceAction.
+// the blunt choice: a verb this function has never heard of is far more likely
+// to be a mutation than a read. Being wrong in the restrictive direction
+// returns a 403 to someone who should have been allowed; being wrong in the
+// permissive direction lets a read-only principal change the workspace.
+// Reclassifying a verb as a read is a one-line change here and in
+// TestProjectWorkspaceAction.
 func projectWorkspaceAction(method string) Action {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -1647,11 +1716,6 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	switch {
-	case strings.HasPrefix(subPath, "dav"):
-		davPath := strings.TrimPrefix(subPath, "dav")
-		davPath = strings.TrimPrefix(davPath, "/")
-		s.handleProjectWebDAV(w, r, project, davPath)
-
 	case subPath == "sync/status":
 		s.handleProjectSyncStatus(w, r, project)
 

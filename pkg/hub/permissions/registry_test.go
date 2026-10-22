@@ -109,6 +109,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
 	"project:list":                    {"project.list"},
+	"project:create":                  {"project.create"},
 	"skill:create":                    {"skill.create"},
 	"skill:create_global":             {"skill.create_global"},
 	"skill:delete":                    {"skill.delete"},
@@ -145,6 +146,14 @@ var expectedSelectorRegistry = map[string][]string{
 	"role_binding:read":      {"role_binding.read"},
 	"access_constraint:read": {"access_constraint.read"},
 	"hub_audit:read":         {"hub.audit.read"},
+
+	// Identity governance administration (hub boundary only).
+	"role:create":             {"role.create"},
+	"role:update":             {"role.update"},
+	"role:delete":             {"role.delete"},
+	"role_binding:create":     {"role_binding.create"},
+	"role_binding:delete":     {"role_binding.delete"},
+	"access_constraint:admin": {"access_constraint.admin"},
 
 	// agent selectors outside the agent:manage alias.
 	"agent:set_message_mode": {"agent.set_message_mode"},
@@ -522,7 +531,7 @@ func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testin
 // coverage this table requires: ResolveTargetScope's collection-evidence
 // cross-check
 // needs a reviewed class set for every Registry permission, not just
-// mintable ones (project.create has no UATScope at all).
+// mintable ones (for example project.register, which has no UATScope).
 func TestCollectionTargetClasses_CoversEveryRegistryPermission(t *testing.T) {
 	for _, p := range Registry {
 		if _, reviewed := CollectionTargetClassesFor(p.ID); !reviewed {

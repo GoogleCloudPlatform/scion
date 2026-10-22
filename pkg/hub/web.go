@@ -258,6 +258,8 @@ type WebServer struct {
 	events         EventPublisher              // nil when no publisher configured
 	hubHandler     http.Handler                // mounted Hub API handler, or nil
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
+	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
+	shutdownHooks  ShutdownHooks               // optional shutdown seams (SetShutdownHooks)
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
@@ -290,13 +292,19 @@ type WebServer struct {
 
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
 	// the files Vite fingerprinted, read from its build manifest when assets
-	// are detected (see loadFingerprintedAssets). It is built before the
-	// server starts serving and only read afterwards, so it needs no lock.
+	// are detected (see fingerprintedAssetsFromManifest). It is built before
+	// the server starts serving and only read afterwards, so it needs no lock.
 	fingerprintedAssets map[string]bool
 
 	// staticIndex serves static assets with precompressed variants and
 	// ETags (pkg/webassets); see staticAssets in web_static_index.go.
 	staticIndex staticAssetIndex
+
+	// shellModulePreloads holds the request paths the SPA shell hints with
+	// <link rel="modulepreload"> (see shellModulePreloadsFromManifest).
+	// Like fingerprintedAssets it is built before serving starts and only
+	// read afterwards.
+	shellModulePreloads []string
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -319,7 +327,16 @@ func safeJSONForHTML(raw string) string {
 // spaShellTemplate is the Go html/template for the SPA shell page.
 // It mirrors the structure from web/src/server/ssr/templates.ts but renders
 // a client-only shell (no SSR content).
-var spaShellTemplate = `<!DOCTYPE html>
+//
+// It has two parts so spaHandler can send the document head before the
+// page data is prefetched: "head" (everything up to </head>, which needs
+// no per-request data and carries the boot hints and the entry module
+// script) and "body" (the app element and the __SCION_DATA__ script).
+// The entry is a module script, so it runs only after the whole document
+// is parsed, and __SCION_DATA__ at the end of the body is in the DOM by
+// then. Executing the template itself renders both parts in order.
+var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
+{{- define "head"}}<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -346,8 +363,13 @@ var spaShellTemplate = `<!DOCTYPE html>
          (main.ts registers every component; icons are served from /shoelace/).
          Nothing is loaded from a CDN. -->
 
-    <!-- Initial state for hydration -->
-    <script id="__SCION_DATA__" type="application/json">{{.InitialData}}</script>
+    <!-- Client entry point and the chunks it imports statically. A module
+         script is deferred: it runs after the document, including the
+         __SCION_DATA__ script at the end of the body, is parsed. -->
+{{- range .ModulePreloads}}
+    <link rel="modulepreload" href="{{.}}">
+{{- end}}
+    <script type="module" src="/assets/main.js"></script>
 
     <style>
         /* Critical CSS - Core layout to prevent FOUC */
@@ -526,13 +548,14 @@ var spaShellTemplate = `<!DOCTYPE html>
         })();
     </script>
 </head>
-<body>
+{{end}}
+{{- define "body"}}<body>
     <div id="app">{{if .IsLoginPage}}<scion-login-page></scion-login-page>{{else if .IsInvitePage}}<scion-page-invite></scion-page-invite>{{else}}<scion-app></scion-app>{{end}}</div>
 
-    <!-- Client entry point -->
-    <script type="module" src="/assets/main.js"></script>
+    <!-- Initial state for hydration -->
+    <script id="__SCION_DATA__" type="application/json">{{.InitialData}}</script>
 </body>
-</html>`
+</html>{{end}}`
 
 // noAssetsPage is a self-contained HTML page served when the binary was built
 // without embedded web assets (e.g. via `go install`) and no --web-assets-dir
@@ -590,6 +613,9 @@ type spaShellData struct {
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
+	// ModulePreloads are the request paths hinted with <link
+	// rel="modulepreload"> in the head (WebServer.shellModulePreloads).
+	ModulePreloads []string
 }
 
 // logger returns the web subsystem logger, falling back to slog.Default()
@@ -721,7 +747,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 
 	ws.hasAssets = ws.detectWebAssets()
 	if ws.hasAssets {
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		if manifest, ok := ws.readViteManifest(); ok {
+			ws.fingerprintedAssets = fingerprintedAssetsFromManifest(manifest)
+			ws.shellModulePreloads = shellModulePreloadsFromManifest(manifest)
+		}
 		// Build the precompressed-asset index once, at startup (it hashes
 		// every servable file of the embedded build).
 		ws.staticAssets()
@@ -1374,6 +1403,9 @@ type viteManifestChunk struct {
 	CSS     []string `json:"css"`
 	Assets  []string `json:"assets"`
 	IsEntry bool     `json:"isEntry"`
+	// Imports lists the manifest keys of the chunks this one imports
+	// statically (dynamic imports are in dynamicImports, not read here).
+	Imports []string `json:"imports"`
 }
 
 // fingerprintSegment is a sanity check on the names the Vite manifest
@@ -1382,21 +1414,18 @@ type viteManifestChunk struct {
 // fingerprinted.
 var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
 
-// loadFingerprintedAssets reads the Vite build manifest from the asset
-// source (embedded FS or --web-assets-dir) and returns the request paths of
-// every file Vite fingerprinted: each chunk's file (except the entry,
-// assets/main.js, which is not hashed) and the CSS and assets it lists.
-// Only clean relative paths that carry a hash segment are kept.
-//
-// A missing, unreadable or unparseable manifest yields nil, so only the
-// hex rule in isHashedAsset applies. A missing manifest (an older build or
-// the dev server) is logged at Info; an unreadable or unparseable one is
-// logged at Warn and is never used partially.
+// readViteManifest reads and parses the Vite build manifest from the asset
+// source (embedded FS or --web-assets-dir). ok is false when there is no
+// usable manifest: a missing one (an older build or the dev server) is
+// logged at Info; an unreadable or unparseable one is logged at Warn and is
+// never used partially. Without a manifest only the hex rule in
+// isHashedAsset gives the long cache lifetime, and the shell carries no
+// module preload hints.
 //
 // It runs once, and only when assets were detected. If --web-assets-dir is
-// replaced or rebuilt while the hub runs, the set describes the earlier
-// build until the hub restarts.
-func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
+// replaced or rebuilt while the hub runs, what was read from it describes
+// the earlier build until the hub restarts.
+func (ws *WebServer) readViteManifest() (manifest map[string]viteManifestChunk, ok bool) {
 	var (
 		raw    []byte
 		err    error
@@ -1410,21 +1439,29 @@ func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
 		source = "embedded"
 		raw, err = fs.ReadFile(ws.assets, viteManifestPath)
 	default:
-		return nil
+		return nil, false
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		ws.logger().Info("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
-		return nil
+		ws.logger().Info("No Vite build manifest; only hex-named assets get the long cache lifetime and the shell has no module preload hints", "source", source)
+		return nil, false
 	}
 	if err != nil {
-		ws.logger().Warn("Vite build manifest unreadable; only hex-named assets get the long cache lifetime", "source", source, "error", err)
-		return nil
+		ws.logger().Warn("Vite build manifest unreadable; only hex-named assets get the long cache lifetime and the shell has no module preload hints", "source", source, "error", err)
+		return nil, false
 	}
-	var manifest map[string]viteManifestChunk
 	if err := json.Unmarshal(raw, &manifest); err != nil {
-		ws.logger().Warn("Vite build manifest does not parse; only hex-named assets get the long cache lifetime", "source", source, "error", err)
-		return nil
+		ws.logger().Warn("Vite build manifest does not parse; only hex-named assets get the long cache lifetime and the shell has no module preload hints", "source", source, "error", err)
+		return nil, false
 	}
+	ws.logger().Debug("Vite build manifest loaded", "source", source, "chunks", len(manifest))
+	return manifest, true
+}
+
+// fingerprintedAssetsFromManifest returns the request paths of every file
+// Vite fingerprinted: each chunk's file (except the entry, assets/main.js,
+// which is not hashed) and the CSS and assets it lists. Only clean relative
+// paths that carry a hash segment are kept.
+func fingerprintedAssetsFromManifest(manifest map[string]viteManifestChunk) map[string]bool {
 	set := make(map[string]bool)
 	add := func(p string) {
 		if requestPath, ok := fingerprintedRequestPath(p); ok {
@@ -1442,8 +1479,63 @@ func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
 			add(p)
 		}
 	}
-	ws.logger().Debug("Vite build manifest loaded", "source", source, "fingerprinted", len(set))
 	return set
+}
+
+// shellPreloadPath is the shape a modulepreload href must have: a .js path
+// of plain URL-safe characters. Vite's chunk names always fit; anything else
+// in the manifest is skipped rather than escaped into the shell.
+var shellPreloadPath = regexp.MustCompile(`^/assets/[A-Za-z0-9_./-]+\.js$`)
+
+// shellEntryFile is the manifest file of the client entry, the module the
+// shell loads with <script type="module" src="/assets/main.js">.
+const shellEntryFile = "assets/main.js"
+
+// shellModulePreloadsFromManifest returns the request paths the shell hints
+// with <link rel="modulepreload">: the JavaScript chunks the entry imports
+// statically, directly or through other static imports, in a stable
+// depth-first order. The entry itself is left out (the shell's module script
+// already requests it), and so are dynamic imports (loaded on demand) and
+// any path that is not a clean, fingerprinted .js path under assets/ made
+// of URL-safe characters.
+//
+// Manifest "imports" are manifest keys, not file names, so each one is
+// looked up to find its file. No stylesheet is linked: the CSS these chunks
+// list is applied at runtime today (Vite's preload helper adds it when a
+// lazy chunk that needs it loads), and linking it from the shell would
+// change when it applies and where it sits in the cascade.
+func shellModulePreloadsFromManifest(manifest map[string]viteManifestChunk) []string {
+	entryKey := ""
+	for key, chunk := range manifest {
+		if chunk.IsEntry && chunk.File == shellEntryFile {
+			entryKey = key
+			break
+		}
+	}
+	if entryKey == "" {
+		return nil
+	}
+	var preloads []string
+	seen := map[string]bool{entryKey: true}
+	var walk func(key string)
+	walk = func(key string) {
+		for _, imp := range manifest[key].Imports {
+			if seen[imp] {
+				continue
+			}
+			seen[imp] = true
+			chunk, ok := manifest[imp]
+			if !ok {
+				continue
+			}
+			if requestPath, ok := fingerprintedRequestPath(chunk.File); ok && shellPreloadPath.MatchString(requestPath) {
+				preloads = append(preloads, requestPath)
+			}
+			walk(imp)
+		}
+	}
+	walk(entryKey)
+	return preloads
 }
 
 // fingerprintedRequestPath maps a manifest path (relative to the client
@@ -1588,9 +1680,21 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 				apiReq.Header.Set("Authorization", "Bearer "+accessToken)
 			}
 			rec := httptest.NewRecorder()
-			ws.hubHandler.ServeHTTP(rec, apiReq)
+			// The shell head is already sent when this runs (spaHandler),
+			// so a panic here must not cut the document short: it degrades
+			// to no page data, like a timeout or an error status.
+			panicked := func() (panicked bool) {
+				defer func() {
+					if p := recover(); p != nil {
+						panicked = true
+						ws.logger().Error("SPA shell page data prefetch panicked; rendering the shell without page data", "panic", p)
+					}
+				}()
+				ws.hubHandler.ServeHTTP(rec, apiReq)
+				return false
+			}()
 
-			if rec.Code == http.StatusOK {
+			if !panicked && rec.Code == http.StatusOK {
 				var apiData interface{}
 				if err := json.Unmarshal(rec.Body.Bytes(), &apiData); err == nil {
 					envelope.Data = apiData
@@ -1680,12 +1784,25 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		}
 
 		data := spaShellData{
-			IsLoginPage:  r.URL.Path == "/login",
-			IsInvitePage: r.URL.Path == "/invite",
-			InitialData:  ws.prefetchPageData(r),
+			IsLoginPage:    r.URL.Path == "/login",
+			IsInvitePage:   r.URL.Path == "/invite",
+			ModulePreloads: ws.shellModulePreloads,
 		}
-		if err := ws.shellTmpl.Execute(w, data); err != nil {
-			ws.logger().Error("Failed to render SPA shell", "error", err)
+		// Send the head first and flush it, so the browser starts fetching
+		// the entry and its preloaded chunks while the page data is
+		// prefetched (which can take up to its 2-second deadline). Every
+		// response header is already set above. The head holds no
+		// per-request data. A writer that cannot flush just buffers.
+		if err := ws.shellTmpl.ExecuteTemplate(w, "head", data); err != nil {
+			ws.logger().Error("Failed to render SPA shell head", "error", err)
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			ws.logger().Debug("Failed to flush SPA shell head", "error", err)
+		}
+		data.InitialData = ws.prefetchPageData(r)
+		if err := ws.shellTmpl.ExecuteTemplate(w, "body", data); err != nil {
+			ws.logger().Error("Failed to render SPA shell body", "error", err)
 		}
 	}
 }
@@ -1864,6 +1981,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
 
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	streamCtx, endStream := ws.shutdownMark.streamContext(r)
+	defer endStream()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1943,7 +2065,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
 			flusher.Flush()
 			return
-		case <-r.Context().Done():
+		case <-streamCtx.Done():
 			return
 		}
 	}
@@ -2720,6 +2842,8 @@ func isCreateCollectionPath(path string) bool {
 	return len(segs) == 3 && segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 }
 
+const devAuthLastLoginInterval = 5 * time.Minute
+
 // devAuthMiddleware auto-populates the session with the dev user identity
 // when a dev token is configured and no user is already in the session.
 func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
@@ -2779,6 +2903,13 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				}
 				if dbUser.DisplayName != "" {
 					devName = dbUser.DisplayName
+				}
+				// Throttle writes for clients that do not retain session cookies.
+				now := time.Now()
+				if dbUser.LastLogin.IsZero() || now.Sub(dbUser.LastLogin) > devAuthLastLoginInterval {
+					if err := ws.store.UpdateUserLastLogin(r.Context(), dbUser.ID, now); err != nil {
+						ws.logger().Warn("Failed to update dev-auth last login", "error", err)
+					}
 				}
 			}
 		}
@@ -3098,8 +3229,9 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			// UpdateUser succeeds so that a failed UpdateUser cannot leave
 			// the binding state diverged from User.Role.
 			var bindingSuperAdmin string // "", "ensure", or "delete"
+			activating := user.Status == store.UserStatusInvited
 
-			if user.Status == store.UserStatusInvited {
+			if activating {
 				// Transition invited → active on first login
 				// (mirrors handleOAuthCallback's invited→active block)
 				ws.logger().Info("user activated from invited state via proxy auth", "email", proxyUser.Email, "user_id", user.ID)
@@ -3145,6 +3277,13 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
+				if activating {
+					// The stored row is still invited: issue no token or
+					// session for it (mirrors provisionUser).
+					ws.logger().Error("Proxy auth: failed to activate invited user", "email", proxyUser.Email, "user_id", user.ID, "error", err)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+					return
+				}
 				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
 				syncGrants = false
 			} else {
@@ -3526,8 +3665,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		// UpdateUser succeeds so that a failed UpdateUser cannot leave
 		// the binding state diverged from User.Role.
 		var bindingSuperAdmin string // "", "ensure", or "delete"
+		activating := user.Status == store.UserStatusInvited
 
-		if user.Status == store.UserStatusInvited {
+		if activating {
 			// Transition invited → active on first login
 			// TODO(NG4): This duplicates the invited→active logic in provisionUser.
 			// Consolidate into a shared function in a future refactor.
@@ -3583,6 +3723,13 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
+			if activating {
+				// The stored row is still invited: issue no token or
+				// session for it (mirrors provisionUser).
+				ws.logger().Error("Failed to activate invited user on login", "error", err)
+				http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
+				return
+			}
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
 			syncGrants = false
 		} else {
@@ -3967,6 +4114,11 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Dev-auth middleware (auto-populates session when dev token configured)
 	handler = ws.devAuthMiddleware(handler)
 
+	// Refuse new requests once shutdown has begun (ptone/scion#5054); the
+	// health endpoints stay reachable, and requests for the mounted hub API
+	// are left to the hub handler's own refusal.
+	handler = ws.shutdownMark.refuseDuringShutdown(handler, ws.isMountedHubRequest)
+
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
@@ -4015,29 +4167,41 @@ func (ws *WebServer) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return ws.Shutdown(context.Background())
+		sctx, cancel := ws.shutdownHooks.shutdownContext()
+		defer cancel()
+		return ws.Shutdown(sctx)
 	}
 }
 
-// Shutdown gracefully shuts down the web server and any mounted Hub resources.
+// Shutdown gracefully shuts down the web server and any mounted Hub
+// resources. The order (ptone/scion#5054) is: mark shutting down (a no-op
+// if cmd already did it), wait for the co-located broker
+// (ShutdownHooks.BeforeHTTPDrain), close the listener and drain HTTP
+// (bounded by ctx and 30s), then the mounted hub's background teardown
+// (control channels, broker auth, event publisher), so the listener no
+// longer accepts requests while the hub tears down. The hub's audit
+// writer is closed later by cmd, after every server has drained.
 func (ws *WebServer) Shutdown(ctx context.Context) error {
 	if ws.httpServer == nil {
 		return nil
 	}
 
 	ws.logger().Info("Web frontend server shutting down...")
+	ws.BeginShutdown()
+
+	ws.shutdownHooks.beforeHTTPDrain(ctx)
+	dctx, cancelDrain := ws.shutdownHooks.httpDrainContext(ctx)
+	err := drainHTTPServer(dctx, ws.httpServer)
+	cancelDrain()
 
 	// Clean up mounted Hub resources (control channels, broker auth, event publisher)
 	if ws.hubShutdown != nil {
-		if err := ws.hubShutdown(ctx); err != nil {
-			ws.logger().Error("Failed to clean up Hub resources during web server shutdown", "error", err)
+		if herr := ws.hubShutdown(ctx); herr != nil {
+			ws.logger().Error("Failed to clean up Hub resources during web server shutdown", "error", herr)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	return ws.httpServer.Shutdown(ctx)
+	return err
 }
 
 // Handler returns the HTTP handler for testing without starting a listener.

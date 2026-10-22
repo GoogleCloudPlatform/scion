@@ -805,8 +805,8 @@ func (m *panickingManager) List(ctx context.Context, filter map[string]string) (
 	return m.mockManager.List(ctx, filter)
 }
 
-func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
-	err := m.mockManager.Stop(ctx, agentID, projectPath, runID)
+func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
+	err := m.mockManager.Stop(ctx, agentID, projectPath, projectID, runID)
 	if m.panicIn == "stop" {
 		panic("stop panicked")
 	}

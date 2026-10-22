@@ -81,6 +81,7 @@ type idFixtures struct {
 	gcpSADel                string
 	accessConstraint        string
 	accessConstraintUD      string
+	previewJob              string
 	invite                  string
 	envVarKey               string
 	uatRevokePost           string
@@ -346,6 +347,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		gcpSADel:             tid("li-gcp-sa-del"),
 		accessConstraint:     tid("li-ac"),
 		accessConstraintUD:   tid("li-ac-ud"),
+		previewJob:           tid("li-preview-job"),
 		invite:               tid("li-invite"),
 		allowListEmail:       "li-allowlist@test.com",
 		envVarKey:            "LI_INVENTORY_TEST_VAR",
@@ -473,6 +475,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	acUD, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{Name: "li-ac-ud", SubjectKind: "principal", SubjectPrincipalType: &acSubjectType, SubjectPrincipalID: &acSubjectID, ScopeType: "system", MaximumPermissions: []string{"agent.read"}, Purpose: "live-inventory test fixture (update+delete)", CreatedBy: f.user, CreatedAt: now, UpdatedAt: now})
 	require.NoError(t, err)
 	f.accessConstraintUD = acUD.ID
+	// A finished constraint preview job, so the preview job and result
+	// reads address a real job. Preview jobs live in the preview service's
+	// memory, not in the store.
+	require.NotNil(t, srv.previewService, "the test server wires the preview service")
+	srv.previewService.asyncJobs.Store(f.previewJob, &PreviewJob{JobID: f.previewJob, Status: JobStatusSucceeded, Operation: "create", Result: &PreviewResult{}})
 
 	require.NoError(t, s.CreateInviteCode(ctx, &store.InviteCode{ID: f.invite, CodeHash: "li-invite-hash", CodePrefix: "li-invite", MaxUses: 1, ExpiresAt: now.Add(24 * time.Hour), CreatedBy: f.user, Created: now}))
 
@@ -680,13 +687,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
-	// federation.project_visitors on too, so their experiment-gated routes
-	// are live: the registry above with all four also defaulting on (no
-	// operational settings, which the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation and federation.project_visitors on
+	// too, so their experiment-gated routes are live: the registry above
+	// with all three also defaulting on (no operational settings, which the
+	// other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -697,7 +704,6 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
-	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
@@ -1027,11 +1033,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/settings/resolved":                 {"id": f.project},
 		"/api/v1/projects/{id}/messaging-policy":                  {"id": f.project},
 		"/api/v1/projects/{id}/set-template":                      {"id": f.project},
+		"/api/v1/projects/{id}/clone":                             {"id": f.project},
 		"/api/v1/projects/{id}/discover-templates":                {"id": f.project},
 		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
 		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},
 		"/api/v1/projects/{id}/import-harness-configs":            {"id": f.project},
-		"/api/v1/projects/{id}/dav/{path}":                        {"id": f.project, "path": "li.txt"},
 		"/api/v1/projects/{id}/sync/status":                       {"id": f.project},
 		"/api/v1/projects/{id}/workspace/archive":                 {"id": f.project},
 		"/api/v1/projects/{id}/workspace/cache/notify":            {"id": f.project},
@@ -1124,6 +1130,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/access-constraints/{id}":                     {"id": f.accessConstraint},
 		"/api/v1/admin/access-constraints/{id}/affected-principals": {"id": f.accessConstraint},
 		"/api/v1/admin/access-constraints/{id}/audit":               {"id": f.accessConstraint},
+		"/api/v1/admin/access-constraint-previews/{jobId}":          {"jobId": f.previewJob},
+		"/api/v1/admin/access-constraint-previews/{jobId}/result":   {"jobId": f.previewJob},
 
 		// --- credential token family ---
 		"/api/v1/auth/tokens/{id}/revoke": {"id": f.uatRevokePost},

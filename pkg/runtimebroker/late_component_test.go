@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -31,7 +32,7 @@ func newLateComponentServer() *Server {
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = true
 	cfg.BrokerAuthStrictMode = true
-	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 }
 
 // addLateComponentConn adds a connection named name and returns its key.

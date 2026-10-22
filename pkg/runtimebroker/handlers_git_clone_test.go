@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -63,7 +64,7 @@ func newTestServerWithGitCloneCapture() (*Server, *gitCloneCapturingManager) {
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 }
 
 func TestCreateAgentWithGitClone(t *testing.T) {

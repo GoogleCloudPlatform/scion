@@ -265,7 +265,7 @@ func TestStartConduit_FailureLogNamesTheKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
+	require.NoError(t, startConduit(ctx, newTestShutdown(cancel), cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
 	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	out := logs.String()
 	assert.Contains(t, out, "setting=server.hub.conduit.peer_auth")
@@ -291,7 +291,7 @@ func TestStartConduit_NonSettingFailureRecordsNoKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
+	require.NoError(t, startConduit(ctx, newTestShutdown(cancel), cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
 	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	assert.Equal(t, []string{""}, *recorded, "a failure not caused by one setting records no key")
 	out := logs.String()

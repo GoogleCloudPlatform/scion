@@ -164,6 +164,8 @@ gcloud projects add-iam-policy-binding <service-account-project> \
 
 If the role is missing there, assignment is refused with `403` and a message that names the service account's GCP project, the Hub's service account and the IAM Security Reviewer role, and gives this command with both values filled in. If the Hub does not know its own service account email, or the project ID or that email does not have the shape of a GCP project ID or service account email, the refusal instead uses the generic message below; grant the role as shown above. Retrying does not help until the role is granted. Other check failures, such as the Policy Troubleshooter API being disabled or a transient error, keep the message "Could not verify your permission to use this GCP service account because the check did not complete; try again".
 
+Registering or verifying a service account checks this ahead of time. When check mode is `enforce` and the account is in a GCP project other than the Hub's own, the Hub asks Policy Troubleshooter about that project. If the Hub's service account is refused there, or the project is not found, the response still succeeds and carries the same message, with the gcloud command, in its `warnings` list: registration returns it with `201`, and verification only with `200`, since a verification that fails returns its error without warnings. A project that does not exist and one the Hub may not read give the same response. The warning is advisory only: it does not block registration or change the account's verification status. Other outcomes of that call, including a disabled API or a transient error, add no warning. Accounts in the Hub's own project, and all accounts while check mode is `off`, are not checked this way.
+
 If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 
 ### Start-Time Admissibility Check
@@ -240,7 +242,7 @@ Hub administrators can set a hub-wide default GCP identity in **Admin > Server C
 4. The hub default. An explicit hub default of **Block** counts as set too.
 5. Nothing configured at any rung: the Hub leaves the agent's GCP identity unset and sends no mode, so the Runtime Broker applies its runtime default: **Block** on every runtime except Kubernetes, **Passthrough** on Kubernetes.
 
-This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule (ptone/scion#1927): a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
+This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule: a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
 
 **Kubernetes runtime note**: on the Kubernetes runtime, **Block** runs the agent pod as a zero-privilege identity rather than refusing it: the operator's block Kubernetes ServiceAccount (`kubernetes_block_service_account`), or the namespace's default ServiceAccount when none is configured, with no Kubernetes API token mounted and only on Workload Identity nodes. This applies whether **Block** comes from the create request, an explicit project default, an explicit hub default, or a project or hub default of **Assign** with no service account selected. Zero privilege depends on IAM preconditions the operator must keep true; see [block on Kubernetes](/scion/hosted/ha/kubernetes/#block). Rung 5 (nothing configured) and a denied hub-default **Passthrough** (below) are not **Block**: they get the Kubernetes runtime default, **Passthrough**.
 
@@ -398,7 +400,7 @@ To ensure security policies stay up-to-date and to support legacy agents created
 - **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `project:read`, `project:agent:lifecycle`, or secret access) after a token refresh.
 
 #### Raw Template Scopes Removed
-With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)), and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` no longer has any effect: the Hub does not read it from templates or record it on agents, and the CLI warns when a local template file still sets it. Agent permissions are configured via the named roles.
 
 ## Implementation Status
 

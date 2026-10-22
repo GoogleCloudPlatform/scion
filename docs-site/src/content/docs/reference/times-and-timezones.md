@@ -107,7 +107,7 @@ A pin is the agent's explicit timezone. It is set in three ways:
   - `""` unpins it, and the agent follows steps 2-5 from then on.
 
   The field is accepted in any phase except on a deleted agent (`409`). A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). See the [Agents API](/scion/reference/api/).
-- **Later, in the web dashboard.** The agent's **Configure** page has a **Timezone** row. It shows the resolved zone and its source, and offers **Pin** and **Unpin**.
+- **Later, in the web dashboard.** The agent's **Edit** page has a **Timezone** field (in the **General** section of the by-function view). Pick a zone to pin it, or press **Clear** to unpin it; either is saved with the page's **Save**, like any other field, and applies at the agent's next start.
 
 An agent created by an older Hub may have a `TZ` saved in its applied config env. The Hub converts that value to a pin (source `legacy`) the first time it reads the agent's timezone. The `applied-config-tz-cleanup` operation does the same for every agent in one pass (see [Operator steps](#operator-steps)).
 
@@ -124,9 +124,9 @@ An agent created by an older Hub may have a `TZ` saved in its applied config env
 Recurring schedules are evaluated in UTC, and there is no schedule timezone setting.
 
 - An expression that starts with `CRON_TZ=` or `TZ=` is rejected with `400`.
-- Schedules saved with such a prefix by an older Hub are paused at Hub start, with one warning per schedule in the Hub log. To resume one, edit its expression to UTC first.
+- Schedules saved with such a prefix by an older Hub are paused with `statusReason` `cron_zone_unsupported` at Hub start (and if the evaluator encounters one at run time), with one warning per schedule in the Hub log. To resume one, edit its expression to UTC first.
 
-See [Scheduling](/scion/hosted/user/scheduling/#recurring-schedules).
+See [Scheduling](/scion/hosted/user/scheduling/#schedules-paused-by-the-hub).
 
 ## Operator steps
 

@@ -1,0 +1,9 @@
+# Filled-in config; may name real projects. Never commit it.
+config.env
+*.env
+!config.example.env
+# Local build output
+/mediator/mediator
+# Secret material must never be committed (keep it outside the checkout).
+*.pem
+*webhook-secret*

@@ -30,7 +30,6 @@ import (
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
-	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
@@ -51,271 +50,6 @@ func resetDetectLocalRuntimeCache() {
 	detectLocalRuntimeOnce = sync.OnceValues(func() (string, error) {
 		return DetectLocalRuntime()
 	})
-}
-
-// LoadSettingsKoanf loads settings using Koanf with provider priority:
-// 1. Embedded defaults (YAML) with OS-specific runtime adjustment
-// 2. Global settings file (~/.scion/settings.yaml or .json)
-// 3. In-repo project settings file (.scion/settings.yaml or .json)
-// 4. External project config settings (for git projects with split storage)
-// 5. Environment variables (SCION_ prefix, top-level only)
-func LoadSettingsKoanf(projectPath string) (*Settings, error) {
-	return loadSettingsKoanf(projectPath, false)
-}
-
-// LoadSettingsIgnoringEnvProjectID is LoadSettingsKoanf without the
-// SCION_PROJECT_ID / SCION_HUB_PROJECT_ID environment overlay on project_id.
-// All other environment variables still apply.
-//
-// It is for callers that resolve an explicitly named project (the --project
-// or --global flag): the project ID must come from that project's own
-// settings, not from the environment of the agent container the CLI runs
-// in (ptone/scion#3123).
-func LoadSettingsIgnoringEnvProjectID(projectPath string) (*Settings, error) {
-	return loadSettingsKoanf(projectPath, true)
-}
-
-func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, error) {
-	k := koanf.New(".")
-
-	// 1. Load embedded defaults (YAML with fallback to JSON)
-	// GetDefaultSettingsData applies OS-specific runtime adjustments
-	if defaultData, err := GetDefaultSettingsData(); err == nil {
-		_ = k.Load(rawbytes.Provider(defaultData), json.Parser())
-	}
-
-	// 2. Load global settings (~/.scion/settings.yaml or .json)
-	globalDir, _ := GetGlobalDir()
-	var globalMigratedHub bool
-	if globalDir != "" {
-		var err error
-		globalMigratedHub, err = loadSettingsFile(k, globalDir)
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Captured once, right after the global layer loads: the precedence
-	// check below always compares a project layer's newly migrated value
-	// against the global value specifically, regardless of which layer
-	// (in-repo or external) turns out to hold the project's own file — see
-	// logHubProjectIDPrecedenceChange. A global value that was itself
-	// migrated from hub.grove_id in this load is not a pre-existing
-	// canonical value, so no precedence change is reported against it: two
-	// legacy hub.grove_id values resolve to the same project-over-global
-	// precedence whether or not either side has been migrated yet.
-	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
-	if globalMigratedHub {
-		globalHubProjectID = ""
-	}
-
-	// 3. Load in-repo project settings (.scion/settings.yaml)
-	// For git projects with split storage, the in-repo settings provide
-	// project-level defaults checked into the repo.
-	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
-	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
-	if projectPath != "" && projectPath != globalDir {
-		migratedHub, err := loadSettingsFile(k, projectPath)
-		if err != nil {
-			return nil, err
-		}
-		if migratedHub {
-			logHubProjectIDPrecedenceChange(k, projectPath, globalHubProjectID)
-		}
-		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
-	}
-
-	// 4. Load external project config settings (overrides in-repo for split
-	// storage). This is also where a plain (non-split-storage) project's own
-	// settings.yaml is actually loaded when projectPath is "" and the
-	// project is found via the current directory (resolveEffectiveProjectPath
-	// -> FindProjectRoot): step 3 above never runs in that case, so the
-	// precedence check must run here too, not only in step 3.
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
-		if err != nil {
-			return nil, err
-		}
-		if migratedHub {
-			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
-		}
-	}
-
-	// Check for unrecognized keys BEFORE environment variables are loaded.
-	// Environment variables like SCION_PROJECT, SCION_CREATOR do not map to
-	// Settings struct fields and would produce false-positive warnings if the
-	// check ran on the merged koanf instance.
-	if settingsUnused, err := decodeCollectingUnused(k, settingsProbeStruct(false)); err == nil {
-		warnSettingsUnusedKeys(k, settingsUnused, func() bool {
-			hasVersioned, _ := detectHierarchyFormat(projectPath)
-			return hasVersioned
-		}, "settings", settingsHierarchySources(globalDir, projectPath, effectiveProjectPath))
-	}
-
-	// 5. Load environment variables (SCION_ prefix, top-level only)
-	// Maps: SCION_ACTIVE_PROFILE -> active_profile
-	//       SCION_DEFAULT_TEMPLATE -> default_template
-	//       SCION_BUCKET_PROVIDER -> bucket.provider
-	//       SCION_BUCKET_NAME -> bucket.name
-	//       SCION_BUCKET_PREFIX -> bucket.prefix
-	//       SCION_HUB_ENDPOINT -> hub.endpoint
-	//       SCION_HUB_TOKEN -> hub.token
-	//       SCION_HUB_API_KEY -> hub.apiKey
-	//       SCION_HUB_BROKER_ID -> hub.brokerId
-	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
-	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
-		if os.Getenv(s) == "" {
-			// An exported but empty variable is treated as unset, so it
-			// never blanks a value from the settings files.
-			return ""
-		}
-		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
-			if ignoreEnvProjectID || s == projectkeys.EnvHubProjectID {
-				// SCION_HUB_PROJECT_ID is applied after the file sources
-				// below, so it outranks them; mapped here, the two env
-				// names would collide on project_id in os.Environ order.
-				return ""
-			}
-			return mapped
-		}
-		if isSettingsExcludedEnv(s) {
-			// See settingsExcludedEnvVars for every excluded name and the
-			// reason. Dropping them here too keeps this legacy mapper in
-			// sync with settings_v1.go's versionedEnvKeyMapper (a bare
-			// SCION_HUB, for one, collides with Settings.Hub).
-			return ""
-		}
-		if isRemovedLegacyEnv(s) {
-			// SCION_HUB_GROVE_ID is no longer read. Without this check
-			// it would otherwise fall through to the generic "hub_" mapping
-			// below and land on the unrecognised key hub.grove_id.
-			// Returning "" makes the env provider drop the variable
-			// entirely (env.go's Provider skips a "" key), the same idiom
-			// this callback uses above for an empty value.
-			// WarnRemovedLegacyEnv reports it separately.
-			return ""
-		}
-		key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
-		// Handle nested bucket keys
-		if strings.HasPrefix(key, "bucket_") {
-			return "bucket." + strings.TrimPrefix(key, "bucket_")
-		}
-		// Handle nested hub keys
-		if strings.HasPrefix(key, "hub_") {
-			subkey := strings.TrimPrefix(key, "hub_")
-			// Convert snake_case to camelCase for specific keys
-			switch subkey {
-			case "api_key":
-				return "hub.apiKey"
-			case "broker_id":
-				return "hub.brokerId"
-			case "broker_token":
-				return "hub.brokerToken"
-			default:
-				return "hub." + subkey
-			}
-		}
-		return key
-	}), nil)
-
-	// Normalize v1 settings keys to legacy keyspace.
-	// In v1 format, project_id is stored at hub.project_id (snake_case), but
-	// the legacy Settings struct expects it at the top level (project_id).
-	// The HubClientConfig struct uses koanf tag "projectId" (camelCase), so
-	// the v1 key hub.project_id doesn't match either location without
-	// remapping. Always remap (unconditionally) because after the koanf
-	// merge chain, hub.project_id reflects the most specific
-	// (project-level) value and must take precedence over any top-level
-	// project_id inherited from global.
-	hubProjectID := ""
-	if k.Exists(projectkeys.ConfigHubProjectIDKey) {
-		hubProjectID = k.String(projectkeys.ConfigHubProjectIDKey)
-	}
-
-	if hubProjectID != "" {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectkeys.ConfigProjectIDKey: hubProjectID,
-		}, "."), nil)
-		// Also remap to hub.projectId (camelCase) so the legacy
-		// HubClientConfig.ProjectID field (koanf tag "projectId") is populated.
-		// Without this, GetHubProjectID() returns "" for V1 settings, causing
-		// EnsureHubReady to fall back to the local project_id and loop on
-		// project registration when the hub project ID differs from the local ID.
-		if !k.Exists(projectkeys.ConfigHubProjectIDJSON) {
-			_ = k.Load(confmap.Provider(map[string]interface{}{
-				projectkeys.ConfigHubProjectIDJSON: hubProjectID,
-			}, "."), nil)
-		}
-	}
-
-	// For git projects, the project_id is stored in a project-id file inside the
-	// .scion directory rather than in the settings file. Read it here so that
-	// it overrides any project_id inherited from global settings. The original
-	// projectPath points to the .scion directory (before resolveEffectiveProjectPath
-	// redirects to the external config dir).
-	var fileProjectID string
-	if projectPath != "" && projectPath != globalDir {
-		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
-			fileProjectID = projectID
-			_ = k.Load(confmap.Provider(map[string]interface{}{
-				projectkeys.ConfigProjectIDKey: projectID,
-			}, "."), nil)
-		}
-	}
-
-	// SCION_HUB_PROJECT_ID outranks every file source: the project-id file
-	// and the settings key hub.project_id (and the SCION_PROJECT_ID
-	// environment variable). A disagreement is logged once per distinct
-	// pair of values. SCION_PROJECT_ID keeps its rank: above a top-level
-	// project_id in the files, below hub.project_id and the project-id file.
-	if hubEnv := envHubProjectID(); hubEnv != "" && !ignoreEnvProjectID {
-		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.EnvProjectID, os.Getenv(projectkeys.EnvProjectID))
-		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDKey, hubProjectID)
-		if camel := k.String(projectkeys.ConfigHubProjectIDJSON); camel != hubProjectID {
-			warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDJSON, camel)
-		}
-		if fileProjectID != "" {
-			warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectIDFileSource(projectPath), fileProjectID)
-		}
-		override := map[string]interface{}{projectkeys.ConfigProjectIDKey: hubEnv}
-		if k.Exists(projectkeys.ConfigHubProjectIDJSON) {
-			// Keep GetHubProjectID in step with ProjectID when the files
-			// set a hub project ID of their own.
-			override[projectkeys.ConfigHubProjectIDJSON] = hubEnv
-		}
-		_ = k.Load(confmap.Provider(override, "."), nil)
-	}
-
-	// In v1 format, broker identity fields are stored under server.broker.*
-	// (snake_case), but the legacy Settings struct expects them at hub.brokerId
-	// (camelCase). Remap so LoadSettingsKoanf produces correct HubClientConfig.
-	if k.Exists("server.broker.broker_id") && !k.Exists("hub.brokerId") {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"hub.brokerId": k.String("server.broker.broker_id"),
-		}, "."), nil)
-	}
-	if k.Exists("server.broker.broker_token") && !k.Exists("hub.brokerToken") {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"hub.brokerToken": k.String("server.broker.broker_token"),
-		}, "."), nil)
-	}
-	if k.Exists("server.broker.broker_nickname") && !k.Exists("hub.brokerNickname") {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"hub.brokerNickname": k.String("server.broker.broker_nickname"),
-		}, "."), nil)
-	}
-
-	// Unmarshal into Settings struct
-	settings := &Settings{
-		Runtimes:  make(map[string]RuntimeConfig),
-		Harnesses: make(map[string]HarnessConfig),
-		Profiles:  make(map[string]ProfileConfig),
-	}
-
-	if err := k.Unmarshal("", settings); err != nil {
-		return nil, err
-	}
-
-	return settings, nil
 }
 
 // dropInheritedHubProjectID removes the global layer's hub project ID from k
@@ -339,7 +73,7 @@ func dropInheritedHubProjectID(k *koanf.Koanf, projectPath, effectiveProjectPath
 
 // loadsProjectLayer reports whether a settings load for projectPath merges a
 // project layer above the global one. It follows the in-repo and external
-// project steps of LoadSettingsKoanf and LoadVersionedSettings, but compares
+// project steps of LoadVersionedSettings, but compares
 // against the global directory by resolved path: FindProjectRoot returns a
 // symlink-resolved path, so a working directory under a symlinked $HOME still
 // names the global project. The "global" and "home" aliases name the global
@@ -370,25 +104,29 @@ func sameDirForComparison(a, b string) bool {
 // This is useful when you need to read just one project's settings file in isolation,
 // for example to get the project's hub.endpoint without the broker's own env vars
 // overriding it.
+//
+// The result is the read-only Settings view of the versioned loader
+// (settingsViewOf) for that one file: a legacy-format file is converted to
+// the v1 shape first, and a v1 file's hub.project_id is carried to
+// Hub.ProjectID (ptone/scion#5427). No environment variable is read.
 func LoadSettingsFromDir(dir string) (*Settings, error) {
-	k := koanf.New(".")
-	if _, err := loadSettingsFile(k, dir); err != nil {
-		return nil, err
-	}
-	settings := &Settings{
-		Runtimes:  make(map[string]RuntimeConfig),
-		Harnesses: make(map[string]HarnessConfig),
-		Profiles:  make(map[string]ProfileConfig),
-	}
-	settingsUnused, err := decodeCollectingUnused(k, settings)
+	s, err := loadSingleDirSettingsView(dir)
 	if err != nil {
 		return nil, err
 	}
-	warnSettingsUnusedKeys(k, settingsUnused, func() bool {
-		hasVersioned, _ := detectDirSettingsFormat(dir)
-		return hasVersioned
-	}, "settings", settingsHierarchySources(dir))
-	return settings, nil
+	// The unused-key warning reads the file as written. It is only a
+	// warning: a file the legacy probe cannot decode gets none, and the
+	// load does not fail for it.
+	raw := koanf.New(".")
+	if _, err := loadSettingsFile(raw, dir); err == nil {
+		if settingsUnused, err := decodeCollectingUnused(raw, settingsProbeStruct(false)); err == nil {
+			warnSettingsUnusedKeys(raw, settingsUnused, func() bool {
+				hasVersioned, _ := detectDirSettingsFormat(dir)
+				return hasVersioned
+			}, "settings", settingsHierarchySources(dir))
+		}
+	}
+	return s, nil
 }
 
 // settingsHierarchySources resolves each directory to its settings file path
@@ -429,15 +167,21 @@ func settingsHierarchySources(dirs ...string) []string {
 // loadGlobalSettingsOnly (round 6 addendum — see LoadGlobalSettings' doc
 // comment in settings_v1.go for why the global-only, Layer-0
 // server.shared_dir_storage read needs a loader this narrow).
-func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, error) {
+//
+// A legacy-format file is converted to the v1 shape (see
+// loadLegacySettingsLayer); the conversion's deprecation warnings are
+// returned.
+func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, []string, error) {
 	k := koanf.New(".")
 
 	if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
 		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
 	}
-	if _, err := loadSettingsFile(k, dir); err != nil {
-		return nil, err
+	legacy := &legacyLayerState{}
+	if _, err := loadSettingsFileConverting(k, dir, legacy); err != nil {
+		return nil, nil, err
 	}
+	warnings := legacy.warnings
 
 	settings := &VersionedSettings{
 		Runtimes:       make(map[string]V1RuntimeConfig),
@@ -445,34 +189,9 @@ func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, error) {
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
 	if err := unmarshalVersionedSettings(k, settings); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return settings, nil
-}
-
-// loadLegacySettingsFileOnly is LoadSettingsKoanf restricted to a single
-// directory's settings file plus embedded defaults: no project layers, no
-// SCION_ environment provider. Used only by loadGlobalSettingsOnly (see
-// loadVersionedSettingsFileOnly above).
-func loadLegacySettingsFileOnly(dir string) (*Settings, error) {
-	k := koanf.New(".")
-
-	if defaultData, err := GetDefaultSettingsData(); err == nil {
-		_ = k.Load(rawbytes.Provider(defaultData), json.Parser())
-	}
-	if _, err := loadSettingsFile(k, dir); err != nil {
-		return nil, err
-	}
-
-	settings := &Settings{
-		Runtimes:  make(map[string]RuntimeConfig),
-		Harnesses: make(map[string]HarnessConfig),
-		Profiles:  make(map[string]ProfileConfig),
-	}
-	if err := k.Unmarshal("", settings); err != nil {
-		return nil, err
-	}
-	return settings, nil
+	return settings, warnings, nil
 }
 
 // loadSettingsFile loads settings from a directory, preferring YAML over
@@ -486,7 +205,20 @@ func loadLegacySettingsFileOnly(dir string) (*Settings, error) {
 // reports whether this call found and processed such a key — callers use
 // this to log the one-time precedence-change note right after the file
 // that just changed is loaded.
+//
+// The file is loaded as written. The settings loaders use
+// loadSettingsFileConverting instead, which also converts a legacy-format
+// file to the v1 shape.
 func loadSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, err error) {
+	return loadSettingsFileConverting(k, dir, nil)
+}
+
+// loadSettingsFileConverting is loadSettingsFile for the settings loaders.
+// When legacy is not nil, a file without schema_version is converted to the
+// v1 shape at its own layer (loadLegacySettingsLayer) before it is merged,
+// and legacy records what the conversion found. A versioned file is loaded
+// as written.
+func loadSettingsFileConverting(k *koanf.Koanf, dir string, legacy *legacyLayerState) (migratedHubProjectID bool, err error) {
 	yamlPath := filepath.Join(dir, "settings.yaml")
 	ymlPath := filepath.Join(dir, "settings.yml")
 	jsonPath := filepath.Join(dir, "settings.json")
@@ -514,8 +246,16 @@ func loadSettingsFile(k *koanf.Koanf, dir string) (migratedHubProjectID bool, er
 				override = v
 			}
 		}
-		if err := k.Load(file.Provider(path), parser); err != nil {
+		if legacy != nil {
+			if err := loadLegacySettingsLayer(k, path, parser, legacy); err != nil {
+				return false, err
+			}
+		} else if err := k.Load(file.Provider(path), parser); err != nil {
 			return false, err
+		}
+		if override != "" && legacy != nil {
+			legacy.hubIDFromCamel = false
+			legacy.touch(projectkeys.ConfigHubProjectIDKey)
 		}
 		if override != "" {
 			// The override is applied at this file's own layer,
@@ -768,45 +508,26 @@ func settingsProbeStruct(hasVersioned bool) interface{} {
 	}
 }
 
-// warnSettingsUnusedKeys warns about unrecognized keys in merged settings.yaml
-// data. settingsUnused is the unused-key list from a decode into the legacy
-// Settings struct that the CALLER already performed for its own purposes
-// (LoadSettingsKoanf's probe decode, or LoadSettingsFromDir's real result
-// decode) — this function never decodes into Settings itself, so callers
-// never pay for that decode twice.
+// warnSettingsUnusedKeys warns about unrecognized keys in the settings.yaml
+// data LoadSettingsFromDir reads as written. settingsUnused is the
+// unused-key list of the caller's decode of that data into the legacy
+// Settings probe, so this function never decodes into Settings itself.
 //
-// Settings-unused is always the base: LoadSettingsKoanf seeds the koanf
-// instance with embedded defaults in the legacy JSON shape (see
-// GetDefaultSettingsData) regardless of the user's own file format, so even a
-// purely v1-format user file is decoded from data that is a mix of both
-// shapes — Settings alone still correctly recognizes every default-seeded
-// legacy key (e.g. "harnesses", converted from the default's v1
-// harness_configs).
+// Settings does not carry the v1-only fields (schema_version, top-level
+// server/image_registry, runtimes[*].type, profiles[*].image_registry, ...),
+// so when hasVersioned() is true (the source is v1-format) a second decode
+// into VersionedSettings cross-checks Settings' unused list via
+// combineSettingsUnused: a key survives only if both decodes leave it
+// unused. When hasVersioned() is false the list is reported as-is
+// (ptone/scion#2258 round-1 review finding 2).
 //
-// Settings does not, however, carry the user's own v1-only fields
-// (schema_version, top-level server/image_registry, runtimes[*].type,
-// profiles[*].image_registry, ...), so when hasVersioned() is true (from
-// detectHierarchyFormat or detectDirSettingsFormat — the source is genuinely
-// v1-format) a second decode into VersionedSettings cross-checks Settings'
-// unused list via combineSettingsUnused: a key survives only if the other
-// decode corroborates it, so a real v1 field settings alone can't see is
-// dropped, a genuinely unknown key both decodes agree on is kept, and a
-// default-seeded legacy-only key VersionedSettings alone can't see (e.g.
-// "harnesses") is also dropped. When hasVersioned() is false, the source is
-// legacy-format and is never read by anything but the legacy Settings shape
-// (LoadEffectiveSettings sends it through LoadSettingsKoanf +
-// AdaptLegacySettings, never LoadVersionedSettings), so the cross-check is
-// skipped and Settings-unused is reported as-is: a v1-only key mistakenly
-// placed in a legacy file is genuinely unused by every loader that will ever
-// read it, and must still warn (ptone/scion#2258 round-1 review finding 2).
+// The settings loaders (LoadVersionedSettings' layers) warn on their own,
+// from a VersionedSettings decode.
 //
 // hasVersioned is a func, not a bool, and is called only when settingsUnused
-// is non-empty: detecting the format re-reads the settings file(s) from disk
-// (detectHierarchyFormat) or re-reads and re-parses one (detectDirSettingsFormat),
-// and settings are loaded from many call sites per CLI invocation, so that
-// work — like the VersionedSettings cross-check decode itself — should not
-// run on the (overwhelmingly common) path where there is nothing to warn
-// about.
+// is non-empty: detecting the format re-reads the settings file from disk,
+// which should not happen on the (overwhelmingly common) path where there is
+// nothing to warn about.
 func warnSettingsUnusedKeys(k *koanf.Koanf, settingsUnused []string, hasVersioned func() bool, label string, sources []string) {
 	if len(settingsUnused) == 0 {
 		return

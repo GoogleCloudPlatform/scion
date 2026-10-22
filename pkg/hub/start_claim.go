@@ -87,8 +87,9 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
+		errors.Is(err, errStartRunNotBegun),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
-		isBrokerRuntimeUnavailable(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
+		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
 	}
 	return startUnconfirmed
@@ -121,6 +122,10 @@ type startClaimRun struct {
 	owner string
 	claim store.StartClaim
 	cfg   StartClaimSettings
+	// broker is the Runtime Broker the claim's start targets (the agent
+	// row's RuntimeBrokerID when the claim was taken). The idle release
+	// after the claim clears frees only a reservation on it.
+	broker string
 
 	ctx    context.Context // the start runs under it: deadline, cancelled when lost
 	cancel context.CancelFunc
@@ -173,15 +178,15 @@ func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind
 	agent.RunIntent = store.RunIntentRunning
 	at := claim.RunIntentAt
 	agent.RunIntentAt = &at
-	return s.runStartClaim(ctx, agent.ID, claim, cfg, sent), nil
+	return s.runStartClaim(ctx, agent.ID, agent.RuntimeBrokerID, claim, cfg, sent), nil
 }
 
-// runStartClaim starts the lease renewal of an acquired claim. sent is the
-// time the claim request was sent: the first fence deadline is measured
-// from it.
-func (s *Server) runStartClaim(parent context.Context, agentID string, claim store.StartClaim, cfg StartClaimSettings, sent time.Time) *startClaimRun {
+// runStartClaim starts the lease renewal of an acquired claim. broker is the
+// Runtime Broker the claim's start targets. sent is the time the claim
+// request was sent: the first fence deadline is measured from it.
+func (s *Server) runStartClaim(parent context.Context, agentID, broker string, claim store.StartClaim, cfg StartClaimSettings, sent time.Time) *startClaimRun {
 	r := &startClaimRun{
-		s: s, agent: agentID, owner: claim.Owner, claim: claim, cfg: cfg,
+		s: s, agent: agentID, broker: broker, owner: claim.Owner, claim: claim, cfg: cfg,
 		fenceAt:    sent.Add(cfg.LeaseTTL - cfg.LeaseTTL/3),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -293,11 +298,21 @@ func (r *startClaimRun) renewLoop() {
 
 // finish stops the renewal and settles the claim by outcome. A lost claim
 // writes nothing: whoever took it (a stop or the reaper) owns its next
-// state. It reports whether the claim was still held.
+// state. It reports whether the claim was still held. For every outcome
+// except a handoff, success and a lost claim included, it then frees the
+// agent's slot on the broker the claim's start targeted if the agent holds
+// no capacity and no start-kind claim (releaseSlotIfIdle, which never frees
+// a reservation on another broker): an exit observed while the claim was
+// held skipped its release (for example a synchronous create whose
+// container exited during the dispatch keeps its terminal phase). That is a
+// no-op for a running agent and while a start-kind claim is still held.
 func (r *startClaimRun) finish(outcome startOutcome) bool {
 	close(r.stop)
 	<-r.done
 	defer r.cancel()
+	if outcome != startHandedOff {
+		defer r.releaseSlotIfIdle()
+	}
 	if r.isLost() {
 		return false
 	}
@@ -317,6 +332,15 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 		slog.Warn("Start claim: settling the claim failed; the reaper will settle it", "agent_id", r.agent, "claim_id", r.claim.ID, "error", err)
 	}
 	return held
+}
+
+// releaseSlotIfIdle runs Server.releaseSlotIfIdleOn for the run's agent and
+// the broker its start targeted, once the claim is settled, on a context
+// detached from the run's.
+func (r *startClaimRun) releaseSlotIfIdle() {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 10*time.Second)
+	defer cancel()
+	r.s.releaseSlotIfIdleOn(ctx, r.agent, r.broker)
 }
 
 // claimedDispatch runs a start under its claim's context. fence reports
@@ -406,6 +430,19 @@ type StartOpts struct {
 	// in a counted phase (a restart). A start from a resting phase always
 	// clears them.
 	NewGeneration bool
+	// AcceptAsyncLaunch is the request's opt-in to an asynchronous start
+	// (ptone/scion#4669). The start is sent asynchronously only when, in
+	// addition, the hub.async_agent_start experiment is on, every live hub
+	// instance advertises async_start_v1 (asyncStartAllowed), the agent was
+	// at rest (the dispatch wrote starting) or this is a restart's start
+	// leg, and the dispatcher's own rules hold (asyncStartEligible).
+	AcceptAsyncLaunch bool
+	// OnLaunchAccepted, when set, is called once a broker accepted the
+	// start as an asynchronous launch, while the claim is held, in place of
+	// AfterStart (which is not called). The agent row then reads starting
+	// with an active launch; the launch's end writes the outcome, settles
+	// the claim and keeps or releases the reservation.
+	OnLaunchAccepted func(ctx context.Context, agent *store.Agent)
 	// AfterStart, when set, runs after a successful dispatch while the claim
 	// is still held, in place of the default status write (phase from the
 	// broker response, or running; its container status; exit fields
@@ -455,7 +492,12 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
-	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
+	// The effective resting phase (ptone/scion#4669): an error row that
+	// remembers a created or provisioning phase a failed asynchronous start
+	// began from is still a provisioned agent that never ran. Read before
+	// the dispatch, while no launch is active.
+	rest := store.EffectiveRestingPhase(agent)
+	provisioned := rest == string(state.PhaseCreated) || rest == string(state.PhaseProvisioning)
 	// Taken before the dispatch, which may record a new placement: a start
 	// replacing a previous run's ephemeral workspace warns about it
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
@@ -466,6 +508,8 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	// accepted: a broker accepted the start as an asynchronous launch.
+	accepted := false
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
 		defer endOp()
@@ -485,7 +529,29 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			dctx, cancel = context.WithDeadline(ctx, callerDeadline)
 			defer cancel()
 		}
+		// An asynchronous start (ptone/scion#4669) is asked for only from
+		// a resting phase (the dispatch wrote starting; a start of a
+		// running agent keeps its pod and stays synchronous) or for a
+		// restart's start leg, and only through a dispatcher that takes
+		// options. The experiment and the hub-node check come last, so
+		// the registry is read only when the rest holds.
+		od, hasOptions := dispatcher.(startOptionsDispatcher)
+		async := opts.AcceptAsyncLaunch && hasOptions &&
+			(sd.wroteStarting() || opts.Kind == store.StartClaimRestart) &&
+			s.asyncStartAllowed()
+		var res *StartDispatchResult
 		dispatch := func(c context.Context) error {
+			if async {
+				kind := store.LaunchKindStart
+				if opts.Kind == store.StartClaimRestart {
+					kind = store.LaunchKindRestart
+				}
+				var err error
+				res, err = od.DispatchAgentStartWithOptions(c, agent, opts.Task, opts.Resume, StartDispatchOptions{
+					Async: true, Kind: kind, PriorPhase: sd.restingPhase(),
+				})
+				return err
+			}
 			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
 		}
 		var err error
@@ -495,8 +561,27 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			err = dispatch(dctx)
 		}
 		if err != nil {
+			if opts.Dispatch != nil && startOutcomeOf(err) == startUnconfirmed {
+				// The caller's hold (a restart's) outlives a start whose
+				// outcome is unknown (ptone/scion#5143): its reservation is
+				// kept, and the agent rests at stopped, until the start
+				// claim is settled.
+				sd.keepForUnknownOutcome()
+			}
 			sd.rollback(ctx)
 			return false, err
+		}
+		if res.AcceptedLaunch() != nil {
+			// Accepted as an asynchronous launch: keep the reservation
+			// (the launch's end or the launch reaper releases it), write
+			// no started status, and hand the claim to the launch, whose
+			// end settles it.
+			sd.settle()
+			accepted = true
+			if opts.OnLaunchAccepted != nil {
+				opts.OnLaunchAccepted(ctx, agent)
+			}
+			return true, nil
 		}
 		// The container is up: the reservation is kept whatever the
 		// status write below does.
@@ -518,30 +603,87 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
-		s.clearSupersededQueuedStop(ctx, agent)
+		// A start handed off to an asynchronous launch is still launching:
+		// its queued stop is replaced with starting, not running
+		// (ptone/scion#5266).
+		status := "running"
+		if accepted {
+			status = containerStatusStarting
+		}
+		s.replaceQueuedStop(ctx, agent, status)
+	}
+	if err == nil && accepted {
+		// Watchers see the launching agent (phase starting, its launch)
+		// now, not at the launch's first report (ptone/scion#4669).
+		s.publishAgentStatusByID(ctx, agent.ID)
 	}
 	if err != nil && provisioned && startDidNotHappen(err) && agent.RunIntentAt != nil {
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
+	} else if err != nil && supersedesQueuedStop && opts.Existing == nil &&
+		startRefusedBeforeRun(err) && agent.RunIntentAt != nil {
+		// A start refused before anything ran, after a stop was queued for
+		// the agent's offline broker (ptone/scion#5070): the claim recorded
+		// run intent running, which takes the agent out of every queued-stop
+		// path (the drain, the settle and the intent backstop all need the
+		// stop intended) while stop_queued keeps its slot held. Put the
+		// stopped intent back (compare-and-set on the claim's intent time;
+		// run_intent_at stays that newer time), so the queued stop is still
+		// pending: the settle confirms it once a fresh inventory shows the
+		// container gone, and the intent backstop stops a container still
+		// running. A restart (opts.Existing) handles stop_queued itself.
+		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, refusedStartMessage(err))
 	}
 	return err
+}
+
+// startRefusedBeforeRun reports whether err is a start refused before
+// anything ran: startDidNotHappen, or a broker that is draining or has no
+// runtime of the agent's type, both of which refuse a start before acting.
+func startRefusedBeforeRun(err error) bool {
+	return startDidNotHappen(err) || isBrokerDraining(err) || isBrokerRuntimeUnavailable(err)
+}
+
+// refusedStartMessage is the message a stop-queued agent gets when its
+// start is refused before anything ran: a flat Runtime Broker refusal's own
+// message (the lifecycle handler records that same message after the start
+// returns, so the status event published with it stays current), otherwise
+// the refusal with a note that the agent stays stopped.
+func refusedStartMessage(err error) string {
+	if msg := runtimeTargetRefusalMessage(err); msg != "" {
+		return msg
+	}
+	return "Start failed: " + err.Error() + ". The agent stays stopped."
 }
 
 // provisionedRestingNote ends the message a provisioned agent gets when its
 // start did not happen: it is back at rest and can be started again.
 const provisionedRestingNote = "The agent is still provisioned and can be started again."
 
-// clearSupersededQueuedStop clears the queued-stop status and notice of an
-// agent whose start succeeded after a stop was queued for its offline
-// broker: the start superseded the stop. It runs after the start's claim is
-// released, so it re-reads the row and clears only while run intent is still
+// containerStatusStarting is the container status of a start handed off to
+// an asynchronous launch whose container is still launching
+// (ptone/scion#4669). It is neutral for capacity: the agent holds its slot
+// through its phase (starting) while the launch is live, and once the
+// launch ends a failed start's slot is released with it. A queued stop's
+// status (containerStatusStopQueued) left in place would instead keep the
+// agent holding capacity after a failed launch (ptone/scion#5266).
+const containerStatusStarting = "starting"
+
+// replaceQueuedStop clears the queued-stop status and notice of an agent
+// whose stop was queued for its offline broker, replacing stop_queued with
+// containerStatus: running after a start that succeeded (the start
+// superseded the stop), stopped after a restart's stop leg stopped the old
+// container and its start leg's outcome is unknown (ptone/scion#5143). It
+// runs after the start's claim is released, or under the restart's kept
+// claim, so it re-reads the row and clears only while run intent is still
 // running and the queued status or notice is still there: a stop recorded
 // since keeps its own state. A row a delete has won (deletedOrDeleteHeld)
 // keeps its state too: the delete claim does not move run intent (the
 // engine records stop later, in dispatch), and the store's delete guard
 // does not cover the container status, so without this check the clear
-// would repaint a deleting row running (ptone/scion#3696). The container
-// status becomes running unless the broker reported one.
-func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
+// would repaint a deleting row (ptone/scion#3696). The container status is
+// replaced only while the row reads stop_queued. A start handed off to an
+// asynchronous launch passes containerStatusStarting.
+func (s *Server) replaceQueuedStop(ctx context.Context, agent *store.Agent, containerStatus string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(cctx, agent.ID)
@@ -551,10 +693,10 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 	}
 	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
 	if cur.ContainerStatus == containerStatusStopQueued {
-		upd.ContainerStatus = "running"
+		upd.ContainerStatus = containerStatus
 	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
-		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
+		slog.Warn("Replacing the queued-stop container status failed", "agent_id", agent.ID, "container_status", containerStatus, "error", err)
 		return
 	}
 	if upd.ContainerStatus != "" {
@@ -562,16 +704,33 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 	}
 }
 
+// publishAgentStatusByID is publishAgentRow on a context detached from the
+// caller's cancellation and bounded to 5 seconds (the start's claim context
+// may already be done).
+func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	s.publishAgentRow(pctx, agentID)
+}
+
 // startDidNotHappen reports whether err is a start that definitely never
 // reached a runtime: refused before dispatch for capacity, missing
-// environment, a credential that could not be issued, a broker without the
-// required capability, a create left incomplete, a phase that no longer
-// allows a launch, or a broker that confirmed it did not act. Anything else,
-// including a start that succeeded but whose status write failed, an
-// ambiguous dispatch error, a claim refusal (the earlier claimant owns the
-// intent) or a launch in flight (which may still start a container), is not.
+// environment, a credential that could not be issued, a run that could not
+// be begun before the request was sent (errStartRunNotBegun; not when a
+// delete refused the run-ID write, since the delete then owns the row), a
+// broker without the required capability, a create left incomplete, a phase
+// that no longer allows a launch, or a broker that confirmed it did not
+// act. Anything else, including a start that succeeded but whose status
+// write failed, an ambiguous dispatch error, a claim refusal (the earlier
+// claimant owns the intent) or a launch in flight (which may still start a
+// container), is not. Neither is any error that wraps
+// store.ErrDeleteInProgress (for example ErrLaunchInvalidPhase from a launch
+// begin that found the row delete-held): a delete-held row's run intent is
+// the delete engine's, so no provisioned settle or queued-stop revert may
+// write it.
 func startDidNotHappen(err error) bool {
-	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) {
+	if err == nil || errors.Is(err, errStartedStatusWrite) || errors.Is(err, errStartClaimLost) ||
+		errors.Is(err, store.ErrDeleteInProgress) {
 		return false
 	}
 	var quotaErr *startQuotaError
@@ -580,28 +739,147 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
+		(errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
 }
 
-// settleFailedProvisionedStart returns a provisioned agent (phase created)
-// whose start definitely did not happen to its resting state: run intent
-// goes back to stopped, compare-and-set on the intent the start recorded at
-// intentAt, and only when that wins the message says why. A newer start or
-// stop since keeps its intent and gets no message.
-func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) {
+// settleFailedProvisionedStart returns an agent whose start did not happen
+// to its resting intent: a provisioned agent (phase created), or an agent
+// whose stop was queued for its offline broker before the refused start
+// (ptone/scion#5070). Run intent goes back to stopped, compare-and-set on
+// the intent the start recorded at intentAt, and only when that wins the
+// message says why and the agent's status is published. A newer start or
+// stop since keeps its intent and gets no message. It reports whether the
+// intent was reverted.
+func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID string, intentAt time.Time, message string) bool {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	reverted, err := s.store.RevertRunIntent(sctx, agentID, store.RunIntentRunning, intentAt, store.RunIntentStopped)
 	if err != nil {
-		slog.Warn("Failed provisioned start: intent revert failed", "agent_id", agentID, "error", err)
-		return
+		slog.Warn("Refused start: intent revert failed", "agent_id", agentID, "error", err)
+		return false
 	}
 	if !reverted {
-		return
+		return false
 	}
 	if err := s.store.UpdateAgentStatus(sctx, agentID, store.AgentStatusUpdate{Message: message}); err != nil {
-		slog.Warn("Failed provisioned start: message write failed", "agent_id", agentID, "error", err)
+		slog.Warn("Refused start: message write failed", "agent_id", agentID, "error", err)
 	}
+	s.publishAgentRow(sctx, agentID)
+	return true
+}
+
+// settleFailedStartLaunch is the run-intent hook of a start launch's
+// failure end (ptone/scion#4669, design D-c "Run intent"): when a start
+// launch (kind start; a restart's failure ends stopped and keeps its intent)
+// ended failed, timed_out or lost from a provisioned prior
+// (launch_prior_phase created or provisioning, which covers a retry from a
+// resume-memory row), it calls settleFailedProvisionedStart as the
+// synchronous failed start does (startAgentCore). The run intent returns to
+// stopped and the message, startLaunchFailureMessage, says why. It reports
+// whether it settled.
+//
+// a is the row the failure end itself wrote, and the caller calls this only
+// on the write that ended the launch: an applied failed report that ended an
+// active launch (end reason failed), or a row the launch reaper ended. Never
+// on a later refine of an already-ended launch: the CAS key is the row's
+// current RunIntentAt, so a second call could revert a newer start's intent.
+// It is the shared call site for every start-launch failure end (the
+// ptone/scion#5368 follow-up, a failure applied after running_observed,
+// reuses it). Start launches exist only while hub.async_agent_start is on;
+// one begun before the experiment was turned off still settles here when it
+// ends.
+func (s *Server) settleFailedStartLaunch(ctx context.Context, a *store.Agent) bool {
+	if !isProvisionedStartLaunchEnd(a) || a.RunIntentAt == nil {
+		return false
+	}
+	return s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, startLaunchFailureMessage(a))
+}
+
+// isProvisionedStartLaunchEnd reports whether a's launch is a start launch
+// from a provisioned prior that ended in failure (failed, timed_out or
+// lost).
+func isProvisionedStartLaunchEnd(a *store.Agent) bool {
+	if a == nil || a.LaunchKind != store.LaunchKindStart || a.LaunchState != store.LaunchStateEnded {
+		return false
+	}
+	switch a.LaunchEndReason {
+	case store.LaunchEndReasonFailed, store.LaunchEndReasonTimedOut, store.LaunchEndReasonLost:
+	default:
+		return false
+	}
+	prior := state.Phase(a.LaunchPriorPhase)
+	return prior == state.PhaseCreated || prior == state.PhaseProvisioning
+}
+
+// startLaunchFailureMessage is the message a failed provisioned start
+// launch leaves, in the synchronous path's shape: "Start failed: <the
+// failure>. <provisionedRestingNote>". The failure is the launch's own end:
+// for a failed report, the message that report just wrote ("<step>:
+// <message>"; its launch error when it carried none); for a reaper end
+// (timed_out, lost), which writes no message, its launch error
+// (launch_timeout, broker_lost), never the row's older message (on a
+// memory-row retry that is the previous attempt's failure). A failed end
+// that left an older failure message in place (one already in this shape)
+// uses its launch error too. A trailing period is dropped so the text has
+// one.
+func startLaunchFailureMessage(a *store.Agent) string {
+	failure := ""
+	if a.LaunchEndReason == store.LaunchEndReasonFailed && !strings.HasSuffix(a.Message, provisionedRestingNote) {
+		failure = strings.TrimRight(strings.TrimSpace(a.Message), ".")
+	}
+	if failure == "" {
+		failure = a.LaunchError
+	}
+	return "Start failed: " + failure + ". " + provisionedRestingNote
+}
+
+// reapplyStartLaunchFailureMessage restores the failure message shape after
+// a failed report refined an already-ended provisioned start launch (the
+// reaper ended it first): the refine wrote the broker's detail
+// as the message, so it is rewritten as "Start failed: <detail>. <note>"
+// with a narrow message write, no intent change. Only while the run intent
+// is still stopped (the reap's settle won and nothing started since) and
+// the message is not already in that shape; the write is conditional on
+// the phase a was read in, so a start that moved the row on since keeps its
+// message. On success a.Message is set to the rewritten text, so the
+// caller's own publish of a (the handler publishes the changed row) carries
+// it.
+func (s *Server) reapplyStartLaunchFailureMessage(ctx context.Context, a *store.Agent) {
+	if !isProvisionedStartLaunchEnd(a) || a.LaunchEndReason == store.LaunchEndReasonFailed ||
+		a.RunIntent != store.RunIntentStopped || strings.HasSuffix(a.Message, provisionedRestingNote) {
+		return
+	}
+	failure := strings.TrimRight(strings.TrimSpace(a.Message), ".")
+	if failure == "" {
+		failure = a.LaunchError
+	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	msg := "Start failed: " + failure + ". " + provisionedRestingNote
+	err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{Message: msg, IfPhase: a.Phase})
+	switch {
+	case errors.Is(err, store.ErrPhaseMismatch):
+		// A newer write moved the row on: leave its message.
+	case err != nil:
+		slog.Warn("Failed provisioned start: message write after a refined report failed", "agent_id", a.ID, "error", err)
+	default:
+		a.Message = msg
+	}
+}
+
+// publishAgentRow publishes agentID's stored row as a status event, unless
+// the row is gone, soft-deleted or held by a delete (the delete engine owns
+// its status), or there is no publisher. Best-effort.
+func (s *Server) publishAgentRow(ctx context.Context, agentID string) {
+	if s.events == nil {
+		return
+	}
+	cur, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || deletedOrDeleteHeld(cur) {
+		return
+	}
+	s.events.PublishAgentStatus(ctx, cur)
 }
 
 // writeStartedStatus is startAgentCore's default post-start write: the
@@ -639,6 +917,15 @@ var errStartClaimWrite = errors.New("record the start claim")
 // errStartedStatusWrite marks a start that succeeded but whose status write
 // failed: the agent is starting, so for the claim the start succeeded.
 var errStartedStatusWrite = errors.New("agent started but its status could not be recorded")
+
+// errStartRunNotBegun marks a start dispatch whose run could not be begun
+// (beginRun: no token generator, the agent token could not be signed or its
+// credential recorded, or the run ID could not be recorded), or whose
+// asynchronous launch could not be begun after the run was
+// (BeginStartLaunch failed; ptone/scion#4669), wrapped around that error.
+// Nothing was sent to the broker, so for the claim the start is released,
+// not unconfirmed.
+var errStartRunNotBegun = errors.New("start not sent: its run could not be begun")
 
 // startQuotaError is a start refused because the broker is at capacity (or
 // the capacity check failed); nothing was dispatched.

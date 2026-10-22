@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -55,7 +56,9 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 		{name: "first-stage aux match", projectID: "", labels: map[string]string{"scion.name": "some-agent"}},
 		// project-scoped lookup of an unlabelled agent — only the
 		// no-project-label fallback stage can find it.
-		{name: "no-project-label fallback aux match", projectID: "proj-1", labels: map[string]string{"scion.name": "some-agent"}},
+		// The entry's recorded path identifies as the project, as the
+		// fallback stage requires.
+		{name: "no-project-label fallback aux match", projectID: scopeProjA, labels: map[string]string{"scion.name": "some-agent"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,12 +67,17 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 			fakeRuntime := filepath.Join(dir, "fake-runtime")
 			require.NoError(t, os.WriteFile(fakeRuntime, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o700))
 
-			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			auxRT := &attachCapableTestRuntime{
 				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
 			}
-			auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1", Labels: tc.labels}}}
+			entry := api.AgentInfo{Name: "some-agent", ID: "cid-1", Labels: tc.labels}
+			if tc.projectID != "" {
+				entry.ContainerID = "cid-1"
+				entry.ProjectPath = legacyProjectPath(t, tc.projectID)
+			}
+			auxMgr := &mockManager{agents: []api.AgentInfo{entry}}
 			srv.auxiliaryRuntimesMu.Lock()
 			srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(auxRT)] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
 			srv.auxiliaryRuntimesMu.Unlock()
@@ -261,7 +269,7 @@ profiles:
 func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testing.T) {
 	writeHomeSettings(t, `schema_version: "1"
 `)
-	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"))
+	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
@@ -278,7 +286,7 @@ func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testi
 // before the swap the heartbeat reports attach supported; after swapping
 // to a runtime that opts out, the next heartbeat must report false.
 func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hb.SetDefaultRuntime(srv.runtime)
 	srv.hubMu.Lock()
@@ -289,7 +297,7 @@ func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
 	require.NotNil(t, before.Capabilities)
 	require.True(t, before.Capabilities.Attach, "precondition: attach-capable default runtime reports Attach=true")
 
-	srv.SwapRuntime(newOptOutTestRuntime("optout"))
+	srv.SwapRuntime(newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	after := hb.buildHeartbeat(context.Background())
 	require.NotNil(t, after.Capabilities)

@@ -38,6 +38,8 @@ permissions). Available scopes:
 | `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
+| `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
@@ -51,9 +53,9 @@ permissions). Available scopes:
 | `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session. Granting `hub` mode (by setting it, by a cascade, or when creating an agent) needs a hub-bound token |
 | `agent:manage` | All agent scopes except `agent:attach`, `agent:port_access`, `agent:update`, `agent:stop_all` and `agent:set_message_mode` (convenience alias) |
 
-In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
+In addition to project and agent scopes, Scion supports UAT scopes for other resource types, among them `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
-To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, `user.list`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
+To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
 
 You can dynamically discover all available scopes and their descriptions by querying the API:
 ```bash
@@ -232,7 +234,10 @@ The web UI's **Create Token** form always mints project tokens. Through the API,
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
 `boundary` that disagrees with `projectId`, is rejected with `400` (`boundary_invalid`). Token
-management requires a signed-in session credential; a UAT cannot mint another token:
+management requires a signed-in session credential; a UAT cannot mint another token. Every
+authenticated caller that is not a user with a session or dev credential (a UAT, an agent, a
+Runtime Broker or any other credential) gets the same `403` from `POST /api/v1/auth/tokens`,
+decided before the request body is read. With a session credential:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
@@ -261,8 +266,20 @@ The same per-request checks apply, with these limits:
   the grant's project.
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
-- **Inbox and conversations.** Inbox, conversation and notification operations check the token's
-  inbox selectors and its boundary.
+- **Inbox and conversations.** Chat writes made with a token (sending, changing or removing your
+  own inbox items, notifications, conversations and direct messages) need `inbox:write`. Reading
+  your own inbox, notifications, direct messages, direct-message read state and chat preferences
+  needs `inbox:read`. Both scopes act only on your own records. Reading a project chat thread (the
+  thread, its messages and your read state on it) or the members of its chat space needs
+  `project:read` on its project (agent rows in the member list also need `agent:list`), and
+  posting to a thread needs `inbox:write` as well. A project token reaches only records of its
+  project, and only while you are a member; a record with no project, such as a direct message
+  between users, needs a hub token.
+- **Limits and quotas.** Reading hub-wide limit definitions, entitlements and usage needs
+  `quota:read`; creating, updating or deleting them needs `quota:read` together with `quota:create`,
+  `quota:update` or `quota:delete`.
+  These scopes can be selected only on a hub token, and your user must also hold the matching
+  hub permission.
 - **Project configuration.** Setting the project messaging policy, and template and project
   configuration operations, each require their own permission; project owners hold
   `project.set_messaging_policy`.
@@ -284,6 +301,31 @@ The same per-request checks apply, with these limits:
   Removing an allow-list entry deletes the invited user together with that user's role bindings
   and group memberships, and is refused with `409` while the invited user is a project's last
   owner.
+- **Creating, registering and cloning projects.** Creating or registering a project admits only
+  a hub token carrying `project:create`, and your user must hold `project.create`. You become the
+  owner of the new project, so the token must also carry a selector for every permission of the
+  project owner role; with the built-in owner role, which includes permissions that have no
+  selector (such as `project.delete`), a token is refused and you create projects with an
+  interactive sign-in. Naming an existing project by id also needs `project:update` on it.
+  Registering a project with an embedded broker needs an interactive sign-in; a token registers
+  brokers with `POST /api/v1/brokers`.
+  Cloning a project also needs `project:read` on the source project and `project:clone`;
+  selecting `project:clone` needs `project.clone`, which the built-in super-admin role carries.
+- **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
+  importing or duplicating a custom role needs `role:create`, updating one `role:update`, and
+  deleting one `role:delete`, each together with `role:read`. Creating or updating a role needs
+  your user to hold every permission of the role at hub level, and the token must carry a scope
+  for each of them; a
+  project-scoped custom role can be bound in every project, so a project role does not count.
+  A token cannot create a system-scoped custom role. Binding a custom project role needs
+  `role_binding:create`, current project management access to that project, and every
+  permission of the role in that project within the token's scopes. Deleting a system-scoped
+  binding needs `role_binding:delete`. A token can never create a system-scoped binding or
+  delete a super-admin binding. Constraint previews need `access_constraint:admin`; creating a
+  constraint, or an update that tightens it (removes permissions from its maximum set, or
+  widens or removes its time window), also needs `access_constraint:read`. Deleting a
+  constraint, or an update that relaxes it (adds permissions, changes its subject or scope, or
+  narrows or adds its time window), needs an interactive sign-in.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your
@@ -301,6 +343,23 @@ The same per-request checks apply, with these limits:
   project needs `skill:create` on a token whose boundary contains the project; discovering
   them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
   references with no project needs `skill:read` on a hub token.
+- **Schedules.** Creating a scheduled event or schedule needs `scheduled_event:create`; updating,
+  re-targeting, pausing or resuming a schedule needs `scheduled_event:update`; cancelling or
+  deleting needs `scheduled_event:delete`. The request also passes the event type's own target
+  checks, and each fire stays within the recording token's ceiling and boundary. A fire fails once
+  that token is revoked, deleted or has expired, so a recurring schedule authored with a token
+  stops firing at the token's expiry; pause and resume it with a sign-in or a newer token to record new
+  authority. See [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Identity governance.** Reading role definitions, role bindings and access constraints needs
+  `role:read`, `role_binding:read` or `access_constraint:read`; reading a principal's
+  effective access (the admin effective-access view), explaining another principal's
+  authorization, or reading an access constraint's audit history needs `hub_audit:read`; among the
+  built-in roles, only super-admin holds the `hub.audit.read` permission. These scopes can be
+  selected only on a hub token (for writes to roles, role bindings and access constraints, see
+  **Roles, role bindings and access constraints** above). Listing users
+  needs `user:list` together with `user:read`, and the list holds only users the token may read;
+  among the built-in roles, only super-admin holds the `user.list` permission. Redeeming an invitation code and linking a chat account
+  always need a sign-in.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
@@ -359,9 +418,8 @@ To use the CLI from a coding agent running on your machine, see
 Because a UAT is scoped, some operations that must be re-checked later, or that rely on
 owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
 
-- **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
-  scheduled `dispatch_agent` events or schedules. See
-  [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Chat scheduled messages**: creating, listing, sending now, dismissing or cancelling a message
+  scheduled in a chat conversation.
 - **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
   embedded Runtime Broker path of project registration) admits a UAT only when it is a
   hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT

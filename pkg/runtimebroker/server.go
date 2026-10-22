@@ -271,9 +271,15 @@ func DefaultServerConfig() ServerConfig {
 
 // Server is the Runtime Broker API HTTP server.
 type Server struct {
-	config     ServerConfig
-	manager    agent.Manager
-	runtime    scionrt.Runtime
+	config  ServerConfig
+	manager agent.Manager
+	runtime scionrt.Runtime
+
+	// runtimeRecord is the build record of runtime (Kubernetes placement
+	// defaults, ptone/scion#5085). It is replaced together with runtime and
+	// read only through defaultPair, never on its own.
+	runtimeRecord config.RuntimeBuildRecord
+
 	httpServer *http.Server
 	mux        *http.ServeMux
 	mu         sync.RWMutex
@@ -339,6 +345,10 @@ type Server struct {
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
 
+	// shutdownContext, when set (SetShutdownContext), returns the context
+	// Start passes to Shutdown once its ctx ends (ptone/scion#5054).
+	shutdownContext func() (context.Context, context.CancelFunc)
+
 	// dispatchAttempts tracks request-id based create-attempt state for
 	// idempotency and auditability.
 	dispatchAttempts   map[string]*dispatchAttempt
@@ -394,6 +404,11 @@ type Server struct {
 
 	stateDir string
 
+	// inbox holds the attachment delivery state (ptone/scion#4596): the
+	// spool root downloads are verified in, and the last inbox prune per
+	// agent.
+	inbox inboxState
+
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
@@ -429,11 +444,12 @@ type Server struct {
 	// and profile name when discovering or creating auxiliary runtimes, and
 	// in resolveManagerForOpts when settings resolve to something other than
 	// the broker's default runtime. It is a field (defaulting to
-	// agent.ResolveRuntime, set in New) rather than a direct call, so tests
-	// can substitute a stub that does not require live cluster/network
-	// access — resolving a real Kubernetes runtime calls Verify() against
-	// the API server.
-	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
+	// agent.ResolveRuntimeWithRecord, set in New) rather than a direct call,
+	// so tests can substitute a stub that does not require live
+	// cluster/network access — resolving a real Kubernetes runtime calls
+	// Verify() against the API server. It returns the runtime's build
+	// record with it.
+	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) (scionrt.Runtime, config.RuntimeBuildRecord)
 
 	// saDiscoveryCache holds the background ServiceAccount annotation
 	// discovery results behind the heartbeat's service account report
@@ -499,6 +515,14 @@ type Server struct {
 	// every request it serves (flat_instance.go).
 	flatPolicy *config.FlatInstancePolicy
 
+	// presentationSeq is the process-wide sequence of a flat instance's
+	// presentation reports: every heartbeat service this server builds (one
+	// per hub connection, rebuilt on re-initialisation) takes the next
+	// value, so the sequence grows for the process life under one epoch
+	// (the start time) and a rebuilt service is never fenced out by its own
+	// earlier reports.
+	presentationSeq atomic.Int64
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
@@ -532,10 +556,13 @@ type Server struct {
 	envSecretLog      *slog.Logger
 }
 
-// auxiliaryRuntime pairs a runtime with its manager for non-default runtimes.
+// auxiliaryRuntime pairs a runtime with its manager for non-default
+// runtimes, and with the runtime's build record (the zero value when the
+// runtime was built without one).
 type auxiliaryRuntime struct {
 	Runtime scionrt.Runtime
 	Manager agent.Manager
+	Record  config.RuntimeBuildRecord
 }
 
 type dispatchAttempt struct {
@@ -552,8 +579,9 @@ type dispatchAttempt struct {
 	EnvResponse     *EnvRequirementsResponse
 }
 
-// New creates a new Runtime Broker API server.
-func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
+// New creates a new Runtime Broker API server. rec is rt's build record;
+// a flat host instance passes the zero value.
+func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBuildRecord) *Server {
 	// Enable util debug logging when broker debug mode is on,
 	// so that debug messages from pkg/agent (which use util.Debugf)
 	// are visible in the broker's logs.
@@ -565,6 +593,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		config:            cfg,
 		manager:           mgr,
 		runtime:           rt,
+		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
 		version:           "0.1.0", // TODO: Get from build info
@@ -575,7 +604,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// Defaults to the real profile-resolution path; tests substitute a
 		// stub that does not require live cluster/network access (see
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
-		resolveAuxiliaryRuntime: agent.ResolveRuntime,
+		resolveAuxiliaryRuntime: agent.ResolveRuntimeWithRecord,
 		launchRegistry:          newLaunchRegistry(),
 		startsInFlight:          newStartTracker(),
 		retainedPurges:          newRetainedPurgeGuard(),
@@ -657,6 +686,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
 	}
+	// Remove attachment spools a crash left behind, before any message is
+	// accepted (ptone/scion#4596).
+	srv.initInboxSpool()
 
 	// A host-bind instance of a host with a single NFS mount owner uses
 	// that owner's reconciler (registered requirement, shared status, one
@@ -757,27 +789,28 @@ func (s *Server) RuntimeName() string {
 }
 
 // defaultPair returns one consistent snapshot of the broker's default
-// manager and runtime, read under s.mu: SwapRuntime replaces both together
-// while requests are in flight. A caller that uses both takes one snapshot
-// and uses it throughout, so it never pairs the old manager with the new
-// runtime. Callers must not hold s.mu.
-func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime) {
+// manager, runtime and the runtime's build record, read under s.mu:
+// SwapRuntime replaces all three together while requests are in flight. A
+// caller that uses more than one takes one snapshot and uses it throughout,
+// so it never pairs the old manager or record with the new runtime. Callers
+// must not hold s.mu.
+func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime, config.RuntimeBuildRecord) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.manager, s.runtime
+	return s.manager, s.runtime, s.runtimeRecord
 }
 
 // currentManager returns the broker's default manager, read under s.mu
 // (see defaultPair). Callers must not hold s.mu.
 func (s *Server) currentManager() agent.Manager {
-	mgr, _ := s.defaultPair()
+	mgr, _, _ := s.defaultPair()
 	return mgr
 }
 
 // currentRuntime returns the broker's default runtime, read under s.mu
 // (see defaultPair). Callers must not hold s.mu.
 func (s *Server) currentRuntime() scionrt.Runtime {
-	_, rt := s.defaultPair()
+	_, rt, _ := s.defaultPair()
 	return rt
 }
 
@@ -786,11 +819,13 @@ func (s *Server) currentRuntime() scionrt.Runtime {
 // change (e.g. during onboarding) so the broker picks up the new engine
 // without requiring a full server restart. Running heartbeat services are
 // updated to use the new manager so they don't continue shelling out to
-// the old (possibly missing) runtime binary.
-func (s *Server) SwapRuntime(rt scionrt.Runtime) {
+// the old (possibly missing) runtime binary. rec is rt's build record; it
+// replaces the old runtime's record in the same critical section.
+func (s *Server) SwapRuntime(rt scionrt.Runtime, rec config.RuntimeBuildRecord) {
 	s.mu.Lock()
 	old := s.runtime.Name()
 	s.runtime = rt
+	s.runtimeRecord = rec
 	newMgr := agent.NewManager(rt)
 	s.manager = newMgr
 	s.mu.Unlock()
@@ -1387,8 +1422,27 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		shutdownContext := s.shutdownContext
+		s.mu.RUnlock()
+		sctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if shutdownContext != nil {
+			sctx, cancel = shutdownContext()
+		}
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
+}
+
+// SetShutdownContext sets the function that returns the context Start
+// passes to Shutdown once its ctx ends, so the process can bound the
+// broker's shutdown by its own shutdown budget (ptone/scion#5054);
+// Shutdown's ShutdownDeadline still applies within it. Nil (the default):
+// context.Background(). Call it before Start.
+func (s *Server) SetShutdownContext(fn func() (context.Context, context.CancelFunc)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdownContext = fn
 }
 
 // Started reports whether the server's services were started.
@@ -1838,7 +1892,7 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 				continue
 			}
 
-			resolved := s.resolveAuxiliaryRuntime(gp, "", profileName)
+			resolved, rec := s.resolveAuxiliaryRuntime(gp, "", profileName)
 			if resolved.Name() == "error" {
 				logUnresolvedAuxiliaryProfile(profileName, vs.ActiveProfile, resolved)
 				continue
@@ -1852,7 +1906,7 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 
 			mgr := agent.NewManager(resolved)
 			s.auxiliaryRuntimesMu.Lock()
-			s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+			s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr, Record: rec}
 			s.auxiliaryRuntimesMu.Unlock()
 
 			slog.Info("Discovered auxiliary runtime from project settings",
@@ -2049,8 +2103,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 //  1. a project-scoped search (scion.name plus the project label);
 //  2. only when projectID is set and stage 1 found nothing, a slug-only
-//     search that accepts just containers carrying no project label at all
-//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//     search that accepts just containers carrying no project identity
+//     whose recorded path identifies as projectID (pre-label containers —
+//     see legacyAgentsInProject; the same rule delete applies).
 //
 // Errors:
 //   - a default-runtime List failure, in either stage, wraps
@@ -2083,10 +2138,16 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 // the ErrAgentNotFound returned for a matched entry that carries no
 // container identifier: there is nothing to act on, but the entry's listed
 // name and project path are still the agent's.
+//
+// record is runtime's build record, taken from the same holder as manager
+// and runtime (a defaultPair snapshot, an auxiliary runtime, or the agent's
+// own runtime); it is the zero value when runtime was paired with manager
+// through runtimeOfManager.
 type agentMatch struct {
 	containerID string
 	manager     agent.Manager
 	runtime     scionrt.Runtime
+	record      config.RuntimeBuildRecord
 	entry       api.AgentInfo
 	matched     bool
 }
@@ -2096,7 +2157,7 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, defRec := s.defaultPair()
 	if defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -2112,7 +2173,7 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return agentMatchFrom(slug, agents, own.mgr, own.rt)
+		return agentMatchFrom(slug, agents, own.mgr, own.rt, own.record)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -2129,22 +2190,25 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 	matchManager := defMgr
 	matchRuntime := defRT
+	matchRecord := defRec
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
-		auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
 			return agentMatch{}, auxErr
 		}
 		agents = auxAgents
-		matchManager = auxManager
-		matchRuntime = auxRuntime
+		matchManager = aux.Manager
+		matchRuntime = aux.Runtime
+		matchRecord = aux.Record
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
-	// project-scoped request, or same-slug agents across projects would collide.
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject). A container of a
+	// different project must not match a project-scoped request, or same-slug
+	// agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
@@ -2152,22 +2216,24 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
-			agents = agentsWithoutProjectLabel(agents)
+			agents = legacyAgentsInProject(agents, projectID)
 		}
 		matchManager = defMgr
 		matchRuntime = defRT
+		matchRecord = defRec
 		if len(agents) == 0 {
-			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, func(a []api.AgentInfo) []api.AgentInfo { return legacyAgentsInProject(a, projectID) })
 			if auxErr != nil {
 				return agentMatch{}, auxErr
 			}
 			agents = auxAgents
-			matchManager = auxManager
-			matchRuntime = auxRuntime
+			matchManager = aux.Manager
+			matchRuntime = aux.Runtime
+			matchRecord = aux.Record
 		}
 	}
 
-	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime, matchRecord)
 }
 
 // lookupAgentMatchForRun is the lookup of a run-scoped stop
@@ -2198,7 +2264,7 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 	if runID == "" {
 		return s.lookupAgentMatch(ctx, slug, projectID)
 	}
-	if defMgr, _ := s.defaultPair(); defMgr == nil {
+	if defMgr, _, _ := s.defaultPair(); defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 	slug = strings.ToLower(slug)
@@ -2214,7 +2280,9 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		return agentMatch{}, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", slug, len(targets), projectID)
 	case len(targets) == 1:
 		c := targets[0]
-		return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr))
+		// Stop only; the record is never consumed here, and a runtime
+		// paired through runtimeOfManager carries no record.
+		return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{})
 	case listErr != nil:
 		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, listErr)
 	default:
@@ -2239,7 +2307,8 @@ func (e *otherRunsHoldNameError) Error() string {
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
 // project scoping lookupAgentMatch and LookupAgent use: entries labelled for
-// projectID, else (with a projectID) entries carrying no project label. A
+// projectID, else (with a projectID) entries carrying no project identity
+// whose recorded path identifies as projectID (legacyAgentsInProject). A
 // failed List wraps ErrAgentListUnavailable.
 func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
 	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
@@ -2252,14 +2321,15 @@ func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 	}
 	return agents, nil
 }
 
 // agentMatchFrom builds lookupAgentMatch's result from the entries the
-// runtime behind matchManager/matchRuntime listed for slug.
-func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+// runtime behind matchManager/matchRuntime listed for slug. matchRecord is
+// matchRuntime's build record from the same holder.
+func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime, matchRecord config.RuntimeBuildRecord) (agentMatch, error) {
 	if len(agents) == 0 {
 		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}
@@ -2278,11 +2348,11 @@ func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Mana
 		containerID = entry.ID
 	}
 	if containerID == "" {
-		return agentMatch{manager: matchManager, runtime: matchRuntime, entry: entry, matched: true},
+		return agentMatch{manager: matchManager, runtime: matchRuntime, record: matchRecord, entry: entry, matched: true},
 			fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
-	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, entry: entry, matched: true}, nil
+	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, record: matchRecord, entry: entry, matched: true}, nil
 }
 
 // auxListAgentsSorted queries every currently registered auxiliary runtime
@@ -2304,12 +2374,12 @@ func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Mana
 //
 // slug and fallback are used only for the debug line logged on a match.
 //
-// The returned agent.Manager and scionrt.Runtime are always the pair
-// registered together for the same auxiliary runtime identity (auxiliaryRuntime
-// stores them together), so a caller never has to re-derive one from the
-// other: they are paired at the moment the match is found, not looked up
-// again afterward.
-func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
+// The returned auxiliaryRuntime is the holder registered for that auxiliary
+// runtime identity, so its Manager, Runtime and Record always belong
+// together: a caller never has to re-derive one from another, since they
+// are paired at the moment the match is found, not looked up again
+// afterward. With no match it is the zero value.
+func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, auxiliaryRuntime, error) {
 	var listErr error
 	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
 		rtName := aux.identity
@@ -2326,13 +2396,13 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, aux.Manager, aux.Runtime, nil
+			return matched, aux.auxiliaryRuntime, nil
 		}
 	}
 	if listErr != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
+		return nil, auxiliaryRuntime{}, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
 	}
-	return nil, nil, nil, nil
+	return nil, auxiliaryRuntime{}, nil
 }
 
 // errAuxiliaryRuntimeList marks an ErrAgentListUnavailable error that came
@@ -2345,7 +2415,7 @@ var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 // It looks up an agent by slug and returns detailed info including the runtime.
 // projectID scopes the lookup to prevent cross-project collision.
 func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error) {
-	defMgr, defRT := s.defaultPair()
+	defMgr, defRT, _ := s.defaultPair()
 	if defMgr == nil {
 		return nil, fmt.Errorf("agent manager not available")
 	}
@@ -2420,8 +2490,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject), as lookupAgentMatch
+	// does. A container of a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
@@ -2429,7 +2500,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 		if len(agents) == 0 {
 			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -2437,7 +2508,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 					listUnavailable = true
 					continue
 				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				auxAgents = legacyAgentsInProject(auxAgents, projectID)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
 					// See the identity note above: use the runtime's own

@@ -75,7 +75,15 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
-This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). Activities like `completed`, `blocked`, and `limits_exceeded` are "sticky" — they persist until the agent is explicitly restarted or stopped. The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+
+#### Sticky activities
+
+The activities `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, and `crashed` are "sticky": routine harness events (model calls, tool runs, the end of a turn, sub-agent activity) do not replace them, except as listed below for `waiting_for_input`. A sticky activity is cleared by new work (a new prompt, or a new harness session), by an explicit status update from the agent (`sciontool status`), or by a lifecycle phase change such as stopping. Beyond that, each one has its own rules:
+
+- **`limits_exceeded` and `crashed`** are terminal: they record how the agent ended. A later notification, or a later question from the agent (a Claude Code `AskUserQuestion` or `ExitPlanMode`), does not replace them.
+- **`blocked` and `completed`** are kept through tool runs, which may follow `task_completed` as wrap-up. The agent asking the user (its own question, or a harness notification that asks the user) moves them to `waiting_for_input`. A sub-agent's question does not.
+- **`waiting_for_input`** set by the agent itself (`sciontool status ask_user`, or the agent's own `AskUserQuestion` or `ExitPlanMode`) is cleared when the agent starts its next tool, because the user has answered. A wait set by a harness prompt (for example a permission dialog) is also cleared when the prompted tool ends or the turn ends. While a sub-agent's question is open, the wait stays until that sub-agent's question is answered or the sub-agent ends, even if the parent agent answers its own question first.
 
 #### Suspended phase
 
@@ -114,9 +122,7 @@ Only the agent runtime's own observations (its reports of the container, and the
 
 To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
 
-`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
-
-Local mode never records `halted`.
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. The agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
 #### Stalled, offline, and auto-suspend
 
@@ -164,7 +170,7 @@ When a Hub manages a git-based project and worktree-per-agent mode is not select
 
 This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. When linking a git checkout to the local workstation Hub creates the project, it is created in that mode.
 
-**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
+**Worktree-per-agent (Hub-managed git projects):** the Runtime Broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as a linked checkout on the workstation Hub, gated on the Runtime Broker host's git version being 2.48 or later; the Runtime Broker falls back to clone-per-agent if worktree provisioning is not possible. On the local workstation Hub, agents of a linked checkout use that checkout instead, and creation fails rather than falling back (see [Workspace Mode Change for Git Projects](/scion/hosted/user/hosted-user/#workspace-mode-change-for-git-projects)). See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.

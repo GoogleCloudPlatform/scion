@@ -147,7 +147,7 @@ func preparePartitionHostScoped(t *testing.T, globalDir string, daemons map[stri
 			cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{BrokerID: ic.Identity.RuntimeBrokerID, SecretKey: "c2VjcmV0", HubEndpoint: cfg.HubEndpoint}
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true,
 				ConflictingOwnershipKeys: ic.ConflictingKeys}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 		OwnershipPreflight: flatOwnershipPreflight,
 		OwnershipKeys:      flatOwnershipKeys,

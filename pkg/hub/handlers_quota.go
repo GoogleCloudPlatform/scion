@@ -142,6 +142,14 @@ type usageReservationView struct {
 	// Such a reservation is reported, never moved, released or backfilled
 	// (ReconcileStaleBrokerQuotaReservations).
 	ScopeConflict bool `json:"scopeConflict,omitempty"`
+	// ScopeUnlisted is true for a max_agents_per_broker reservation whose
+	// broker is not in the Runtime Broker list (capped at
+	// brokerScopedListLimit): a deregistered broker, or a live one beyond
+	// the cap or registered after the list was read. The sweep releases such
+	// a row only once a point lookup confirms the broker is gone
+	// (releaseDeregisteredScopeReservations). Unlisted rows follow the listed
+	// ones and are not counted in totalActive.
+	ScopeUnlisted bool `json:"scopeUnlisted,omitempty"`
 }
 
 // myUsageEntry represents one limit's current/max for the current user.
@@ -760,9 +768,9 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	// store.QuotaScopeSystem — so the generic system-scope query below would
 	// always return none for it. List across every broker instead, the same
 	// way ReconcileStaleBrokerQuotaReservations does.
-	var reservations []*store.UsageReservation
+	var reservations, unlisted []*store.UsageReservation
 	if def.Name == store.LimitMaxAgentsPerBroker {
-		reservations, err = s.listBrokerScopedActiveReservations(ctx, def.ID)
+		reservations, unlisted, err = s.brokerScopedActiveReservations(ctx, def.ID)
 	} else {
 		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
 	}
@@ -777,15 +785,21 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	brokerCapacityCache := make(map[string]BrokerCapacity)
 	var agentsByID map[string]*store.Agent
 	if def.Name == store.LimitMaxAgentsPerBroker {
-		agentsByID, err = s.reservedBrokerAgents(ctx, reservations)
+		agentsByID, err = s.reservedBrokerAgents(ctx, append(append([]*store.UsageReservation(nil), reservations...), unlisted...))
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 	}
-	views := make([]usageReservationView, len(reservations))
-	for i, res := range reservations {
-		views[i] = usageReservationView{UsageReservation: res}
+	views := make([]usageReservationView, 0, len(reservations)+len(unlisted))
+	for _, res := range reservations {
+		views = append(views, usageReservationView{UsageReservation: res})
+	}
+	for _, res := range unlisted {
+		views = append(views, usageReservationView{UsageReservation: res, ScopeUnlisted: true})
+	}
+	for i := range views {
+		res := views[i].UsageReservation
 		if def.Name != store.LimitMaxAgentsPerBroker || res.ScopeType != store.QuotaScopeBroker {
 			continue
 		}
@@ -840,22 +854,36 @@ func (s *Server) reservedBrokerAgents(ctx context.Context, reservations []*store
 // that is not a listed broker (for example a deleted broker) are left out,
 // and rows appear in broker-list order, created_at ascending within a broker.
 func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) ([]*store.UsageReservation, error) {
+	listed, _, err := s.brokerScopedActiveReservations(ctx, limitDefinitionID)
+	return listed, err
+}
+
+// brokerScopedActiveReservations returns listBrokerScopedActiveReservations'
+// rows (listed) and, separately, the active broker-scoped rows whose scope
+// ID is not a listed broker (unlisted), in created_at order.
+func (s *Server) brokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) (listed, unlisted []*store.UsageReservation, err error) {
 	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: brokerScopedListLimit})
 	if err != nil {
-		return nil, fmt.Errorf("list runtime brokers: %w", err)
+		return nil, nil, fmt.Errorf("list runtime brokers: %w", err)
 	}
 
 	all, err := s.store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, store.QuotaScopeBroker)
 	if err != nil {
-		return nil, fmt.Errorf("list active broker-scoped reservations: %w", err)
+		return nil, nil, fmt.Errorf("list active broker-scoped reservations: %w", err)
 	}
 	byBroker := groupReservationsByScopeID(all)
 
-	var reservations []*store.UsageReservation
+	isListed := make(map[string]bool, len(brokers.Items))
 	for _, broker := range brokers.Items {
-		reservations = append(reservations, byBroker[broker.ID]...)
+		isListed[broker.ID] = true
+		listed = append(listed, byBroker[broker.ID]...)
 	}
-	return reservations, nil
+	for _, res := range all {
+		if !isListed[res.ScopeID] {
+			unlisted = append(unlisted, res)
+		}
+	}
+	return listed, unlisted, nil
 }
 
 // countBrokerScopedActiveReservations returns the number of rows

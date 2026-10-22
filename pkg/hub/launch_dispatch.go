@@ -166,6 +166,76 @@ func (d *HTTPAgentDispatcher) asyncLaunchEligible(ctx context.Context, agent *st
 	return settings, true
 }
 
+// minAsyncStartLaunchTimeout is the smallest launch timeout an
+// asynchronous start is sent with: the broker takes its asynchronous
+// branch only when launchTimeoutSeconds is above 20 (as for a create), so
+// a shorter budget would only be answered synchronously.
+const minAsyncStartLaunchTimeout = 21 * time.Second
+
+// asyncStartEligible reports whether a start send for agent may request an
+// asynchronous launch (ptone/scion#4669): the caller asked for it
+// (opts.Async, after its own checks: the hub.async_agent_start experiment,
+// every live hub advertising async_start_v1, the request's opt-in and the
+// prior phase), the hub.async_agent_launch experiment is on, the launch
+// timeout leaves the broker room to go asynchronous, and the broker is not
+// known to lack AsyncStart. A broker with no recorded capabilities, or one
+// that cannot be read, is tried: its echo is authoritative.
+func (d *HTTPAgentDispatcher) asyncStartEligible(ctx context.Context, agent *store.Agent, opts StartDispatchOptions) (AsyncLaunchSettings, bool) {
+	if !opts.Async || d.asyncLaunchSettings == nil || d.store == nil {
+		return AsyncLaunchSettings{}, false
+	}
+	settings := d.asyncLaunchSettings()
+	if !settings.Enabled || settings.Timeout < minAsyncStartLaunchTimeout {
+		return settings, false
+	}
+	if broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncStart {
+		return settings, false
+	}
+	return settings, true
+}
+
+// beginStartLaunch begins the asynchronous launch of a start when it is
+// eligible (asyncStartEligible) and this node will send it, and returns its
+// ID, the settings and the time its budget started. An empty ID with a nil
+// error means the start is sent synchronously: it is not eligible, the
+// client will hand it to the owner node (which begins its own launch from
+// the intent's options), or the row is not in a phase a launch of that
+// kind may begin on (BeginStartLaunch's ErrInvalidPhase; design D-b). A
+// row a delete holds returns ErrLaunchInvalidPhase wrapping
+// store.ErrDeleteInProgress, as for a create; any other store error is
+// returned. revokeOnFail is this call's synchronous revoke decision
+// (DispatchAgentStart's rule); a restart's launch never revokes.
+func (d *HTTPAgentDispatcher) beginStartLaunch(ctx context.Context, agent *store.Agent, endpoint string, opts StartDispatchOptions, revokeOnFail bool) (string, AsyncLaunchSettings, time.Time, error) {
+	settings, eligible := d.asyncStartEligible(ctx, agent, opts)
+	if !eligible {
+		return "", settings, time.Time{}, nil
+	}
+	if rc, ok := d.client.(createRouteChecker); ok && rc.createWithGatherWouldDefer(ctx, agent.RuntimeBrokerID, endpoint) {
+		return "", settings, time.Time{}, nil
+	}
+	kind := opts.launchKind()
+	// The timer starts immediately before BeginStartLaunch, so the
+	// remaining budget sent to the broker never exceeds the stored deadline.
+	began := time.Now()
+	launchID, err := d.store.BeginStartLaunch(ctx, agent.ID, kind, settings.Timeout, store.BeginLaunchOptions{
+		PriorPhase:   opts.PriorPhase,
+		RevokeOnFail: kind == store.LaunchKindStart && revokeOnFail,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidPhase) {
+			if fresh, gerr := d.store.GetAgent(ctx, agent.ID); gerr == nil &&
+				(!fresh.DeletedAt.IsZero() || fresh.DeletionHoldsRow(time.Now())) {
+				return "", settings, time.Time{}, fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, err, store.ErrDeleteInProgress)
+			}
+			d.log.Info("Start not eligible for async launch in its current phase; sending synchronously",
+				"agent_id", agent.ID, "kind", kind, "error", err)
+			return "", settings, time.Time{}, nil
+		}
+		return "", settings, time.Time{}, fmt.Errorf("begin start launch: %w", err)
+	}
+	return launchID, settings, began, nil
+}
+
 // remainingLaunchSeconds is ceil(timeout - elapsed) in whole seconds, at
 // least 1.
 func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
@@ -185,12 +255,16 @@ func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 //   - an error whose outcome is unknown (isUnknownDispatchOutcome: the
 //     request may have reached the broker): the launch is kept and returned
 //     as accepted with no owner, and no error (ptone/scion#4866).
-//   - any other error, env requirements, or a synchronous answer from a
-//     broker without async support: the launch is ended as not_launched.
+//   - any other error: the launch is ended as not_launched with the code
+//     dispatch_failed, so a client following it sees a failed launch (the
+//     env and bootstrap finalize callers keep the row in provisioning).
+//   - env requirements, or a synchronous answer from a broker without async
+//     support: the launch is ended as not_launched without a code. Neither
+//     is a failure: the start goes on, or waits for env (see each case).
 //   - launchPending with the matching ID: the launch is marked accepted and
 //     returned. The agent row is now provisioning.
-//   - launchPending with another ID: the launch is ended and
-//     errLaunchEchoMismatch is returned.
+//   - launchPending with another ID: the launch is ended as not_launched
+//     with the code dispatch_failed and errLaunchEchoMismatch is returned.
 //
 // deferrable marks sends whose transport may defer to the owner node; for
 // those, a client that can predict deferral is asked first so no launch is
@@ -240,12 +314,62 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		}
 		return nil, nil, nil, fmt.Errorf("begin launch: %w", err)
 	}
-	req.AsyncLaunch = true
-	req.LaunchID = launchID
-	req.LaunchTimeoutSeconds = remainingLaunchSeconds(settings.Timeout, time.Since(began))
-	req.LaunchKeepaliveSeconds = settings.KeepaliveSeconds
+	return d.sendLaunching(ctx, agent, launchID, settings, began, "Agent create accepted for async launch",
+		func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			req.AsyncLaunch = true
+			req.LaunchID = f.LaunchID
+			req.LaunchTimeoutSeconds = f.TimeoutSeconds
+			req.LaunchKeepaliveSeconds = f.KeepaliveSeconds
+			return send(ctx, req)
+		})
+}
 
-	resp, envReqs, err := send(ctx, req)
+// launchFields are the asynchronous launch fields of one launching send:
+// the launch ID, the remaining whole-launch budget and the keepalive.
+type launchFields struct {
+	LaunchID         string
+	TimeoutSeconds   int
+	KeepaliveSeconds int
+	// Remaining recomputes the remaining whole-launch budget, for a
+	// resend within the same send (a hash-mismatch repair), so the budget
+	// the broker gets never exceeds the stored deadline. Nil means
+	// TimeoutSeconds.
+	Remaining func() int
+}
+
+// remaining returns f.Remaining(), or f.TimeoutSeconds when it is nil.
+func (f launchFields) remaining() int {
+	if f.Remaining == nil {
+		return f.TimeoutSeconds
+	}
+	return f.Remaining()
+}
+
+// launchSendFunc performs the transport send of a launching request with
+// f applied, including any resend (a hash-mismatch repair), so one launch
+// covers every attempt.
+type launchSendFunc func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+
+// sendLaunching is the kind-generic part of a launching send, shared by
+// create (dispatchLaunching) and start (dispatchAgentStart): launchID has
+// been begun (at began) and the send carries its fields. It resolves the
+// launch from the broker's answer as dispatchLaunching documents.
+// acceptedMsg is the log line of an accepted launch.
+func (d *HTTPAgentDispatcher) sendLaunching(
+	ctx context.Context,
+	agent *store.Agent,
+	launchID string,
+	settings AsyncLaunchSettings,
+	began time.Time,
+	acceptedMsg string,
+	send launchSendFunc,
+) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, *LaunchAccepted, error) {
+	resp, envReqs, err := send(ctx, launchFields{
+		LaunchID:         launchID,
+		TimeoutSeconds:   remainingLaunchSeconds(settings.Timeout, time.Since(began)),
+		KeepaliveSeconds: settings.KeepaliveSeconds,
+		Remaining:        func() int { return remainingLaunchSeconds(settings.Timeout, time.Since(began)) },
+	})
 	switch {
 	case errors.Is(err, ErrLifecycleDeferred):
 		// Raised by routing before any send. The owner's BeginLaunch
@@ -268,24 +392,33 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		addDispatchWarnings(ctx, launchOutcomeUnknownWarning)
 		return nil, nil, &LaunchAccepted{ID: launchID}, nil
 	case err != nil:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker refused the launch or was not reached: a failure. The
+		// code tells a client following the launch that it ended, whatever
+		// the caller then does with the row (ptone/scion#5283).
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		return nil, nil, nil, err
 	case envReqs != nil:
-		// Waiting for a human to supply env costs no launch budget.
+		// Waiting for a human to supply env costs no launch budget. No
+		// code: this is not a failure. The same request may begin a new
+		// launch at once (the gather second pass, the finalize retry), or
+		// the row waits in provisioning for the env to be submitted.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
 		d.markLaunchAccepted(ctx, agent, launchID, resp.LaunchInstanceID)
-		d.log.Info("Agent create accepted for async launch",
+		d.log.Info(acceptedMsg,
 			"agent_id", agent.ID, "project_id", agent.ProjectID, "launch_id", launchID,
 			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
 		return resp, nil, &LaunchAccepted{ID: launchID, Owner: resp.LaunchInstanceID}, nil
 	case resp == nil || !resp.LaunchPending:
-		// A broker without async support answered synchronously.
+		// A broker without async support answered synchronously. No code:
+		// the start goes on outside the launch record, and the caller
+		// applies the broker's phase from the answer.
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, nil, nil, nil
 	default:
-		d.endLaunchNotLaunched(ctx, agent, launchID)
+		// The broker is not running the launch the hub began: a failure.
+		d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, store.LaunchErrorDispatchFailed)
 		d.log.Warn("Broker acknowledged a different launch ID; ending the launch",
 			"agent_id", agent.ID, "launch_id", launchID, "broker_launch_id", resp.LaunchID)
 		return nil, nil, nil, errLaunchEchoMismatch
@@ -311,12 +444,19 @@ func (d *HTTPAgentDispatcher) markLaunchAccepted(ctx context.Context, agent *sto
 // after a send whose outcome is unknown.
 const launchOutcomeUnknownWarning = "The runtime broker did not confirm the launch request; the launch is kept and settles when the broker reports it, or ends when the launch times out."
 
-// endLaunchNotLaunched ends launchID as not_launched. It uses a context
-// detached from the request so a client disconnect cannot strand the launch.
+// endLaunchNotLaunched ends launchID as not_launched without a code, for
+// the cases that are not failures. It uses a context detached from the
+// request so a client disconnect cannot strand the launch.
 func (d *HTTPAgentDispatcher) endLaunchNotLaunched(ctx context.Context, agent *store.Agent, launchID string) {
+	d.endLaunchNotLaunchedWithCode(ctx, agent, launchID, "")
+}
+
+// endLaunchNotLaunchedWithCode ends launchID as not_launched and records
+// code ("" for none) as the launch error, like endLaunchNotLaunched.
+func (d *HTTPAgentDispatcher) endLaunchNotLaunchedWithCode(ctx context.Context, agent *store.Agent, launchID, code string) {
 	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := d.store.EndLaunch(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched); err != nil {
+	if err := d.store.EndLaunchWithCode(endCtx, agent.ID, launchID, store.LaunchEndReasonNotLaunched, code); err != nil {
 		d.log.Warn("Failed to end launch",
 			"agent_id", agent.ID, "launch_id", launchID, "error", err)
 	}

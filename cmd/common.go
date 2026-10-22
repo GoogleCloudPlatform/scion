@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -420,7 +421,7 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	ownProjectSlug := os.Getenv("SCION_PROJECT")
-	ownProjectID := os.Getenv("SCION_PROJECT_ID")
+	ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 		(ownProjectID != "" && projectPath == ownProjectID)
 	if isSameProject {
@@ -627,11 +628,16 @@ func printDeleteInProgressWarnings(w io.Writer, err error) {
 }
 
 // shouldSuggestHubCheck reports whether the hub-check hint is relevant for
-// err: true for connectivity failures (no structured API response) and 5xx.
+// err: true for connectivity failures (no structured API response) and 5xx,
+// except a reload_unconfirmed answer, where the hub answered normally and
+// only the running agent did not confirm a credential reload.
 func shouldSuggestHubCheck(err error) bool {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
 		return true
+	}
+	if apiErr.Code == api.BrokerErrCodeReloadUnconfirmed {
+		return false
 	}
 	return apiErr.IsServerError()
 }
@@ -800,24 +806,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
-	if modelFlag != "" {
-		normalizedModel := config.NormalizeModelAlias(modelFlag)
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.Model = normalizedModel
-	}
-	// An explicitly set --thinking-level is always parsed, so an empty
-	// value fails instead of being treated as unset.
-	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
-		val, err := parseThinkingLevel(thinkingLevelFlag)
-		if err != nil {
-			return err
-		}
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.ThinkingLevel = &val
+	inlineCfg, err = applyModelFlags(cmd, inlineCfg)
+	if err != nil {
+		return err
 	}
 
 	hubCtx, err := requireHub(projectPath)
@@ -826,6 +817,33 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
+}
+
+// applyModelFlags writes --model and --thinking-level into the request's
+// inline config, creating it when either flag is set, and returns it. They
+// are explicit request values, the top of the hub's request > project >
+// template > hub order. --model is sent alias-normalized; the hub resolves
+// the alias. An explicitly set --thinking-level is always parsed, so an
+// empty value fails (a usage error) instead of being treated as unset.
+// Shared by scion start and scion create.
+func applyModelFlags(cmd *cobra.Command, inlineCfg *api.ScionConfig) (*api.ScionConfig, error) {
+	if modelFlag != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = config.NormalizeModelAlias(modelFlag)
+	}
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return nil, err
+		}
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.ThinkingLevel = &val
+	}
+	return inlineCfg, nil
 }
 
 // applyServiceAccountFlag wires the --service-account CLI flag into a

@@ -230,7 +230,7 @@ func TestAgentGCPToken_MetadataModeNotAssignedDenied(t *testing.T) {
 // here directly rather than through a handler.
 func TestResolveAgentGCPMintFacts_NilIdentityDenied(t *testing.T) {
 	srv, _ := testServer(t)
-	allowed := srv.resolveAgentGCPMintFacts(context.Background(), nil, "some-project")
+	allowed := srv.resolveAgentGCPMintFacts(context.Background(), nil, "some-project", "")
 	require.False(t, allowed)
 }
 

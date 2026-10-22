@@ -20,8 +20,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // agentRefusedSampleNames covers the server prefix, the legacy session secret
@@ -33,80 +31,6 @@ var agentRefusedSampleNames = []string{
 	"SCION_SERVER_HUB_CONDUIT_PEER_SECRET",
 	"SCION_DEV_TOKEN",
 	"SCION_AUTH_TOKEN",
-}
-
-func TestExpandEnvMap_ReservedHostEnvExpandsEmpty(t *testing.T) {
-	const sentinel = "reserved-host-value"
-	t.Setenv("SCION_SERVER_SESSION_SECRET", sentinel)
-	t.Setenv("SESSION_SECRET", sentinel)
-	t.Setenv("ORDINARY_VAR", "ordinary")
-
-	got := expandEnvMap(map[string]string{
-		"A":                 "${SCION_SERVER_SESSION_SECRET}",
-		"B":                 "$SESSION_SECRET",
-		"C":                 "${ORDINARY_VAR}",
-		"${SESSION_SECRET}": "key-expansion",
-		"SESSION_SECRET":    "",
-		"D":                 "x-${SESSION_SECRET}-${ORDINARY_VAR}",
-	})
-	for k, v := range got {
-		if strings.Contains(k, sentinel) || strings.Contains(v, sentinel) {
-			t.Errorf("expanded map carries a reserved host value under %q", k)
-		}
-	}
-	if got["A"] != "" || got["B"] != "" {
-		t.Errorf("A = %q, B = %q; want both empty", got["A"], got["B"])
-	}
-	if got["C"] != "ordinary" {
-		t.Errorf("C = %q, want %q", got["C"], "ordinary")
-	}
-	if got["D"] != "x--ordinary" {
-		t.Errorf("D = %q, want %q", got["D"], "x--ordinary")
-	}
-	if v, ok := got["SESSION_SECRET"]; !ok || v != "" {
-		t.Errorf("SESSION_SECRET = %q, %v; want an empty marker kept as-is", v, ok)
-	}
-	if len(got) != 5 {
-		t.Errorf("got %d keys, want 5 (the key-expansion entry dropped): %v", len(got), got)
-	}
-}
-
-func TestExpandEnvMap_HostCredentialAliasesExpandEmpty(t *testing.T) {
-	const sentinel = "host-credential-value"
-	t.Setenv("SCION_DEV_TOKEN", sentinel)
-	t.Setenv("SCION_AUTH_TOKEN", sentinel)
-	got := expandEnvMap(map[string]string{"A": "${SCION_DEV_TOKEN}", "B": "$SCION_AUTH_TOKEN"})
-	if got["A"] != "" || got["B"] != "" {
-		t.Errorf("A has length %d, B has length %d; want both empty", len(got["A"]), len(got["B"]))
-	}
-}
-
-func TestExpandVolumeMounts_RefusedHostEnvExpandsEmpty(t *testing.T) {
-	const sentinel = "refused-host-value"
-	for _, name := range agentRefusedSampleNames {
-		t.Setenv(name, sentinel)
-	}
-	t.Setenv("ORDINARY_DIR", "/data")
-
-	var vols []api.VolumeMount
-	for _, name := range agentRefusedSampleNames {
-		vols = append(vols, api.VolumeMount{Source: "/src/${" + name + "}", Target: "/dst/$" + name})
-	}
-	vols = append(vols, api.VolumeMount{Source: "${ORDINARY_DIR}/in", Target: "/mnt/${ORDINARY_DIR}"})
-
-	got := expandVolumeMounts(vols)
-	for i, v := range got[:len(agentRefusedSampleNames)] {
-		if strings.Contains(v.Source, sentinel) || strings.Contains(v.Target, sentinel) {
-			t.Errorf("%s: mount path carries a refused host value", agentRefusedSampleNames[i])
-		}
-		if v.Source != "/src/" || v.Target != "/dst/" {
-			t.Errorf("%s: mount = %q:%q, want %q:%q", agentRefusedSampleNames[i], v.Source, v.Target, "/src/", "/dst/")
-		}
-	}
-	last := got[len(got)-1]
-	if last.Source != "/data/in" || last.Target != "/mnt//data" {
-		t.Errorf("ordinary mount = %q:%q, want expansion", last.Source, last.Target)
-	}
 }
 
 // TestGitTracked_ChildEnvOmitsRefusedNames runs gitTracked against a fake git

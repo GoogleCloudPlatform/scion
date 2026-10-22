@@ -173,6 +173,13 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 			"Agent has no runtime broker", "")
 	}
 	if !s.experimentEnabled(conduitExperiment) {
+		// No path without a target-side deadline (design §3.5 Q14,
+		// v2.21.46): in external relay mode with enforce a user attach never
+		// takes the broker's terminal path, even with hub.conduit off at
+		// run time.
+		if s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonConduitNotServing, conduitCauseConduitNotRoutable, agent.ID) {
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable, conduitNotRoutableMessage, ptyReasonConduitNotServing)
+		}
 		return s.brokerPTYPath(ctx, agent, false)
 	}
 	// Targets without stream renewal (contracts, Target lacks stream
@@ -247,6 +254,10 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent, brokerSkipped bool) ptyPathDecision {
 	rtr := s.conduitRouter()
 	if rtr == nil {
+		if brokerSkipped {
+			// No route at all, and the broker's terminal path is not used.
+			s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonConduitNotServing, conduitCauseConduitNotRoutable, agent.ID)
+		}
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and conduit is not serving on this hub node", ptyReasonConduitNotServing)
 	}
@@ -282,8 +293,11 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		// an agent image without conduit from a session that is briefly
 		// reconnecting, so this is the temporary failure, never
 		// stream_renewal_unsupported (design v2.21.46 §3.5 Q14).
-		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
-			"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+		message := "Conduit routing is unavailable"
+		if s.conduitLegacyRouteRefused(ctx, identity, conduitRoutePTY, ptyReasonRegistryUnavailable, conduitCauseNoConduitSession, agent.ID) {
+			message = conduitNoSessionMessage
+		}
+		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable, message, ptyReasonRegistryUnavailable)
 	default:
 		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
 			"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
@@ -480,8 +494,8 @@ func (s *Server) runAgentPTY(ctx context.Context, conn *websocket.Conn, identity
 		slog.Error("PTY session error", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent), "error", err)
 	}
 	code, reason := session.CloseCause()
-	slog.Info("PTY session ended", "agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
-		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason)
+	slog.Info("PTY session ended", append([]any{"agent_id", agent.ID, "slug", agent.Slug, "path", string(ptyPathAgent),
+		"conduit_session_id", up.sessionID, "close_code", code, "close_reason", reason}, up.route...)...)
 }
 
 // ptyAgentReadBuffer is the size of one terminal output read from a
@@ -499,8 +513,11 @@ type agentPTYUpstream struct {
 
 	st        conduit.Stream
 	sessionID string
-	untrack   func()
-	buf       []byte
+	// route holds the routing log fields of the open stream
+	// (conduitRouteLogAttrs).
+	route   []any
+	untrack func()
+	buf     []byte
 	// authzClose is set when the re-check closed the stream.
 	authzClose atomic.Pointer[StreamClosedError]
 }
@@ -556,6 +573,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
+		u.route = conduitRouteLogAttrs(res)
 		target := conduitLeafTarget(res, st, bridge)
 		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindPTY,
@@ -581,6 +599,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		return ptyAgentOpenError(err)
 	}
+	slog.Info("Conduit PTY stream opened", append([]any{"agent_id", u.agent.ID, "conduit_session_id", u.sessionID}, u.route...)...)
 	u.buf = make([]byte, ptyAgentReadBuffer)
 	return nil
 }

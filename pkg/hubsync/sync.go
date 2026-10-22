@@ -1105,7 +1105,9 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 		localAgentMap[name] = true
 	}
 
-	// Parse lastSyncedAt from state.yaml (preferred) or legacy settings (fallback).
+	// Parse lastSyncedAt from state.yaml. A legacy settings file's
+	// hub.lastSyncedAt is not read; migrating the file (scion config migrate,
+	// or any settings write) moves it to state.yaml.
 	var lastSyncedAt time.Time
 	var lastSyncedAtStr string
 
@@ -1122,12 +1124,6 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 	previouslySynced := make(map[string]bool, len(projectState.SyncedAgents))
 	for _, name := range projectState.SyncedAgents {
 		previouslySynced[name] = true
-	}
-
-	// Fall back to legacy settings if state.yaml doesn't have it
-	if lastSyncedAtStr == "" && hubCtx.Settings.Hub != nil && hubCtx.Settings.Hub.LastSyncedAt != "" {
-		lastSyncedAtStr = hubCtx.Settings.Hub.LastSyncedAt
-		debugf("lastSyncedAt from legacy settings (hub.lastSyncedAt): %s", lastSyncedAtStr)
 	}
 
 	if lastSyncedAtStr != "" {

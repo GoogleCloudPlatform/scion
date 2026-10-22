@@ -375,3 +375,69 @@ func TestRecheckRunsCoalesce(t *testing.T) {
 		t.Fatalf("%d re-check runs, want 2 (the running one and one pending)", n)
 	}
 }
+
+// neitherAnswer answers every stream re-check item with result, a result
+// carrying neither renew nor close.
+func neitherAnswer(result relay.HubStreamRecheckResult) func(string, []byte) hubAnswer {
+	return func(path string, body []byte) hubAnswer {
+		if path != "streams/recheck" {
+			return hubAnswer{status: http.StatusOK, body: relay.HubSessionRecheckResponse{}}
+		}
+		var req relay.HubStreamRecheckRequest
+		_ = json.Unmarshal(body, &req)
+		res := make([]relay.HubStreamRecheckResult, len(req.Items))
+		for i := range res {
+			res[i] = result
+		}
+		return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: res}}
+	}
+}
+
+// TestStreamRecheckUnavailableNeverExtends (B5): an unavailable re-check
+// result, at the interval or on a sweep, renews nothing and never moves the
+// deadline: the stream still closes at its original deadline.
+func TestStreamRecheckUnavailableNeverExtends(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(neitherAnswer(relay.HubStreamRecheckResult{Reason: "unavailable"}))
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute) // the interval re-check
+	ro.Streams.RecheckAll(context.Background(), TriggerSweep)
+	if n := hub.count("streams/recheck"); n != 2 {
+		t.Fatalf("%d re-checks, want 2", n)
+	}
+	rec.mu.Lock()
+	renewed := len(rec.renewed)
+	rec.mu.Unlock()
+	if renewed != 0 || len(rec.closes()) != 0 {
+		t.Fatalf("renewed %d, closed %v before the deadline; want nothing", renewed, rec.closes())
+	}
+	clk.Advance(2 * time.Minute) // 10m: the original deadline
+	if c := rec.closes(); len(c) != 1 || c[0] != conduit.CloseUnauthenticated {
+		t.Fatalf("closes %v, want [4401] at the original deadline", c)
+	}
+}
+
+// TestStreamRecheckNeitherFieldNeverCloses (B6): a re-check result with
+// neither renew nor close, after an interval re-check, a sweep and an
+// event, never closes the stream before its deadline.
+func TestStreamRecheckNeitherFieldNeverCloses(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(neitherAnswer(relay.HubStreamRecheckResult{}))
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute)
+	ro.Streams.RecheckAll(context.Background(), TriggerSweep)
+	ro.Streams.RecheckAll(context.Background(), TriggerNotify)
+	if n := hub.count("streams/recheck"); n != 3 {
+		t.Fatalf("%d re-checks, want 3", n)
+	}
+	clk.Advance(time.Minute + 59*time.Second)
+	if c := rec.closes(); len(c) != 0 {
+		t.Fatalf("closes %v before the deadline, want none", c)
+	}
+}

@@ -443,6 +443,16 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A server that has begun shutting down is not ready, so a front
+	// proxy or load balancer stops routing to it (ptone/scion#5054).
+	if s.ShuttingDown() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": "shutting down",
+		})
+		return
+	}
+
 	// Check if database is connected and migrated
 	if err := s.store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{

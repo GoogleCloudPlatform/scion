@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,10 +64,10 @@ func (r *openRefusedRecorder) RecordConduitOpenRefused(route, reason, cause stri
 	r.seen = append(r.seen, route+"/"+reason+"/"+cause)
 }
 
-func (r *openRefusedRecorder) RecordConduitOpenUnstamped(route, principalKind string) {
+func (r *openRefusedRecorder) RecordConduitOpenUnstamped(route, principalKind, cause string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.unstamped = append(r.unstamped, route+"/"+principalKind)
+	r.unstamped = append(r.unstamped, route+"/"+principalKind+"/"+cause)
 }
 
 func (r *openRefusedRecorder) unstampedList() []string {
@@ -147,10 +146,13 @@ type openSetup struct {
 	scopeErr bool
 	allowAll bool
 	// noRenewalRoute makes every route one this node cannot renew on
-	// (conduitRouteCanRenewTest), as a bridged leaf is until 6.6b-3.
+	// (conduitRouteCanRenewTest), as a session-less or legacy route is.
 	noRenewalRoute bool
-	rec            *openRefusedRecorder
-	keys           *countingGrantKeyStore
+	// targetNoRenewal makes the relay tunnel fixture's agent session
+	// advertise no stream_renewal.v2.
+	targetNoRenewal bool
+	rec             *openRefusedRecorder
+	keys            *countingGrantKeyStore
 }
 
 func (o *openSetup) mod(srv *Server) {
@@ -351,7 +353,13 @@ func TestConduitScopeOfTestUnsetInProduction(t *testing.T) {
 	assert.Nil(t, srv.conduitAuthorizeActionTestHook)
 	assert.Nil(t, srv.conduitRouteCanRenewTest)
 
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards assignments of the conduit test seams.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards assignments of the conduit test seams.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards assignments of the conduit test seams.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -426,7 +434,13 @@ func TestConduitGrantRequestCallersSetOrigin(t *testing.T) {
 	}
 	got := map[string][]string{}
 	calls := 0
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards conduitGrantRequest callers.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards conduitGrantRequest callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards conduitGrantRequest callers.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -816,13 +830,17 @@ func newRelayTunnelFixture(t *testing.T, o *openSetup) *relayTunnelFixture {
 	require.NoError(t, err)
 	cf.agent = got
 	now := time.Now()
+	features := []string{conduit.FeatureStreamRenewal}
+	if o.targetNoRenewal {
+		features = nil
+	}
 	epoch, err := ops.reg.InsertSessionWithNextEpoch(ctx, registry.SessionRecord{
 		SessionID: "s-agent", PrincipalKind: registry.PrincipalAgent, PrincipalID: cf.agent.ID, ProjectID: cf.agent.ProjectID,
 		RelayInstanceID: "relay-0", RelayGeneration: ops.relayGen, Transport: registry.TransportWS,
 		EndpointIncarnation: cf.agent.RunID, ConnectedAt: now, LastSeen: now,
 		Capabilities: registry.Capabilities{
 			StreamKinds: []string{grant.StreamKindTCP}, EndpointIncarnation: cf.agent.RunID, IncarnationSource: "launch_id",
-			Features: []string{conduit.FeatureStreamRenewal},
+			Features: features,
 		},
 	})
 	require.NoError(t, err)
@@ -830,26 +848,39 @@ func newRelayTunnelFixture(t *testing.T, o *openSetup) *relayTunnelFixture {
 	return &relayTunnelFixture{ops: ops, cf: cf, token: adm.AdmissionToken, epoch: epoch}
 }
 
-// post forwards a tcp tunnel request for the agent, as relay-0.
+// post forwards a tcp tunnel request for the agent, as relay-0 listing
+// tunnels but not tunnel_recheck.
 func (f *relayTunnelFixture) post(t *testing.T) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+	t.Helper()
+	return f.postWith(t, []string{relay.HubFeatureTunnels}, nil)
+}
+
+// postWith forwards a tcp tunnel request for the agent, as relay-0 listing
+// features; edit, when set, changes the client's RPC before it is sent.
+func (f *relayTunnelFixture) postWith(t *testing.T, features []string, edit func(*conduitv1.RpcRequest)) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
 	t.Helper()
 	body, err := json.Marshal(conduitTunnelRequest{Agent: f.cf.agent.ID, Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamPort: "3000"}})
 	require.NoError(t, err)
-	b, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1", Method: http.MethodPost, Path: conduitTunnelsPath, Body: body})
+	rpc := &conduitv1.RpcRequest{RequestId: "r1", Method: http.MethodPost, Path: conduitTunnelsPath, Body: body}
+	if edit != nil {
+		edit(rpc)
+	}
+	b, err := proto.Marshal(rpc)
 	require.NoError(t, err)
 	var out relay.HubRPCResponse
 	require.NoError(t, f.ops.hub.Call(context.Background(), relay.HubSessionPath("s1", "rpc"),
-		relay.HubRPCRequest{AdmissionToken: f.token, RPC: b, Features: []string{relay.HubFeatureTunnels}}, &out))
+		relay.HubRPCRequest{AdmissionToken: f.token, RPC: b, Features: features}, &out))
 	resp := &conduitv1.RpcResponse{}
 	require.NoError(t, proto.Unmarshal(out.RPC, resp))
 	return resp, out.Tunnel
 }
 
 // TestConduitOpen_RenewalUnavailable_RelayTunnel (C5, relay-held tunnel):
-// a relay-held stream cannot be renewed until the relay re-check is
-// served, so with enforce the tunnel is refused with 503 unavailable,
-// reason stream_renewal_unavailable; nothing is signed and the relay gets
-// no instruction to open anything.
+// a relay that does not list tunnel_recheck does not re-check the tunnels
+// it opens, so with enforce a tunnel it forwards to a stream_renewal.v2
+// target is refused with 503 unavailable, reason
+// stream_renewal_unavailable; nothing is signed and the relay gets no
+// instruction to open anything.
 func TestConduitOpen_RenewalUnavailable_RelayTunnel(t *testing.T) {
 	o := &openSetup{enforce: true}
 	f := newRelayTunnelFixture(t, o)
@@ -865,12 +896,12 @@ func TestConduitOpen_RenewalUnavailable_RelayTunnel(t *testing.T) {
 	assert.Equal(t, []string{conduitRouteRelayTunnel + "/" + conduitReasonStreamRenewalUnavailable + "/" + conduitCauseRenewalRouteUnavailable}, o.rec.list())
 }
 
-// TestConduitOpen_RelayTunnelOffStampsGrant: with off, the relay gets the
-// instruction to open the tunnel, with a grant that carries via=tunnel and
-// authz_until for the renewal-capable target.
+// TestConduitOpen_RelayTunnelOffStampsGrant: with off, a relay that lists
+// tunnel_recheck gets the instruction to open the tunnel, with a grant
+// that carries via=tunnel and authz_until for the renewal-capable target.
 func TestConduitOpen_RelayTunnelOffStampsGrant(t *testing.T) {
 	f := newRelayTunnelFixture(t, &openSetup{})
-	resp, open := f.post(t)
+	resp, open := f.postWith(t, []string{relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck}, nil)
 	require.Equal(t, int32(http.StatusOK), resp.GetStatus(), string(resp.GetBody()))
 	require.NotNil(t, open)
 	pubs, err := f.cf.srv.ConduitGrantPublicKeys(context.Background())
@@ -892,13 +923,14 @@ func TestConduitOpen_RelayTunnelOffStampsGrant(t *testing.T) {
 
 // TestConduitOpen_ScopeError_RelayTunnel (C5, relay-held tunnel): a scope
 // that cannot be determined fails the tunnel with 500 internal_error;
-// nothing is signed and there is no instruction.
+// nothing is signed and there is no instruction. The relay lists
+// tunnel_recheck, so the grant would be stamped.
 func TestConduitOpen_ScopeError_RelayTunnel(t *testing.T) {
 	o := &openSetup{scopeErr: true}
 	f := newRelayTunnelFixture(t, o)
 
 	o.keys.arm(f.cf.srv)
-	resp, open := f.post(t)
+	resp, open := f.postWith(t, []string{relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck}, nil)
 	require.Equal(t, int32(http.StatusInternalServerError), resp.GetStatus(), string(resp.GetBody()))
 	var er ErrorResponse
 	require.NoError(t, json.Unmarshal(resp.GetBody(), &er))
@@ -1003,7 +1035,7 @@ func TestMintConduitGrant_RenewalUnsupportedPrincipalOff(t *testing.T) {
 			assert.Nil(t, c.Scope)
 			assert.True(t, c.AuthzUntil.IsZero())
 			assert.Zero(t, c.AuthzInterval)
-			assert.Equal(t, []string{conduitRouteProxy + "/" + kind}, rec.unstampedList())
+			assert.Equal(t, []string{conduitRouteProxy + "/" + kind + "/" + conduitCauseRenewalPrincipalUnsupported}, rec.unstampedList())
 			assert.Empty(t, rec.list(), "off refuses nothing")
 		})
 	}

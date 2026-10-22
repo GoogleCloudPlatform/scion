@@ -574,22 +574,42 @@ func TestReport_H1_FailedConfirmingReapedLaunchRefinesLaunchError(t *testing.T) 
 
 // --- ApplyLaunchReport failed-path reservation release ---------------------
 
-// seedBrokerQuotaReservation creates a max_agents_per_broker limit definition
-// and an active reservation for agentID, returning the limit definition ID
-// for a HasActiveReservation check.
-func seedBrokerQuotaReservation(t *testing.T, ctx context.Context, s *AgentStore, agentID string) (quota *QuotaStore, limitDefID string) {
+// testQuotaBroker is the Runtime Broker the launch-end reservation tests
+// record on the agent row and scope the reservation to.
+const testQuotaBroker = "broker-1"
+
+// setAgentRuntimeBroker records broker on agent a's row through the ent
+// client (white-box: the launch tests' agents are created with no broker)
+// and on the caller's struct, which the tests' reports are sent from (a
+// report from any other broker is refused).
+func setAgentRuntimeBroker(t *testing.T, ctx context.Context, s *AgentStore, a *store.Agent, broker string) {
 	t.Helper()
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetRuntimeBrokerID(broker).Save(ctx)
+	require.NoError(t, err)
+	a.RuntimeBrokerID = broker
+}
+
+// seedBrokerQuotaReservation records testQuotaBroker as a's Runtime Broker
+// (row and struct), creates a max_agents_per_broker limit definition and an
+// active reservation for a scoped to that broker, and returns the limit
+// definition ID for a HasActiveReservation check. A launch end releases only
+// a reservation on the agent's own broker (ptone/scion#5137).
+func seedBrokerQuotaReservation(t *testing.T, ctx context.Context, s *AgentStore, a *store.Agent) (quota *QuotaStore, limitDefID string) {
+	t.Helper()
+	setAgentRuntimeBroker(t, ctx, s, a, testQuotaBroker)
 	quota = NewQuotaStore(s.client)
 	ld, err := quota.CreateLimitDefinition(ctx, &store.LimitDefinition{
 		Name: store.LimitMaxAgentsPerBroker, ResourceType: "agent", Unit: "count", DefaultValue: 1,
 	})
 	require.NoError(t, err)
 	_, err = quota.CreateUsageReservation(ctx, &store.UsageReservation{
-		LimitDefinitionID: ld.ID, SubjectID: "broker-1", ScopeType: "broker", ScopeID: "broker-1",
-		ResourceID: agentID, Reserved: 1,
+		LimitDefinitionID: ld.ID, SubjectID: testQuotaBroker, ScopeType: "broker", ScopeID: testQuotaBroker,
+		ResourceID: a.ID, Reserved: 1,
 	})
 	require.NoError(t, err)
-	has, err := quota.HasActiveReservation(ctx, ld.ID, agentID)
+	has, err := quota.HasActiveReservation(ctx, ld.ID, a.ID)
 	require.NoError(t, err)
 	require.True(t, has, "setup: the reservation must be active before the failed report")
 	return quota, ld.ID
@@ -599,7 +619,7 @@ func TestReport_H1_FailedPreRunning_ReleasesReservation(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-prerunning")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed,
@@ -616,7 +636,7 @@ func TestReport_H1_ErrorByAnotherWriter_FailedReleasesReservation(t *testing.T) 
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-error-writer")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -645,7 +665,7 @@ func TestReport_H1_FailedPreRunning_ReleasesReservationOnPGWithSingleConnection(
 	ctx := context.Background()
 	s, projectID := newPGTestAgentStore(t, 1)
 	a, launchID := beginTestLaunch(t, ctx, s, projectID, "h1-release-prerunning-pg-single-conn")
-	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a.ID)
+	quota, ldID := seedBrokerQuotaReservation(t, ctx, s, a)
 
 	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed,

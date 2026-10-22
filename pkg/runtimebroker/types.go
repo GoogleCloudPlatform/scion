@@ -93,6 +93,12 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates this broker runs a start of an existing agent
+	// (the start request's asyncLaunch, launchId, launchTimeoutSeconds and
+	// launchKeepaliveSeconds, with the agentId query parameter) as an async
+	// launch (design wave 3 §2 D-f; ptone/scion#4669). As for AsyncLaunch,
+	// the start response's LaunchPending echo is authoritative.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates this broker provisions the
 	// empty-per-agent workspace sharing mode: a private, initially empty
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
@@ -103,11 +109,22 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates this broker can be the target of a forced
+	// move: it provisions the agent with a fresh workspace after confirming
+	// it has no files for the agent.
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
 	// hub checks runtime suitability separately.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates this broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates this broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -305,14 +322,23 @@ type CreateAgentRequest struct {
 	// check that refuses an empty directory on the new backend while the
 	// dir's directory on its previous backend is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
-	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
-	// is being moved here from another broker on the same NFS export: before
-	// provisioning, the broker confirms through its own mount that the
+	// ExpectExistingNFSWorkspace is the moved-agent workspace expectation of
+	// a ProvisionOnly request for an agent moved here from another broker
+	// (the JSON key predates the third value). For a move on the same NFS
+	// export, the broker first confirms through its own mount that the
 	// workspace already exists ("agent-dir": <subPathRoot>/<projectID>/
 	// agents/<name>/workspace; "project": <subPathRoot>/<projectID>/
 	// workspace) and refuses with 409 when it does not, instead of
-	// provisioning an empty workspace (design ptone/scion#2727 A9).
+	// provisioning an empty workspace (design ptone/scion#2727 A9). For a
+	// forced move ("fresh-agent-dir", ptone/scion#5441) the workspace is
+	// recreated, and the broker refuses with 409 when it already has any
+	// directory for the agent.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID, required with ExpectExistingNFSWorkspace
+	// "fresh-agent-dir" and refused otherwise, is the forced move's
+	// reincarnation ID: the provision writes it into the agent directory it
+	// creates as the move marker (agent.MoveMarkerFile).
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -569,6 +595,16 @@ type MessageRequest struct {
 	// MessageID is the hub's persisted message ID, when the hub wants to be
 	// told about a buffered delivery that fails after acceptance (#1820).
 	MessageID string `json:"message_id,omitempty"`
+
+	// Attachments are the files the broker downloads, verifies and writes
+	// into the agent's home before it delivers the text (ptone/scion#4596).
+	// An entry without URL is reported to the agent as not delivered.
+	Attachments []messages.WireAttachment `json:"attachments,omitempty"`
+
+	// AttachmentRetentionDays is how long the agent's inbox keeps delivered
+	// attachments (messaging.attachment_inbox_retention_days); the broker
+	// prunes older ones after a write. 0 means the default.
+	AttachmentRetentionDays int `json:"attachment_retention_days,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support the legacy

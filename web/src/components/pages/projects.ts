@@ -28,6 +28,7 @@ import type { PageData, Project, Capabilities } from '../../shared/types.js';
 import { can, projectWorkspaceModeIcon } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { seedHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
@@ -303,6 +304,9 @@ export class ScionPageProjects extends LitElement {
       stateManager.seedProjects(this.projects);
       if (this.scopeCapabilities) {
         stateManager.seedScopeCapabilities('project', this.scopeCapabilities);
+        // Hub-scope (not per-filter), so the next page's create-project
+        // check needs no projects?limit=1 request (ptone/scion#5311).
+        seedHubProjectCapabilities(this.scopeCapabilities);
       }
     } catch (err) {
       console.error('Failed to load projects:', err);

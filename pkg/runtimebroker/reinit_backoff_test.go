@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -67,7 +68,7 @@ func newReinitBackoffFixture(t *testing.T) *reinitBackoffFixture {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
 	cfg.BrokerAuthEnabled = false
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
 	conn, err := srv.createHubConnection(reinitBackoffConnName, makeTestCreds(reinitBackoffConnName, "broker-1", "http://hub1.example.com"))
 	if err != nil {

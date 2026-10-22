@@ -434,7 +434,13 @@ func TestRelationshipProjectAccess_Federated(t *testing.T) {
 
 		f.fed.set(func(s *federatedBindingStore) { s.users[fed.ID()].Status = store.UserStatusSuspended })
 		after := f.evaluate(t, fed, res, "agent.attach", RelationshipRuleOwner)
-		assertFedDeny(t, after)
+		// Decide denies at the account-status gate, before any grant
+		// stage; the stage and the admission, called directly, deny too.
+		require.False(t, after.decision.Allowed, "decision must deny: %s", after.decision.Reason)
+		assert.Equal(t, principalNotActiveReason, after.decision.Reason)
+		assert.False(t, after.decision.IsIndeterminate())
+		assert.Equal(t, RelationshipRejectProjectAccess, after.stageKind)
+		assert.False(t, after.admission.Admitted)
 		require.Error(t, after.admErr)
 		assert.ErrorIs(t, after.admErr, ErrProjectAccessDenied)
 

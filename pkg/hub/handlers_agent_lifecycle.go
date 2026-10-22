@@ -143,6 +143,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
+		// Guard 0f applies to the agent's own reports only; a user or
+		// service with update access is not a container of some run.
+		startLaunchGuarded := false
+		if _, isAgent := identity.(AgentIdentity); isAgent {
+			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
 		// `scion reincarnate` migration) has blanked the report and nothing
@@ -164,6 +170,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// transaction.
 		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
+			return
+		}
+		// The same for Guard 0f: a report from a container other than the
+		// one an active start launch is launching, with nothing else to
+		// persist, is answered as not applied (ptone/scion#4669).
+		if startLaunchGuarded && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonStartLaunchOtherRun})
 			return
 		}
 		// Reconcile the max_agents_per_broker reservation against the phase
@@ -220,6 +233,10 @@ const (
 	// statusUpdateReasonReincarnationInFlight: a reincarnation owns the
 	// agent (Guard 0b).
 	statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+	// statusUpdateReasonStartLaunchOtherRun: an asynchronous start or
+	// restart launch is active and the report's agent token names no run,
+	// or another run than the one being launched (Guard 0f).
+	statusUpdateReasonStartLaunchOtherRun = "start_launch_other_run"
 )
 
 // statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
@@ -406,6 +423,38 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	}
 }
 
+// guardStartLaunchSelfReport is Guard 0f (design wave 3 D-e, there named
+// "Guard 0d"; renamed because 0d and 0e were taken), applied to the
+// agent's own status report after guardAgentPhaseTransition: while an
+// asynchronous start or restart launch is active on the row, a report whose
+// agent token names no run, or a run other than the row's (the run the hub
+// recorded for the new start before sending it), comes from the previous
+// container, not the one being launched. Its Phase, Activity, ExitCode,
+// ExitReason and Message are dropped, as Guards 0b and 0c drop them, so an
+// old container's "stopped" cannot end the launch as stopped during
+// launch. Other fields apply. A report from the new run's container passes.
+// The store already drops any report of another run (the run check in
+// UpdateAgentStatus); this guard adds the run-less token, and keeps the
+// quota reconcile from acting on such a report. Once the launch has ended
+// it no longer applies. It reports whether it applied (blanked the
+// report's guarded fields), so a report with nothing else is answered as
+// not applied.
+func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) bool {
+	if agent.LaunchState != store.LaunchStateActive ||
+		(agent.LaunchKind != store.LaunchKindStart && agent.LaunchKind != store.LaunchKindRestart) {
+		return false
+	}
+	if tokenRunID != "" && tokenRunID == agent.RunID {
+		return false
+	}
+	status.Phase = ""
+	status.Activity = ""
+	status.ExitCode = nil
+	status.ExitReason = ""
+	status.Message = ""
+	return true
+}
+
 // disruptionSettled reports whether agent is stopped or in error with a
 // Kubernetes disruption (preempted/evicted) recorded as its exit reason.
 func disruptionSettled(agent *store.Agent) bool {
@@ -572,9 +621,14 @@ func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent s
 // meaningful when the agent is in phase=error, where it requests a
 // best-effort resume of the interrupted harness session instead of a fresh
 // one. See resumeInPlaceDecision for the equivalent semantics on the
-// create-agent resume path.
+// create-agent resume path. AcceptAsyncLaunch opts in to an asynchronous
+// start (ptone/scion#4669): when the hub.async_agent_start experiment and
+// its other rules allow, the hub answers as soon as the broker accepts the
+// start, with the agent in phase starting and an active launch. The
+// "restart" action reads the same body for AcceptAsyncLaunch only.
 type AgentLifecycleStartRequest struct {
-	ForceResume bool `json:"forceResume,omitempty"`
+	ForceResume       bool `json:"forceResume,omitempty"`
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
@@ -700,6 +754,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// stopRunID is the run a stop is dispatched for; the stopped status is
 	// recorded only while the row still holds it (ptone/scion#2550).
 	var stopRunID string
+	// launchAccepted: a start or restart's start leg was accepted as an
+	// asynchronous launch (ptone/scion#4669); the launch's end writes the
+	// outcome, so the handler answers with the launching agent and writes
+	// no status of its own.
+	var launchAccepted bool
+	onLaunchAccepted := func(context.Context, *store.Agent) { launchAccepted = true }
 
 	// Collect warnings the start leg raises (hub-side TZ drops and the
 	// broker's hub-only env warnings) so the start and restart responses
@@ -732,12 +792,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					return
 				}
 			}
-			forcedRecovery := agent.Phase == string(state.PhaseError) && startReq.ForceResume
+			// rest is the effective resting phase (ptone/scion#4669): an error
+			// row that remembers the phase a failed asynchronous start began
+			// from resumes as that phase would (a suspended memory resumes
+			// its session). It is a local only; agent.Phase is not changed.
+			rest := store.EffectiveRestingPhase(agent)
+			forcedRecovery := agent.Phase == string(state.PhaseError) && rest == string(state.PhaseError) && startReq.ForceResume
 			if forcedRecovery {
 				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
-			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			resume := rest == string(state.PhaseSuspended) || forcedRecovery
 			// Flat placement pre-check: a stale pin is refused before the
 			// reservation, the run intent and any credential or run-ID
 			// write.
@@ -766,7 +831,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// made when the start fails (ptone/scion#1978), and writes the
 			// started status while the claim is held.
 			startFromRest = !isBrokerQuotaCountedPhase(agent.Phase)
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true,
+				AcceptAsyncLaunch: startReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+			if dispatchErr == nil && launchAccepted {
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
+				return
+			}
 			startDispatched = dispatchErr == nil || errors.Is(dispatchErr, errStartedStatusWrite)
 			if dispatchErr == nil {
 				startStatusWritten = true
@@ -866,6 +936,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
+		// The optional body's AcceptAsyncLaunch opts the start leg in to
+		// an asynchronous start (ptone/scion#4669). A restart never
+		// rejected a body, so one that cannot be decoded is ignored, as
+		// before.
+		var restartReq AgentLifecycleStartRequest
+		if r.ContentLength > 0 {
+			if err := readJSON(r, &restartReq); err != nil {
+				restartReq = AgentLifecycleStartRequest{}
+			}
+		}
 		var restartClaim *startClaimRun
 		if hasBroker {
 			// As for start: from here the restart no longer follows the
@@ -995,7 +1075,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// by syncDispatch (SyncDispatchBound).
 			existing := restartClaim
 			restartClaim = nil
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true,
+				AcceptAsyncLaunch: restartReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+			if dispatchErr == nil && launchAccepted {
+				// The start leg was accepted as an asynchronous restart
+				// launch: its end records running or stopped, keeps or
+				// releases the slot and settles the restart's claim.
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
+				return
+			}
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
@@ -1009,8 +1097,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// The claim was lost while the start leg ran (a stop
 					// superseded it): the container may be up, so no
 					// stopped state is recorded and the slot is not
-					// released; startAgentCore already undid only what its
-					// hold created.
+					// released. When the dispatch outcome is unknown,
+					// startAgentCore kept the hold's reservation, and a phase
+					// the hold marked starting rests at stopped; otherwise it
+					// undid only what its hold created. Whoever took the
+					// claim settles the slot.
 				} else if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
 					// A delete claimed the row between the legs
 					// (ptone/scion#2550, round 5 N3). The delete engine
@@ -1020,6 +1111,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// is conditional on the row still reading starting,
 					// so it leaves the engine's phase alone.
 					sd.rollback(ctx)
+				} else if startOutcomeOf(dispatchErr) == startUnconfirmed {
+					// The start leg may have reached the runtime
+					// (ptone/scion#5143, erratum E-33c-1): nothing is
+					// recorded stopped and nothing is released. The restart
+					// claim stays unconfirmed, startAgentCore kept the hold's
+					// reservation and rests the agent at stopped, and the
+					// start-claim reaper settles both once a fresh inventory
+					// shows the outcome (then the idle release frees the
+					// slot of an agent that is not running). A stop_queued
+					// status is replaced: the stop leg stopped the old
+					// container, so the queued stop is done.
+					s.replaceQueuedStop(ctx, agent, "stopped")
+					s.publishAgentRow(context.WithoutCancel(ctx), agent.ID)
 				} else {
 					// The start leg only runs after the stop leg succeeded
 					// or reported no running instance (any other stop error
@@ -1240,7 +1344,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 // Offline stop: the container status and message an agent gets when its
 // stop is queued for an offline broker.
 const (
-	containerStatusStopQueued = "stop_queued"
+	containerStatusStopQueued = store.ContainerStatusStopQueued
 	offlineStopMessage        = "Stop queued: broker offline; it will be applied when the broker reconnects."
 )
 

@@ -157,7 +157,11 @@ type ScopeReissueResponse struct {
 	CredentialsRevoked int                    `json:"credentials_revoked"`
 	Dispatched         bool                   `json:"dispatched"`
 	DispatchError      string                 `json:"dispatch_error,omitempty"`
-	Message            string                 `json:"message"`
+	// ReloadUnconfirmed is set when the new credential was delivered
+	// (Dispatched is true) but the running agent did not confirm the
+	// reload. It carries the caller-facing message.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
 }
 
 // reissueAuditSummary is the AfterSummary of agent_scopes_reissued.
@@ -1161,6 +1165,17 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 	}
 	// The dispatch mints from E' (it reads the committed edge) and pushes.
 	if err := disp.DispatchAgentResetAuth(withMintSite(ctx, mintSiteReissue), fresh); err != nil {
+		if isBrokerReloadUnconfirmed(err) {
+			// The credential was delivered; only the reload is unconfirmed.
+			slog.WarnContext(ctx, "scope re-issue: token delivered, reload unconfirmed", "agent_id", agent.ID, "op_id", opID)
+			summary.Dispatched = true
+			summary.ErrorClass = api.BrokerErrCodeReloadUnconfirmed
+			recordReissueDispatch(ctx, s.store, agent.ID, summary)
+			resp.Dispatched = true
+			resp.ReloadUnconfirmed = api.ReloadUnconfirmedMessage
+			resp.Message = "Scopes re-issued and a new token dispatched; the running agent did not confirm the reload"
+			return resp, nil
+		}
 		slog.ErrorContext(ctx, "scope re-issue: token dispatch failed", "agent_id", agent.ID, "op_id", opID, "error", err)
 		summary.ErrorClass = reissueDispatchErrorClass(err)
 		recordReissueDispatch(ctx, s.store, agent.ID, summary)

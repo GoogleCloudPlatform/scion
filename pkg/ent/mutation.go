@@ -18035,6 +18035,7 @@ type AgentReincarnationMutation struct {
 	source_broker_id        *string
 	target_broker_id        *string
 	source_cleanup          *string
+	transfer_mode           *string
 	clearedFields           map[string]struct{}
 	done                    bool
 	oldValue                func(context.Context) (*AgentReincarnation, error)
@@ -18842,6 +18843,55 @@ func (m *AgentReincarnationMutation) ResetSourceCleanup() {
 	delete(m.clearedFields, agentreincarnation.FieldSourceCleanup)
 }
 
+// SetTransferMode sets the "transfer_mode" field.
+func (m *AgentReincarnationMutation) SetTransferMode(s string) {
+	m.transfer_mode = &s
+}
+
+// TransferMode returns the value of the "transfer_mode" field in the mutation.
+func (m *AgentReincarnationMutation) TransferMode() (r string, exists bool) {
+	v := m.transfer_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTransferMode returns the old "transfer_mode" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldTransferMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTransferMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTransferMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTransferMode: %w", err)
+	}
+	return oldValue.TransferMode, nil
+}
+
+// ClearTransferMode clears the value of the "transfer_mode" field.
+func (m *AgentReincarnationMutation) ClearTransferMode() {
+	m.transfer_mode = nil
+	m.clearedFields[agentreincarnation.FieldTransferMode] = struct{}{}
+}
+
+// TransferModeCleared returns if the "transfer_mode" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) TransferModeCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldTransferMode]
+	return ok
+}
+
+// ResetTransferMode resets all changes to the "transfer_mode" field.
+func (m *AgentReincarnationMutation) ResetTransferMode() {
+	m.transfer_mode = nil
+	delete(m.clearedFields, agentreincarnation.FieldTransferMode)
+}
+
 // Where appends a list predicates to the AgentReincarnationMutation builder.
 func (m *AgentReincarnationMutation) Where(ps ...predicate.AgentReincarnation) {
 	m.predicates = append(m.predicates, ps...)
@@ -18876,7 +18926,7 @@ func (m *AgentReincarnationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentReincarnationMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.agent_id != nil {
 		fields = append(fields, agentreincarnation.FieldAgentID)
 	}
@@ -18922,6 +18972,9 @@ func (m *AgentReincarnationMutation) Fields() []string {
 	if m.source_cleanup != nil {
 		fields = append(fields, agentreincarnation.FieldSourceCleanup)
 	}
+	if m.transfer_mode != nil {
+		fields = append(fields, agentreincarnation.FieldTransferMode)
+	}
 	return fields
 }
 
@@ -18960,6 +19013,8 @@ func (m *AgentReincarnationMutation) Field(name string) (ent.Value, bool) {
 		return m.TargetBrokerID()
 	case agentreincarnation.FieldSourceCleanup:
 		return m.SourceCleanup()
+	case agentreincarnation.FieldTransferMode:
+		return m.TransferMode()
 	}
 	return nil, false
 }
@@ -18999,6 +19054,8 @@ func (m *AgentReincarnationMutation) OldField(ctx context.Context, name string) 
 		return m.OldTargetBrokerID(ctx)
 	case agentreincarnation.FieldSourceCleanup:
 		return m.OldSourceCleanup(ctx)
+	case agentreincarnation.FieldTransferMode:
+		return m.OldTransferMode(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -19113,6 +19170,13 @@ func (m *AgentReincarnationMutation) SetField(name string, value ent.Value) erro
 		}
 		m.SetSourceCleanup(v)
 		return nil
+	case agentreincarnation.FieldTransferMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTransferMode(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -19197,6 +19261,9 @@ func (m *AgentReincarnationMutation) ClearedFields() []string {
 	if m.FieldCleared(agentreincarnation.FieldSourceCleanup) {
 		fields = append(fields, agentreincarnation.FieldSourceCleanup)
 	}
+	if m.FieldCleared(agentreincarnation.FieldTransferMode) {
+		fields = append(fields, agentreincarnation.FieldTransferMode)
+	}
 	return fields
 }
 
@@ -19237,6 +19304,9 @@ func (m *AgentReincarnationMutation) ClearField(name string) error {
 		return nil
 	case agentreincarnation.FieldSourceCleanup:
 		m.ClearSourceCleanup()
+		return nil
+	case agentreincarnation.FieldTransferMode:
+		m.ClearTransferMode()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation nullable field %s", name)
@@ -19290,6 +19360,9 @@ func (m *AgentReincarnationMutation) ResetField(name string) error {
 		return nil
 	case agentreincarnation.FieldSourceCleanup:
 		m.ResetSourceCleanup()
+		return nil
+	case agentreincarnation.FieldTransferMode:
+		m.ResetTransferMode()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)
@@ -71073,44 +71146,56 @@ func (m *RoleDefinitionMutation) ResetEdge(name string) error {
 // RuntimeBrokerMutation represents an operation that mutates the RuntimeBroker nodes in the graph.
 type RuntimeBrokerMutation struct {
 	config
-	op                             Op
-	typ                            string
-	id                             *uuid.UUID
-	name                           *string
-	slug                           *string
-	mode                           *string
-	version                        *string
-	lock_version                   *int64
-	addlock_version                *int64
-	status                         *string
-	connection_state               *string
-	last_heartbeat                 *time.Time
-	capabilities                   *string
-	supported_harnesses            *string
-	resources                      *string
-	runtimes                       *string
-	default_profile                *string
-	workspace_storage              *string
-	health                         *string
-	labels                         *map[string]string
-	annotations                    *map[string]string
-	endpoint                       *string
-	created_by                     *string
-	auto_provide                   *bool
-	gcp_host_service_account_email *string
-	gcp_host_project_id            *string
-	connected_hub_id               *string
-	connected_session_id           *string
-	connected_at                   *time.Time
-	runtime_target_id              *string
-	runtime_target_type            *string
-	runtime_target_display_name    *string
-	created                        *time.Time
-	updated                        *time.Time
-	clearedFields                  map[string]struct{}
-	done                           bool
-	oldValue                       func(context.Context) (*RuntimeBroker, error)
-	predicates                     []predicate.RuntimeBroker
+	op                               Op
+	typ                              string
+	id                               *uuid.UUID
+	name                             *string
+	slug                             *string
+	mode                             *string
+	version                          *string
+	lock_version                     *int64
+	addlock_version                  *int64
+	status                           *string
+	connection_state                 *string
+	last_heartbeat                   *time.Time
+	capabilities                     *string
+	supported_harnesses              *string
+	resources                        *string
+	runtimes                         *string
+	default_profile                  *string
+	workspace_storage                *string
+	health                           *string
+	labels                           *map[string]string
+	annotations                      *map[string]string
+	endpoint                         *string
+	created_by                       *string
+	auto_provide                     *bool
+	gcp_host_service_account_email   *string
+	gcp_host_project_id              *string
+	gcp_host_source                  *string
+	host_identity_observed_email     *string
+	host_identity_observation        *string
+	host_identity_observed_at        *time.Time
+	connected_hub_id                 *string
+	connected_session_id             *string
+	connected_at                     *time.Time
+	runtime_target_id                *string
+	runtime_target_type              *string
+	runtime_target_display_name      *string
+	runtime_target_presentation      *string
+	runtime_target_presentation_hash *string
+	presentation_epoch               *int64
+	addpresentation_epoch            *int64
+	presentation_seq                 *int64
+	addpresentation_seq              *int64
+	presentation_fenced_at           *time.Time
+	presentation_observed_at         *time.Time
+	created                          *time.Time
+	updated                          *time.Time
+	clearedFields                    map[string]struct{}
+	done                             bool
+	oldValue                         func(context.Context) (*RuntimeBroker, error)
+	predicates                       []predicate.RuntimeBroker
 }
 
 var _ ent.Mutation = (*RuntimeBrokerMutation)(nil)
@@ -72224,6 +72309,202 @@ func (m *RuntimeBrokerMutation) ResetGcpHostProjectID() {
 	delete(m.clearedFields, runtimebroker.FieldGcpHostProjectID)
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) SetGcpHostSource(s string) {
+	m.gcp_host_source = &s
+}
+
+// GcpHostSource returns the value of the "gcp_host_source" field in the mutation.
+func (m *RuntimeBrokerMutation) GcpHostSource() (r string, exists bool) {
+	v := m.gcp_host_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGcpHostSource returns the old "gcp_host_source" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldGcpHostSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGcpHostSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGcpHostSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGcpHostSource: %w", err)
+	}
+	return oldValue.GcpHostSource, nil
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) ClearGcpHostSource() {
+	m.gcp_host_source = nil
+	m.clearedFields[runtimebroker.FieldGcpHostSource] = struct{}{}
+}
+
+// GcpHostSourceCleared returns if the "gcp_host_source" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) GcpHostSourceCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldGcpHostSource]
+	return ok
+}
+
+// ResetGcpHostSource resets all changes to the "gcp_host_source" field.
+func (m *RuntimeBrokerMutation) ResetGcpHostSource() {
+	m.gcp_host_source = nil
+	delete(m.clearedFields, runtimebroker.FieldGcpHostSource)
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (m *RuntimeBrokerMutation) SetHostIdentityObservedEmail(s string) {
+	m.host_identity_observed_email = &s
+}
+
+// HostIdentityObservedEmail returns the value of the "host_identity_observed_email" field in the mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservedEmail() (r string, exists bool) {
+	v := m.host_identity_observed_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHostIdentityObservedEmail returns the old "host_identity_observed_email" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldHostIdentityObservedEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHostIdentityObservedEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHostIdentityObservedEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHostIdentityObservedEmail: %w", err)
+	}
+	return oldValue.HostIdentityObservedEmail, nil
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (m *RuntimeBrokerMutation) ClearHostIdentityObservedEmail() {
+	m.host_identity_observed_email = nil
+	m.clearedFields[runtimebroker.FieldHostIdentityObservedEmail] = struct{}{}
+}
+
+// HostIdentityObservedEmailCleared returns if the "host_identity_observed_email" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservedEmailCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldHostIdentityObservedEmail]
+	return ok
+}
+
+// ResetHostIdentityObservedEmail resets all changes to the "host_identity_observed_email" field.
+func (m *RuntimeBrokerMutation) ResetHostIdentityObservedEmail() {
+	m.host_identity_observed_email = nil
+	delete(m.clearedFields, runtimebroker.FieldHostIdentityObservedEmail)
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (m *RuntimeBrokerMutation) SetHostIdentityObservation(s string) {
+	m.host_identity_observation = &s
+}
+
+// HostIdentityObservation returns the value of the "host_identity_observation" field in the mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservation() (r string, exists bool) {
+	v := m.host_identity_observation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHostIdentityObservation returns the old "host_identity_observation" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldHostIdentityObservation(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHostIdentityObservation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHostIdentityObservation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHostIdentityObservation: %w", err)
+	}
+	return oldValue.HostIdentityObservation, nil
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (m *RuntimeBrokerMutation) ClearHostIdentityObservation() {
+	m.host_identity_observation = nil
+	m.clearedFields[runtimebroker.FieldHostIdentityObservation] = struct{}{}
+}
+
+// HostIdentityObservationCleared returns if the "host_identity_observation" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservationCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldHostIdentityObservation]
+	return ok
+}
+
+// ResetHostIdentityObservation resets all changes to the "host_identity_observation" field.
+func (m *RuntimeBrokerMutation) ResetHostIdentityObservation() {
+	m.host_identity_observation = nil
+	delete(m.clearedFields, runtimebroker.FieldHostIdentityObservation)
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (m *RuntimeBrokerMutation) SetHostIdentityObservedAt(t time.Time) {
+	m.host_identity_observed_at = &t
+}
+
+// HostIdentityObservedAt returns the value of the "host_identity_observed_at" field in the mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservedAt() (r time.Time, exists bool) {
+	v := m.host_identity_observed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHostIdentityObservedAt returns the old "host_identity_observed_at" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldHostIdentityObservedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHostIdentityObservedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHostIdentityObservedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHostIdentityObservedAt: %w", err)
+	}
+	return oldValue.HostIdentityObservedAt, nil
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (m *RuntimeBrokerMutation) ClearHostIdentityObservedAt() {
+	m.host_identity_observed_at = nil
+	m.clearedFields[runtimebroker.FieldHostIdentityObservedAt] = struct{}{}
+}
+
+// HostIdentityObservedAtCleared returns if the "host_identity_observed_at" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) HostIdentityObservedAtCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldHostIdentityObservedAt]
+	return ok
+}
+
+// ResetHostIdentityObservedAt resets all changes to the "host_identity_observed_at" field.
+func (m *RuntimeBrokerMutation) ResetHostIdentityObservedAt() {
+	m.host_identity_observed_at = nil
+	delete(m.clearedFields, runtimebroker.FieldHostIdentityObservedAt)
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (m *RuntimeBrokerMutation) SetConnectedHubID(s string) {
 	m.connected_hub_id = &s
@@ -72518,6 +72799,342 @@ func (m *RuntimeBrokerMutation) ResetRuntimeTargetDisplayName() {
 	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetDisplayName)
 }
 
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetPresentation(s string) {
+	m.runtime_target_presentation = &s
+}
+
+// RuntimeTargetPresentation returns the value of the "runtime_target_presentation" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetPresentation() (r string, exists bool) {
+	v := m.runtime_target_presentation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetPresentation returns the old "runtime_target_presentation" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetPresentation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetPresentation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetPresentation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetPresentation: %w", err)
+	}
+	return oldValue.RuntimeTargetPresentation, nil
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetPresentation() {
+	m.runtime_target_presentation = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetPresentation] = struct{}{}
+}
+
+// RuntimeTargetPresentationCleared returns if the "runtime_target_presentation" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetPresentationCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetPresentation]
+	return ok
+}
+
+// ResetRuntimeTargetPresentation resets all changes to the "runtime_target_presentation" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetPresentation() {
+	m.runtime_target_presentation = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetPresentation)
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetPresentationHash(s string) {
+	m.runtime_target_presentation_hash = &s
+}
+
+// RuntimeTargetPresentationHash returns the value of the "runtime_target_presentation_hash" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetPresentationHash() (r string, exists bool) {
+	v := m.runtime_target_presentation_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetPresentationHash returns the old "runtime_target_presentation_hash" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetPresentationHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetPresentationHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetPresentationHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetPresentationHash: %w", err)
+	}
+	return oldValue.RuntimeTargetPresentationHash, nil
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetPresentationHash() {
+	m.runtime_target_presentation_hash = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetPresentationHash] = struct{}{}
+}
+
+// RuntimeTargetPresentationHashCleared returns if the "runtime_target_presentation_hash" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetPresentationHashCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetPresentationHash]
+	return ok
+}
+
+// ResetRuntimeTargetPresentationHash resets all changes to the "runtime_target_presentation_hash" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetPresentationHash() {
+	m.runtime_target_presentation_hash = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetPresentationHash)
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (m *RuntimeBrokerMutation) SetPresentationEpoch(i int64) {
+	m.presentation_epoch = &i
+	m.addpresentation_epoch = nil
+}
+
+// PresentationEpoch returns the value of the "presentation_epoch" field in the mutation.
+func (m *RuntimeBrokerMutation) PresentationEpoch() (r int64, exists bool) {
+	v := m.presentation_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPresentationEpoch returns the old "presentation_epoch" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldPresentationEpoch(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPresentationEpoch is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPresentationEpoch requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPresentationEpoch: %w", err)
+	}
+	return oldValue.PresentationEpoch, nil
+}
+
+// AddPresentationEpoch adds i to the "presentation_epoch" field.
+func (m *RuntimeBrokerMutation) AddPresentationEpoch(i int64) {
+	if m.addpresentation_epoch != nil {
+		*m.addpresentation_epoch += i
+	} else {
+		m.addpresentation_epoch = &i
+	}
+}
+
+// AddedPresentationEpoch returns the value that was added to the "presentation_epoch" field in this mutation.
+func (m *RuntimeBrokerMutation) AddedPresentationEpoch() (r int64, exists bool) {
+	v := m.addpresentation_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (m *RuntimeBrokerMutation) ClearPresentationEpoch() {
+	m.presentation_epoch = nil
+	m.addpresentation_epoch = nil
+	m.clearedFields[runtimebroker.FieldPresentationEpoch] = struct{}{}
+}
+
+// PresentationEpochCleared returns if the "presentation_epoch" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) PresentationEpochCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldPresentationEpoch]
+	return ok
+}
+
+// ResetPresentationEpoch resets all changes to the "presentation_epoch" field.
+func (m *RuntimeBrokerMutation) ResetPresentationEpoch() {
+	m.presentation_epoch = nil
+	m.addpresentation_epoch = nil
+	delete(m.clearedFields, runtimebroker.FieldPresentationEpoch)
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (m *RuntimeBrokerMutation) SetPresentationSeq(i int64) {
+	m.presentation_seq = &i
+	m.addpresentation_seq = nil
+}
+
+// PresentationSeq returns the value of the "presentation_seq" field in the mutation.
+func (m *RuntimeBrokerMutation) PresentationSeq() (r int64, exists bool) {
+	v := m.presentation_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPresentationSeq returns the old "presentation_seq" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldPresentationSeq(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPresentationSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPresentationSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPresentationSeq: %w", err)
+	}
+	return oldValue.PresentationSeq, nil
+}
+
+// AddPresentationSeq adds i to the "presentation_seq" field.
+func (m *RuntimeBrokerMutation) AddPresentationSeq(i int64) {
+	if m.addpresentation_seq != nil {
+		*m.addpresentation_seq += i
+	} else {
+		m.addpresentation_seq = &i
+	}
+}
+
+// AddedPresentationSeq returns the value that was added to the "presentation_seq" field in this mutation.
+func (m *RuntimeBrokerMutation) AddedPresentationSeq() (r int64, exists bool) {
+	v := m.addpresentation_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (m *RuntimeBrokerMutation) ClearPresentationSeq() {
+	m.presentation_seq = nil
+	m.addpresentation_seq = nil
+	m.clearedFields[runtimebroker.FieldPresentationSeq] = struct{}{}
+}
+
+// PresentationSeqCleared returns if the "presentation_seq" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) PresentationSeqCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldPresentationSeq]
+	return ok
+}
+
+// ResetPresentationSeq resets all changes to the "presentation_seq" field.
+func (m *RuntimeBrokerMutation) ResetPresentationSeq() {
+	m.presentation_seq = nil
+	m.addpresentation_seq = nil
+	delete(m.clearedFields, runtimebroker.FieldPresentationSeq)
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (m *RuntimeBrokerMutation) SetPresentationFencedAt(t time.Time) {
+	m.presentation_fenced_at = &t
+}
+
+// PresentationFencedAt returns the value of the "presentation_fenced_at" field in the mutation.
+func (m *RuntimeBrokerMutation) PresentationFencedAt() (r time.Time, exists bool) {
+	v := m.presentation_fenced_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPresentationFencedAt returns the old "presentation_fenced_at" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldPresentationFencedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPresentationFencedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPresentationFencedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPresentationFencedAt: %w", err)
+	}
+	return oldValue.PresentationFencedAt, nil
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (m *RuntimeBrokerMutation) ClearPresentationFencedAt() {
+	m.presentation_fenced_at = nil
+	m.clearedFields[runtimebroker.FieldPresentationFencedAt] = struct{}{}
+}
+
+// PresentationFencedAtCleared returns if the "presentation_fenced_at" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) PresentationFencedAtCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldPresentationFencedAt]
+	return ok
+}
+
+// ResetPresentationFencedAt resets all changes to the "presentation_fenced_at" field.
+func (m *RuntimeBrokerMutation) ResetPresentationFencedAt() {
+	m.presentation_fenced_at = nil
+	delete(m.clearedFields, runtimebroker.FieldPresentationFencedAt)
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (m *RuntimeBrokerMutation) SetPresentationObservedAt(t time.Time) {
+	m.presentation_observed_at = &t
+}
+
+// PresentationObservedAt returns the value of the "presentation_observed_at" field in the mutation.
+func (m *RuntimeBrokerMutation) PresentationObservedAt() (r time.Time, exists bool) {
+	v := m.presentation_observed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPresentationObservedAt returns the old "presentation_observed_at" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldPresentationObservedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPresentationObservedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPresentationObservedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPresentationObservedAt: %w", err)
+	}
+	return oldValue.PresentationObservedAt, nil
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (m *RuntimeBrokerMutation) ClearPresentationObservedAt() {
+	m.presentation_observed_at = nil
+	m.clearedFields[runtimebroker.FieldPresentationObservedAt] = struct{}{}
+}
+
+// PresentationObservedAtCleared returns if the "presentation_observed_at" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) PresentationObservedAtCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldPresentationObservedAt]
+	return ok
+}
+
+// ResetPresentationObservedAt resets all changes to the "presentation_observed_at" field.
+func (m *RuntimeBrokerMutation) ResetPresentationObservedAt() {
+	m.presentation_observed_at = nil
+	delete(m.clearedFields, runtimebroker.FieldPresentationObservedAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *RuntimeBrokerMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -72624,7 +73241,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 40)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -72691,6 +73308,18 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	if m.gcp_host_project_id != nil {
 		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
 	}
+	if m.gcp_host_source != nil {
+		fields = append(fields, runtimebroker.FieldGcpHostSource)
+	}
+	if m.host_identity_observed_email != nil {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservedEmail)
+	}
+	if m.host_identity_observation != nil {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservation)
+	}
+	if m.host_identity_observed_at != nil {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservedAt)
+	}
 	if m.connected_hub_id != nil {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
 	}
@@ -72708,6 +73337,24 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.runtime_target_display_name != nil {
 		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
+	if m.runtime_target_presentation != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetPresentation)
+	}
+	if m.runtime_target_presentation_hash != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetPresentationHash)
+	}
+	if m.presentation_epoch != nil {
+		fields = append(fields, runtimebroker.FieldPresentationEpoch)
+	}
+	if m.presentation_seq != nil {
+		fields = append(fields, runtimebroker.FieldPresentationSeq)
+	}
+	if m.presentation_fenced_at != nil {
+		fields = append(fields, runtimebroker.FieldPresentationFencedAt)
+	}
+	if m.presentation_observed_at != nil {
+		fields = append(fields, runtimebroker.FieldPresentationObservedAt)
 	}
 	if m.created != nil {
 		fields = append(fields, runtimebroker.FieldCreated)
@@ -72767,6 +73414,14 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.GcpHostServiceAccountEmail()
 	case runtimebroker.FieldGcpHostProjectID:
 		return m.GcpHostProjectID()
+	case runtimebroker.FieldGcpHostSource:
+		return m.GcpHostSource()
+	case runtimebroker.FieldHostIdentityObservedEmail:
+		return m.HostIdentityObservedEmail()
+	case runtimebroker.FieldHostIdentityObservation:
+		return m.HostIdentityObservation()
+	case runtimebroker.FieldHostIdentityObservedAt:
+		return m.HostIdentityObservedAt()
 	case runtimebroker.FieldConnectedHubID:
 		return m.ConnectedHubID()
 	case runtimebroker.FieldConnectedSessionID:
@@ -72779,6 +73434,18 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.RuntimeTargetType()
 	case runtimebroker.FieldRuntimeTargetDisplayName:
 		return m.RuntimeTargetDisplayName()
+	case runtimebroker.FieldRuntimeTargetPresentation:
+		return m.RuntimeTargetPresentation()
+	case runtimebroker.FieldRuntimeTargetPresentationHash:
+		return m.RuntimeTargetPresentationHash()
+	case runtimebroker.FieldPresentationEpoch:
+		return m.PresentationEpoch()
+	case runtimebroker.FieldPresentationSeq:
+		return m.PresentationSeq()
+	case runtimebroker.FieldPresentationFencedAt:
+		return m.PresentationFencedAt()
+	case runtimebroker.FieldPresentationObservedAt:
+		return m.PresentationObservedAt()
 	case runtimebroker.FieldCreated:
 		return m.Created()
 	case runtimebroker.FieldUpdated:
@@ -72836,6 +73503,14 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldGcpHostServiceAccountEmail(ctx)
 	case runtimebroker.FieldGcpHostProjectID:
 		return m.OldGcpHostProjectID(ctx)
+	case runtimebroker.FieldGcpHostSource:
+		return m.OldGcpHostSource(ctx)
+	case runtimebroker.FieldHostIdentityObservedEmail:
+		return m.OldHostIdentityObservedEmail(ctx)
+	case runtimebroker.FieldHostIdentityObservation:
+		return m.OldHostIdentityObservation(ctx)
+	case runtimebroker.FieldHostIdentityObservedAt:
+		return m.OldHostIdentityObservedAt(ctx)
 	case runtimebroker.FieldConnectedHubID:
 		return m.OldConnectedHubID(ctx)
 	case runtimebroker.FieldConnectedSessionID:
@@ -72848,6 +73523,18 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldRuntimeTargetType(ctx)
 	case runtimebroker.FieldRuntimeTargetDisplayName:
 		return m.OldRuntimeTargetDisplayName(ctx)
+	case runtimebroker.FieldRuntimeTargetPresentation:
+		return m.OldRuntimeTargetPresentation(ctx)
+	case runtimebroker.FieldRuntimeTargetPresentationHash:
+		return m.OldRuntimeTargetPresentationHash(ctx)
+	case runtimebroker.FieldPresentationEpoch:
+		return m.OldPresentationEpoch(ctx)
+	case runtimebroker.FieldPresentationSeq:
+		return m.OldPresentationSeq(ctx)
+	case runtimebroker.FieldPresentationFencedAt:
+		return m.OldPresentationFencedAt(ctx)
+	case runtimebroker.FieldPresentationObservedAt:
+		return m.OldPresentationObservedAt(ctx)
 	case runtimebroker.FieldCreated:
 		return m.OldCreated(ctx)
 	case runtimebroker.FieldUpdated:
@@ -73015,6 +73702,34 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGcpHostProjectID(v)
 		return nil
+	case runtimebroker.FieldGcpHostSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGcpHostSource(v)
+		return nil
+	case runtimebroker.FieldHostIdentityObservedEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHostIdentityObservedEmail(v)
+		return nil
+	case runtimebroker.FieldHostIdentityObservation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHostIdentityObservation(v)
+		return nil
+	case runtimebroker.FieldHostIdentityObservedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHostIdentityObservedAt(v)
+		return nil
 	case runtimebroker.FieldConnectedHubID:
 		v, ok := value.(string)
 		if !ok {
@@ -73057,6 +73772,48 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRuntimeTargetDisplayName(v)
 		return nil
+	case runtimebroker.FieldRuntimeTargetPresentation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetPresentation(v)
+		return nil
+	case runtimebroker.FieldRuntimeTargetPresentationHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetPresentationHash(v)
+		return nil
+	case runtimebroker.FieldPresentationEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPresentationEpoch(v)
+		return nil
+	case runtimebroker.FieldPresentationSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPresentationSeq(v)
+		return nil
+	case runtimebroker.FieldPresentationFencedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPresentationFencedAt(v)
+		return nil
+	case runtimebroker.FieldPresentationObservedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPresentationObservedAt(v)
+		return nil
 	case runtimebroker.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -73082,6 +73839,12 @@ func (m *RuntimeBrokerMutation) AddedFields() []string {
 	if m.addlock_version != nil {
 		fields = append(fields, runtimebroker.FieldLockVersion)
 	}
+	if m.addpresentation_epoch != nil {
+		fields = append(fields, runtimebroker.FieldPresentationEpoch)
+	}
+	if m.addpresentation_seq != nil {
+		fields = append(fields, runtimebroker.FieldPresentationSeq)
+	}
 	return fields
 }
 
@@ -73092,6 +73855,10 @@ func (m *RuntimeBrokerMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case runtimebroker.FieldLockVersion:
 		return m.AddedLockVersion()
+	case runtimebroker.FieldPresentationEpoch:
+		return m.AddedPresentationEpoch()
+	case runtimebroker.FieldPresentationSeq:
+		return m.AddedPresentationSeq()
 	}
 	return nil, false
 }
@@ -73107,6 +73874,20 @@ func (m *RuntimeBrokerMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddLockVersion(v)
+		return nil
+	case runtimebroker.FieldPresentationEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPresentationEpoch(v)
+		return nil
+	case runtimebroker.FieldPresentationSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPresentationSeq(v)
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker numeric field %s", name)
@@ -73161,6 +73942,18 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldGcpHostProjectID) {
 		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
 	}
+	if m.FieldCleared(runtimebroker.FieldGcpHostSource) {
+		fields = append(fields, runtimebroker.FieldGcpHostSource)
+	}
+	if m.FieldCleared(runtimebroker.FieldHostIdentityObservedEmail) {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservedEmail)
+	}
+	if m.FieldCleared(runtimebroker.FieldHostIdentityObservation) {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservation)
+	}
+	if m.FieldCleared(runtimebroker.FieldHostIdentityObservedAt) {
+		fields = append(fields, runtimebroker.FieldHostIdentityObservedAt)
+	}
 	if m.FieldCleared(runtimebroker.FieldConnectedHubID) {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
 	}
@@ -73178,6 +73971,24 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(runtimebroker.FieldRuntimeTargetDisplayName) {
 		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetPresentation) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetPresentation)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetPresentationHash) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetPresentationHash)
+	}
+	if m.FieldCleared(runtimebroker.FieldPresentationEpoch) {
+		fields = append(fields, runtimebroker.FieldPresentationEpoch)
+	}
+	if m.FieldCleared(runtimebroker.FieldPresentationSeq) {
+		fields = append(fields, runtimebroker.FieldPresentationSeq)
+	}
+	if m.FieldCleared(runtimebroker.FieldPresentationFencedAt) {
+		fields = append(fields, runtimebroker.FieldPresentationFencedAt)
+	}
+	if m.FieldCleared(runtimebroker.FieldPresentationObservedAt) {
+		fields = append(fields, runtimebroker.FieldPresentationObservedAt)
 	}
 	return fields
 }
@@ -73238,6 +74049,18 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 	case runtimebroker.FieldGcpHostProjectID:
 		m.ClearGcpHostProjectID()
 		return nil
+	case runtimebroker.FieldGcpHostSource:
+		m.ClearGcpHostSource()
+		return nil
+	case runtimebroker.FieldHostIdentityObservedEmail:
+		m.ClearHostIdentityObservedEmail()
+		return nil
+	case runtimebroker.FieldHostIdentityObservation:
+		m.ClearHostIdentityObservation()
+		return nil
+	case runtimebroker.FieldHostIdentityObservedAt:
+		m.ClearHostIdentityObservedAt()
+		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ClearConnectedHubID()
 		return nil
@@ -73255,6 +74078,24 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimeTargetDisplayName:
 		m.ClearRuntimeTargetDisplayName()
+		return nil
+	case runtimebroker.FieldRuntimeTargetPresentation:
+		m.ClearRuntimeTargetPresentation()
+		return nil
+	case runtimebroker.FieldRuntimeTargetPresentationHash:
+		m.ClearRuntimeTargetPresentationHash()
+		return nil
+	case runtimebroker.FieldPresentationEpoch:
+		m.ClearPresentationEpoch()
+		return nil
+	case runtimebroker.FieldPresentationSeq:
+		m.ClearPresentationSeq()
+		return nil
+	case runtimebroker.FieldPresentationFencedAt:
+		m.ClearPresentationFencedAt()
+		return nil
+	case runtimebroker.FieldPresentationObservedAt:
+		m.ClearPresentationObservedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker nullable field %s", name)
@@ -73330,6 +74171,18 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 	case runtimebroker.FieldGcpHostProjectID:
 		m.ResetGcpHostProjectID()
 		return nil
+	case runtimebroker.FieldGcpHostSource:
+		m.ResetGcpHostSource()
+		return nil
+	case runtimebroker.FieldHostIdentityObservedEmail:
+		m.ResetHostIdentityObservedEmail()
+		return nil
+	case runtimebroker.FieldHostIdentityObservation:
+		m.ResetHostIdentityObservation()
+		return nil
+	case runtimebroker.FieldHostIdentityObservedAt:
+		m.ResetHostIdentityObservedAt()
+		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ResetConnectedHubID()
 		return nil
@@ -73347,6 +74200,24 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimeTargetDisplayName:
 		m.ResetRuntimeTargetDisplayName()
+		return nil
+	case runtimebroker.FieldRuntimeTargetPresentation:
+		m.ResetRuntimeTargetPresentation()
+		return nil
+	case runtimebroker.FieldRuntimeTargetPresentationHash:
+		m.ResetRuntimeTargetPresentationHash()
+		return nil
+	case runtimebroker.FieldPresentationEpoch:
+		m.ResetPresentationEpoch()
+		return nil
+	case runtimebroker.FieldPresentationSeq:
+		m.ResetPresentationSeq()
+		return nil
+	case runtimebroker.FieldPresentationFencedAt:
+		m.ResetPresentationFencedAt()
+		return nil
+	case runtimebroker.FieldPresentationObservedAt:
+		m.ResetPresentationObservedAt()
 		return nil
 	case runtimebroker.FieldCreated:
 		m.ResetCreated()

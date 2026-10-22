@@ -106,6 +106,7 @@ jobs:
           - terminal-pane
           - terminal-workspace
           - test-hub-banner
+          - broker-area
           - test-identity-session
           - iap-driver
     steps:

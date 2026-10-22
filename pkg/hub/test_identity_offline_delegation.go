@@ -249,3 +249,22 @@ func offlineDelegationBinding(ctx context.Context, principal PrincipalContext, c
 	}
 	return cb, role
 }
+
+// offlineGrantorStatusExempt reports whether the account-status gate
+// (principalStatusGate) admits principal although it has no users row. It
+// holds only when decide Step 5b4 grants this request
+// (offlineDelegationBinding returns a binding) and principal.ID is the
+// reserved offline grantor id recomputed from the delegation's hub id. It
+// reads only the request context and its arguments. principalStatusGate is
+// its only caller, and only for a store.ErrNotFound users-row read.
+func offlineGrantorStatusExempt(ctx context.Context, principal PrincipalContext, credential CredentialContext, permissionID string) bool {
+	if cb, _ := offlineDelegationBinding(ctx, principal, credential, permissionID); cb == nil {
+		return false
+	}
+	st := workloadDelegationFromContext(ctx)
+	if st == nil || st.delegation == nil {
+		return false
+	}
+	reserved := store.TestInfraOfflineGrantorID(st.delegation.HubID)
+	return reserved != "" && principal.ID == reserved
+}

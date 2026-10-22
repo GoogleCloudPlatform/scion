@@ -72,6 +72,7 @@ const (
 	ActionDelete         = "delete"
 	ActionList           = "list"
 	ActionManage         = "manage"
+	ActionAdmin          = "admin"   // access_constraint.admin: administer access constraints
 	ActionSteward        = "steward" // artifact.steward: share and retire an agent's artifact within bounds (design D25)
 	ActionAttach         = "attach"
 	ActionPortAccess     = "port_access"
@@ -224,12 +225,12 @@ var Registry = []Permission{
 	{ID: "agent.delegation.list", Resource: ResourceAgent, Action: ActionDelegationList, Description: "List agent delegation grants: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 	{ID: "agent.delegation.read", Resource: ResourceAgent, Action: ActionDelegationRead, Description: "Read an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 
-	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
+	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "project:create", Description: "Create projects: project create, project register, and the new project of a clone", Enforcement: []string{"pkg/hub/handlers_projects_core.go:createProject", "pkg/hub/handlers_projects_core.go:handleProjectRegister", "pkg/hub/project_clone.go:authorizeProjectClone"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.update", Resource: ResourceProject, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "project:update", Description: "Update projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
 	{ID: "project.delete", Resource: ResourceProject, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/artifacts_host.go:func (h *artifactHost) ReviewGrantClause", "pkg/hub/artifacts_host.go:func (h *artifactHost) MayGrantReview"}},
-	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
+	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Reserved: "no route checks project.register; project register checks project.create"},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (project owner/admin, hub admin)", Enforcement: []string{"pkg/hub/handlers_project_visitors.go"}},
 
@@ -355,15 +356,15 @@ var Registry = []Permission{
 
 	// Role management (Phase 2 PR-C1)
 	{ID: "role.read", Resource: ResourceRole, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "role:read", Description: "Read role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.create", Resource: ResourceRole, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.update", Resource: ResourceRole, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role.delete", Resource: ResourceRole, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.create", Resource: ResourceRole, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "role:create", Description: "Create custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.update", Resource: ResourceRole, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "role:update", Description: "Update custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role.delete", Resource: ResourceRole, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "role:delete", Description: "Delete custom role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 	{ID: "role_binding.read", Resource: ResourceRoleBinding, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "role_binding:read", Description: "Read role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
-	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.create", Resource: ResourceRoleBinding, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "role_binding:create", Description: "Create role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
+	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "role_binding:delete", Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 
 	// Access constraint management (AC1 — Operator Access Constraint Backend)
-	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionManage, CapabilityKind: CapabilityScope, Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
+	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionAdmin, CapabilityKind: CapabilityScope, UATScope: "access_constraint:admin", Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 	{ID: "access_constraint.read", Resource: ResourceAccessConstraint, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "access_constraint:read", Description: "Read access constraints", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 
 	// Scheduled event / recurring schedule permissions (project-scoped)

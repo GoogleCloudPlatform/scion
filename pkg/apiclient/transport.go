@@ -127,6 +127,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var resp *http.Response
 	var err error
 
+	client := t.hubScopedClient()
 	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
@@ -154,7 +155,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			attempt.Body = body
 		}
 
-		resp, err = t.HTTPClient.Do(attempt)
+		resp, err = client.Do(attempt)
 		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
@@ -179,6 +180,85 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	}
 
 	return resp, nil
+}
+
+// hubScopedClient returns the client Do sends with: a shallow copy of
+// HTTPClient (sharing its RoundTripper and connection pool) whose redirect
+// policy applies the hub origin rule. A redirect hop to another origin than
+// BaseURL's has the credential headers and the X-Scion-* headers removed,
+// then HTTPClient.CheckRedirect (or the 10-hop limit) applies; same-origin
+// hops are unchanged. When HTTPClient.Transport is a HubOnlyRoundTripper
+// (transportauth.Wrap), such a hop is also sent below that layer, so the
+// transport credential is not added to it again. The first request of each
+// attempt is sent exactly as before.
+func (t *Transport) hubScopedClient() *http.Client {
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	hub := parseOrigin(t.BaseURL)
+	c := *base
+	c.CheckRedirect = hubRedirectPolicy(hub, base.CheckRedirect)
+	if _, ok := base.Transport.(HubOnlyRoundTripper); ok {
+		c.Transport = &redirectHopRoundTripper{
+			base:  base.Transport,
+			other: withoutHubOnlyLayers(base.Transport),
+			hub:   hub,
+		}
+	}
+	return &c
+}
+
+// hubRedirectPolicy returns a CheckRedirect function that removes the
+// cross-origin headers from a hop to another origin than hub, then defers to
+// baseCheck, or to the net/http default limit of 10 hops when baseCheck is
+// nil.
+func hubRedirectPolicy(hub origin, baseCheck func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if !sameOrigin(req.URL, hub) {
+			dropCrossOriginHeaders(req.Header)
+		}
+		if baseCheck != nil {
+			return baseCheck(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+}
+
+// dropCrossOriginHeaders removes crossOriginDroppedHeaders and every header
+// named with crossOriginDroppedPrefix from h.
+func dropCrossOriginHeaders(h http.Header) {
+	for _, name := range crossOriginDroppedHeaders {
+		h.Del(name)
+	}
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), crossOriginDroppedPrefix) {
+			delete(h, name)
+		}
+	}
+}
+
+// redirectHopRoundTripper sends a redirect hop (a request with Response set)
+// to another origin than hub through other, the transport below the
+// hub-only layers; every other request goes through base.
+type redirectHopRoundTripper struct {
+	base  http.RoundTripper
+	other http.RoundTripper
+	hub   origin
+}
+
+func (rt *redirectHopRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Response != nil && !sameOrigin(req.URL, rt.hub) {
+		other := rt.other
+		if other == nil {
+			other = http.DefaultTransport
+		}
+		return other.RoundTrip(req)
+	}
+	return rt.base.RoundTrip(req)
 }
 
 // bodyRewindable reports whether req can be re-sent with its full body: it
@@ -240,47 +320,179 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 }
 
 // AuthenticatedHTTPClient returns an *http.Client that applies this transport's
-// authentication to every request. This is useful for code paths that need a
-// raw *http.Client (e.g. the transfer client for signed URL uploads/downloads)
-// but still need to authenticate with the hub when signed URLs are HTTP proxy
-// URLs rather than GCS signed URLs or file:// URLs.
+// authentication to requests sent to the hub's own origin (the scheme, host
+// and port of BaseURL). This is useful for code paths that need a raw
+// *http.Client (e.g. the transfer client for signed URL uploads/downloads)
+// and still need to authenticate with the hub when signed URLs are HTTP proxy
+// URLs on the hub rather than storage signed URLs or file:// URLs.
+//
+// Requests to any other origin, such as a storage host's signed URL, are sent
+// without the Authenticator's headers. When the outermost layer of
+// HTTPClient.Transport is a HubOnlyRoundTripper (transportauth.Wrap), those
+// requests also skip that layer, so its transport credential goes only to the
+// hub as well; a hub-only layer below another wrapper is not detected.
+//
+// Redirects follow HTTPClient.CheckRedirect when it is set, and otherwise the
+// net/http default limit of 10 hops. Before either, a hop to another origin
+// has its Authorization, Proxy-Authorization, X-Serverless-Authorization and
+// X-Scion-* headers removed; same-origin hops keep the credential. The base
+// client's cookie jar, timeout and other settings are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
 		base = http.DefaultClient
 	}
-	return &http.Client{
-		Timeout: base.Timeout,
-		Transport: &authRoundTripper{
-			base: base.Transport,
-			auth: t.Auth,
-			ua:   t.UserAgent,
-		},
+	hub := parseOrigin(t.BaseURL)
+	baseCheck := base.CheckRedirect
+	client := *base
+	client.Transport = &authRoundTripper{
+		base:  base.Transport,
+		other: withoutHubOnlyLayers(base.Transport),
+		auth:  t.Auth,
+		ua:    t.UserAgent,
+		hub:   hub,
 	}
+	client.CheckRedirect = hubRedirectPolicy(hub, baseCheck)
+	return &client
 }
 
-// authRoundTripper is an http.RoundTripper that applies authentication headers.
+// HubOnlyRoundTripper is implemented by a RoundTripper layer that adds a
+// credential meant only for the hub, such as transportauth.Wrap.
+// AuthenticatedHTTPClient sends requests for other origins to HubOnlyBase,
+// the transport below that layer.
+type HubOnlyRoundTripper interface {
+	http.RoundTripper
+	HubOnlyBase() http.RoundTripper
+}
+
+// maxHubOnlyLayers bounds the unwrapping in withoutHubOnlyLayers.
+const maxHubOnlyLayers = 8
+
+// withoutHubOnlyLayers returns rt with its outermost HubOnlyRoundTripper
+// layers removed (nil stays nil, meaning http.DefaultTransport).
+func withoutHubOnlyLayers(rt http.RoundTripper) http.RoundTripper {
+	for i := 0; i < maxHubOnlyLayers; i++ {
+		l, ok := rt.(HubOnlyRoundTripper)
+		if !ok {
+			return rt
+		}
+		rt = l.HubOnlyBase()
+	}
+	return rt
+}
+
+// crossOriginDroppedHeaders are removed from a redirect hop to another
+// origin: the headers that carry the hub or transport credential.
+var crossOriginDroppedHeaders = []string{"Authorization", "Proxy-Authorization", "X-Serverless-Authorization"}
+
+// crossOriginDroppedPrefix names the client's own request headers (the
+// X-Scion-* agent, broker and HMAC headers), which are removed from a
+// redirect hop to another origin as well.
+const crossOriginDroppedPrefix = "X-Scion-"
+
+// maxRedirects matches the hop limit of net/http's default redirect policy.
+const maxRedirects = 10
+
+// origin is the scheme, host and effective port of a URL.
+type origin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+// parseOrigin returns the origin of rawURL, or the zero origin, which
+// sameOrigin never matches, when rawURL has no http or https scheme or no
+// host.
+func parseOrigin(rawURL string) origin {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return origin{}
+	}
+	o, _ := originOf(u)
+	return o
+}
+
+// originOf returns the origin of u, with the host lower-cased (url.Parse
+// already lower-cases the scheme) and the default port (80 for http, 443 for
+// https) filled in when u has none.
+func originOf(u *url.URL) (o origin, ok bool) {
+	if u == nil {
+		return origin{}, false
+	}
+	o.scheme = u.Scheme
+	o.host = strings.ToLower(u.Hostname())
+	o.port = u.Port()
+	if o.port == "" {
+		switch o.scheme {
+		case "http":
+			o.port = "80"
+		case "https":
+			o.port = "443"
+		}
+	}
+	if (o.scheme != "http" && o.scheme != "https") || o.host == "" {
+		return origin{}, false
+	}
+	return o, true
+}
+
+// sameOrigin reports whether u has the origin want.
+func sameOrigin(u *url.URL, want origin) bool {
+	got, ok := originOf(u)
+	return ok && got == want
+}
+
+// authRoundTripper is an http.RoundTripper that applies authentication headers
+// to requests for the hub origin and sends them through base; requests for
+// any other origin go through other (base without its hub-only layers),
+// without authentication. A nil base or other means http.DefaultTransport.
 type authRoundTripper struct {
-	base http.RoundTripper
-	auth Authenticator
-	ua   string
+	base  http.RoundTripper
+	other http.RoundTripper
+	auth  Authenticator
+	ua    string
+	// hub is the only origin that receives auth. It is the zero origin,
+	// which matches no request, when the BaseURL has no usable origin.
+	hub origin
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Headers are set on a clone so the caller's request is never changed.
+	// Redirect hops do not depend on this: net/http copies their headers
+	// from the initial request before the first send.
 	clone := req.Clone(req.Context())
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}
-	if rt.auth != nil {
-		if err := rt.auth.ApplyAuth(clone); err != nil {
-			return nil, fmt.Errorf("failed to apply auth: %w", err)
-		}
-	}
 	base := rt.base
+	if sameOrigin(clone.URL, rt.hub) {
+		if rt.auth != nil {
+			if err := rt.auth.ApplyAuth(clone); err != nil {
+				// The base transport will not receive this request to close its body.
+				if clone.Body != nil {
+					_ = clone.Body.Close()
+				}
+				return nil, fmt.Errorf("failed to apply auth: %w", err)
+			}
+		}
+	} else {
+		base = rt.other
+	}
 	if base == nil {
 		base = http.DefaultTransport
 	}
 	return base.RoundTrip(clone)
+}
+
+// CloseIdleConnections forwards cleanup to the wrapped transport when supported.
+func (rt *authRoundTripper) CloseIdleConnections() {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if closer, ok := base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // buildURL joins the base URL with a path and optional query parameters.

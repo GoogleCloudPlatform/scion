@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -804,6 +805,15 @@ type StartExtras struct {
 	// this restart, the same set DispatchAgentStart sends as its
 	// resolvedSecrets parameter. Values are never logged.
 	ResolvedSecrets []ResolvedSecret
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// are a start's asynchronous launch fields (ptone/scion#4669), sent
+	// under the same wire keys as a create's (RemoteCreateAgentRequest).
+	// Zero values send nothing: the start is sent synchronously. Set by
+	// dispatchAgentStart for an asynchronous start.
+	AsyncLaunch            bool
+	LaunchID               string
+	LaunchTimeoutSeconds   int
+	LaunchKeepaliveSeconds int
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -883,6 +893,18 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if extras.AsyncLaunch {
+		payload["asyncLaunch"] = true
+	}
+	if extras.LaunchID != "" {
+		payload["launchId"] = extras.LaunchID
+	}
+	if extras.LaunchTimeoutSeconds > 0 {
+		payload["launchTimeoutSeconds"] = extras.LaunchTimeoutSeconds
+	}
+	if extras.LaunchKeepaliveSeconds > 0 {
+		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
 	}
 }
 
@@ -1001,6 +1023,10 @@ type DeleteAgentOptions struct {
 	// retained files after the retention window (api.PurgeRetainedQueryParam,
 	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
 	PurgeRetained bool
+	// MoveReincarnationID marks a forced move's rollback delete
+	// (api.MoveReincarnationIDQueryParam): the broker removes nothing
+	// unless every agent directory that exists carries that move's marker.
+	MoveReincarnationID string
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -1027,6 +1053,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.PurgeRetained {
 		query += "&" + api.PurgeRetainedQueryParam + "=true"
+	}
+	if opts.MoveReincarnationID != "" {
+		query += "&" + api.MoveReincarnationIDQueryParam + "=" + url.QueryEscape(opts.MoveReincarnationID)
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1097,6 +1126,19 @@ func withRunIDURL(endpoint, runID string) string {
 		return endpoint + "&runId=" + url.QueryEscape(runID)
 	}
 	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withDispatchAgentIDURL appends the api.AgentIDQueryParam query
+// parameter to a start request URL (or path) when an agent ID was attached
+// with withDispatchAgentID (ptone/scion#4669): the broker's asynchronous
+// start needs the hub's agent ID before it reads the body. An older broker
+// ignores it.
+func withDispatchAgentIDURL(ctx context.Context, endpoint string) string {
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + dispatchAgentIDQuery(ctx, sep)
 }
 
 // withRunIDQuery is withRunIDURL for a bare query string.
@@ -1343,6 +1385,10 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly request for an agent moved from another broker, the
 	// broker confirms the workspace on its mount of the export first.
 	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
+	// MoveReincarnationID mirrors
+	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
+	// reincarnation ID, sent with the fresh-agent-dir expectation.
+	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -1631,6 +1677,10 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// uploadFormMemoryForTest, when positive, replaces maxUploadTotalSize as
+	// the in-memory multipart limit (uploadFormMaxMemory). Set by tests only.
+	uploadFormMemoryForTest int64
+
 	// generalTopicWarned records project IDs whose #general ensure already
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.
@@ -1678,6 +1728,9 @@ type Server struct {
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
 	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
+	// attachmentDeliveryKey signs attachment delivery capabilities
+	// (ptone/scion#4596, attachment_delivery.go).
+	attachmentDeliveryKey []byte
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1705,6 +1758,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// brokerPresenceRegistryFallbacks counts broker presence reads whose
+	// conduit registry read failed and fell back to the legacy signals
+	// (broker_presence.go).
+	brokerPresenceRegistryFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.
@@ -1734,6 +1791,10 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitIngressDrainMetrics counts failed drain calls of a
+	// terminating hub ingress (conduit_ingress_drain.go); nil until
+	// SetConduitIngressDrainMetrics.
+	conduitIngressDrainMetrics atomic.Pointer[OTelConduitIngressDrainMetrics]
 	// conduitBrokerRPCMetrics counts routed broker requests that fell back
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
@@ -1818,16 +1879,25 @@ type Server struct {
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
-	runtimeReloadFunc       func() bool // Callback to reload the co-located broker runtime; returns true if swapped
-	workstation             bool        // True when running in workstation (non-production) mode
-	// webdavLocks stores per-project WebDAV lock systems keyed by project ID.
-	// This replaces the per-request webdav.NewMemLS() so that locks survive
-	// across HTTP requests within a single instance.
-	webdavLocks sync.Map           // map[string]webdav.LockSystem
-	scheduler   *Scheduler         // Unified scheduler for recurring tasks
-	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
-	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
-	ctxCancel   context.CancelFunc // Cancels ctx
+	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
+	workstation             bool               // True when running in workstation (non-production) mode
+	scheduler               *Scheduler         // Unified scheduler for recurring tasks
+	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
+	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown
+	ctxCancel               context.CancelFunc // Cancels ctx
+
+	// shutdownMark is the "shutting down" mark (BeginShutdown,
+	// ptone/scion#5054): /readyz fails, new requests are refused and
+	// streams end before any listener or background service stops.
+	shutdownMark shutdownState
+	// shutdownHooks are the optional shutdown seams cmd sets
+	// (SetShutdownHooks); zero value: today's behaviour.
+	shutdownHooks ShutdownHooks
+	// conduitShutdownGrace is server.hub.conduit.shutdown_grace when set
+	// (SetConduitShutdownGrace), so every relay shutdown path caps the
+	// GoAway drain deadline the same way (ptone/scion#5105 timing).
+	conduitShutdownGrace    time.Duration
+	conduitShutdownGraceSet bool
 
 	// brokerWork admits and joins broker connection work (connect,
 	// disconnect, reconcile and notification drains), so shutdown stops
@@ -1852,6 +1922,10 @@ type Server struct {
 	// in New and never replaced.
 	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
 	decisionAuditLogger *decisionAuditLogger
+	// auditWriterHandler is the async slog handler over auditWriter. The
+	// converted broker audit events (P4 slice 1) emit through a SlogSink
+	// over it (wireBrokerAuditEnvelopes). Set in New, never replaced.
+	auditWriterHandler slog.Handler
 
 	// cloudLoggingHealth reports the direct Cloud Logging path for the
 	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
@@ -2023,6 +2097,10 @@ type Server struct {
 	// somebody has to construct and pass. See saAssignCheckerFor.
 	saAssignChecker   store.CallerPermissionChecker
 	saAssignCheckMode string
+	// saProjectProbe and saProjectProbeHubProject are set by
+	// SetSAProjectAccessProbe under s.mu; see saProjectAccessWarning.
+	saProjectProbe           SAProjectAccessProbe
+	saProjectProbeHubProject string
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
@@ -2153,6 +2231,9 @@ type Server struct {
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map
+	// asyncStartGate caches whether every live hub instance advertises
+	// async_start_v1 (async_start_gate.go). The zero value reads false.
+	asyncStartGate asyncStartGate
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -2314,6 +2395,16 @@ type Server struct {
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only
 	// tests set it, on their own Server; production code never does.
 	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+	// conduitIngressSampleTestHook, when non-nil, replaces the conduit
+	// ingress's random sample of the eligible relays (one or two of them)
+	// for relay selection. Only tests set it, on their own Server.
+	conduitIngressSampleTestHook func(eligible []registry.RelayInstance) []registry.RelayInstance
+
+	// legacyPortTunnelReturnedTestHook, when non-nil, runs in the port
+	// proxy right after the port-forward tunnel returns, before the
+	// answer is written. Only tests set it, on their own Server.
+	legacyPortTunnelReturnedTestHook func()
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2610,6 +2701,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 
+	// Initialize the attachment delivery capability key (ptone/scion#4596).
+	if err := srv.initAttachmentDeliveryKey(ctx); err != nil {
+		return nil, err
+	}
+
 	// Initialize the dedicated authorized-list cursor sealing key
 	// (ptone/scion#2124).
 	if err := srv.initListCursorSealer(ctx); err != nil {
@@ -2871,6 +2967,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditLogger, cfg.PerfTrace))
+	// Converted broker audit events (remaining-audit P4 slice 1) share the
+	// same async writer. They are always on: never gated on the decision
+	// experiment.
+	if err := srv.wireBrokerAuditEnvelopes(); err != nil {
+		return nil, err
+	}
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3720,6 +3822,8 @@ func signingKeySecretID(keyName, hubID string) string {
 func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+		hd.SetShutdownGate(s.dispatchShutdownGate)
+		hd.SetAttachmentIssuer(s.attachmentDelivery())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -4876,6 +4980,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.
 	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	dispatcher.SetShutdownGate(s.dispatchShutdownGate)
 
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
@@ -5559,7 +5664,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			MetadataMode: store.GCPMetadataModePassthrough,
 		}
 		if agent.RuntimeBrokerID != "" {
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
 			if agentHasAssignModeIdentity(agent) {
@@ -5634,7 +5739,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				}
 				// The mode follows the pinned profile's type, as on every passthrough surface.
 				if agent.RuntimeBrokerID != "" {
-					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
+					if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 					}
 					if agentHasAssignModeIdentity(agent) {
@@ -6442,10 +6547,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	// Written under s.mu: in combined mode the CleanupResources goroutine
-	// (cmd/server_foreground.go) is already running and reads s.scheduler
-	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
-	// this goroutine, after this write, so they need no lock.
+	// Written under s.mu: a shutdown that begins during startup reads
+	// s.scheduler under s.mu.RLock (BeginShutdown, CleanupResources).
+	// The reads in registerSchedulerHandlers below run on this
+	// goroutine, after this write, so they need no lock.
 	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.mu.Lock()
 	s.scheduler = sched
@@ -6513,8 +6618,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.startScheduledSendSweeper(ctx)
 
 	// Start the migration of personal chat thread groups into project
-	// thread groups (ptone/scion#4424). It idles while
-	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
 
 	// Start notification dispatcher (uses the current event publisher).
@@ -6570,39 +6674,53 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		hooks := s.shutdownHooks
+		s.mu.RUnlock()
+		sctx, cancel := hooks.shutdownContext()
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
 }
 
 // Shutdown gracefully shuts down the server. It is safe to call even when
 // the Server was never started (e.g. New() followed directly by Shutdown()):
 // the background-service teardown below always runs via
-// CleanupBackgroundResources, and only the final HTTP listener shutdown is
-// skipped when there is no listener to shut down. It is also safe to call
-// more than once, or together with CleanupResources, since both are
-// idempotent and http.Server.Shutdown tolerates repeated calls. The order
-// is: background teardown, then the HTTP drain, then CloseAuditWriter, so
-// audit records emitted by requests still draining are written rather
-// than dropped as closed (remaining-audit P1, AC P1-9).
+// CleanupBackgroundResources, and only the HTTP listener drain is skipped
+// when there is no listener. It is also safe to call more than once, or
+// together with CleanupResources, since both are idempotent and
+// http.Server.Shutdown tolerates repeated calls.
+//
+// The order (ptone/scion#5054) is: mark shutting down (BeginShutdown, a
+// no-op if cmd already did it), wait for the co-located broker
+// (ShutdownHooks.BeforeHTTPDrain), close the listener and drain HTTP
+// (bounded by ctx and 30s), then the background teardown, then
+// CloseAuditWriter, so audit records emitted by requests still draining
+// are written rather than dropped as closed (remaining-audit P1, AC
+// P1-9). Background work is joined inside the teardown, before the audit
+// writer and the store close (ptone/scion#4869).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
+	hooks := s.shutdownHooks
 	s.mu.RUnlock()
 
 	slog.Info("Hub API server shutting down...")
+	s.BeginShutdown()
+
+	var err error
+	if srv != nil {
+		hooks.beforeHTTPDrain(ctx)
+		dctx, cancelDrain := hooks.httpDrainContext(ctx)
+		err = drainHTTPServer(dctx, srv)
+		cancelDrain()
+	}
 
 	// Run the shared background-service teardown (control channel, broker
 	// auth, scheduler, dispatchers, preview service, link services, event
 	// publisher, command bus, etc). It is sync.Once-guarded, so this is a
 	// no-op if it already ran.
 	_ = s.CleanupBackgroundResources(ctx)
-
-	var err error
-	if srv != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = srv.Shutdown(shutdownCtx)
-		cancel()
-	}
 
 	// After the drain: close the audit writer (bounded by its own drain
 	// timeout; idempotent).
@@ -7027,6 +7145,10 @@ func (s *Server) registerRoutes() {
 
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.guarded("/api/v1/users/me/groups", s.handleMyGroups))
+	// A project visitor's own visitor grants (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-grants", s.guarded("/api/v1/users/me/visitor-grants", s.handleUserMeVisitorGrants))
+	// A project visitor's own DMs with agents (ptone/scion#4603).
+	s.mux.HandleFunc("/api/v1/users/me/visitor-dms", s.guarded("/api/v1/users/me/visitor-dms", s.handleUserMeVisitorDMs))
 	s.mux.HandleFunc("/api/v1/principals/", s.guarded("/api/v1/principals/", s.handlePrincipalRoutes))
 
 	// User-scoped injected-skills endpoints (/users/me/...)
@@ -7148,10 +7270,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
-	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
-	// hub.chat_thread_groups experiment is off (threadGroupsGate).
-	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.threadGroupsGate(s.handleThreadGroups)))
-	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.threadGroupsGate(s.handleThreadGroupRoutes)))
+	// Project-scoped chat thread groups (ptone/scion#4424).
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.handleThreadGroups))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.handleThreadGroupRoutes))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))
@@ -7177,9 +7298,12 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
+
+	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
+	s.mux.HandleFunc("/api/v1/attachment-deliveries/", s.guarded("/api/v1/attachment-deliveries/", s.handleAttachmentDelivery))
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.guarded("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect))
@@ -7304,6 +7428,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 
 	h = s.recoveryMiddleware(h)
 
+	// Refuse new work once shutdown has begun (ptone/scion#5054). Inside
+	// the broker auth below, so requests from a Runtime Broker (which
+	// reports to the hub while it shuts down) are let through.
+	h = s.shutdownMark.refuseDuringShutdown(h, isBrokerRequest)
+
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
 	if s.brokerAuthService != nil {
@@ -7336,6 +7465,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// The audit operation context (remaining-audit P4-1) sits directly
+	// inside the request logger, which mints the request ID it adopts, and
+	// outside every auth middleware, so broker auth audit events carry it.
+	// See auditOperationMiddleware for the re-entry and no-ID rules.
+	h = auditOperationMiddleware(h)
 
 	// The request logger wraps UnifiedAuthMiddleware, so it is the request
 	// logger's own next.ServeHTTP call that invokes auth: every request is

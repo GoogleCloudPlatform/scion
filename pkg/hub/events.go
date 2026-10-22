@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -206,6 +207,17 @@ type AgentStatusEvent struct {
 	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
 	// No omitempty: false must reach the web to clear a merged true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, with
+	// the same names and values (see agentEventBadges).
+	// HarnessVendor is omitempty: the harness cannot change after create,
+	// and an event cannot resolve the vendor of an older agent that names
+	// its harness only through a harness-config reference, so an omitted
+	// key keeps the value merged from a list fetch.
+	// ModelSize has no omitempty: a model PATCH or a reincarnation can
+	// change or clear it, and it is always known from the record, so ""
+	// must reach the web to clear a merged size.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -241,6 +253,20 @@ type AgentCreatedEvent struct {
 	// "provisioned, not started" without a refetch. No omitempty, as on
 	// the status event: a false must clear a value merged onto an existing row.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, so a
+	// new row shows its badges without a refetch (see agentEventBadges).
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize,omitempty"`
+}
+
+// agentEventBadges returns the harness vendor and model size an agent event
+// carries. Events are built from the agent record alone, with no store
+// access, so the harness comes from storedAgentHarness: an agent created
+// before the harness was stamped, naming its harness only through a
+// harness-config reference, gets no vendor here (the key is omitted, so a
+// merged value from a list fetch is kept).
+func agentEventBadges(agent *store.Agent) (vendor, size string) {
+	return harness.Vendor(storedAgentHarness(agent)), agentModelSize(agent)
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -540,6 +566,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Deletion:        deletionViewForCaller(agent, now, false),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
@@ -596,6 +623,7 @@ func newAgentCreatedEvent(agent *store.Agent) AgentCreatedEvent {
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}

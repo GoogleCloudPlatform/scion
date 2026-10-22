@@ -578,6 +578,7 @@ var (
 		{Name: "source_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "target_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "source_cleanup", Type: field.TypeString, Nullable: true},
+		{Name: "transfer_mode", Type: field.TypeString, Nullable: true},
 	}
 	// AgentReincarnationsTable holds the schema information for the "agent_reincarnations" table.
 	AgentReincarnationsTable = &schema.Table{
@@ -2475,12 +2476,22 @@ var (
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
 		{Name: "gcp_host_service_account_email", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "gcp_host_source", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "host_identity_observed_email", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observation", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
 		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_presentation", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_presentation_hash", Type: field.TypeString, Nullable: true},
+		{Name: "presentation_epoch", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_seq", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_fenced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "presentation_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2503,7 +2514,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[26]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
 			},
 		},
 	}

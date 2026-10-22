@@ -69,6 +69,15 @@ type separateRelayWorld struct {
 	// spawnPTY, when set, makes the agent serve pty streams with it.
 	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
 
+	// authzClocks are the hubs' stream re-check clocks, by hub id ("hub-a",
+	// "hub-b"); each starts at the clock grants are minted on.
+	authzClocks map[string]*clock.Fake
+	// relayClocks are the separate relays' timer clocks, by relay id, when
+	// separateRelayOptions.relayFakeClocks is set (see relayClockFor).
+	relayClocks map[string]*clock.Fake
+	// opts are the options the world was built with.
+	opts separateRelayOptions
+
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
 }
@@ -96,6 +105,37 @@ type separateRelayOptions struct {
 	// agentWithoutRenewal makes the agent's Hello advertise no protocol
 	// features, as a sciontool without stream renewal does.
 	agentWithoutRenewal bool
+	// srvMod, when set, is applied to both hubs before they start external
+	// relay mode (after enforce), so a test can configure them without
+	// racing serving goroutines.
+	srvMod func(*Server)
+	// noConduitAgent starts no conduit agent: the agent has no conduit
+	// session.
+	noConduitAgent bool
+	// relayFakeClocks runs every separate relay on its own fake clock that
+	// reads the clock grants are minted on (relayClockFor), so a test moves
+	// the relays' timers with the mint clock.
+	relayFakeClocks bool
+	// relayRecheckInterval, when set, is every separate relay's re-check
+	// sweep period.
+	relayRecheckInterval time.Duration
+	// worldMod, when set, runs with the world's other mods, before the
+	// agent starts.
+	worldMod func(*separateRelayWorld)
+}
+
+// relayClockFor returns the clock for the separate relay id: nil (real
+// time) unless relayFakeClocks is set; then a fake clock started at the mint
+// clock, recorded in w.relayClocks, whose Now reads the mint clock (as the
+// agent's fixtureClock does), so the relay's timers fire only when the test
+// advances w.relayClocks[id].
+func (w *separateRelayWorld) relayClockFor(id string, mint *conduitTestClock) clock.Clock {
+	if !w.opts.relayFakeClocks {
+		return nil
+	}
+	fk := clock.NewFake(mint.Now())
+	w.relayClocks[id] = fk
+	return fixtureClock{Fake: fk, now: mint.Now}
 }
 
 // newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
@@ -104,7 +144,7 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	w := &separateRelayWorld{release: make(chan struct{})}
+	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}, relayClocks: map[string]*clock.Fake{}, opts: opts}
 
 	// The app inside the agent: /events holds an event stream open until
 	// the test feeds it; everything else answers hello.
@@ -148,11 +188,15 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 		if opts.enforce {
 			enforceTargetDeadlines(srv)
 		}
+		if opts.srvMod != nil {
+			opts.srvMod(srv)
+		}
+		w.authzClocks[id] = clock.NewFake(cf.clock.Now())
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
 			// The clock also drives the stream re-check and its renewal
 			// driver, so it starts at the clock grants are minted on.
-			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(cf.clock.Now()),
+			Registry: registry.New(regStore, registry.Config{}), Clock: w.authzClocks[id],
 			replayStore: replay,
 		}))
 	}
@@ -166,6 +210,7 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
 		PublicListener: publicLn, InternalListen: "127.0.0.1:0",
 		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: entadapter.NewConduitRegistryStore(w.regClient), Experiment: conduitAlwaysOn{},
+		Clock: w.relayClockFor("relay-0", cf.clock), RecheckInterval: opts.relayRecheckInterval,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -197,7 +242,12 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	for _, m := range mods {
 		m(w)
 	}
-	w.startAgentDialingRelay(t, addr)
+	if opts.worldMod != nil {
+		opts.worldMod(w)
+	}
+	if !opts.noConduitAgent {
+		w.startAgentDialingRelay(t, addr)
+	}
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)

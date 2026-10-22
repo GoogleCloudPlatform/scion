@@ -44,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -229,13 +230,6 @@ func currentProjectMigrationReporter() Reporter {
 // fixture to another uid (which requires root).
 var geteuid = os.Geteuid
 
-// renameFile mimics os.Rename for algorithm C's commit-only rename (the tmp
-// file created by migrateLegacyYAMLKeysLocked onto the real path). Tests
-// override it to force a failure after a conflict backup has already been
-// written, so the backup-removed-on-rename-failure path can be exercised
-// without a filesystem that actually rejects rename.
-var renameFile = os.Rename
-
 // backupWriteFile mimics (*os.File).Write for writeConflictBackup's own
 // write to the backup file. Tests override it to force a failure after the
 // backup file has been created, so the partial-file cleanup can be
@@ -409,7 +403,13 @@ var renameDir = func(oldname, newname string) error {
 // own symlink, and moves on without reporting anything either way. Never
 // returns an error that should abort startup; every problem is reported via
 // report instead.
+//
+// It does nothing while internal/writesonread is set: a read-only command
+// leaves the layout as it is.
 func MigrateLegacyGlobalLayout(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	for _, root := range legacyGlobalRoots {
 		migrateLegacyGlobalRoot(scionHome, root, report)
 	}
@@ -431,7 +431,14 @@ var migrateLegacyGlobalLayoutOnce sync.Once
 // but only the first call in the process has any effect. Mirrors
 // WarnRemovedLegacyEnvOnce, which the same two boot hooks already share for
 // the same reason.
+//
+// While internal/writesonread is set it returns without using up the
+// Once, so a process that sets the switch never makes a later boot
+// migration in the same process a silent no-op.
 func MigrateLegacyGlobalLayoutOnce(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	migrateLegacyGlobalLayoutOnce.Do(func() {
 		MigrateLegacyGlobalLayout(scionHome, report)
 	})
@@ -779,12 +786,19 @@ func migrateLegacyMarkerFile(path string) map[string]string {
 // that it is left alone here (its hub.grove_id, if any, simply stops being
 // read, like any other unrecognised key).
 func migrateProjectSettingsFile(path string) (migrated bool, override string) {
+	return migrateProjectSettingsFileHeld(path, nil)
+}
+
+// migrateProjectSettingsFileHeld is migrateProjectSettingsFile for a caller
+// that holds the settings lock for path's directory (held), so the migration
+// writes under it instead of deferring.
+func migrateProjectSettingsFileHeld(path string, held *SettingsLock) (migrated bool, override string) {
 	switch filepath.Ext(path) {
 	case ".yaml", ".yml":
 	default:
 		return false, ""
 	}
-	overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, currentProjectMigrationReporter())
+	overrides := migrateLegacyYAMLKeysHeld(path, hubGroveIDRename, currentProjectMigrationReporter(), held)
 	v, ok := overrides[projectkeys.ConfigProjectIDKey]
 	return ok, v
 }
@@ -835,12 +849,12 @@ func warnUnmigratedHubGroveID(path string, report Reporter, reason string) {
 		manualKeyRenameCommand(hubGroveIDRename[0], path))
 }
 
-// betweenReadAndRename is called after migrateLegacyYAMLKeys has written its
-// replacement content to a temp file but before it re-reads the target path
-// to compare against the bytes it started from. Tests override it to land a
-// concurrent writer (another scion process, or a hand edit) in that window,
-// without needing real timing-dependent concurrency.
-var betweenReadAndRename = func() {}
+// betweenReadAndLock is called after migrateLegacyYAMLKeys has planned the
+// rewrite from an unlocked read but before it takes the settings lock and
+// reads the file again. Tests override it to land a concurrent writer
+// (another scion process, or a hand edit) in that window, without needing
+// real timing-dependent concurrency.
+var betweenReadAndLock = func() {}
 
 // legacyKeyAction is one legacyYAMLKeyRename found present in a document,
 // together with what migrateLegacyYAMLKeys decided to do about it.
@@ -869,6 +883,14 @@ type legacyKeyAction struct {
 // Every call still re-examines the filesystem, so a file edited or
 // migrated by another process between calls is always picked up correctly.
 func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Reporter) map[string]string {
+	return migrateLegacyYAMLKeysHeld(file, renames, report, nil)
+}
+
+// migrateLegacyYAMLKeysHeld is migrateLegacyYAMLKeys for a caller that may
+// already hold the settings lock for file's directory: held is that lock, or
+// nil. With a held lock the migration writes under it; without one it takes
+// the lock only if it is free (see migrateLegacyYAMLKeysLocked).
+func migrateLegacyYAMLKeysHeld(file string, renames []legacyYAMLKeyRename, report Reporter, held *SettingsLock) map[string]string {
 	path := file
 	if resolved, err := filepath.EvalSymlinks(file); err == nil {
 		// A dotfile-managed settings file: rewrite the resolved target in
@@ -880,21 +902,24 @@ func migrateLegacyYAMLKeys(file string, renames []legacyYAMLKeyRename, report Re
 	st := projectMigrationStateFor(path)
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return migrateLegacyYAMLKeysLocked(path, renames, report, st, 0)
+	return migrateLegacyYAMLKeysLocked(file, path, renames, report, st, held)
 }
 
-// migrateLegacyYAMLKeysLocked does not take the settings lock
-// (LockSettingsDir), unlike every other whole-file settings writer. It runs
-// from the settings loaders, sometimes while the caller already holds that
-// non-re-entrant lock (LoadSingleFileVersioned inside
-// LoadModifySaveVersionedSettings, for example), so taking it here could
-// deadlock until the lock's wait runs out. It coordinates optimistically
-// instead: it re-reads the file just before its atomic rename and retries
-// (once) or gives up if the bytes changed. A locked write landing in the
-// short window between that re-read and the rename can still be lost; the
-// window exists only while a legacy key is present. Retired with the legacy
-// loader (ptone/scion#3919).
-func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, report Reporter, st *projectMigrationDirState, attempt int) map[string]string {
+// migrateLegacyYAMLKeysLocked is migrateLegacyYAMLKeys for a caller that
+// holds st.mu; file is the path as given (the settings lock and the write
+// use it), path the same file with symlinks resolved. It writes through the
+// locked settings writer (writeSettingsFileAtomic) under the settings lock
+// for the file's directory: held, when the caller holds it, else the lock
+// taken only if it is free right now (tryLockSettingsDir). The migration
+// runs from the settings loaders,
+// sometimes while this process already holds the (non-re-entrant) lock, for
+// example LoadSingleFileVersioned inside LoadModifySaveVersionedSettings. When
+// the lock is busy, the file is left for a later load and the legacy value
+// is used in memory, as for a file this process cannot write; an in-process
+// lock holder that saves the settings writes the canonical key itself.
+//
+// A file without any legacy key is never locked or written.
+func migrateLegacyYAMLKeysLocked(file, path string, renames []legacyYAMLKeyRename, report Reporter, st *projectMigrationDirState, held *SettingsLock) map[string]string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -903,22 +928,49 @@ func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, rep
 	if err != nil {
 		return nil
 	}
-
-	var doc yaml.Node
-	if err := yaml.Unmarshal(orig, &doc); err != nil || len(doc.Content) == 0 {
-		return nil // malformed or empty YAML: leave it alone
-	}
-	root := doc.Content[0]
-
-	actions := planLegacyKeyActions(root, renames)
+	doc, root, actions := parseLegacyKeyActions(orig, renames)
 	if len(actions) == 0 {
-		return nil // no legacy keys present: nothing to migrate, no write
+		return nil // no legacy keys present (or malformed YAML): no write
 	}
 	overrides := legacyValueOverrides(actions)
+	if writesonread.Disabled() {
+		// A read-only command: keep the legacy value in memory, as for a
+		// busy lock below, and leave the file (and its directory) as it is.
+		return overrides
+	}
 
 	if uid, ok := fileOwnerUID(info); ok && uid != geteuid() {
 		reportActionsSkipped(report, st, actions, path, "owned by another user")
 		return overrides
+	}
+
+	betweenReadAndLock()
+
+	lock := held
+	if lock == nil {
+		var locked bool
+		if lock, locked = tryLockSettingsDir(filepath.Dir(file)); !locked {
+			// Another writer holds the settings lock (or this process
+			// does): migrate on a later load. Nothing is reported, so the
+			// next load can still report the outcome once.
+			return overrides
+		}
+		defer lock.Unlock()
+	}
+
+	// Plan again from the bytes under the lock: the file may have changed
+	// since the unlocked read.
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return overrides
+	}
+	if !bytes.Equal(cur, orig) {
+		orig = cur
+		doc, root, actions = parseLegacyKeyActions(orig, renames)
+		if len(actions) == 0 {
+			return nil
+		}
+		overrides = legacyValueOverrides(actions)
 	}
 
 	allSurgical := allActionsSurgical(actions)
@@ -930,57 +982,22 @@ func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, rep
 		return overrides
 	}
 
-	newContent, hasConflict := applyLegacyKeyActions(orig, &doc, root, actions, allSurgical)
-
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".migrate-*")
-	if err != nil {
-		reportActionsSkipped(report, st, actions, path, unwrapErrno(err))
-		return overrides
-	}
-	tmpPath := tmp.Name()
-	writeOK := func() bool {
-		if err := tmp.Chmod(info.Mode().Perm()); err != nil {
-			return false
-		}
-		if _, err := tmp.Write(newContent); err != nil {
-			return false
-		}
-		return tmp.Sync() == nil
-	}()
-	closeErr := tmp.Close()
-	if !writeOK || closeErr != nil {
-		_ = os.Remove(tmpPath)
-		reportActionsSkipped(report, st, actions, path, "could not write migrated file")
-		return overrides
-	}
-
-	betweenReadAndRename()
-
-	if cur, err := os.ReadFile(path); err != nil || !bytes.Equal(cur, orig) {
-		_ = os.Remove(tmpPath)
-		if attempt == 0 {
-			return migrateLegacyYAMLKeysLocked(path, renames, report, st, attempt+1)
-		}
-		reportActionsSkipped(report, st, actions, path, "file changed during migration")
-		return overrides
-	}
+	newContent, hasConflict := applyLegacyKeyActions(orig, doc, root, actions, allSurgical)
 
 	// The backup is written only once every earlier check has already
-	// succeeded, immediately before the atomic rename that commits the
+	// succeeded, immediately before the atomic write that commits the
 	// migration: a backup only belongs on disk paired with a completed
-	// migration, so a rename failure below removes it again rather than
+	// migration, so a write failure below removes it again rather than
 	// leaving an orphan behind.
 	var backupPath string
 	if hasConflict {
 		if backupPath, err = writeConflictBackup(path, orig); err != nil {
-			_ = os.Remove(tmpPath)
 			reportActionsSkipped(report, st, actions, path, unwrapErrno(err))
 			return overrides
 		}
 	}
 
-	if err := renameFile(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := writeSettingsFileAtomic(lock, file, newContent); err != nil {
 		if hasConflict {
 			_ = os.Remove(backupPath)
 		}
@@ -1007,6 +1024,17 @@ func migrateLegacyYAMLKeysLocked(path string, renames []legacyYAMLKeyRename, rep
 		}
 	}
 	return overrides
+}
+
+// parseLegacyKeyActions parses data and plans the renames present in it
+// (planLegacyKeyActions). Malformed or empty YAML plans nothing.
+func parseLegacyKeyActions(data []byte, renames []legacyYAMLKeyRename) (*yaml.Node, *yaml.Node, []legacyKeyAction) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil || len(doc.Content) == 0 {
+		return nil, nil, nil
+	}
+	root := doc.Content[0]
+	return &doc, root, planLegacyKeyActions(root, renames)
 }
 
 // planLegacyKeyActions finds, for each rename, whether its legacy key is

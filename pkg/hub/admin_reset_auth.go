@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -67,6 +68,8 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		// Code is set to runtime_unavailable when the agent's broker does
 		// not have the agent's runtime available, and to internal_error
 		// when the agent token could not be issued; both can be retried.
+		// reload_unconfirmed means the credential was written but the
+		// running agent did not confirm the reload.
 		// A structural delegation denial sets one of the delegation_* codes
 		// (resetAuthDelegationFailure), and an agent not in good standing
 		// agent_not_in_standing; retrying does not help those.
@@ -108,6 +111,9 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 					res.AncestorDepth = f.AncestorDepth
 				} else if isBrokerRuntimeUnavailable(err) {
 					res.Code = brokerCodeRuntimeUnavailable
+				} else if isBrokerReloadUnconfirmed(err) {
+					res.Error = api.ReloadUnconfirmedMessage
+					res.Code = api.BrokerErrCodeReloadUnconfirmed
 				}
 				// The raw error stays in the log; the response carries
 				// the plain reason for the classified failures.

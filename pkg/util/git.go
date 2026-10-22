@@ -517,30 +517,6 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 	return branchDeleted, nil
 }
 
-// PruneWorktrees prunes worktree information for worktrees that no longer exist.
-// It runs from the current working directory.
-func PruneWorktrees() error {
-	// Guard: skip pruning inside agent containers. SCION_HOST_UID is set by the
-	// runtime when launching containers. Pruning inside a container can destroy
-	// worktree metadata that appears stale from the container's mount layout but
-	// is actively used by sibling agents on the host.
-	if os.Getenv("SCION_HOST_UID") != "" {
-		return nil
-	}
-	cmd := exec.Command("git", "worktree", "prune")
-	return cmd.Run()
-}
-
-// PruneWorktreesIn prunes worktree information from the specified repository root.
-func PruneWorktreesIn(repoRoot string) error {
-	// Guard: skip pruning inside agent containers (see PruneWorktrees).
-	if os.Getenv("SCION_HOST_UID") != "" {
-		return nil
-	}
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
-	return cmd.Run()
-}
-
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
 // from the repository at repoRoot, using "git worktree remove" (without
 // --force). Unlike a repository-wide "git worktree prune", it never touches
@@ -561,7 +537,7 @@ func PruneWorktreesIn(repoRoot string) error {
 // git matches a path with more than one missing trailing component only by
 // its literal text against the recorded entry, and whether that recorded
 // path is symlink-resolved depends on the layout when the worktree was
-// created. So the path is tried as given first and, only if git does not
+// created. So the cleaned path is tried first and, only if git does not
 // know it, again with its existing ancestor's symlinks resolved; both name
 // the same location. Any other failure (for example a locked entry) is
 // returned; callers must not fall back to a repository-wide prune.
@@ -585,11 +561,15 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // LC_ALL=C to the command's environment so git's messages can be matched.
 //
 // It acts only when path is absent (Lstat reports it does not exist), runs
-// "git worktree remove <path>" without --force, first with path as given
+// "git worktree remove <path>" without --force, first with the cleaned path
 // and, only if git does not know it, again with its existing ancestor's
 // symlinks resolved. "is not a working tree" after the last attempt means
-// git has no entry for path and is not an error. Any other failure is
-// returned; callers must not fall back to a repository-wide prune.
+// git has no entry for path and is not an error. Before any git call, a
+// path whose existing part resolves to anything other than the agent's own
+// path (a link below the directory holding the agent directories) is
+// refused with an error, since git would follow the same link. Any other
+// failure is returned; callers must not fall back to a repository-wide
+// prune.
 func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error)) error {
 	if path == "" {
 		return nil
@@ -597,20 +577,29 @@ func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx conte
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("worktree entry %q: path must be absolute", path)
 	}
+	// Clean first, so git gets exactly the path the checks below approve:
+	// git would resolve a ".." after a link physically, not lexically.
+	path = filepath.Clean(path)
 	if _, err := os.Lstat(path); err == nil {
 		return nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
+	// Resolve first: git itself follows symlinks in the existing part of
+	// path, so a path whose existing part resolves to a path other than the
+	// agent's own directory is refused before any git call.
+	resolved, state, err := resolveMissingPath(path)
+	if err != nil {
+		return fmt.Errorf("worktree entry %s: %w", path, err)
+	}
+	if state == resolvedOutside {
+		return fmt.Errorf("worktree entry %s: resolves to a path other than the agent's own directory; left alone", path)
+	}
 	known, err := removeWorktreeEntryAt(ctx, newCmd, path)
 	if err != nil || known {
 		return err
 	}
-	resolved, ok, err := resolveMissingPath(path)
-	if err != nil {
-		return fmt.Errorf("worktree entry %s: %w", path, err)
-	}
-	if !ok || resolved == path {
+	if state != resolvedWithin || resolved == path {
 		return nil
 	}
 	_, err = removeWorktreeEntryAt(ctx, newCmd, resolved)
@@ -639,32 +628,69 @@ func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context,
 	return true, nil
 }
 
+// resolveState is what resolveMissingPath found.
+type resolveState int
+
+const (
+	// resolvedLiteralOnly: no resolved form; only the cleaned path is
+	// used. The deepest existing ancestor is above the bound (so git can
+	// only match the path's text) or cannot be resolved (a dangling link,
+	// which git cannot follow either).
+	resolvedLiteralOnly resolveState = iota
+	// resolvedWithin: the resolved form keeps the path's own position under
+	// the bound.
+	resolvedWithin
+	// resolvedOutside: the existing part of the path resolves somewhere
+	// else (outside the bound, or to another directory under it); the path
+	// must not be used at all.
+	resolvedOutside
+)
+
 // resolveMissingPath returns path with the symlinks of its deepest existing
-// ancestor resolved and the missing tail rejoined. ok is false when that
-// ancestor cannot be resolved (for example a dangling link); the caller
-// then skips the resolved form rather than guess. An Lstat error other than
-// "does not exist" on the way up is returned.
-func resolveMissingPath(path string) (resolved string, ok bool, err error) {
-	dir := filepath.Clean(path)
+// ancestor resolved and the missing tail rejoined, keeping resolution within
+// the agent directory. The bound is path's grandparent, the directory that
+// holds the agent directories (agents/ for agents/<name>/workspace, the
+// shared checkout for worktrees/<name>); it must exist even when the agent's
+// own directory is already gone. Links on the bound or above it are
+// resolved, but no component below the bound may be a link: the resolved
+// form must name the agent's own path, never a sibling agent's directory or
+// anything outside. An Lstat error other than "does not exist" on the way up
+// is returned.
+func resolveMissingPath(path string) (resolved string, state resolveState, err error) {
+	clean := filepath.Clean(path)
+	bound := filepath.Dir(filepath.Dir(clean))
+	dir := clean
 	var tail []string
 	for {
 		if _, err := os.Lstat(dir); err == nil {
 			break
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", false, err
+			return "", resolvedLiteralOnly, err
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false, nil
+		if dir == bound {
+			return "", resolvedLiteralOnly, nil
 		}
 		tail = append([]string{filepath.Base(dir)}, tail...)
-		dir = parent
+		dir = filepath.Dir(dir)
+	}
+	resolvedBound, err := filepath.EvalSymlinks(bound)
+	if err != nil {
+		return "", resolvedLiteralOnly, nil
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", false, nil
+		return "", resolvedLiteralOnly, nil
 	}
-	return filepath.Join(append([]string{resolvedDir}, tail...)...), true, nil
+	// The existing ancestor must keep its position under the bound once
+	// resolved: no component between the bound and the missing tail may be
+	// a link, so the resolved form names the agent's own path and never a
+	// sibling's or anything outside.
+	lexRel, lexErr := filepath.Rel(bound, dir)
+	rel, relErr := filepath.Rel(resolvedBound, resolvedDir)
+	if lexErr != nil || relErr != nil || rel != lexRel {
+		return "", resolvedOutside, nil
+	}
+	return filepath.Join(append([]string{resolvedDir}, tail...)...), resolvedWithin, nil
 }
 
 // DeleteBranchIn deletes a git branch from the specified repository root.

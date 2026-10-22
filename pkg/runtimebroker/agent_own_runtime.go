@@ -51,10 +51,12 @@ import (
 // the previous behaviour: every registered runtime is searched.
 
 // agentOwnRuntime is the runtime an existing agent's saved profile resolves
-// to, paired with its manager.
+// to, paired with its manager and the runtime's build record, all from the
+// runtimeResolution that filled the entry.
 type agentOwnRuntime struct {
 	mgr     agent.Manager
 	rt      scionrt.Runtime
+	record  config.RuntimeBuildRecord
 	profile string
 	// fingerprint identifies the profile's runtime configuration the entry
 	// was resolved from; a memoised entry whose fingerprint differs from the
@@ -153,7 +155,7 @@ func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {
 // that configuration changes.
 func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, projectPathHint string) context.Context {
 	// A flat instance has one runtime and never resolves a saved profile.
-	if defMgr, defRT := s.defaultPair(); defMgr == nil || defRT == nil || s.isFlat() {
+	if defMgr, defRT, _ := s.defaultPair(); defMgr == nil || defRT == nil || s.isFlat() {
 		return ctx
 	}
 	projectDir := s.knownAgentProjectDir(id, projectID, projectPathHint)
@@ -191,15 +193,18 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 		if v, ok := s.agentOwnRuntimes.Load(key); ok && v.(*agentOwnRuntime).fingerprint == fp {
 			return v, nil
 		}
-		mgr, name := s.resolveManagerForOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: profile})
+		res := s.resolveManagerForOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: profile})
+		mgr, name := res.Manager, res.RuntimeType
 		if mgr == nil || name == "error" {
 			return nil, errors.New("profile runtime could not be resolved")
 		}
-		rt := s.runtimeOfManager(mgr)
+		// The runtime and record come from the same resolution as mgr, never
+		// from runtimeOfManager.
+		rt := res.Runtime
 		if rt == nil {
 			return nil, fmt.Errorf("manager for runtime %q exposes no runtime", name)
 		}
-		own := &agentOwnRuntime{mgr: mgr, rt: rt, profile: profile, fingerprint: fp}
+		own := &agentOwnRuntime{mgr: mgr, rt: rt, record: res.Record, profile: profile, fingerprint: fp}
 		s.agentOwnRuntimes.Store(key, own)
 		return own, nil
 	})
@@ -304,7 +309,7 @@ func (s *Server) logSavedProfileFallback(id, projectID, projectDir, profile, cat
 
 // runtimeOfManager returns the runtime behind mgr, or nil.
 func (s *Server) runtimeOfManager(mgr agent.Manager) scionrt.Runtime {
-	if defMgr, defRT := s.defaultPair(); mgr == defMgr {
+	if defMgr, defRT, _ := s.defaultPair(); mgr == defMgr {
 		return defRT
 	}
 	if am, ok := mgr.(*agent.AgentManager); ok {

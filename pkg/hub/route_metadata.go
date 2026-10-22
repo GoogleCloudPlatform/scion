@@ -97,7 +97,7 @@ type RouteMetadata struct {
 	// the pattern serves. On a subtree pattern (one ending in "/") a
 	// listed method admits a visitor only on the sub-paths
 	// visitorAdmittedSubRoutes lists for the pattern and method, and only
-	// for a target the visitor may message (admitVisitorSubRoute).
+	// when the sub-route's per-request check passes (admitVisitorSubRoute).
 	VisitorMethods []string
 }
 
@@ -247,6 +247,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/users/me/groups": {
 		Pattern: "/api/v1/users/me/groups", RouteID: "users.me.groups",
 		Classification: RouteAuthenticated,
+	},
+	// A project visitor's own visitor grants (handleUserMeVisitorGrants):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-grants": {
+		Pattern: "/api/v1/users/me/visitor-grants", RouteID: "users.me.visitorGrants",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
+	},
+	// A project visitor's own DMs with agents (handleUserMeVisitorDMs):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-dms": {
+		Pattern: "/api/v1/users/me/visitor-dms", RouteID: "users.me.visitorDMs",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/principals/": {
 		Pattern: "/api/v1/principals/", RouteID: "principals.byId",
@@ -404,15 +418,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/projects/register": {
 		Pattern: "/api/v1/projects/register", RouteID: "projects.register",
 		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
+		// Register checks project.create (handleProjectRegister). Its
+		// embedded-broker form is session-only.
+		Permission: "project.create", Resource: "project", Action: "create",
 	},
 	"/api/v1/projects/": {
 		Pattern: "/api/v1/projects/", RouteID: "projects.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
-		// A visitor may only send a message: POST
-		// {projectId}/agents/{agentId}/message (visitorAdmittedSubRoutes).
-		VisitorMethods: []string{http.MethodPost},
+		// A visitor may only send a message (POST
+		// {projectId}/agents/{agentId}/message) and list and read the
+		// project's agents in the visitor view (GET {projectId}/agents and
+		// GET {projectId}/agents/{agentId}); see visitorAdmittedSubRoutes.
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------
@@ -676,6 +694,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.attachments.list and chat.attachments.byId are wrapped by
+	// chatAttachmentRoute: an agent credential is admitted on the collection
+	// only, for POST (upload) and GET (the capability probe), and must pass
+	// agentMaySend there; the by-id route stays session and token only
+	// (ptone/scion#4596). Neither route is on the delegated-agent admission
+	// list.
 	"/api/v1/chat/attachments": {
 		Pattern: "/api/v1/chat/attachments", RouteID: "chat.attachments.list",
 		Classification: RoutePolicy,
@@ -987,10 +1011,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Role management (PR-C1). The read routes admit a
-	// hub-boundary token carrying role:read; every write method on them is
-	// checked again inline with its own permission, which no token selector
-	// admits.
+	// Hub admin: Role management (PR-C1). The route guard checks role.read
+	// on the hub-level role records for every method, so a hub-boundary
+	// token needs role:read; every write method is checked again inline with
+	// its own permission (role:create, role:update or role:delete on the
+	// same records) and the delegation check on the role's permissions.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/roles": {
 		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
@@ -1008,6 +1033,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/": {
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
@@ -1021,8 +1047,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// inline. GET checks role_binding.read at hub scope. POST defers
 		// to the membership service for project-scoped requests (project
 		// owners need only project.manage, not hub-level role_binding.create)
-		// and checks role_binding.create at hub scope for system-scoped
-		// requests.
+		// for built-in project roles, and checks role_binding.create on the
+		// hub-level binding records for custom project roles and
+		// system-scoped requests.
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/role-bindings/": {
@@ -1044,10 +1071,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Access Constraints (AC1). The read routes admit a
-	// hub-boundary token carrying access_constraint:read; every write method
-	// on them is checked again inline with access_constraint.admin, which no
-	// token selector admits.
+	// Hub admin: Access Constraints (AC1). The route guard checks
+	// access_constraint.read on the hub-level constraint records for every
+	// method, so a hub-boundary token needs access_constraint:read; every
+	// write method is checked again inline with access_constraint.admin on
+	// the same records (access_constraint:admin). The preview routes check
+	// access_constraint.admin in the guard.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/access-constraints": {
 		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
@@ -1070,11 +1099,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraint-previews/": {
 		Pattern: "/api/v1/admin/access-constraint-previews/", RouteID: "admin.accessConstraintPreviews.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.admin", Resource: "access_constraint", Action: "preview",
+		BearerTarget: "hub_instance",
 	},
 
 	"/api/v1/admin/effective-access": {
@@ -1319,6 +1350,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/runtime-brokers/connect": {
 		Pattern: "/api/v1/runtime-brokers/connect", RouteID: "runtimeBrokers.connect",
+		Classification: RouteBrokerHMAC,
+	},
+	// Attachment delivery capability redemption (ptone/scion#4596): the
+	// handler requires the broker credential whose broker id the capability
+	// names, and answers every refusal with one 404.
+	"/api/v1/attachment-deliveries/": {
+		Pattern: "/api/v1/attachment-deliveries/", RouteID: "attachmentDeliveries.redeem",
 		Classification: RouteBrokerHMAC,
 	},
 

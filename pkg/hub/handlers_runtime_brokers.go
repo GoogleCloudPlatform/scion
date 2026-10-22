@@ -145,7 +145,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
+			eb.RuntimeBroker = withHostIdentity(eb.RuntimeBroker, false)
 			if caps != nil && i < len(caps) {
+				eb.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 				eb.Cap = caps[i]
 				s.reportBrokerDispatchCapability(ctx, eb.Cap, &result.Items[i], project)
 			}
@@ -179,9 +181,10 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
-		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(broker)}
+		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		if caps != nil && i < len(caps) {
+			resp.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 			resp.Cap = caps[i]
 			// Without a project, the project-independent dispatch rule.
 			s.reportBrokerDispatchCapability(ctx, resp.Cap, &result.Items[i], nil)
@@ -397,10 +400,11 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(*broker)}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
@@ -441,6 +445,11 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		Labels                     map[string]string `json:"labels,omitempty"`
 		GCPHostServiceAccountEmail *string           `json:"gcpHostServiceAccountEmail,omitempty"`
 		GCPHostProjectID           *string           `json:"gcpHostProjectId,omitempty"`
+		// GCPHostPinned false hands the GCP host pair back to registration
+		// and detection (the values are unchanged); true keeps the current
+		// values until the next update. Setting either GCP host field
+		// implies true unless false is sent with it.
+		GCPHostPinned *bool `json:"gcpHostPinned,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -452,6 +461,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	before := *broker
+	before.Labels = make(map[string]string, len(broker.Labels))
+	for k, v := range broker.Labels {
+		before.Labels[k] = v
+	}
+
+	recordChanged := false
 	if updates.Name != "" {
 		// A rename may not make a flat row's name or slug collide with
 		// another row, or another row's with a flat row (flat contract
@@ -469,18 +485,26 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		broker.Name = updates.Name
+		recordChanged = true
 	}
 	if updates.Labels != nil {
-		// The hub-reserved plugin label is never taken from the client: it
-		// is dropped from the request and the stored value, if any, kept.
+		// Hub-managed labels are never taken from the client: they are
+		// dropped from the request and the stored values, if any, kept.
 		labels := stripReservedBrokerLabels(updates.Labels)
-		if v, ok := broker.Labels[pluginBrokerLabel]; ok {
-			labels[pluginBrokerLabel] = v
+		for _, k := range reservedBrokerLabels {
+			if v, ok := broker.Labels[k]; ok {
+				labels[k] = v
+			}
 		}
 		broker.Labels = labels
+		recordChanged = true
 	}
+	priorHostSA := hostSAClaimOf(broker)
+
+	setGCPHost := updates.GCPHostServiceAccountEmail != nil || updates.GCPHostProjectID != nil
+	email, project := broker.GCPHostServiceAccountEmail, broker.GCPHostProjectID
 	if updates.GCPHostServiceAccountEmail != nil {
-		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
+		email = strings.ToLower(*updates.GCPHostServiceAccountEmail)
 		if email != "" && !isValidServiceAccountEmail(email) {
 			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
 				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{
@@ -488,18 +512,92 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			})
 			return
 		}
-		broker.GCPHostServiceAccountEmail = email
 	}
 	if updates.GCPHostProjectID != nil {
-		broker.GCPHostProjectID = *updates.GCPHostProjectID
+		project = *updates.GCPHostProjectID
 	}
 
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+	// A changed host service account needs actAs for the requesting user on
+	// the new value; an unchanged or cleared one needs no check.
+	nextHostSA := hostSAClaim{Email: strings.ToLower(email), ProjectID: project}
+	hostSAVerdict := s.evaluateHostSAClaim(ctx, priorHostSA, nextHostSA, SurfaceBrokerHostSAUpdate)
+	if hostSAClaimWriteAllowed(priorHostSA, nextHostSA, hostSAVerdict) != nil {
+		writeHostSAClaimDenied(w, hostSAVerdict)
+		return
+	}
+
+	// The GCP host pair is written only through the dedicated store
+	// writers: a value set or cleared here is kept by registration and
+	// detection until the next update. The writers return the values they
+	// replaced, which the audit event records as the old values. The pair
+	// is written only over the stored value the actAs decision above was
+	// made against (priorHostSA); if a registration or another update
+	// changed it in between, nothing is written and the request gets 409.
+	var gcpPrev *store.GCPHostSetting
+	writeErr := func() error {
+		if recordChanged {
+			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+				return err
+			}
+		}
+		if setGCPHost {
+			prev, applied, err := s.store.SetRuntimeBrokerGCPHostIfPrior(ctx, broker.ID,
+				priorHostSA.Email, priorHostSA.ProjectID, email, project)
+			if err != nil {
+				return err
+			}
+			if !applied {
+				return ErrHostSAClaimStale
+			}
+			gcpPrev = &prev
+		}
+		if updates.GCPHostPinned != nil {
+			source := store.GCPHostSourceAdmin
+			if !*updates.GCPHostPinned {
+				source = ""
+			}
+			prev, err := s.store.SetRuntimeBrokerGCPHostSource(ctx, broker.ID, source)
+			if err != nil {
+				return err
+			}
+			if gcpPrev == nil {
+				gcpPrev = &prev
+			}
+		}
+		return nil
+	}()
+
+	// The update audit event covers what was applied, also when a later
+	// write failed.
+	after, err := s.store.GetRuntimeBroker(ctx, broker.ID)
+	if err == nil {
+		old := before
+		if gcpPrev != nil {
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = gcpPrev.Email, gcpPrev.Project, gcpPrev.Source
+		} else {
+			// No GCP host writer ran: any difference is not this update's.
+			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = after.GCPHostServiceAccountEmail, after.GCPHostProjectID, after.GCPHostSource
+		}
+		if details := brokerSettingsChangeDetails(&old, after); details != nil {
+			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
+				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
+		}
+	}
+	if errors.Is(writeErr, ErrHostSAClaimStale) {
+		Conflict(w, "the broker's host service account changed during the update; retry")
+		return
+	}
+	if writeErr != nil {
+		writeErrorFromErr(w, writeErr, "")
+		return
+	}
+	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, brokerForDisplay(*broker))
+	// The caller holds broker.update (checked above).
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
@@ -565,6 +663,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.forgetBrokerBackfill(id)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -769,6 +868,17 @@ type brokerHeartbeatRequest struct {
 	// Omitted by an older broker, in which case the stored value is left
 	// unchanged.
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
+	// RuntimeTargetPresentation is a flat instance's full FC4-a
+	// presentation (see hubclient.BrokerHeartbeat.RuntimeTargetPresentation),
+	// with its fence: the instance's runtime target ID, and the reporting
+	// process's epoch and per-process sequence. It is stored only when the
+	// request identity is the broker itself (ApplyRuntimeTargetPresentation); the wire
+	// carries no hash. Omitted by an older broker or a legacy one, in which
+	// case the stored value is left unchanged.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
+	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
+	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -1041,8 +1151,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// dev credential holding broker.update on the broker (heartbeats modify
 	// agent state and broker liveness). A user access token is refused with
 	// the HOST_OPERATIONS session-only reason.
+	brokerSelf := false
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker sending its own heartbeat — allowed
+		// Broker sending its own heartbeat — allowed. brokerSelf is set
+		// only when the request identity is the broker itself.
+		if self, ok := GetIdentityFromContext(ctx).(BrokerIdentity); ok && self.BrokerID() == id {
+			brokerSelf = true
+		}
 	} else if !s.authorizeBrokerHeartbeatUser(w, r, id) {
 		return
 	}
@@ -1180,6 +1295,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 		}
+	}
+
+	// A flat instance's presentation is stored only when the request is
+	// authenticated as the broker itself (write rule 1): the user path,
+	// which this handler also admits, never writes it, so the presentation
+	// stays read-only to Hub users. Rules 2-4 (flat row, experiment on,
+	// target bound, fence advances) and the Hub-computed hash are
+	// ApplyRuntimeTargetPresentation's. An omitted field keeps the stored
+	// value.
+	if !brokerSelf {
+		if heartbeat.RuntimeTargetPresentation != nil {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring runtimeTargetPresentation sent with a request identity other than the broker itself",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
+		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
 	}
 
 	// Process agent status updates from each project
@@ -1491,7 +1624,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-						if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+						// Starting -> running clears the prior run's exit fields in the store.
+						if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+							(curPhase == state.PhaseStarting && hbPhase == state.PhaseRunning)) {
 							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
@@ -1568,7 +1703,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// touching the phase or message derived from ContainerStatus.
 				hbExitReason := state.ExitReason(agentHB.ExitReason)
 				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-				if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+				if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+					(agent.Phase == string(state.PhaseStarting) && statusUpdate.Phase == string(state.PhaseRunning))) {
 					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
@@ -1691,6 +1827,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ones its complete inventory shows terminated, and apply the rest.
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
+
+	// Retry a registration reservation backfill that skipped an agent on this
+	// replica (BackfillBrokerOnRegistration). Without a pending one this reads
+	// nothing: a heartbeat that needs nothing does not read the broker row.
+	s.retryBrokerBackfill(ctx, id)
 
 	writeJSON(w, http.StatusOK, heartbeatResp)
 }

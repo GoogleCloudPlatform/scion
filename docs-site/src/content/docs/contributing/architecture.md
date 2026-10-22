@@ -249,7 +249,7 @@ Hub and Runtime Broker servers have their own entry points but reuse the same `a
 scion start <name> "task" [--template claude] [--profile docker-local]
 ```
 
-1. **Hub resolution**: The CLI resolves the Hub endpoint (flag, environment, settings) and fails with a pointer to `scion server start` when there is none. An unregistered project links itself on the local workstation Hub, or after a prompt on a remote Hub.
+1. **Hub resolution**: The CLI resolves the Hub endpoint (flag, environment, the directory's link entry, then the current Hub from the hub list) and fails with a pointer to `scion server start` when there is none. An unregistered project links itself on the local workstation Hub, or after a prompt on a remote Hub.
 2. **API call**: The CLI sends a `POST /api/v1/projects/{projectId}/agents` request to the Hub.
 3. **Broker selection**: The Hub selects a Runtime Broker (explicit or project default).
 4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).

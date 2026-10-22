@@ -39,6 +39,7 @@ import {
   type TerminalDisconnectReason,
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import '../shared/status-badge.js';
@@ -1809,20 +1810,20 @@ export class ScionTerminalPane extends LitElement {
    * terminal is open takes effect the next time the dialog opens — this is
    * also how the "retry after a rejection" flow picks up a since-changed
    * policy. Fails open (today's dialog, unrestricted) if the fetch fails.
+   *
+   * The fresh read goes through the shared per-page cache
+   * (ptone/scion#5311): dropping it first forces the request, and its result
+   * then refreshes the copy the create and configure pages read.
    */
   private async openCaptureAuthScopeDialog(): Promise<void> {
     this.captureAuthScopeDialogOpen = true;
     this.captureAuthSettingsLoading = true;
     const requestSeq = ++this.captureAuthSettingsRequestSeq;
     let agentSecretsUserScopeOnly = false;
-    try {
-      const response = await fetch('/api/v1/settings/public', { credentials: 'include' });
-      if (response.ok) {
-        const data = (await response.json()) as { agentSecretsUserScopeOnly?: boolean };
-        agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to fetch public settings for capture auth dialog:', err);
+    invalidatePublicSettings();
+    const settings = await getPublicSettings();
+    if (settings) {
+      agentSecretsUserScopeOnly = settings.agentSecretsUserScopeOnly ?? false;
     }
     // A newer open has since started its own fetch; let that one own the
     // final state instead of overwriting it with this stale result.

@@ -37,7 +37,9 @@ import (
 // The hub-instance registry writer (health dashboard F3 design §5.3). Each
 // hub process writes its own hub_instances row from a dedicated goroutine,
 // so the health summary on any replica can list every hub instance. The
-// registry is display-only: nothing in the control plane reads it.
+// registry was display-only; its Features list (hubInstanceFeatures) is
+// the one field meant for the control plane: asynchronous start stays off
+// while any live instance lacks async_start_v1 (ptone/scion#4669).
 
 const (
 	// hubInstanceTickInterval is the registry write cadence. A row with no
@@ -91,6 +93,7 @@ type hubInstanceMaterial struct {
 	DBMaxOpen             *int                         `json:"db_max_open"`
 	Integrations          []api.HubInstanceIntegration `json:"integrations"`
 	IntegrationsTruncated bool                         `json:"integrations_truncated"`
+	Features              []string                     `json:"features"`
 }
 
 // material returns the canonical JSON of the snapshot's material fields.
@@ -102,6 +105,7 @@ func (s hubInstanceSnapshot) material() []byte {
 		Checks:                s.Checks,
 		Integrations:          s.Stats.Integrations,
 		IntegrationsTruncated: s.Stats.IntegrationsTruncated,
+		Features:              s.Stats.Features,
 	}
 	if s.Stats.DB != nil {
 		maxOpen := s.Stats.DB.MaxOpen
@@ -187,8 +191,19 @@ func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInsta
 	stats := api.HubInstanceStats{
 		DB:           s.hubInstanceDBStats(),
 		Integrations: s.hubInstanceIntegrations(ctx),
+		Features:     hubInstanceFeatures(),
 	}
 	return hubInstanceSnapshotFromChecks(label, version.Short(), checks, stats)
+}
+
+// hubInstanceFeatures lists the cross-node capabilities this hub process
+// implements, written into its registry row (api.HubInstanceStats.Features)
+// for other nodes to check. async_start_v1: this process handles
+// asynchronous start launches (the kind-aware launch report, claim
+// settlement and self-report guard; ptone/scion#4669), so a node that
+// turns asynchronous start on can rely on it.
+func hubInstanceFeatures() []string {
+	return []string{api.HubInstanceFeatureAsyncStartV1}
 }
 
 // hubInstanceDBStats returns this process's database connection pool

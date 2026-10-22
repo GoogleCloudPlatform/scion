@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -429,7 +430,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			NameFunc:             func() string { return "docker" },
 			GetWorkspacePathFunc: func(context.Context, string) (string, error) { return "", nil },
 		}
-		srv := New(cfg, &listErrManager{mockAgentManager: mgr, err: listErr}, rt)
+		srv := New(cfg, &listErrManager{mockAgentManager: mgr, err: listErr}, rt, config.RuntimeBuildRecord{})
 		return srv, ws
 	}
 	agentRequest := func(handler http.HandlerFunc, path string, body any) *httptest.ResponseRecorder {
@@ -706,7 +707,7 @@ func TestCreateAgent_GlobalDirError_FixedText(t *testing.T) {
 // log with the project slug.
 func TestDeleteProject_GlobalDirError_FixedText(t *testing.T) {
 	cfg := DefaultServerConfig()
-	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleJSONLog(srv)
 	t.Setenv("HOME", "")
 

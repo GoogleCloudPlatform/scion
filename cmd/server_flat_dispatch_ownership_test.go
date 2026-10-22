@@ -70,7 +70,7 @@ func TestFlatOwnership_RealHubDispatchCarriesBothIDs(t *testing.T) {
 			cfg.HubEndpoint = "http://127.0.0.1:1"
 			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	})
 	require.NoError(t, err)
