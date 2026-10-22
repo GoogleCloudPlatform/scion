@@ -159,6 +159,7 @@ func entCursorToStore(c *ent.AgentLifecycleCursor) *store.LifecycleCursor {
 		PendingAdoptedFrom:      c.PendingAdoptedFrom,
 		PendingAdoptedAt:        c.PendingAdoptedAt,
 		PendingAdoptionSource:   c.PendingAdoptionSource,
+		PendingAdoptedTo:        c.PendingAdoptedTo,
 		CreatorPrincipalType:    c.CreatorPrincipalType,
 		CreatorPrincipalID:      c.CreatorPrincipalID,
 		UpdatedAt:               c.UpdatedAt,
@@ -224,6 +225,7 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 			SetPendingAdoptedFrom(upd.Run.PendingAdoptedFrom).
 			SetNillablePendingAdoptedAt(utcPtr(upd.Run.PendingAdoptedAt)).
 			SetPendingAdoptionSource(upd.Run.PendingAdoptionSource).
+			SetPendingAdoptedTo(upd.Run.PendingAdoptedTo).
 			Save(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -243,7 +245,8 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 		SetOpenRunMetadataRevision(upd.Run.OpenRunMetadataRevision).
 		SetReincarnationBaseRunID(upd.Run.ReincarnationBaseRunID).
 		SetPendingAdoptedFrom(upd.Run.PendingAdoptedFrom).
-		SetPendingAdoptionSource(upd.Run.PendingAdoptionSource)
+		SetPendingAdoptionSource(upd.Run.PendingAdoptionSource).
+		SetPendingAdoptedTo(upd.Run.PendingAdoptedTo)
 	if t := upd.Run.PendingRunChangeAt; t != nil {
 		u.SetPendingRunChangeAt(t.UTC())
 	} else {

@@ -34,7 +34,11 @@ import (
 	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-// fullPlanString renders a plan with every field the rules decide.
+// fullPlanString renders a plan with every field the rules decide: the
+// enum fields, then the flags lid (launch_failed names its run), nolid
+// (any other transition with launch_id omitted), closes (frozen closure of
+// the open segment), seg (terminal of the committed run's own segment),
+// async, nextgen, adopt and owner=<launch owner>.
 func fullPlanString(p Plan) string {
 	var parts []string
 	if p.SkipRevision {
@@ -47,12 +51,19 @@ func fullPlanString(p Plan) string {
 				attrs = append(attrs, a)
 			}
 		}
-		if e.Transition == tc.TransitionLaunchFailed && !e.OmitLaunchID {
-			attrs = append(attrs, "lid")
+		flag := func(on bool, name string) {
+			if on {
+				attrs = append(attrs, name)
+			}
 		}
-		if e.ClosesOpenRun {
-			attrs = append(attrs, "closes")
-		}
+		flag(e.Transition == tc.TransitionLaunchFailed && !e.OmitLaunchID, "lid")
+		flag(e.Transition != tc.TransitionLaunchFailed && e.OmitLaunchID, "nolid")
+		flag(e.ClosesOpenRun, "closes")
+		flag(e.ClosesSegment, "seg")
+		flag(e.AsyncLaunch, "async")
+		flag(e.NextGeneration, "nextgen")
+		flag(e.CarriesAdoption, "adopt")
+		flag(e.LaunchOwner != "", "owner="+e.LaunchOwner)
 		s := e.Transition
 		if len(attrs) > 0 {
 			s += "(" + strings.Join(attrs, ",") + ")"
@@ -69,6 +80,17 @@ func fullPlanString(p Plan) string {
 		parts = append(parts, "rmcursor")
 	}
 	return strings.Join(parts, " ")
+}
+
+// addFlag appends flag to the attribute list of the last transition in w.
+func addFlag(w, flag string) string {
+	if w == "" || strings.HasPrefix(w, "ambiguous:") {
+		return w
+	}
+	if strings.HasSuffix(w, ")") {
+		return strings.TrimSuffix(w, ")") + "," + flag + ")"
+	}
+	return w + "(" + flag + ")"
 }
 
 // Phase groups as sets, for the declarative rules.
@@ -134,23 +156,25 @@ var phaseRules = []struct {
 	id   string
 	c    rcond
 	want string
+	// closes: with S the event closes the committed run's segment (seg).
+	closes bool
 }{
-	{"P1a", rcond{ap: gRun, s: no, e: yes}, "started"},
-	{"P1b", rcond{ap: gRun, bp: gAny &^ gRun, s: no, e: no, legacy: yes}, "started(run_uncorrelated)"},
-	{"P1", rcond{same: true}, ""},
-	{"P2", rcond{ap: gRun}, ""},
-	{"P3", rcond{ap: gHalt}, "halted"},
-	{"P4", rcond{ap: gErr, bp: gPre | gWind, s: no}, "launch_failed(launch_error{lid})"},
-	{"P7a", rcond{ap: gRest | gErr, bp: gRun, s: no, stopOrE: yes}, "stopped({ap},start_unobserved)"},
-	{"P5", rcond{ap: gErr, bp: gRun | gWind | gPre, s: yes}, "stopped(error)"},
-	{"P5b", rcond{ap: gErr, bp: gRun, s: no}, "ambiguous:" + AmbiguousErrorNoSegment},
-	{"P6", rcond{ap: gErr}, ""},
-	{"P7", rcond{ap: gRest, bp: gRun | gWind | gPre, s: yes}, "stopped({ap}{rb})"},
-	{"P8", rcond{ap: gRest, bp: gPre | gWind, s: no, cancel: yes}, "launch_failed(cancelled)"},
-	{"P9", rcond{ap: gRest, bp: gPre | gWind | gRun, s: no}, "ambiguous:" + AmbiguousRestNoSegment},
-	{"P10", rcond{ap: gRest}, ""},
-	{"P11", rcond{ap: gWind}, ""},
-	{"P12", rcond{ap: gPre}, ""},
+	{"P1a", rcond{ap: gRun, s: no, e: yes}, "started", false},
+	{"P1b", rcond{ap: gRun, bp: gAny &^ gRun, s: no, e: no, legacy: yes}, "started(run_uncorrelated)", false},
+	{"P1", rcond{same: true}, "", false},
+	{"P2", rcond{ap: gRun}, "", false},
+	{"P3", rcond{ap: gHalt}, "halted", true},
+	{"P4", rcond{ap: gErr, bp: gPre | gWind, s: no}, "launch_failed(launch_error{lid}{async})", false},
+	{"P7a", rcond{ap: gRest | gErr, bp: gRun, s: no, stopOrE: yes}, "stopped({ap},start_unobserved)", false},
+	{"P5", rcond{ap: gErr, bp: gRun | gWind | gPre, s: yes}, "stopped(error)", true},
+	{"P5b", rcond{ap: gErr, bp: gRun, s: no}, "ambiguous:" + AmbiguousErrorNoSegment, false},
+	{"P6", rcond{ap: gErr}, "", false},
+	{"P7", rcond{ap: gRest, bp: gRun | gWind | gPre, s: yes}, "stopped({ap}{rb})", true},
+	{"P8", rcond{ap: gRest, bp: gPre | gWind, s: no, cancel: yes}, "launch_failed(cancelled)", false},
+	{"P9", rcond{ap: gRest, bp: gPre | gWind | gRun, s: no}, "ambiguous:" + AmbiguousRestNoSegment, false},
+	{"P10", rcond{ap: gRest}, "", false},
+	{"P11", rcond{ap: gWind}, "", false},
+	{"P12", rcond{ap: gPre}, "", false},
 }
 
 // evidenceClass is how each evidence kind of the E axis classifies, for an
@@ -168,7 +192,7 @@ var evidenceClass = map[Evidence]struct{ eRun, eOther, legacy, corr bool }{
 }
 
 // expectPhase is the step 4 expectation from phaseRules.
-func expectPhase(bpPhase, apPhase string, s bool, k store.AgentWriteKind, ev Evidence) string {
+func expectPhase(bpPhase, apPhase string, s bool, k store.AgentWriteKind, ev Evidence, launchActive bool) string {
 	ap, bp := gsetOf(apPhase), gsetOf(bpPhase)
 	cls := evidenceClass[ev]
 	e := cls.eOther
@@ -192,7 +216,19 @@ func expectPhase(bpPhase, apPhase string, s bool, k store.AgentWriteKind, ev Evi
 		if del {
 			rb = ",delete_rollback"
 		}
-		return strings.ReplaceAll(w, "{rb}", rb)
+		w = strings.ReplaceAll(w, "{rb}", rb)
+		async := ""
+		if launchActive {
+			async = ",async"
+		}
+		w = strings.ReplaceAll(w, "{async}", async)
+		if r.closes && s {
+			w = addFlag(w, "seg")
+		}
+		if strings.HasPrefix(w, "started") && ev == EvidenceLaunchReport {
+			w = addFlag(w, "async")
+		}
+		return w
 	}
 	return "NO RULE"
 }
@@ -250,12 +286,12 @@ var (
 )
 
 // caseFacts builds the Facts of one enumerated case.
-func caseFacts(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d delAxis, ev Evidence) Facts {
+func caseFacts(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d delAxis, ev Evidence, la bool) Facts {
 	f := Facts{
 		Op: store.AgentWriteStatus, Kind: k, HasBefore: true, BeforeLive: true, HasAfter: true,
 		BeforePhase: bp, AfterPhase: ap, BeforeRunID: "R1", AfterRunID: "R1",
 		BeforeGeneration: 1, AfterGeneration: 1, Evidence: ev, Now: tableNow,
-		BeforeDigest: "d", AfterDigest: "d", BeforeConfigDigest: "c", AfterConfigDigest: "c",
+		BeforeDigest: "d", AfterDigest: "d", BeforeConfigDigest: "c", AfterConfigDigest: "c", LaunchActive: la,
 		Cursor: CursorFacts{Exists: true, FingerprintMatches: true, Digest: "d"},
 	}
 	open := func(run string) {
@@ -305,7 +341,7 @@ func caseFacts(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d 
 
 // expectCase is the expectation for one enumerated case: the deletion,
 // run-ID and hint overlays on top of phaseRules.
-func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d delAxis, ev Evidence) string {
+func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d delAxis, ev Evidence, la bool) string {
 	openRun := ra == runOpenSame || ra == runOpenOther
 	switch d {
 	case dLive:
@@ -314,9 +350,9 @@ func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d
 		var parts []string
 		switch h {
 		case hCreateRolledBack:
-			parts = append(parts, "launch_failed(create_rolled_back,dispatch,lid)")
+			parts = append(parts, "launch_failed(create_rolled_back,dispatch,lid,async)")
 		case hCreateFailed:
-			parts = append(parts, "launch_failed(create_failed,provision,lid)")
+			parts = append(parts, "launch_failed(create_failed,provision,lid,async)")
 		}
 		del := "deleted(hard)"
 		if h == hCreateRolledBack {
@@ -339,11 +375,17 @@ func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d
 		parts = append(parts, "stopped(superseded,closes)")
 	}
 	hint := ""
+	seg := func(w string) string {
+		if s {
+			return strings.Replace(w, ",lid)", ",lid,seg,async)", 1)
+		}
+		return strings.Replace(w, ",lid)", ",lid,async)", 1)
+	}
 	switch h {
 	case hLaunchEnd:
-		hint = "launch_failed(timed_out,launch_timeout,lid)"
+		hint = seg("launch_failed(timed_out,launch_timeout,lid)")
 	case hCreateFailed:
-		hint = "launch_failed(create_failed,provision,lid)"
+		hint = seg("launch_failed(create_failed,provision,lid)")
 	case hRestartFailed:
 		hint = "launch_failed(restart_failed)"
 	case hRestoreUnconfirmed:
@@ -354,7 +396,7 @@ func expectCase(bp, ap string, ra runAxis, k store.AgentWriteKind, h hintAxis, d
 		}
 	}
 	if hint == "" {
-		hint = expectPhase(bp, ap, s, k, ev)
+		hint = expectPhase(bp, ap, s, k, ev, la)
 	}
 	if hint != "" {
 		parts = append(parts, hint)
@@ -380,18 +422,20 @@ func TestDeriveCoversEveryCase(t *testing.T) {
 								continue
 							}
 							for _, ev := range evAxes {
-								n++
-								want := expectCase(bp, ap, ra, k, h, d, ev)
-								f := caseFacts(bp, ap, ra, k, h, d, ev)
-								p := Derive(f)
-								got := fullPlanString(p)
-								if strings.Contains(want, "NO RULE") || got != want {
-									fails++
-									if fails <= 40 {
-										t.Errorf("%s->%s run=%d K=%q H=%d D=%d E=%d: got %q, want %q", bp, ap, ra, k, h, d, ev, got, want)
+								for _, la := range []bool{false, true} {
+									n++
+									want := expectCase(bp, ap, ra, k, h, d, ev, la)
+									f := caseFacts(bp, ap, ra, k, h, d, ev, la)
+									p := Derive(f)
+									got := fullPlanString(p)
+									if strings.Contains(want, "NO RULE") || got != want {
+										fails++
+										if fails <= 40 {
+											t.Errorf("%s->%s run=%d K=%q H=%d D=%d E=%d LA=%v: got %q, want %q", bp, ap, ra, k, h, d, ev, la, got, want)
+										}
 									}
+									checkRunInvariants(t, f, p)
 								}
-								checkRunInvariants(t, f, p)
 							}
 						}
 					}
@@ -457,7 +501,7 @@ func TestDerivePhaseMatrix(t *testing.T) {
 				{"S=yes", true, store.WriteKindOther, EvidenceNone},
 				{"S=yes,deletion", true, store.WriteKindDeletion, EvidenceNone},
 			} {
-				w := expectPhase(bp, ap, v.s, v.k, v.ev)
+				w := expectPhase(bp, ap, v.s, v.k, v.ev, false)
 				if w == "NO RULE" {
 					t.Errorf("no rule for %s->%s %s", bp, ap, v.name)
 				}
@@ -484,4 +528,135 @@ func TestDerivePhaseMatrix(t *testing.T) {
 		b.WriteString("\n")
 	}
 	t.Log("\n" + b.String())
+}
+
+// adoptedCursor is a cursor with a pending adoption from R1 to L1 and the
+// given open run.
+func adoptedCursor(open string) CursorFacts {
+	at := tableNow
+	return CursorFacts{Exists: true, FingerprintMatches: true, Digest: "d", OpenRun: open,
+		Run: store.LifecycleRunState{OpenRun: open, OpenRunGeneration: "1", OpenRunMetadataRevision: 1,
+			PendingAdoptedFrom: "R1", PendingAdoptedAt: &at, PendingAdoptionSource: store.AdoptionSourceCAS, PendingAdoptedTo: "L1"}}
+}
+
+// TestDeriveAdoptionRidesOnlyOnTheAdoptedRun is wp1s2 review r1 R1: the
+// provenance lands on the first event naming the adopted run (closures
+// included) and never on a later, different run.
+func TestDeriveAdoptionRidesOnlyOnTheAdoptedRun(t *testing.T) {
+	base := func(open, bp, ap, before, after string) Facts {
+		return Facts{Op: store.AgentWriteStatus, HasBefore: true, BeforeLive: true, HasAfter: true,
+			BeforePhase: bp, AfterPhase: ap, BeforeRunID: before, AfterRunID: after,
+			BeforeGeneration: 1, AfterGeneration: 1, Now: tableNow,
+			BeforeDigest: "d", AfterDigest: "d", BeforeConfigDigest: "c", AfterConfigDigest: "c",
+			Cursor: adoptedCursor(open)}
+	}
+	cases := []struct {
+		name     string
+		f        Facts
+		want     string
+		keepsPen bool
+	}{
+		{"same segment: the next event carries it", func() Facts {
+			f := base("L1", "running", "running", "L1", "L1")
+			f.Op, f.AfterDigest = store.AgentWriteUpdate, "d2"
+			return f
+		}(), "metadata_changed(adopt)", false},
+		{"queued restart: the closure of L1 carries it, started(R2) does not", func() Facts {
+			f := base("L1", "running", "running", "R2", "R2")
+			f.Evidence = EvidenceReportRun
+			return f
+		}(), "stopped(superseded,closes,adopt) started", false},
+		{"stop leg closing L1 carries it", func() Facts {
+			f := base("L1", "running", "running", "L1", "L1")
+			f.Op, f.Hint = store.AgentWriteRestartStopLeg, Hint{Kind: HintRestartStopLeg, StopLegRunID: "L1"}
+			return f
+		}(), "stopped(stopped,restart_stop_leg,closes,adopt)", false},
+		{"a mint while L1's segment is open keeps it for the closure", func() Facts {
+			f := base("L1", "running", "running", "L1", "R2")
+			f.Op, f.Kind = store.AgentWriteRunID, store.WriteKindRunMint
+			return f
+		}(), "", true},
+		{"a mint when L1 never opened drops it", func() Facts {
+			f := base("", "running", "running", "L1", "R2")
+			f.Op, f.Kind = store.AgentWriteRunID, store.WriteKindRunMint
+			return f
+		}(), "", false},
+		{"started of a different run after L1 closed carries nothing", func() Facts {
+			f := base("", "stopped", "running", "R2", "R2")
+			f.Evidence = EvidenceStartWrite
+			return f
+		}(), "started", false},
+		{"deleted closing L1 carries it", func() Facts {
+			f := base("L1", "running", "running", "L1", "L1")
+			f.Op, f.HasAfter = store.AgentWriteHardDelete, false
+			return f
+		}(), "deleted(hard,closes,adopt) rmcursor", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := Derive(c.f)
+			if got := fullPlanString(p); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+			if kept := p.Run.PendingAdoptedFrom != ""; kept != c.keepsPen && !p.DeleteCursor {
+				t.Errorf("pending adoption kept = %v, want %v", kept, c.keepsPen)
+			}
+		})
+	}
+}
+
+// TestDeriveReincarnationTagsSparesTheBaseRun is wp1s2 review r1 R2 (Q2):
+// while a reincarnation of base run R1 is in flight, events closing R1's
+// segment or naming R1 as a run (stopped, halted, started) keep generation
+// N and launch_id R1; only configuration/attempt events of the next
+// incarnation and events of a new run carry N+1.
+func TestDeriveReincarnationTagsSparesTheBaseRun(t *testing.T) {
+	base := func(open, bp, ap, run string) Facts {
+		return Facts{Op: store.AgentWriteStatus, HasBefore: true, BeforeLive: true, HasAfter: true,
+			BeforePhase: bp, AfterPhase: ap, BeforeRunID: run, AfterRunID: run,
+			BeforeGeneration: 1, AfterGeneration: 1, AfterReincarnationInFlight: true, Now: tableNow,
+			BeforeDigest: "d", AfterDigest: "d", BeforeConfigDigest: "c", AfterConfigDigest: "c",
+			Cursor: CursorFacts{Exists: true, FingerprintMatches: true, Digest: "d", OpenRun: open,
+				Run: store.LifecycleRunState{OpenRun: open, OpenRunGeneration: "1", OpenRunMetadataRevision: 1, ReincarnationBaseRunID: "R1"}}}
+	}
+	cases := []struct {
+		name string
+		f    Facts
+		want string
+	}{
+		{"stop record closing R1", func() Facts {
+			f := base("R1", "running", "stopped", "R1")
+			f.Kind = store.WriteKindStopRecord
+			return f
+		}(), "stopped(stopped,seg)"},
+		{"halt of R1", base("R1", "running", "halted", "R1"), "halted(seg)"},
+		{"error of R1", base("R1", "running", "error", "R1"), "stopped(error,seg)"},
+		{"start_unobserved stop of R1", func() Facts {
+			f := base("", "running", "stopped", "R1")
+			f.Kind = store.WriteKindStopRecord
+			return f
+		}(), "stopped(stopped,start_unobserved)"},
+		{"the reprovision configured is N+1 without launch_id", func() Facts {
+			f := base("", "stopping", "starting", "R1")
+			f.Op, f.ConfigResolution, f.AfterConfigDigest, f.AfterDigest = store.AgentWriteUpdate, true, "c2", "d2"
+			return f
+		}(), "configured(nolid,nextgen)"},
+		{"a new run's start is N+1; R1's closure is not", func() Facts {
+			f := base("R1", "starting", "running", "R2")
+			f.Evidence = EvidenceReportRun
+			return f
+		}(), "stopped(superseded,closes) started(nextgen)"},
+		{"a failed attempt of the next incarnation", func() Facts {
+			f := base("", "starting", "error", "R1")
+			f.Cause = Cause{Kind: CauseCreateFailed, Stage: "x"}
+			return f
+		}(), "launch_failed(create_failed,x,async,nextgen)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fullPlanString(Derive(c.f)); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
 }

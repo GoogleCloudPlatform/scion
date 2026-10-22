@@ -976,3 +976,92 @@ func TestLifecycleStore2_StopConfirmedStartUnconfirmed(t *testing.T) {
 	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped,restart_stop_leg)[R1/1]", lcFull(f.events(a.ID)))
 	assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricUnconfirmed, ""))
 }
+
+// TestLifecycleStore2_AdoptionDoesNotLeakToALaterRun is wp1s2 review r1
+// R1: after a rebind R1 -> L1, a queued restart closes L1 as superseded
+// (carrying the R1 -> L1 provenance: its launch_id is L1) and started(R2)
+// carries none; the HTTP-restart variant closes L1 at the stop leg.
+func TestLifecycleStore2_AdoptionDoesNotLeakToALaterRun(t *testing.T) {
+	ctx := context.Background()
+	adopt := func(f *lifecycleFixture, id, from, to string) {
+		ok, err := f.cs.AdoptAgentRunID(ctx, id, from, to, time.Now().Add(time.Hour))
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	adopt(f, a.ID, "R1", "L1")
+	f.heartbeat(a.ID, "running", "L1")
+	f.mint(a.ID, "R2")
+	f.heartbeat(a.ID, "running", "R2")
+	evs := f.events(a.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[L1/1] started@4[R2/1]", lcFull(evs))
+	assert.Equal(t, "R1", evs[2].AdoptedFromLaunchID, "the closure of L1 carries the alias")
+	assert.Empty(t, evs[3].AdoptedFromLaunchID, "started(R2) carries no adoption")
+
+	g, b := newS2Fixture(t)
+	g.mint(b.ID, "R1")
+	g.startWrite(b.ID)
+	adopt(g, b.ID, "R1", "L1")
+	require.NoError(t, g.cs.RecordRestartStopLeg(ctx, b.ID, "L1"))
+	g.mint(b.ID, "R2")
+	g.startWrite(b.ID)
+	evs = g.events(b.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped,restart_stop_leg)[L1/1] started@4[R2/1]", lcFull(evs))
+	assert.Equal(t, "R1", evs[2].AdoptedFromLaunchID)
+	assert.Empty(t, evs[3].AdoptedFromLaunchID)
+}
+
+// TestLifecycleStore2_AdoptBackThenQueuedRestart is the start-of-running
+// variant of review r1 R1: R2 is minted and the broker reports R1 back
+// (pending R2 -> R1); a queued restart then closes R1 with that alias,
+// and started(R3) carries none.
+func TestLifecycleStore2_AdoptBackThenQueuedRestart(t *testing.T) {
+	ctx := context.Background()
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.mint(a.ID, "R2")
+	ok, err := f.cs.CompareAndSwapAgentRunID(ctx, a.ID, "R2", "R1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	f.mint(a.ID, "R3")
+	f.heartbeat(a.ID, "running", "R3")
+	evs := f.events(a.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(superseded)[R1/1] started@4[R3/1]", lcFull(evs))
+	assert.Equal(t, "R2", evs[2].AdoptedFromLaunchID)
+	assert.Empty(t, evs[3].AdoptedFromLaunchID)
+}
+
+// TestLifecycleStore2_StopDuringReincarnation is wp1s2 review r1 R2: a stop
+// record, or a heartbeat error, of the base run R1 while the reincarnation
+// is in flight closes R1 with launch_id R1 and generation 1, never N+1.
+func TestLifecycleStore2_StopDuringReincarnation(t *testing.T) {
+	ctx := context.Background()
+	claim := func(f *lifecycleFixture, id string) {
+		cur, err := f.cs.GetAgent(ctx, id)
+		require.NoError(t, err)
+		_, err = f.cs.ClaimAgentReincarnation(ctx, id, cur.StateVersion, time.Now())
+		require.NoError(t, err)
+	}
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	claim(f, a.ID)
+	f.stopRecord(a.ID, "R1", "stopped")
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped)[R1/1]", lcFull(f.events(a.ID)))
+
+	g := newLifecycleFixture(t)
+	b := g.create("s2-reinc-missing", func(a *store.Agent) {
+		a.Phase, a.Generation, a.RuntimeBrokerID = "created", 1, "broker-1"
+	})
+	g.mint(b.ID, "R1")
+	g.startWrite(b.ID)
+	claim(g, b.ID)
+	// The container-missing CAS skips rows whose reincarnation is in
+	// flight, so the in-flight terminal here is a broker heartbeat error
+	// for R1 (this direct store call sets no GuardReincarnation).
+	g.heartbeat(b.ID, "error", "R1")
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(error)[R1/1]", lcFull(g.events(b.ID)))
+}

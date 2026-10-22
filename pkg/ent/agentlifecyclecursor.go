@@ -46,6 +46,8 @@ type AgentLifecycleCursor struct {
 	PendingAdoptedAt *time.Time `json:"pending_adopted_at,omitempty"`
 	// PendingAdoptionSource holds the value of the "pending_adoption_source" field.
 	PendingAdoptionSource string `json:"pending_adoption_source,omitempty"`
+	// PendingAdoptedTo holds the value of the "pending_adopted_to" field.
+	PendingAdoptedTo string `json:"pending_adopted_to,omitempty"`
 	// CreatorPrincipalType holds the value of the "creator_principal_type" field.
 	CreatorPrincipalType string `json:"creator_principal_type,omitempty"`
 	// CreatorPrincipalID holds the value of the "creator_principal_id" field.
@@ -64,7 +66,7 @@ func (*AgentLifecycleCursor) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agentlifecyclecursor.FieldTransitionRevision, agentlifecyclecursor.FieldMetadataRevision, agentlifecyclecursor.FieldOpenRunMetadataRevision:
 			values[i] = new(sql.NullInt64)
-		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID:
+		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldPendingAdoptedTo, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID:
 			values[i] = new(sql.NullString)
 		case agentlifecyclecursor.FieldPendingRunChangeAt, agentlifecyclecursor.FieldPendingAdoptedAt, agentlifecyclecursor.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -177,6 +179,12 @@ func (_m *AgentLifecycleCursor) assignValues(columns []string, values []any) err
 			} else if value.Valid {
 				_m.PendingAdoptionSource = value.String
 			}
+		case agentlifecyclecursor.FieldPendingAdoptedTo:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field pending_adopted_to", values[i])
+			} else if value.Valid {
+				_m.PendingAdoptedTo = value.String
+			}
 		case agentlifecyclecursor.FieldCreatorPrincipalType:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field creator_principal_type", values[i])
@@ -276,6 +284,9 @@ func (_m *AgentLifecycleCursor) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("pending_adoption_source=")
 	builder.WriteString(_m.PendingAdoptionSource)
+	builder.WriteString(", ")
+	builder.WriteString("pending_adopted_to=")
+	builder.WriteString(_m.PendingAdoptedTo)
 	builder.WriteString(", ")
 	builder.WriteString("creator_principal_type=")
 	builder.WriteString(_m.CreatorPrincipalType)

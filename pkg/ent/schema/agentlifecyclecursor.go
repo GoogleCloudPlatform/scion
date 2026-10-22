@@ -77,6 +77,11 @@ func (AgentLifecycleCursor) Fields() []ent.Field {
 			Nillable(),
 		field.String("pending_adoption_source").
 			Default(""),
+		// pending_adopted_to is the run the pending adoption made current
+		// (the adopted launch_id); the provenance rides only on an event
+		// that names this run (wp1s2 review r1 R1).
+		field.String("pending_adopted_to").
+			Default(""),
 		field.String("creator_principal_type").
 			Default(""),
 		field.String("creator_principal_id").

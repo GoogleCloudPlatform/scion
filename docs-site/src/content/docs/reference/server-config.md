@@ -229,7 +229,7 @@ Agent lifecycle events are the `hub.lifecycle_events` [experiment](/scion/refere
 
 - **Requirements.** Events are recorded only when the Hub ID is pinned (`server.hub.hub_id`, or a single-process SQLite hub's persisted ID file) and the server's Cloud Logging is enabled (`SCION_CLOUD_LOGGING` or the telemetry setting). A workstation server bound only to loopback, on SQLite with dev auth, writes the events to stdout instead. Otherwise the Hub records nothing and reports why.
 - **Enable it on every replica together.** A replica with the experiment off records nothing. The next recorded event for an affected agent is then preceded by an explicit gap marker (`resynced`), so the loss stays visible.
-- **Turning it off** stops new events. Events already recorded are still delivered, and nothing is deleted.
+- **Turning it off** stops new events. Events already recorded are still delivered; turning it off discards nothing pending.
 - **Diagnostics** are Hub metrics plus a server-log line on every change: `lifecycle_observer_state` (`enabled`, `disabled_experiment_off`, `disabled_unpinned_hub_id`, `disabled_no_sink`), `lifecycle_sink_kind` (`cloud_logging`, `stdout`, `none`), `lifecycle_drainer_state`, and the delivery and loss counters (`lifecycle_outbox_dropped`, `lifecycle_resyncs`, `lifecycle_build_failures`, `lifecycle_ambiguous_transitions`, `lifecycle_unconfirmed_starts`).
 - **Bounded retention.** Undelivered events wait in a database outbox for up to 72 hours or 100,000 rows. Anything trimmed is counted and logged with its event IDs.
 

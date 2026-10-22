@@ -567,16 +567,20 @@ func init() {
 	agentlifecyclecursorDescPendingAdoptionSource := agentlifecyclecursorFields[14].Descriptor()
 	// agentlifecyclecursor.DefaultPendingAdoptionSource holds the default value on creation for the pending_adoption_source field.
 	agentlifecyclecursor.DefaultPendingAdoptionSource = agentlifecyclecursorDescPendingAdoptionSource.Default.(string)
+	// agentlifecyclecursorDescPendingAdoptedTo is the schema descriptor for pending_adopted_to field.
+	agentlifecyclecursorDescPendingAdoptedTo := agentlifecyclecursorFields[15].Descriptor()
+	// agentlifecyclecursor.DefaultPendingAdoptedTo holds the default value on creation for the pending_adopted_to field.
+	agentlifecyclecursor.DefaultPendingAdoptedTo = agentlifecyclecursorDescPendingAdoptedTo.Default.(string)
 	// agentlifecyclecursorDescCreatorPrincipalType is the schema descriptor for creator_principal_type field.
-	agentlifecyclecursorDescCreatorPrincipalType := agentlifecyclecursorFields[15].Descriptor()
+	agentlifecyclecursorDescCreatorPrincipalType := agentlifecyclecursorFields[16].Descriptor()
 	// agentlifecyclecursor.DefaultCreatorPrincipalType holds the default value on creation for the creator_principal_type field.
 	agentlifecyclecursor.DefaultCreatorPrincipalType = agentlifecyclecursorDescCreatorPrincipalType.Default.(string)
 	// agentlifecyclecursorDescCreatorPrincipalID is the schema descriptor for creator_principal_id field.
-	agentlifecyclecursorDescCreatorPrincipalID := agentlifecyclecursorFields[16].Descriptor()
+	agentlifecyclecursorDescCreatorPrincipalID := agentlifecyclecursorFields[17].Descriptor()
 	// agentlifecyclecursor.DefaultCreatorPrincipalID holds the default value on creation for the creator_principal_id field.
 	agentlifecyclecursor.DefaultCreatorPrincipalID = agentlifecyclecursorDescCreatorPrincipalID.Default.(string)
 	// agentlifecyclecursorDescUpdatedAt is the schema descriptor for updated_at field.
-	agentlifecyclecursorDescUpdatedAt := agentlifecyclecursorFields[17].Descriptor()
+	agentlifecyclecursorDescUpdatedAt := agentlifecyclecursorFields[18].Descriptor()
 	// agentlifecyclecursor.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	agentlifecyclecursor.DefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.Default.(func() time.Time)
 	// agentlifecyclecursor.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

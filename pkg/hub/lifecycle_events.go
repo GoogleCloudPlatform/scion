@@ -35,6 +35,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"entgo.io/ent/dialect"
 
@@ -146,11 +147,15 @@ func (s *Server) installObserverLocked(ls lifecycleEventStore) (string, error) {
 		}
 		ls.SetAgentWriteObserver(obs)
 	case telemetryemit.ObserverStateDisabledNoSink:
-		slog.Warn("hub.lifecycle_events has no sink configured; lifecycle observer not installed")
+		if state != rt.state { // change-only: every settings apply re-runs this
+			slog.Warn("hub.lifecycle_events has no sink configured; lifecycle observer not installed")
+		}
 		ls.SetAgentWriteObserver(nil)
 	default:
-		slog.Warn("hub.lifecycle_events requires a pinned hub ID; lifecycle observer not installed",
-			"hub_id", s.HubID(), "hub_id_source", s.config.HubIDSource, "state", state)
+		if state != rt.state {
+			slog.Warn("hub.lifecycle_events requires a pinned hub ID; lifecycle observer not installed",
+				"hub_id", s.HubID(), "hub_id_source", s.config.HubIDSource, "state", state)
+		}
 		ls.SetAgentWriteObserver(nil)
 	}
 	s.setLifecycleStateLocked(state)
@@ -353,8 +358,10 @@ func (s *Server) startDrainerLocked(ctx context.Context, ls lifecycleEventStore,
 		}
 		rt.drainer, rt.cancel, rt.done = nil, nil, nil
 		counters.DrainerState(telemetryemit.DrainerStateIdleDisabled)
-		if rt.started && ls.AgentWriteObserverInstalled() && rt.sink != nil {
-			s.startDrainerLocked(s.lifecycleContext(context.Background()), ls, false)
+		// No successor on a cancelled server context: a shutdown in
+		// progress must not loop final passes (wp1s2 review r1 O1).
+		if rt.started && ctx.Err() == nil && ls.AgentWriteObserverInstalled() && rt.sink != nil {
+			s.startDrainerLocked(ctx, ls, false)
 		}
 	}()
 }
@@ -455,6 +462,9 @@ func onSyncDispatchAnswer(ctx context.Context, agent *store.Agent, resp *RemoteA
 	})
 }
 
+// lifecycleStopLegTimeout bounds the detached RecordRestartStopLeg write.
+const lifecycleStopLegTimeout = 10 * time.Second
+
 // recordRestartStopLeg records a restart's confirmed stop leg (design
 // 2.4a step 3, r5 B1): it closes the agent's open run segment when it is
 // runID. It runs before the start leg mints the next run. A failure is
@@ -467,6 +477,10 @@ func (s *Server) recordRestartStopLeg(ctx context.Context, agentID, runID string
 	if !ok || runID == "" {
 		return
 	}
+	// Detached from the request: the stop leg is confirmed, so a client
+	// that goes away now must not lose the evidence (review r1 O4).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycleStopLegTimeout)
+	defer cancel()
 	if err := r.RecordRestartStopLeg(ctx, agentID, runID); err != nil {
 		slog.Warn("lifecycle: restart stop leg not recorded", "agent_id", agentID, "run_id", runID, "error", err)
 	}

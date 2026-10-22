@@ -141,6 +141,7 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		facts.BeforeLive = before.row.DeletedAt.IsZero()
 		facts.BeforePhase, facts.BeforeRunID, facts.BeforeGeneration = before.row.Phase, before.row.RunID, before.row.Generation
 		facts.BeforeDigest, facts.BeforeConfigDigest = before.digest, before.configDigest
+		facts.LaunchActive = before.row.LaunchState == store.LaunchStateActive
 	}
 	if after != nil {
 		facts.AfterDeleted = !after.row.DeletedAt.IsZero()

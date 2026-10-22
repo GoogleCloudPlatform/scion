@@ -41,6 +41,8 @@ const (
 	FieldPendingAdoptedAt = "pending_adopted_at"
 	// FieldPendingAdoptionSource holds the string denoting the pending_adoption_source field in the database.
 	FieldPendingAdoptionSource = "pending_adoption_source"
+	// FieldPendingAdoptedTo holds the string denoting the pending_adopted_to field in the database.
+	FieldPendingAdoptedTo = "pending_adopted_to"
 	// FieldCreatorPrincipalType holds the string denoting the creator_principal_type field in the database.
 	FieldCreatorPrincipalType = "creator_principal_type"
 	// FieldCreatorPrincipalID holds the string denoting the creator_principal_id field in the database.
@@ -68,6 +70,7 @@ var Columns = []string{
 	FieldPendingAdoptedFrom,
 	FieldPendingAdoptedAt,
 	FieldPendingAdoptionSource,
+	FieldPendingAdoptedTo,
 	FieldCreatorPrincipalType,
 	FieldCreatorPrincipalID,
 	FieldUpdatedAt,
@@ -106,6 +109,8 @@ var (
 	DefaultPendingAdoptedFrom string
 	// DefaultPendingAdoptionSource holds the default value on creation for the "pending_adoption_source" field.
 	DefaultPendingAdoptionSource string
+	// DefaultPendingAdoptedTo holds the default value on creation for the "pending_adopted_to" field.
+	DefaultPendingAdoptedTo string
 	// DefaultCreatorPrincipalType holds the default value on creation for the "creator_principal_type" field.
 	DefaultCreatorPrincipalType string
 	// DefaultCreatorPrincipalID holds the default value on creation for the "creator_principal_id" field.
@@ -192,6 +197,11 @@ func ByPendingAdoptedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByPendingAdoptionSource orders the results by the pending_adoption_source field.
 func ByPendingAdoptionSource(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPendingAdoptionSource, opts...).ToFunc()
+}
+
+// ByPendingAdoptedTo orders the results by the pending_adopted_to field.
+func ByPendingAdoptedTo(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPendingAdoptedTo, opts...).ToFunc()
 }
 
 // ByCreatorPrincipalType orders the results by the creator_principal_type field.

@@ -134,6 +134,7 @@ func (t *memTx) BumpLifecycleCursor(ctx context.Context, agentID string, n int, 
 	c.OpenRun, c.OpenRunGeneration, c.OpenRunMetadataRevision = r.OpenRun, r.OpenRunGeneration, r.OpenRunMetadataRevision
 	c.PendingRunChangeAt, c.ReincarnationBaseRunID = r.PendingRunChangeAt, r.ReincarnationBaseRunID
 	c.PendingAdoptedFrom, c.PendingAdoptedAt, c.PendingAdoptionSource = r.PendingAdoptedFrom, r.PendingAdoptedAt, r.PendingAdoptionSource
+	c.PendingAdoptedTo = r.PendingAdoptedTo
 	t.cursors[agentID] = c
 	return &c, nil
 }

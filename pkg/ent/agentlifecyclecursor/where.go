@@ -125,6 +125,11 @@ func PendingAdoptionSource(v string) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldPendingAdoptionSource, v))
 }
 
+// PendingAdoptedTo applies equality check predicate on the "pending_adopted_to" field. It's identical to PendingAdoptedToEQ.
+func PendingAdoptedTo(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldPendingAdoptedTo, v))
+}
+
 // CreatorPrincipalType applies equality check predicate on the "creator_principal_type" field. It's identical to CreatorPrincipalTypeEQ.
 func CreatorPrincipalType(v string) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldCreatorPrincipalType, v))
@@ -863,6 +868,71 @@ func PendingAdoptionSourceEqualFold(v string) predicate.AgentLifecycleCursor {
 // PendingAdoptionSourceContainsFold applies the ContainsFold predicate on the "pending_adoption_source" field.
 func PendingAdoptionSourceContainsFold(v string) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldPendingAdoptionSource, v))
+}
+
+// PendingAdoptedToEQ applies the EQ predicate on the "pending_adopted_to" field.
+func PendingAdoptedToEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToNEQ applies the NEQ predicate on the "pending_adopted_to" field.
+func PendingAdoptedToNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToIn applies the In predicate on the "pending_adopted_to" field.
+func PendingAdoptedToIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldPendingAdoptedTo, vs...))
+}
+
+// PendingAdoptedToNotIn applies the NotIn predicate on the "pending_adopted_to" field.
+func PendingAdoptedToNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldPendingAdoptedTo, vs...))
+}
+
+// PendingAdoptedToGT applies the GT predicate on the "pending_adopted_to" field.
+func PendingAdoptedToGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToGTE applies the GTE predicate on the "pending_adopted_to" field.
+func PendingAdoptedToGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToLT applies the LT predicate on the "pending_adopted_to" field.
+func PendingAdoptedToLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToLTE applies the LTE predicate on the "pending_adopted_to" field.
+func PendingAdoptedToLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToContains applies the Contains predicate on the "pending_adopted_to" field.
+func PendingAdoptedToContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToHasPrefix applies the HasPrefix predicate on the "pending_adopted_to" field.
+func PendingAdoptedToHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToHasSuffix applies the HasSuffix predicate on the "pending_adopted_to" field.
+func PendingAdoptedToHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToEqualFold applies the EqualFold predicate on the "pending_adopted_to" field.
+func PendingAdoptedToEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldPendingAdoptedTo, v))
+}
+
+// PendingAdoptedToContainsFold applies the ContainsFold predicate on the "pending_adopted_to" field.
+func PendingAdoptedToContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldPendingAdoptedTo, v))
 }
 
 // CreatorPrincipalTypeEQ applies the EQ predicate on the "creator_principal_type" field.

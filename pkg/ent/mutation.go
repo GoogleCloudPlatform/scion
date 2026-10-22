@@ -17339,6 +17339,7 @@ type AgentLifecycleCursorMutation struct {
 	pending_adopted_from          *string
 	pending_adopted_at            *time.Time
 	pending_adoption_source       *string
+	pending_adopted_to            *string
 	creator_principal_type        *string
 	creator_principal_id          *string
 	updated_at                    *time.Time
@@ -18042,6 +18043,42 @@ func (m *AgentLifecycleCursorMutation) ResetPendingAdoptionSource() {
 	m.pending_adoption_source = nil
 }
 
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (m *AgentLifecycleCursorMutation) SetPendingAdoptedTo(s string) {
+	m.pending_adopted_to = &s
+}
+
+// PendingAdoptedTo returns the value of the "pending_adopted_to" field in the mutation.
+func (m *AgentLifecycleCursorMutation) PendingAdoptedTo() (r string, exists bool) {
+	v := m.pending_adopted_to
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingAdoptedTo returns the old "pending_adopted_to" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldPendingAdoptedTo(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingAdoptedTo is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingAdoptedTo requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingAdoptedTo: %w", err)
+	}
+	return oldValue.PendingAdoptedTo, nil
+}
+
+// ResetPendingAdoptedTo resets all changes to the "pending_adopted_to" field.
+func (m *AgentLifecycleCursorMutation) ResetPendingAdoptedTo() {
+	m.pending_adopted_to = nil
+}
+
 // SetCreatorPrincipalType sets the "creator_principal_type" field.
 func (m *AgentLifecycleCursorMutation) SetCreatorPrincipalType(s string) {
 	m.creator_principal_type = &s
@@ -18184,7 +18221,7 @@ func (m *AgentLifecycleCursorMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentLifecycleCursorMutation) Fields() []string {
-	fields := make([]string, 0, 17)
+	fields := make([]string, 0, 18)
 	if m.project_id != nil {
 		fields = append(fields, agentlifecyclecursor.FieldProjectID)
 	}
@@ -18226,6 +18263,9 @@ func (m *AgentLifecycleCursorMutation) Fields() []string {
 	}
 	if m.pending_adoption_source != nil {
 		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptionSource)
+	}
+	if m.pending_adopted_to != nil {
+		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptedTo)
 	}
 	if m.creator_principal_type != nil {
 		fields = append(fields, agentlifecyclecursor.FieldCreatorPrincipalType)
@@ -18272,6 +18312,8 @@ func (m *AgentLifecycleCursorMutation) Field(name string) (ent.Value, bool) {
 		return m.PendingAdoptedAt()
 	case agentlifecyclecursor.FieldPendingAdoptionSource:
 		return m.PendingAdoptionSource()
+	case agentlifecyclecursor.FieldPendingAdoptedTo:
+		return m.PendingAdoptedTo()
 	case agentlifecyclecursor.FieldCreatorPrincipalType:
 		return m.CreatorPrincipalType()
 	case agentlifecyclecursor.FieldCreatorPrincipalID:
@@ -18315,6 +18357,8 @@ func (m *AgentLifecycleCursorMutation) OldField(ctx context.Context, name string
 		return m.OldPendingAdoptedAt(ctx)
 	case agentlifecyclecursor.FieldPendingAdoptionSource:
 		return m.OldPendingAdoptionSource(ctx)
+	case agentlifecyclecursor.FieldPendingAdoptedTo:
+		return m.OldPendingAdoptedTo(ctx)
 	case agentlifecyclecursor.FieldCreatorPrincipalType:
 		return m.OldCreatorPrincipalType(ctx)
 	case agentlifecyclecursor.FieldCreatorPrincipalID:
@@ -18427,6 +18471,13 @@ func (m *AgentLifecycleCursorMutation) SetField(name string, value ent.Value) er
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetPendingAdoptionSource(v)
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedTo:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingAdoptedTo(v)
 		return nil
 	case agentlifecyclecursor.FieldCreatorPrincipalType:
 		v, ok := value.(string)
@@ -18593,6 +18644,9 @@ func (m *AgentLifecycleCursorMutation) ResetField(name string) error {
 		return nil
 	case agentlifecyclecursor.FieldPendingAdoptionSource:
 		m.ResetPendingAdoptionSource()
+		return nil
+	case agentlifecyclecursor.FieldPendingAdoptedTo:
+		m.ResetPendingAdoptedTo()
 		return nil
 	case agentlifecyclecursor.FieldCreatorPrincipalType:
 		m.ResetCreatorPrincipalType()

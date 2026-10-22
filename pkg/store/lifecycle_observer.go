@@ -221,6 +221,8 @@ type LifecycleCursor struct {
 	PendingAdoptedFrom      string
 	PendingAdoptedAt        *time.Time
 	PendingAdoptionSource   string
+	// PendingAdoptedTo is the run the pending adoption made current.
+	PendingAdoptedTo string
 
 	// Creator principal captured at created, copied into later snapshots.
 	CreatorPrincipalType string
@@ -258,6 +260,9 @@ type LifecycleRunState struct {
 	PendingAdoptedFrom      string
 	PendingAdoptedAt        *time.Time
 	PendingAdoptionSource   string
+	// PendingAdoptedTo is the run the pending adoption made current; the
+	// provenance rides only on an event naming this run.
+	PendingAdoptedTo string
 }
 
 // RunState returns the cursor's run-segment state.
@@ -274,6 +279,7 @@ func (c *LifecycleCursor) RunState() LifecycleRunState {
 		PendingAdoptedFrom:      c.PendingAdoptedFrom,
 		PendingAdoptedAt:        c.PendingAdoptedAt,
 		PendingAdoptionSource:   c.PendingAdoptionSource,
+		PendingAdoptedTo:        c.PendingAdoptedTo,
 	}
 }
 
@@ -288,5 +294,6 @@ func (r LifecycleRunState) Equal(o LifecycleRunState) bool {
 	return r.OpenRun == o.OpenRun && r.OpenRunGeneration == o.OpenRunGeneration &&
 		r.OpenRunMetadataRevision == o.OpenRunMetadataRevision && eqT(r.PendingRunChangeAt, o.PendingRunChangeAt) &&
 		r.ReincarnationBaseRunID == o.ReincarnationBaseRunID && r.PendingAdoptedFrom == o.PendingAdoptedFrom &&
-		eqT(r.PendingAdoptedAt, o.PendingAdoptedAt) && r.PendingAdoptionSource == o.PendingAdoptionSource
+		eqT(r.PendingAdoptedAt, o.PendingAdoptedAt) && r.PendingAdoptionSource == o.PendingAdoptionSource &&
+		r.PendingAdoptedTo == o.PendingAdoptedTo
 }

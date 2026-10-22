@@ -23,6 +23,12 @@
 // TestAgentWritersAreClassified; this check only keeps writers from
 // appearing elsewhere.
 //
+// Scope (design 2.8 wording; wp1s2 review r1 O3): packages that import
+// pkg/ent directly. A package that obtains a *ent.AgentClient through
+// another package's API without importing pkg/ent itself is not checked;
+// widening the scope to "every package whose type information references
+// ent.AgentClient" would type-check the whole module.
+//
 // Exit codes: 0 no finding, 1 findings, 2 could not analyse (load or type
 // errors). It runs from make ci-full (hack/check-agent-mutators.sh), not
 // as a unit test, because it type-checks pkg/hub.

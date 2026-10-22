@@ -64,6 +64,10 @@ type Planned struct {
 	// segment_metadata_revision and the segment's frozen launch_id and
 	// incarnation_id (review r6 N6), and run_changed_at on a superseded.
 	ClosesOpenRun bool
+	// ClosesSegment: the event is the terminal that closes the committed
+	// row's own open segment (S); it names that run and its generation as
+	// they are, never the next incarnation (wp1s2 review r1 R2).
+	ClosesSegment bool
 	// AsyncLaunch: the transition belongs to the row's async launch, so
 	// it carries async_launch_id (= the row's LaunchID, when set).
 	AsyncLaunch bool
@@ -195,6 +199,8 @@ type Facts struct {
 	BeforeConfigDigest, AfterConfigDigest string
 	// AdoptionSource is set on a run_adopt write.
 	AdoptionSource string
+	// LaunchActive: the row's async launch was active before the write.
+	LaunchActive bool
 	// Now is the write's commit time.
 	Now time.Time
 }
@@ -441,8 +447,7 @@ func Derive(f Facts) Plan {
 			DeleteMode: deleteModeFor(f.Op, f.Cause), ClosesOpenRun: plan.Run.OpenRun != ""})
 		plan.DeleteCursor = !f.HasAfter
 		plan.Run = store.LifecycleRunState{}
-		sortPlanned(plan.Events)
-		return plan
+		return finish(f, plan)
 	}
 
 	// Step 0: run-ID writes.
@@ -537,6 +542,7 @@ func deriveRunWrite(f Facts, plan *Plan) {
 		r.PendingAdoptedFrom = f.BeforeRunID
 		r.PendingAdoptedAt = &now
 		r.PendingAdoptionSource = f.AdoptionSource
+		r.PendingAdoptedTo = f.AfterRunID
 	case store.WriteKindRunMint:
 		switch {
 		case r.OpenRun != "" && f.AfterRunID == r.OpenRun:
@@ -588,6 +594,7 @@ func (f Facts) deriveHint(plan *Plan, s bool) bool {
 			EndReason: telemetrycontract.EndReasonCreateFailed, ErrorCode: f.Cause.Stage,
 			AsyncLaunch: true, OmitLaunchID: f.AfterRunID == ""})
 		if s {
+			plan.Events[len(plan.Events)-1].ClosesSegment = true
 			closeSegment(plan)
 		}
 		return true
@@ -599,6 +606,7 @@ func (f Facts) deriveHint(plan *Plan, s bool) bool {
 			EndReason: f.Hint.EndReason, ErrorCode: f.Hint.ErrorCode, Cause: f.Hint.Cause,
 			AsyncLaunch: true, OmitLaunchID: f.Hint.OmitLaunchID || f.AfterRunID == ""})
 		if s && !f.Hint.OmitLaunchID {
+			plan.Events[len(plan.Events)-1].ClosesSegment = true
 			closeSegment(plan)
 		}
 		return true
@@ -634,6 +642,7 @@ func (f Facts) derivePhase(plan *Plan, s bool) {
 		plan.FreezeSegment = true
 	}
 	terminal := func(p Planned) {
+		p.ClosesSegment = s
 		add(p)
 		if s {
 			closeSegment(plan)
@@ -652,8 +661,11 @@ func (f Facts) derivePhase(plan *Plan, s bool) {
 		// launch_id only when the write itself correlates the failed
 		// attempt to the row's run (Q10 revised); the row's RunID may still
 		// be the previous run's.
+		// async_launch_id while the row's async launch is active
+		// (design v6.16 P4, item 14).
 		add(Planned{Transition: telemetrycontract.TransitionLaunchFailed, Row: RowAfter,
-			EndReason: telemetrycontract.EndReasonLaunchError, OmitLaunchID: !f.correlated() || f.AfterRunID == ""})
+			EndReason: telemetrycontract.EndReasonLaunchError, OmitLaunchID: !f.correlated() || f.AfterRunID == "",
+			AsyncLaunch: f.LaunchActive})
 	case (ap == groupRest || ap == groupErr) && bp == groupRun && !s && (stopRecord || e): // P7a (before P5, Q8)
 		add(Planned{Transition: telemetrycontract.TransitionStopped, Row: RowAfter,
 			StopKind: f.AfterPhase, Cause: telemetrycontract.CauseStartUnobserved})
@@ -686,14 +698,30 @@ func (f Facts) derivePhase(plan *Plan, s bool) {
 // in flight and its generation is not bumped yet (design 2.7, Q2).
 func (f Facts) generationTag() string {
 	g := f.AfterGeneration
-	if f.Cursor.Run.ReincarnationBaseRunID != "" && f.AfterReincarnationInFlight && f.AfterGeneration == f.BeforeGeneration {
+	base := f.Cursor.Run.ReincarnationBaseRunID
+	if base != "" && f.AfterRunID != base && f.AfterReincarnationInFlight && f.AfterGeneration == f.BeforeGeneration {
 		g++
 	}
 	return itoa(g)
 }
 
 // finish sorts the events, applies the reincarnation tagging and attaches
-// a pending adoption to the first event that names the current run.
+// a pending adoption to the first event that names the adopted run.
+//
+// Reincarnation tag (design 2.7, Q2; wp1s2 review r1 R2): while a
+// reincarnation is in flight and the generation is not bumped yet,
+//   - events of a new run (after.RunID != base) carry generation + 1,
+//     except closures of the older segment (frozen identity);
+//   - events of the base run carry generation + 1 and omit launch_id only
+//     when they describe the next incarnation's configuration or attempt
+//     (configured, metadata_changed, launch_accepted, launch_failed that
+//     closes nothing); a started, stopped or halted of the base run, or
+//     any event closing its segment, names the base run at generation N.
+//
+// Adoption (wp1s2 review r1 R1): the provenance rides on the first event
+// whose launch_id is the adopted run (PendingAdoptedTo), a closure of
+// that run included, and is dropped once that run can no longer be named
+// (it is neither the committed row's run nor the open segment's).
 func finish(f Facts, plan Plan) Plan {
 	sortPlanned(plan.Events)
 	base := f.Cursor.Run.ReincarnationBaseRunID
@@ -703,29 +731,60 @@ func finish(f Facts, plan Plan) Plan {
 	tag := base != "" && f.AfterReincarnationInFlight && f.AfterGeneration == f.BeforeGeneration
 	for i := range plan.Events {
 		p := &plan.Events[i]
-		if p.ClosesOpenRun || p.Row != RowAfter || p.Transition == telemetrycontract.TransitionResynced {
+		if !tag || p.ClosesOpenRun || p.ClosesSegment || p.Row != RowAfter ||
+			p.Transition == telemetrycontract.TransitionResynced || p.Transition == telemetrycontract.TransitionDeleted {
 			continue
 		}
-		if tag {
+		if f.AfterRunID != base {
 			p.NextGeneration = true
-			if f.AfterRunID == base {
-				// Configuration for a run not minted yet (design 2.7).
-				p.OmitLaunchID = true
-			}
+			continue
+		}
+		switch p.Transition {
+		case telemetrycontract.TransitionConfigured, telemetrycontract.TransitionMetadataChanged,
+			telemetrycontract.TransitionLaunchAccepted, telemetrycontract.TransitionLaunchFailed:
+			// Configuration or an attempt of a run not minted yet.
+			p.NextGeneration = true
+			p.OmitLaunchID = true
 		}
 	}
-	if plan.Run.PendingAdoptedFrom != "" && f.Cursor.Run.PendingAdoptedFrom != "" {
+
+	pa := f.Cursor.Run
+	replaced := plan.Run.PendingAdoptedFrom != "" &&
+		(plan.Run.PendingAdoptedFrom != pa.PendingAdoptedFrom || plan.Run.PendingAdoptedTo != pa.PendingAdoptedTo)
+	if pa.PendingAdoptedFrom != "" && !replaced {
+		target := pa.PendingAdoptedTo
+		carried := false
 		for i := range plan.Events {
 			p := &plan.Events[i]
-			if p.ClosesOpenRun || p.OmitLaunchID {
+			if target == "" || p.Transition == telemetrycontract.TransitionResynced || f.eventLaunchID(*p) != target {
 				continue
 			}
 			p.CarriesAdoption = true
-			plan.Run.PendingAdoptedFrom, plan.Run.PendingAdoptedAt, plan.Run.PendingAdoptionSource = "", nil, ""
+			carried = true
 			break
+		}
+		if carried || target == "" || (f.AfterRunID != target && plan.Run.OpenRun != target) {
+			plan.Run.PendingAdoptedFrom, plan.Run.PendingAdoptedAt = "", nil
+			plan.Run.PendingAdoptionSource, plan.Run.PendingAdoptedTo = "", ""
 		}
 	}
 	return plan
+}
+
+// eventLaunchID is the launch_id the builder gives p.
+func (f Facts) eventLaunchID(p Planned) string {
+	switch {
+	case p.ClosesOpenRun:
+		if f.Cursor.Run.OpenRun != "" {
+			return f.Cursor.Run.OpenRun
+		}
+		return f.Cursor.OpenRun
+	case p.OmitLaunchID:
+		return ""
+	case p.Row == RowBefore:
+		return f.BeforeRunID
+	}
+	return f.AfterRunID
 }
 
 func itoa(n int) string {

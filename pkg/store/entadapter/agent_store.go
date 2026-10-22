@@ -3091,6 +3091,11 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 	case obs != nil:
 		// Observed: the swap (and the credential) commit together with the
 		// lifecycle cursor (design 2.4a step 0, run_mint).
+		// Errors keep the unobserved path's classes (review r1 O5): a swap
+		// error is returned as is; a credential failure, or any failure
+		// after the credential was created (the observer, the commit), rolls
+		// the credential back and wraps store.ErrCredentialNotRecorded.
+		credCreated := false
 		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteRunID,
 			store.AgentWriteHints{Kind: store.WriteKindRunMint}, func(c *ent.Client) (int, error) {
 				n, err := swap(c.Agent)
@@ -3102,10 +3107,11 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 					cred.ID = ""
 					return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
 				}
+				credCreated = true
 				return n, nil
 			})
 		if err != nil {
-			if cred != nil && !errors.Is(err, store.ErrCredentialNotRecorded) {
+			if credCreated && !errors.Is(err, store.ErrCredentialNotRecorded) {
 				cred.ID = ""
 				err = fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
 			}

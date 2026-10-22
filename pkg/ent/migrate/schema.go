@@ -554,6 +554,7 @@ var (
 		{Name: "pending_adopted_from", Type: field.TypeString, Default: ""},
 		{Name: "pending_adopted_at", Type: field.TypeTime, Nullable: true},
 		{Name: "pending_adoption_source", Type: field.TypeString, Default: ""},
+		{Name: "pending_adopted_to", Type: field.TypeString, Default: ""},
 		{Name: "creator_principal_type", Type: field.TypeString, Default: ""},
 		{Name: "creator_principal_id", Type: field.TypeString, Default: ""},
 		{Name: "updated_at", Type: field.TypeTime},

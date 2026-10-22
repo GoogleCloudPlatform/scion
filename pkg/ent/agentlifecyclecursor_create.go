@@ -212,6 +212,20 @@ func (_c *AgentLifecycleCursorCreate) SetNillablePendingAdoptionSource(v *string
 	return _c
 }
 
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (_c *AgentLifecycleCursorCreate) SetPendingAdoptedTo(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetPendingAdoptedTo(v)
+	return _c
+}
+
+// SetNillablePendingAdoptedTo sets the "pending_adopted_to" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillablePendingAdoptedTo(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetPendingAdoptedTo(*v)
+	}
+	return _c
+}
+
 // SetCreatorPrincipalType sets the "creator_principal_type" field.
 func (_c *AgentLifecycleCursorCreate) SetCreatorPrincipalType(v string) *AgentLifecycleCursorCreate {
 	_c.mutation.SetCreatorPrincipalType(v)
@@ -339,6 +353,10 @@ func (_c *AgentLifecycleCursorCreate) defaults() {
 		v := agentlifecyclecursor.DefaultPendingAdoptionSource
 		_c.mutation.SetPendingAdoptionSource(v)
 	}
+	if _, ok := _c.mutation.PendingAdoptedTo(); !ok {
+		v := agentlifecyclecursor.DefaultPendingAdoptedTo
+		_c.mutation.SetPendingAdoptedTo(v)
+	}
 	if _, ok := _c.mutation.CreatorPrincipalType(); !ok {
 		v := agentlifecyclecursor.DefaultCreatorPrincipalType
 		_c.mutation.SetCreatorPrincipalType(v)
@@ -390,6 +408,9 @@ func (_c *AgentLifecycleCursorCreate) check() error {
 	}
 	if _, ok := _c.mutation.PendingAdoptionSource(); !ok {
 		return &ValidationError{Name: "pending_adoption_source", err: errors.New(`ent: missing required field "AgentLifecycleCursor.pending_adoption_source"`)}
+	}
+	if _, ok := _c.mutation.PendingAdoptedTo(); !ok {
+		return &ValidationError{Name: "pending_adopted_to", err: errors.New(`ent: missing required field "AgentLifecycleCursor.pending_adopted_to"`)}
 	}
 	if _, ok := _c.mutation.CreatorPrincipalType(); !ok {
 		return &ValidationError{Name: "creator_principal_type", err: errors.New(`ent: missing required field "AgentLifecycleCursor.creator_principal_type"`)}
@@ -491,6 +512,10 @@ func (_c *AgentLifecycleCursorCreate) createSpec() (*AgentLifecycleCursor, *sqlg
 	if value, ok := _c.mutation.PendingAdoptionSource(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptionSource, field.TypeString, value)
 		_node.PendingAdoptionSource = value
+	}
+	if value, ok := _c.mutation.PendingAdoptedTo(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptedTo, field.TypeString, value)
+		_node.PendingAdoptedTo = value
 	}
 	if value, ok := _c.mutation.CreatorPrincipalType(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalType, field.TypeString, value)
@@ -751,6 +776,18 @@ func (u *AgentLifecycleCursorUpsert) SetPendingAdoptionSource(v string) *AgentLi
 // UpdatePendingAdoptionSource sets the "pending_adoption_source" field to the value that was provided on create.
 func (u *AgentLifecycleCursorUpsert) UpdatePendingAdoptionSource() *AgentLifecycleCursorUpsert {
 	u.SetExcluded(agentlifecyclecursor.FieldPendingAdoptionSource)
+	return u
+}
+
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (u *AgentLifecycleCursorUpsert) SetPendingAdoptedTo(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldPendingAdoptedTo, v)
+	return u
+}
+
+// UpdatePendingAdoptedTo sets the "pending_adopted_to" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdatePendingAdoptedTo() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldPendingAdoptedTo)
 	return u
 }
 
@@ -1066,6 +1103,20 @@ func (u *AgentLifecycleCursorUpsertOne) SetPendingAdoptionSource(v string) *Agen
 func (u *AgentLifecycleCursorUpsertOne) UpdatePendingAdoptionSource() *AgentLifecycleCursorUpsertOne {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdatePendingAdoptionSource()
+	})
+}
+
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (u *AgentLifecycleCursorUpsertOne) SetPendingAdoptedTo(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetPendingAdoptedTo(v)
+	})
+}
+
+// UpdatePendingAdoptedTo sets the "pending_adopted_to" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdatePendingAdoptedTo() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdatePendingAdoptedTo()
 	})
 }
 
@@ -1554,6 +1605,20 @@ func (u *AgentLifecycleCursorUpsertBulk) SetPendingAdoptionSource(v string) *Age
 func (u *AgentLifecycleCursorUpsertBulk) UpdatePendingAdoptionSource() *AgentLifecycleCursorUpsertBulk {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdatePendingAdoptionSource()
+	})
+}
+
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetPendingAdoptedTo(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetPendingAdoptedTo(v)
+	})
+}
+
+// UpdatePendingAdoptedTo sets the "pending_adopted_to" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdatePendingAdoptedTo() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdatePendingAdoptedTo()
 	})
 }
 

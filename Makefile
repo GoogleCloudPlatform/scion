@@ -822,7 +822,7 @@ check-hub-store-reassign:
 check-store-delete-callers:
 	@./hack/check-store-delete-callers.sh
 
-## check-agent-mutators: Verify no package outside pkg/store mutates agent rows directly (WP1 lifecycle observer; type-checks pkg/hub, so ci-full only)
+## check-agent-mutators: Verify no package outside pkg/store mutates agent rows directly (WP1 lifecycle observer; type-checks pkg/hub, so ci-full and the CI workflow, not make ci)
 check-agent-mutators:
 	@./hack/check-agent-mutators.sh
 

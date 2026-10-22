@@ -258,6 +258,20 @@ func (_u *AgentLifecycleCursorUpdate) SetNillablePendingAdoptionSource(v *string
 	return _u
 }
 
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (_u *AgentLifecycleCursorUpdate) SetPendingAdoptedTo(v string) *AgentLifecycleCursorUpdate {
+	_u.mutation.SetPendingAdoptedTo(v)
+	return _u
+}
+
+// SetNillablePendingAdoptedTo sets the "pending_adopted_to" field if the given value is not nil.
+func (_u *AgentLifecycleCursorUpdate) SetNillablePendingAdoptedTo(v *string) *AgentLifecycleCursorUpdate {
+	if v != nil {
+		_u.SetPendingAdoptedTo(*v)
+	}
+	return _u
+}
+
 // SetCreatorPrincipalType sets the "creator_principal_type" field.
 func (_u *AgentLifecycleCursorUpdate) SetCreatorPrincipalType(v string) *AgentLifecycleCursorUpdate {
 	_u.mutation.SetCreatorPrincipalType(v)
@@ -398,6 +412,9 @@ func (_u *AgentLifecycleCursorUpdate) sqlSave(ctx context.Context) (_node int, e
 	}
 	if value, ok := _u.mutation.PendingAdoptionSource(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptionSource, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PendingAdoptedTo(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptedTo, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatorPrincipalType(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalType, field.TypeString, value)
@@ -657,6 +674,20 @@ func (_u *AgentLifecycleCursorUpdateOne) SetNillablePendingAdoptionSource(v *str
 	return _u
 }
 
+// SetPendingAdoptedTo sets the "pending_adopted_to" field.
+func (_u *AgentLifecycleCursorUpdateOne) SetPendingAdoptedTo(v string) *AgentLifecycleCursorUpdateOne {
+	_u.mutation.SetPendingAdoptedTo(v)
+	return _u
+}
+
+// SetNillablePendingAdoptedTo sets the "pending_adopted_to" field if the given value is not nil.
+func (_u *AgentLifecycleCursorUpdateOne) SetNillablePendingAdoptedTo(v *string) *AgentLifecycleCursorUpdateOne {
+	if v != nil {
+		_u.SetPendingAdoptedTo(*v)
+	}
+	return _u
+}
+
 // SetCreatorPrincipalType sets the "creator_principal_type" field.
 func (_u *AgentLifecycleCursorUpdateOne) SetCreatorPrincipalType(v string) *AgentLifecycleCursorUpdateOne {
 	_u.mutation.SetCreatorPrincipalType(v)
@@ -827,6 +858,9 @@ func (_u *AgentLifecycleCursorUpdateOne) sqlSave(ctx context.Context) (_node *Ag
 	}
 	if value, ok := _u.mutation.PendingAdoptionSource(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptionSource, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PendingAdoptedTo(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldPendingAdoptedTo, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatorPrincipalType(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalType, field.TypeString, value)
