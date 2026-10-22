@@ -1,0 +1,382 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+)
+
+// mustDetectRepoRoot calls detectRepoRoot with no settings and fails the test
+// on an error.
+func mustDetectRepoRoot(t *testing.T, explicit bool, effectiveWorkspace, projectDir string) string {
+	t.Helper()
+	got, err := detectRepoRoot(explicit, effectiveWorkspace, projectDir, nil)
+	if err != nil {
+		t.Fatalf("detectRepoRoot(%v, %q, %q): %v", explicit, effectiveWorkspace, projectDir, err)
+	}
+	return got
+}
+
+// mkGitRepo creates dir and makes it a git repository with one commit.
+func mkGitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setupGitRepo(t, dir)
+	return dir
+}
+
+// setCommonDir writes a commondir file into repo's .git directory and checks
+// that git now reports want as the common dir, so a test never passes only
+// because git ignored the file.
+func setCommonDir(t *testing.T, repo, commondir, want string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, ".git", "commondir"), []byte(commondir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := util.GetCommonGitDir(repo)
+	if err != nil {
+		t.Fatalf("GetCommonGitDir(%s) after writing commondir: %v", repo, err)
+	}
+	if eval(t, got) != eval(t, want) {
+		t.Fatalf("fixture: git reports common dir %s, want %s", got, want)
+	}
+}
+
+// mkFakeCommonDir creates the minimal layout git accepts as a common dir.
+func mkFakeCommonDir(t *testing.T, dir string) {
+	t.Helper()
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// An in-project shared workspace: the workspace is the project root, so the
+// repo root is the workspace (unchanged from before).
+func TestDetectRepoRoot_SharedWorkspaceAtProjectRoot(t *testing.T) {
+	ws := mkGitRepo(t, filepath.Join(t.TempDir(), "proj"))
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, ws) {
+		t.Fatalf("repo root = %q, want the workspace %q", got, ws)
+	}
+}
+
+// A shared workspace whose .git/commondir names another project's clone is
+// refused: no repo root is returned for the mount layout.
+func TestDetectRepoRoot_SharedWorkspaceRefusesCommonDirOfOtherProject(t *testing.T) {
+	base := t.TempDir()
+	ws := mkGitRepo(t, filepath.Join(base, "projects", "a"))
+	other := mkGitRepo(t, filepath.Join(base, "projects", "b"))
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCommonDir(t, ws, "../../b/.git", filepath.Join(other, ".git"))
+
+	got, err := detectRepoRoot(false, ws, projectDir, nil)
+	if err == nil {
+		t.Fatalf("expected a refusal, got repo root %q", got)
+	}
+	if got != "" {
+		t.Fatalf("repo root = %q on refusal, want \"\"", got)
+	}
+	if !strings.Contains(err.Error(), "outside the project") {
+		t.Fatalf("error should say the common dir is outside the project: %v", err)
+	}
+}
+
+// A shared workspace whose .git/commondir names a directory inside the
+// workspace itself is refused too.
+func TestDetectRepoRoot_SharedWorkspaceRefusesCommonDirInsideWorkspace(t *testing.T) {
+	ws := mkGitRepo(t, filepath.Join(t.TempDir(), "proj"))
+	projectDir := filepath.Join(ws, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(ws, "sub", "fake")
+	mkFakeCommonDir(t, fake)
+	setCommonDir(t, ws, "../sub/fake", fake)
+
+	got, err := detectRepoRoot(false, ws, projectDir, nil)
+	if err == nil || got != "" {
+		t.Fatalf("expected a refusal with no repo root, got (%q, %v)", got, err)
+	}
+}
+
+// A hub-native shared workspace: the project dir is the broker's
+// project-configs dir and the workspace is the recorded workspace_path. The
+// repo root is the workspace; a commondir pointing at a sibling project's
+// clone is refused.
+func TestDetectRepoRoot_HubNativeSharedWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projects := filepath.Join(home, config.GlobalDir, config.ProjectsDir)
+	ws := mkGitRepo(t, filepath.Join(projects, "a"))
+	other := mkGitRepo(t, filepath.Join(projects, "b"))
+	projectDir := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, "a__11111111", config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectConfigsPath(projectDir) {
+		t.Fatalf("fixture: %s should be a project-configs path", projectDir)
+	}
+	settings := &config.VersionedSettings{WorkspacePath: ws}
+
+	got, err := detectRepoRoot(false, ws, projectDir, settings)
+	if err != nil || eval(t, got) != eval(t, ws) {
+		t.Fatalf("detectRepoRoot = (%q, %v), want the workspace %q", got, err, ws)
+	}
+
+	setCommonDir(t, ws, "../../b/.git", filepath.Join(other, ".git"))
+	if got, err := detectRepoRoot(false, ws, projectDir, settings); err == nil || got != "" {
+		t.Fatalf("tampered commondir: detectRepoRoot = (%q, %v), want a refusal", got, err)
+	}
+}
+
+// A worktree workspace of the project's own repository resolves to that
+// repository; one whose .git file is redirected to another repository's
+// worktree is refused.
+func TestDetectRepoRoot_WorktreeWorkspace(t *testing.T) {
+	base := t.TempDir()
+	root := mkGitRepo(t, filepath.Join(base, "repo"))
+	other := mkGitRepo(t, filepath.Join(base, "other"))
+	projectDir := filepath.Join(root, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(projectDir, "agents", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(projectDir, "agents", "dev", "workspace")
+	runGitIn(t, root, "worktree", "add", "-b", "dev", ws)
+
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, root) {
+		t.Fatalf("repo root = %q, want the project repository %q", got, root)
+	}
+
+	otherWT := filepath.Join(base, "other-wt")
+	runGitIn(t, other, "worktree", "add", "-b", "x", otherWT)
+	pointer, err := os.ReadFile(filepath.Join(otherWT, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".git"), pointer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := detectRepoRoot(false, ws, projectDir, nil); err == nil || got != "" {
+		t.Fatalf("redirected worktree: detectRepoRoot = (%q, %v), want a refusal", got, err)
+	}
+}
+
+// A project in a subdirectory of a repository (a monorepo): its worktree
+// workspace still resolves to the enclosing repository root, as before.
+func TestDetectRepoRoot_WorktreeOfSubdirectoryProject(t *testing.T) {
+	base := t.TempDir()
+	root := mkGitRepo(t, filepath.Join(base, "mono"))
+	projectDir := filepath.Join(root, "svc", config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(base, "wt")
+	runGitIn(t, root, "worktree", "add", "-b", "dev", ws)
+
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, root) {
+		t.Fatalf("repo root = %q, want the enclosing repository %q", got, root)
+	}
+}
+
+// A plain checkout outside the project root (for example a workspace storage
+// backend's host path) resolves to itself, as before.
+func TestDetectRepoRoot_PlainCheckoutOutsideProjectRoot(t *testing.T) {
+	base := t.TempDir()
+	ws := mkGitRepo(t, filepath.Join(base, "backend", "workspace"))
+	projectDir := filepath.Join(base, "project", config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustDetectRepoRoot(t, false, ws, projectDir); eval(t, got) != eval(t, ws) {
+		t.Fatalf("repo root = %q, want the workspace %q", got, ws)
+	}
+
+	other := mkGitRepo(t, filepath.Join(base, "other"))
+	setCommonDir(t, ws, filepath.Join(other, ".git"), filepath.Join(other, ".git"))
+	if got, err := detectRepoRoot(false, ws, projectDir, nil); err == nil || got != "" {
+		t.Fatalf("tampered commondir: detectRepoRoot = (%q, %v), want a refusal", got, err)
+	}
+}
+
+// The project-dir fallback (no git workspace): a repository whose
+// core.worktree names another directory is refused instead of mounting it.
+func TestDetectRepoRoot_ProjectDirFallbackRefusesForeignTopLevel(t *testing.T) {
+	base := t.TempDir()
+	root := mkGitRepo(t, filepath.Join(base, "repo"))
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(root, config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := t.TempDir()
+
+	if got := mustDetectRepoRoot(t, false, plain, projectDir); eval(t, got) != eval(t, root) {
+		t.Fatalf("repo root = %q, want %q", got, root)
+	}
+
+	runGitIn(t, root, "config", "core.worktree", elsewhere)
+	if top, _ := util.RepoRootDir(projectDir); eval(t, top) != eval(t, elsewhere) {
+		t.Fatalf("fixture: git should report %s as the top level, got %s", elsewhere, top)
+	}
+	if got, err := detectRepoRoot(false, plain, projectDir, nil); err == nil || got != "" {
+		t.Fatalf("foreign top level: detectRepoRoot = (%q, %v), want a refusal", got, err)
+	}
+}
+
+// hubNativeSharedStartFixture sets up HOME with a harness-config and default
+// template, and a hub-native shared-workspace project "a" whose clone at
+// ~/.scion/projects/a is a git repository, plus a sibling project clone "b".
+// It returns the project's marker path and both clone paths.
+func hubNativeSharedStartFixture(t *testing.T) (markerPath, ws, other string) {
+	t.Helper()
+	home := t.TempDir()
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(home)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", home)
+	if old, ok := os.LookupEnv("SCION_AUTO_EXPOSE_PORTS"); ok {
+		_ = os.Unsetenv("SCION_AUTO_EXPOSE_PORTS")
+		t.Cleanup(func() { _ = os.Setenv("SCION_AUTO_EXPOSE_PORTS", old) })
+	}
+
+	globalScionDir := filepath.Join(home, config.GlobalDir)
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: layout-image:v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	markerPath, projectDir := makeHubNativeProject(t, home, "a", hubNativeTestProjectID)
+	ws = filepath.Join(home, config.GlobalDir, config.ProjectsDir, "a")
+	setupGitRepo(t, ws)
+	other = mkGitRepo(t, filepath.Join(home, config.GlobalDir, config.ProjectsDir, "b"))
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(fmt.Sprintf("schema_version: \"1\"\nworkspace_path: %q\n", ws)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return markerPath, ws, other
+}
+
+func hubNativeSharedStartOpts(markerPath string) api.StartOptions {
+	return api.StartOptions{
+		Name:            "dev",
+		ProjectPath:     markerPath,
+		SharedWorkspace: true,
+		HubProjectID:    hubNativeTestProjectID,
+		BrokerMode:      true,
+		NoAuth:          true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-layout",
+			"SCION_PROJECT_ID": hubNativeTestProjectID,
+		},
+	}
+}
+
+// Start of a hub-native shared-workspace agent: the runtime gets the
+// workspace as both RepoRoot and Workspace (the shared layout), and after the
+// workspace's .git/commondir is pointed at a sibling project's clone, or at a
+// directory inside the workspace, the next start is refused before the
+// runtime is called.
+func TestStart_SharedWorkspaceLayoutFromBrokerPaths(t *testing.T) {
+	markerPath, ws, other := hubNativeSharedStartFixture(t)
+
+	var calls int
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			calls++
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+
+	createOpts := hubNativeSharedStartOpts(markerPath)
+	createOpts.FreshProvision = true // a create dispatch
+	if _, err := mgr.Start(context.Background(), createOpts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runtime Run calls = %d, want 1", calls)
+	}
+	if eval(t, captured.RepoRoot) != eval(t, ws) || eval(t, captured.Workspace) != eval(t, ws) {
+		t.Fatalf("RunConfig (RepoRoot %q, Workspace %q), want both %q", captured.RepoRoot, captured.Workspace, ws)
+	}
+
+	for _, tc := range []struct {
+		name, commondir, want string
+		setup                 func()
+	}{
+		{name: "sibling project", commondir: "../../b/.git", want: filepath.Join(other, ".git")},
+		{name: "inside workspace", commondir: "../sub/fake", want: filepath.Join(ws, "sub", "fake"),
+			setup: func() { mkFakeCommonDir(t, filepath.Join(ws, "sub", "fake")) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup()
+			}
+			setCommonDir(t, ws, tc.commondir, tc.want)
+			t.Cleanup(func() { _ = os.Remove(filepath.Join(ws, ".git", "commondir")) })
+
+			calls = 0
+			_, err := mgr.Start(context.Background(), hubNativeSharedStartOpts(markerPath))
+			if err == nil {
+				t.Fatal("Start succeeded with a redirected git common dir; want a refusal")
+			}
+			if !strings.Contains(err.Error(), "outside the project") {
+				t.Fatalf("Start error should name the refused common dir: %v", err)
+			}
+			if calls != 0 {
+				t.Fatalf("runtime Run was called %d time(s) on a refused start", calls)
+			}
+		})
+	}
+}

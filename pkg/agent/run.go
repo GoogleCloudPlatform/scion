@@ -1709,7 +1709,11 @@ authDone:
 	preValidationWorkspace := effectiveWorkspace
 	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 	if repoRoot == "" {
-		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+		var detectErr error
+		repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
+		if detectErr != nil && !emptyPerAgent {
+			return nil, detectErr
+		}
 	}
 	// Empty-per-agent (design #2703): the workspace is exactly the private
 	// agents/<slug>/workspace directory, never a git checkout, so no repo
@@ -2242,7 +2246,11 @@ authDone:
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
 		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
 		if repoRoot == "" {
-			repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+			var detectErr error
+			repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
+			if detectErr != nil {
+				return nil, detectErr
+			}
 		}
 	}
 
@@ -2822,22 +2830,137 @@ func writeAgentTokenFile(agentHome, token string) error {
 // inside a repo" (provision.go). explicit is set on first start (opts.Workspace)
 // and re-derived on resume from the persisted ExplicitWorkspace flag, so the
 // guarantee holds on every entry path.
-func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string {
+//
+// The returned root picks the container mount layout (pkg/runtime's
+// buildCommonRunArgs), so it is taken only from paths the broker itself
+// knows: the workspace path and the project's own root
+// (brokerProjectRoot). Git metadata inside the workspace is writable from
+// the container, so git's answer is used only to check those paths, never
+// as the root itself:
+//   - workspace at the project root (a shared workspace): the root is the
+//     workspace, whatever git reports;
+//   - workspace that is a plain checkout elsewhere (for example a workspace
+//     storage backend's host path): the root is the workspace;
+//   - workspace that is a worktree or a subdirectory of a repository: the
+//     root is the project's own repository root (projectRepoRoot).
+//
+// When git reports a common dir that does not belong to these paths, the
+// start is refused with an error instead of mounting anything.
+func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settings *config.VersionedSettings) (string, error) {
 	if explicit {
-		return ""
+		return "", nil
 	}
-	if effectiveWorkspace != "" && util.IsGitRepoDir(effectiveWorkspace) {
-		commonDir, err := util.GetCommonGitDir(effectiveWorkspace)
-		if err == nil {
-			return filepath.Dir(commonDir)
+	projectRoot := brokerProjectRoot(settings, projectDir)
+	if effectiveWorkspace != "" {
+		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
+		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
+		hasOwnGitDir := ownGitErr == nil && ownGitInfo.IsDir()
+		if ownGitErr == nil && samePath(effectiveWorkspace, projectRoot) {
+			// The workspace is the project's own checkout: the layout is
+			// the workspace itself. A .git directory whose common dir is
+			// somewhere else is refused rather than started.
+			if hasOwnGitDir {
+				if commonDir, err := util.GetCommonGitDir(effectiveWorkspace); err != nil || !samePath(commonDir, ownGitDir) {
+					return "", workspaceCommonDirError(effectiveWorkspace, commonDir, err)
+				}
+			}
+			return effectiveWorkspace, nil
 		}
-		return ""
+		if util.IsGitRepoDir(effectiveWorkspace) {
+			commonDir, err := util.GetCommonGitDir(effectiveWorkspace)
+			if err != nil {
+				return "", nil
+			}
+			if hasOwnGitDir {
+				if samePath(commonDir, ownGitDir) {
+					return effectiveWorkspace, nil
+				}
+				return "", workspaceCommonDirError(effectiveWorkspace, commonDir, nil)
+			}
+			if projectRepo := projectRepoRoot(projectRoot); projectRepo != "" && samePath(filepath.Dir(commonDir), projectRepo) {
+				return projectRepo, nil
+			}
+			return "", workspaceCommonDirError(effectiveWorkspace, commonDir, nil)
+		}
 	}
 	if util.IsGitRepoDir(projectDir) {
 		root, _ := util.RepoRootDir(projectDir)
-		return root
+		if root == "" {
+			return "", nil
+		}
+		if projectRepo := projectRepoRoot(projectRoot); projectRepo != "" && samePath(root, projectRepo) {
+			return projectRepo, nil
+		}
+		return "", fmt.Errorf("git reports repository root %s for project %s, which is not the project's own repository; refusing to start: check the repository's git configuration", root, projectDir)
 	}
-	return ""
+	return "", nil
+}
+
+// workspaceCommonDirError is detectRepoRoot's refusal for a workspace whose
+// git common dir does not belong to the project.
+func workspaceCommonDirError(workspace, commonDir string, err error) error {
+	if err != nil {
+		return fmt.Errorf("cannot resolve the git common dir of workspace %s: %w; refusing to start", workspace, err)
+	}
+	return fmt.Errorf("git common dir %s of workspace %s is outside the project's own repository; refusing to start: check the workspace's .git metadata", commonDir, workspace)
+}
+
+// brokerProjectRoot is the project's own root directory as the broker knows
+// it, from paths only: the recorded workspace path of a project whose
+// configuration lives in the broker's project-configs tree, otherwise the
+// directory holding the project's .scion directory. A workspace_path setting
+// read from a .scion directory inside the project is not used here: that
+// file can sit inside a shared workspace mount.
+func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
+	hasWorkspacePath := settings != nil && settings.WorkspacePath != ""
+	if hasWorkspacePath && isProjectConfigsPath(projectDir) {
+		return settings.WorkspacePath
+	}
+	if filepath.Base(projectDir) == config.DotScion {
+		return filepath.Dir(projectDir)
+	}
+	if hasWorkspacePath {
+		return settings.WorkspacePath
+	}
+	return projectDir
+}
+
+// projectRepoRoot returns the project's repository root: the nearest of
+// projectRoot and its ancestors that holds a .git entry, symlinks resolved,
+// or "" if there is none. It reads only the directory layout, never git
+// configuration.
+func projectRepoRoot(projectRoot string) string {
+	if projectRoot == "" {
+		return ""
+	}
+	dir, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// samePath reports whether a and b name the same path once symlinks are
+// resolved (cleaned paths are compared when either cannot be resolved).
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ra == rb
 }
 
 // workspaceSourceRoots returns the per-project root(s) a resolved workspace
