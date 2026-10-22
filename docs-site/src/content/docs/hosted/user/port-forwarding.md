@@ -212,7 +212,7 @@ Administrators can control whether port forwarding and auto-expose are permitted
 ### Which Setting Wins
 `SCION_AUTO_EXPOSE_PORTS` can come from four places. Highest first:
 
-1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
+1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's Edit page. This is recorded as the agent's explicit choice and survives reincarnate.
 2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
 3. **Harness-config env.** A template cannot set `SCION_*` keys.
 4. **The Hub default** `auto_expose_ports.enabled` (see below).

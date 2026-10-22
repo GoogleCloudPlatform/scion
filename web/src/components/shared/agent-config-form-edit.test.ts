@@ -177,12 +177,7 @@ describe('the two groupings partition the field table', () => {
     const titles = Array.from(el.shadowRoot!.querySelectorAll('section.group h3')).map((h) =>
       h.textContent!.trim()
     );
-    expect(titles).toEqual([
-      container,
-      'Needs reincarnation',
-      'Takes effect immediately',
-      'Fixed',
-    ]);
+    expect(titles).toEqual([container, 'Needs reincarnation', 'Takes effect immediately', 'Fixed']);
   });
 
   it('by tier: the identity fields are sub-headed in Needs reincarnation', async () => {
@@ -253,9 +248,13 @@ describe('held and reincarnate-only edits stay disabled (one switch)', () => {
   );
 
   it('a held disposition renders its badge, disabled, and is never sent', async () => {
-    const el = await mount('running', {}, hubEditability('running', {
-      'config.max_turns': { tier: 'T1', disposition: 'held' },
-    }));
+    const el = await mount(
+      'running',
+      {},
+      hubEditability('running', {
+        'config.max_turns': { tier: 'T1', disposition: 'held' },
+      })
+    );
     const f = field(el, 'config.max_turns');
     expect(f.textContent).toContain('Held — applies at next start');
     expect(f.querySelector('[data-testid="not-saveable"]')).not.toBeNull();
@@ -280,7 +279,9 @@ describe('name and labels apply immediately in every phase', () => {
       expect(field(el, 'name').dataset.disposition).toBe('immediate');
       expect(field(el, 'labels').dataset.disposition).toBe('immediate');
       await typeInto(el, 'name', '  renamed ');
-      const value = field(el, 'labels').querySelectorAll('sl-input.label-value')[0] as HTMLInputElement;
+      const value = field(el, 'labels').querySelectorAll(
+        'sl-input.label-value'
+      )[0] as HTMLInputElement;
       value.value = 'b';
       value.dispatchEvent(new Event('sl-input'));
       await el.updateComplete;
@@ -391,12 +392,15 @@ describe('timezone in edit mode', () => {
     await el.updateComplete;
   }
 
-  it.each(EDIT_PHASES)('%s: a picked zone is saved with Save as explicitTimezone', async (phase) => {
-    const el = await mount(phase);
-    expect(field(el, 'explicitTimezone').dataset.disposition).toBe('now');
-    await pick(el, 'Asia/Tokyo');
-    expect(el.collectTopLevel()).toEqual({ explicitTimezone: 'Asia/Tokyo' });
-  });
+  it.each(EDIT_PHASES)(
+    '%s: a picked zone is saved with Save as explicitTimezone',
+    async (phase) => {
+      const el = await mount(phase);
+      expect(field(el, 'explicitTimezone').dataset.disposition).toBe('now');
+      await pick(el, 'Asia/Tokyo');
+      expect(el.collectTopLevel()).toEqual({ explicitTimezone: 'Asia/Tokyo' });
+    }
+  );
 
   it('shows the pin; Clear unpins with ""', async () => {
     const el = await mount('stopped', {
@@ -418,9 +422,15 @@ describe('timezone in edit mode', () => {
 
   it('labels a pin adopted from an earlier TZ setting', async () => {
     const el = await mount('running', {
-      editValues: { ...EDIT_VALUES, explicitTimezone: 'Europe/Berlin', explicitTimezoneLegacy: true },
+      editValues: {
+        ...EDIT_VALUES,
+        explicitTimezone: 'Europe/Berlin',
+        explicitTimezoneLegacy: true,
+      },
     });
-    expect(field(el, 'explicitTimezone').querySelector('[data-testid="timezone-legacy"]')).not.toBeNull();
+    expect(
+      field(el, 'explicitTimezone').querySelector('[data-testid="timezone-legacy"]')
+    ).not.toBeNull();
   });
 
   it('an invalid zone is a validation error', async () => {

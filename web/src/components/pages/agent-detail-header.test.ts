@@ -192,7 +192,10 @@ describe('agent detail header actions order', () => {
       'shows Edit linking to the Edit page for a %s agent with update capability',
       (phase) => {
         window.__SCION_FEATURES__ = { 'web.agent_edit': true };
-        const agent = makeAgent({ phase, _capabilities: { actions: ['read', 'lifecycle', 'update'] } });
+        const agent = makeAgent({
+          phase,
+          _capabilities: { actions: ['read', 'lifecycle', 'update'] },
+        });
         expect(headerActionLabels(agent)).toContain('Edit');
         expect(
           renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')

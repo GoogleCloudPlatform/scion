@@ -39,7 +39,10 @@ import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
-import { heldReincarnateKeys, REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
+import {
+  heldReincarnateKeys,
+  REINCARNATE_CONFIRM_MESSAGE,
+} from '../../shared/agent-reincarnate.js';
 import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
@@ -246,7 +249,10 @@ export class ScionPageAgentEdit extends LitElement {
   override willUpdate(changed: Map<string, unknown>): void {
     super.willUpdate(changed);
     if (changed.has('targetBroker') || changed.has('agent')) {
-      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.agent?.appliedConfig?.profile ?? '');
+      this.gcp.setTarget(
+        this.targetRuntimeIsKubernetesOnly,
+        this.agent?.appliedConfig?.profile ?? ''
+      );
     }
     if (changed.has('targetBroker')) void this.gcpAccounts.targetChanged();
   }
@@ -397,10 +403,11 @@ export class ScionPageAgentEdit extends LitElement {
     this.busy = true;
     this.error = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/agents/${encodeURIComponent(this.agentId)}/reincarnate`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
-      );
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}/reincarnate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
       if (!res.ok) {
         this.error = await lifecycleActionErrorMessage(res, 'Failed to reincarnate agent');
         return;
@@ -456,10 +463,7 @@ export class ScionPageAgentEdit extends LitElement {
               Reincarnate…
             </sl-button>`
           : nothing}
-        <a
-          href="/agents/${encodeURIComponent(this.agentId)}"
-          class="back"
-          data-testid="back"
+        <a href="/agents/${encodeURIComponent(this.agentId)}" class="back" data-testid="back"
           >Back to agent</a
         >
       </div>

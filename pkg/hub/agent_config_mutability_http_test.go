@@ -605,7 +605,10 @@ func TestAgentEditGoldens(t *testing.T) {
 		// agent only at the next reincarnation.
 		heldForReincarnate []string
 		check              func(t *testing.T, inline *api.ScionConfig)
-		warnings           int
+		// agentCheck, when set, checks the agent as written (its
+		// top-level fields and applied config).
+		agentCheck func(t *testing.T, after *store.Agent)
+		warnings   int
 		// notWarned are keys no warning may name: Unlimited on Max duration
 		// ("0") applies at the next start, so it is not "cleared".
 		notWarned []string
@@ -628,6 +631,30 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Equal(t, "claude-sonnet", inline.Model)
 			assert.Equal(t, 40, inline.MaxTurns)
 			assert.Equal(t, "2h", inline.MaxDuration)
+		}},
+		// The Edit page's metadata, timezone, env and task edits
+		// (ptone/scion#3975).
+		{name: "metadata", applied: []string{"labels", "name"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, "old-model", inline.Model)
+		}, agentCheck: func(t *testing.T, after *store.Agent) {
+			assert.Equal(t, "renamed-agent", after.Name)
+			assert.Equal(t, map[string]string{"team": "web", "tier": "gold"}, after.Labels)
+		}},
+		{name: "timezone", applied: []string{"explicitTimezone"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, "old-model", inline.Model)
+		}, agentCheck: func(t *testing.T, after *store.Agent) {
+			assert.Equal(t, "Asia/Tokyo", after.AppliedConfig.ExplicitTimezone)
+		}},
+		{name: "env", applied: []string{"config.env"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, map[string]string{"FOO": "bar", "NEW": "1"}, inline.Env)
+		}, agentCheck: func(t *testing.T, after *store.Agent) {
+			assert.Equal(t, "bar", after.AppliedConfig.Env["FOO"])
+			assert.Equal(t, "1", after.AppliedConfig.Env["NEW"])
+		}},
+		{name: "task", applied: []string{"config.task"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, "fix the bug", inline.Task)
+		}, agentCheck: func(t *testing.T, after *store.Agent) {
+			assert.Equal(t, "fix the bug", after.AppliedConfig.Task)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -657,6 +684,9 @@ func TestAgentEditGoldens(t *testing.T) {
 			after, err := s.GetAgent(context.Background(), agent.ID)
 			require.NoError(t, err)
 			tc.check(t, after.AppliedConfig.InlineConfig)
+			if tc.agentCheck != nil {
+				tc.agentCheck(t, after)
+			}
 		})
 	}
 }

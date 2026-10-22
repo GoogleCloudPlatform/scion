@@ -1032,7 +1032,10 @@ export class ScionAgentConfigForm extends LitElement {
         case 'timezone':
           return this.editValues.explicitTimezone ?? '';
         case 'top-choice':
-          return (f.topKey === 'agentRole' ? this.editValues.agentRole : this.editValues.messageMode) ?? '';
+          return (
+            (f.topKey === 'agentRole' ? this.editValues.agentRole : this.editValues.messageMode) ??
+            ''
+          );
         default:
           break;
       }

@@ -69,10 +69,7 @@ async function until(ready: () => boolean): Promise<void> {
 
 beforeAll(async () => {
   stubFetch();
-  await Promise.all([
-    import('./agent-create.js'),
-    import('./project-settings.js'),
-  ]);
+  await Promise.all([import('./agent-create.js'), import('./project-settings.js')]);
 }, 30_000);
 
 afterEach(() => {

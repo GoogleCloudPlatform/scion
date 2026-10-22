@@ -36,9 +36,9 @@ import (
 // in sync with any config edit that actually changes a field's live value
 // (invariant E), and leave it alone for an edit that merely echoes the live
 // value back -- which is what the configure page's Save and Start both do on
-// every call. All eight hub-side test-plan items live here; the ninth
-// (web/src/components/pages/agent-configure.ts's buildConfig) is a Vitest
-// test alongside that file.
+// every call. All eight hub-side test-plan items live here; the ninth was a
+// Vitest test of the Configure page, which the Edit page replaced
+// (ptone/scion#3975).
 //
 // newReincarnateTestAgent and setupReincarnateTestServer (defined in
 // handlers_agent_reincarnate_test.go) are reused throughout: they build a

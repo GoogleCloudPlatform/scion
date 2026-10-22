@@ -536,7 +536,7 @@ above it left the key unset:
 
 | Priority | Source | Where it is recorded |
 | --- | --- | --- |
-| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
+| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's Edit page | the agent's explicit config, so it survives reincarnate |
 | | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
 | | harness-config env | the harness config |
 | Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
