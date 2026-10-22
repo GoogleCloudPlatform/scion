@@ -783,6 +783,17 @@ jobs:
         with:
           workload: sqlite-nonhub
 
+      # pkg/hub/attache2e attaches to a real tmux server; with
+      # SCION_TEST_REQUIRE_TMUX=1 it fails instead of skipping when tmux
+      # is missing (ptone/scion#3312).
+      - name: Install tmux
+        run: |
+          if ! command -v tmux &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          tmux -V
+
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
       # because it needs a real SQLite-backed store (ptone/scion#1118). This
@@ -800,6 +811,8 @@ jobs:
       # timeout stays above it so a real hang still produces go's goroutine
       # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
+        env:
+          SCION_TEST_REQUIRE_TMUX: "1"
         run: make test-sqlite-nonhub
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build

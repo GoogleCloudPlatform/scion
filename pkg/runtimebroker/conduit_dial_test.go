@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -436,7 +437,7 @@ func TestHubConnection_ConduitDialerLifecycle(t *testing.T) {
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = true
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, &mockManager{}, rt)
+	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
 	srv.config.FlatInstance = &FlatInstanceConfig{Identity: &brokeridentity.Identity{
 		RuntimeBrokerID: "broker-1",
 		RuntimeTarget:   api.RuntimeTargetDescriptor{ID: "target-1", Type: "docker"},

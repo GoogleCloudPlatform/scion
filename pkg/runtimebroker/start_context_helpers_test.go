@@ -91,7 +91,7 @@ runtimes:
 	cfg.ForceRuntime = runtimeName
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return runtimeName }}
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // newTestServerForStartContextMultiProfile is newTestServerForStartContextRuntime
@@ -157,7 +157,7 @@ runtimes:
 	// whose profile names a different runtime than the broker's default.
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return defaultRuntimeName }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	// Once settings resolve the dispatch's profile to otherRuntimeName
 	// (differing from defaultRuntimeName), resolveManagerForOpts falls
 	// through to this resolver to construct it. A real "kubernetes" runtime
@@ -169,9 +169,9 @@ runtimes:
 	// non-default profile (otherProfile -> otherRuntimeName), so the
 	// resolver can report otherRuntimeName unconditionally rather than
 	// inspecting profileFlag.
-	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = withoutRecord(func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return otherRuntimeName }}
-	}
+	})
 	return srv, dotScion
 }
 
@@ -322,7 +322,7 @@ runtimes:
 	rt := &runtime.MockRuntime{
 		NameFunc: func() string { return runtimeName },
 	}
-	return New(cfg, mgr, rt)
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // requireWorktreeGit skips the test when the host's git is too old for

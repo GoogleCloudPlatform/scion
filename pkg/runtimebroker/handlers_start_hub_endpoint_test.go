@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -41,7 +42,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 
 		mgr := &provisionCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Linked project: projectPath ends in .scion, settings.yaml is directly there
 		projectDir := filepath.Join(t.TempDir(), ".scion")
@@ -87,7 +88,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 
 		mgr := &provisionCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(cfg, mgr, rt)
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 		// Hub-managed project: projectPath is the workspace parent (~/.scion/projects/<slug>),
 		// settings.yaml lives in the .scion subdirectory
@@ -138,7 +139,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// Create a temp project dir with settings.yaml but no hub endpoint
 	projectDir := t.TempDir()
@@ -181,7 +182,7 @@ func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
 
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://hub.example.com:8080", "SCION_PROJECT_ID": "project-1"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
@@ -217,7 +218,7 @@ func TestStartAgentResolvedEnvHubURLFallback(t *testing.T) {
 
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := `{"resolvedEnv": {"SCION_HUB_URL": "http://hub.example.com:9090"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
@@ -256,7 +257,7 @@ func TestStartAgentResolvedEnvHubEndpointWithContainerOverride(t *testing.T) {
 
 	mgr := &provisionCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	// resolvedEnv has localhost endpoint from the hub
 	body := `{"resolvedEnv": {"SCION_HUB_ENDPOINT": "http://localhost:9810"}}`
@@ -344,7 +345,7 @@ runtimes:
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt), mgr
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 	}
 
 	assertDispatched := func(t *testing.T, mgr *envCapturingManager) {
@@ -439,7 +440,7 @@ func TestHTTPStartAndRestart_DockerComboBridgeOverrideMatchesCreate(t *testing.T
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		return New(cfg, mgr, rt), mgr
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 	}
 
 	cases := []struct {
@@ -573,7 +574,7 @@ runtimes:
 
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt), mgr
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr
 	}
 
 	assertRescued := func(t *testing.T, mgr *envCapturingManager) {
@@ -654,7 +655,7 @@ func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
 		{Name: "test-agent", ProjectPath: projectDir, Labels: map[string]string{"scion.project_id": "p1"}},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/restart?projectId=p1", nil)
 	w := httptest.NewRecorder()
@@ -685,7 +686,7 @@ func TestCreateAgentPortPreservedAcrossBridge(t *testing.T) {
 
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	body := `{
 		"name": "test-agent",

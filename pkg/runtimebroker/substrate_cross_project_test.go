@@ -75,7 +75,7 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
-	return New(cfg, mgr, rt), fc
+	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), fc
 }
 
 // testProjectScionDir creates a real, on-disk project directory named

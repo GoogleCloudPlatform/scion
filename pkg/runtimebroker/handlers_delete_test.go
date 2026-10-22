@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -146,7 +147,7 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 		agents: []api.AgentInfo{}, // No containers
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -199,7 +200,7 @@ func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
 
 	mgr := &mockManager{agents: []api.AgentInfo{}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -254,7 +255,7 @@ func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	// No deleteFiles, no softDelete: a plain container-record removal.
 	// Decodes to id="..", action="".
@@ -287,7 +288,7 @@ func TestDeleteAgent_InvalidIDWithDeleteFilesRejected(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/a%5Cb?deleteFiles=true", nil)
 	rec := httptest.NewRecorder()

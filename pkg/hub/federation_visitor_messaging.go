@@ -33,16 +33,39 @@ import (
 // may message the agent a sub-route names, the request fields a visitor may
 // use, and the sender metadata the agent sees.
 
-// visitorAgentRef names the agent a visitor sub-route acts on.
+// visitorAccess is the per-request check a visitor sub-route needs
+// (admitVisitorSubRoute). The zero value is no check, and a sub-route with
+// it refuses every visitor.
+type visitorAccess int
+
+const (
+	visitorAccessNone visitorAccess = iota
+	// visitorAccessMessage: the visitor may message the named agent now
+	// (authorizeAgentMessage).
+	visitorAccessMessage
+	// visitorAccessAgentList: the visitor holds a current grant on the
+	// named project and agent.list there (visitorMayListProjectAgents).
+	visitorAccessAgentList
+	// visitorAccessAgentRead: the visitor holds a current grant on the
+	// named agent's project and agent.read on the agent
+	// (visitorMayReadAgent).
+	visitorAccessAgentRead
+)
+
+// visitorAgentRef names the agent (or, on the agent list, the project) a
+// visitor sub-route acts on, and the check the sub-route needs.
 type visitorAgentRef struct {
 	// ProjectID is the project path segment of the project form ({uuid} or
 	// {uuid}__{slug}), "" on the other forms.
 	ProjectID string
 	// AgentID is the agent path segment: an agent ID on the by-ID form, an
-	// agent ID or slug on the project form, "" on a DM route.
+	// agent ID or slug on the project form, "" on a DM route and on the
+	// agent list.
 	AgentID string
 	// DMKey is the conversation key of a DM route, "" on the other forms.
 	DMKey string
+	// Access is the check of the matched sub-route (visitorSubRoute.Access).
+	Access visitorAccess
 }
 
 // visitorSubRoute is one sub-path, under a subtree route pattern (a
@@ -56,6 +79,8 @@ type visitorSubRoute struct {
 	// SubPath is the admitted path shape under Pattern, for documentation
 	// and test labels.
 	SubPath string
+	// Access is the per-request check a visitor must pass on the sub-path.
+	Access visitorAccess
 	// match reports whether a request has this shape and returns the agent
 	// reference it names.
 	match func(r *http.Request) (visitorAgentRef, bool)
@@ -63,21 +88,27 @@ type visitorSubRoute struct {
 
 // visitorAdmittedSubRoutes is the complete, deny-by-default list of the
 // sub-routes of subtree patterns that admit a visitor: sending a message
-// to an agent (project and by-ID forms), and the visitor's own DM history
-// and read marker with an agent. On a subtree route a visitor request
-// that matches no entry for the route's pattern and the request's method
-// is refused (admitVisitorSubRoute).
+// to an agent (project and by-ID forms), the visitor's own DM history and
+// read marker with an agent, and listing and reading the agents of a
+// project the visitor holds a grant on (project form only, answered with
+// the visitor view, visitorAgentView). On a subtree route a visitor
+// request that matches no entry for the route's pattern and the request's
+// method is refused (admitVisitorSubRoute).
 var visitorAdmittedSubRoutes = []visitorSubRoute{
 	{Pattern: "/api/v1/projects/", Method: http.MethodPost, SubPath: "{projectId}/agents/{agentId}/message",
-		match: matchVisitorAgentSubRoute(ProjectAgentRouteActionMessage)},
+		Access: visitorAccessMessage, match: matchVisitorAgentSubRoute(ProjectAgentRouteActionMessage)},
 	{Pattern: "/api/v1/agents/", Method: http.MethodPost, SubPath: "{agentId}/message",
-		match: matchVisitorAgentSubRoute(AgentRouteActionMessage)},
+		Access: visitorAccessMessage, match: matchVisitorAgentSubRoute(AgentRouteActionMessage)},
 	{Pattern: "/api/v1/chat/conversations/", Method: http.MethodGet, SubPath: "{dmKey}/messages",
-		match: matchVisitorDMSubRoute("messages")},
+		Access: visitorAccessMessage, match: matchVisitorDMSubRoute("messages")},
 	{Pattern: "/api/v1/chat/conversations/", Method: http.MethodGet, SubPath: "{dmKey}/read",
-		match: matchVisitorDMSubRoute("read")},
+		Access: visitorAccessMessage, match: matchVisitorDMSubRoute("read")},
 	{Pattern: "/api/v1/chat/conversations/", Method: http.MethodPost, SubPath: "{dmKey}/read",
-		match: matchVisitorDMSubRoute("read")},
+		Access: visitorAccessMessage, match: matchVisitorDMSubRoute("read")},
+	{Pattern: "/api/v1/projects/", Method: http.MethodGet, SubPath: "{projectId}/agents",
+		Access: visitorAccessAgentList, match: matchVisitorProjectAgentsSubRoute(ProjectAgentRouteCollection)},
+	{Pattern: "/api/v1/projects/", Method: http.MethodGet, SubPath: "{projectId}/agents/{agentId}",
+		Access: visitorAccessAgentRead, match: matchVisitorProjectAgentsSubRoute(ProjectAgentRouteRoot)},
 }
 
 // matchVisitorAgentSubRoute matches the agent sub-route id, resolved from
@@ -87,6 +118,21 @@ func matchVisitorAgentSubRoute(id AgentSubRouteID) func(r *http.Request) (visito
 	return func(r *http.Request) (visitorAgentRef, bool) {
 		route, ok := ResolveAgentSubRoute(r.Method, r.URL.EscapedPath())
 		if !ok || route.RouteID != id || route.AgentID == "" {
+			return visitorAgentRef{}, false
+		}
+		return visitorAgentRef{ProjectID: route.ProjectID, AgentID: route.AgentID}, true
+	}
+}
+
+// matchVisitorProjectAgentsSubRoute matches the project-form agent
+// sub-route id (the agent list or one agent), resolved from the request's
+// percent-encoded path exactly as routeGuard resolves it for the handler.
+// The returned reference names the project, and the agent on the agent
+// route.
+func matchVisitorProjectAgentsSubRoute(id AgentSubRouteID) func(r *http.Request) (visitorAgentRef, bool) {
+	return func(r *http.Request) (visitorAgentRef, bool) {
+		route, ok := ResolveAgentSubRoute(r.Method, r.URL.EscapedPath())
+		if !ok || route.RouteID != id || route.ProjectID == "" {
 			return visitorAgentRef{}, false
 		}
 		return visitorAgentRef{ProjectID: route.ProjectID, AgentID: route.AgentID}, true
@@ -125,13 +171,15 @@ func routePatternIsSubtree(pattern string) bool {
 }
 
 // matchVisitorSubRoute returns the agent reference of the first entry of
-// visitorAdmittedSubRoutes for pattern and r's method that r matches.
+// visitorAdmittedSubRoutes for pattern and r's method that r matches, with
+// the entry's Access.
 func matchVisitorSubRoute(pattern string, r *http.Request) (visitorAgentRef, bool) {
 	for _, sub := range visitorAdmittedSubRoutes {
 		if sub.Pattern != pattern || sub.Method != r.Method {
 			continue
 		}
 		if ref, ok := sub.match(r); ok {
+			ref.Access = sub.Access
 			return ref, true
 		}
 	}
@@ -150,8 +198,8 @@ func writeVisitorRefusal(w http.ResponseWriter) {
 }
 
 // errVisitorTargetRefused is visitorTargetAgent's answer for a target the
-// visitor may not act on: an unknown project or agent, or a DM key that is
-// not the visitor's own DM with an agent.
+// visitor may not act on: an unknown project or agent, a deleted agent, or
+// a DM key that is not the visitor's own DM with an agent.
 var errVisitorTargetRefused = errors.New("visitor target refused")
 
 // admitVisitorSubRoute is routeGuard's second visitor check; it runs after
@@ -163,12 +211,22 @@ var errVisitorTargetRefused = errors.New("visitor target refused")
 //   - the federation.project_visitors experiment is enabled;
 //   - the request matches an entry of visitorAdmittedSubRoutes for the
 //     route's pattern and the request's method;
-//   - the entry names an agent that exists (in the named project, on the
-//     project form), and on a DM route the key is the visitor's own DM
-//     with that agent;
-//   - the visitor may message the agent now (authorizeAgentMessage: a
-//     current project-visitor grant, through agent.message, and the agent's
-//     message mode).
+//   - the entry's Access check passes (below).
+//
+// The Access checks:
+//   - visitorAccessMessage: the entry names an agent that exists and is
+//     not deleted (in the named project, on the project form), on a DM
+//     route the key is the visitor's own DM with that agent, and the
+//     visitor may message the agent now (authorizeAgentMessage: a current
+//     project-visitor grant, through agent.message, and the agent's
+//     message mode);
+//   - visitorAccessAgentList: the named project exists, the visitor holds
+//     a current grant on it and agent.list there
+//     (visitorMayListProjectAgents);
+//   - visitorAccessAgentRead: the named agent exists in the named project
+//     and is not deleted, the visitor holds a current grant on that project
+//     and agent.read on the agent (visitorMayReadAgent); the agent's
+//     message mode does not matter.
 //
 // Otherwise it writes the uniform refusal (writeVisitorRefusal) and
 // returns false; a store error other than not-found is written as such.
@@ -190,13 +248,39 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 	if !ok {
 		return refuse("sub-route is not open to visitors")
 	}
+	switch ref.Access {
+	case visitorAccessAgentList:
+		allowed, err := s.visitorMayListProjectAgents(r.Context(), visitor, ref.ProjectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if !allowed {
+			return refuse("unknown project, or no current grant with agent.list")
+		}
+		return true
+	case visitorAccessMessage, visitorAccessAgentRead:
+	default:
+		return refuse("sub-route has no visitor check")
+	}
 	agent, err := s.visitorTargetAgent(r.Context(), visitor, ref)
 	if errors.Is(err, errVisitorTargetRefused) {
-		return refuse("unknown target or not the visitor's own DM")
+		return refuse("unknown or deleted target, or not the visitor's own DM")
 	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
+	}
+	if ref.Access == visitorAccessAgentRead {
+		allowed, err := s.visitorMayReadAgent(r.Context(), visitor, agent)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if !allowed {
+			return refuse("deleted agent, or no current grant with agent.read")
+		}
+		return true
 	}
 	if allowed, reason, _ := s.authorizeAgentMessage(r.Context(), visitor, agent, false); !allowed {
 		return refuse(reason)
@@ -206,7 +290,8 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 
 // visitorTargetAgent resolves the agent ref names. A DM key must be the
 // visitor's own DM with an agent (visitorDMAgentID). An unknown project or
-// agent, or a key that is not the visitor's DM, returns
+// agent, a deleted agent (on every form, so a visitor can neither message
+// it nor read its DM), or a key that is not the visitor's DM, returns
 // errVisitorTargetRefused; any other store error is returned as is.
 func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentity, ref visitorAgentRef) (*store.Agent, error) {
 	if s.store == nil {
@@ -240,7 +325,7 @@ func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentit
 	if err != nil {
 		return nil, err
 	}
-	if agent == nil {
+	if agent == nil || !agent.DeletedAt.IsZero() {
 		return nil, errVisitorTargetRefused
 	}
 	return agent, nil
@@ -363,6 +448,23 @@ func userSenderAddress(user UserIdentity) string {
 		return "user:" + email
 	}
 	return "user:" + user.ID()
+}
+
+// visitorDeliveryConversation returns the conversation ID and DM key a
+// message send reports to its sender: for a *VisitorIdentity, convID (the
+// conversation the message was persisted in, "" when it was not) and the
+// visitor's DM key with agent; for any other identity, "" for both, so
+// no other sender's response changes.
+func visitorDeliveryConversation(identity Identity, agent *store.Agent, convID string) (string, string) {
+	visitor, ok := identity.(*VisitorIdentity)
+	if !ok || visitor == nil || agent == nil {
+		return "", ""
+	}
+	key, err := messages.DMConversationKey("agent", agent.ID, "user", visitor.ID())
+	if err != nil {
+		key = ""
+	}
+	return convID, key
 }
 
 // stampVisitorSender returns md with the visitor sender metadata set when

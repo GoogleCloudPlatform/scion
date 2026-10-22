@@ -265,6 +265,13 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"handlers_groups.go:groupClosureAuthority:ListRoleBindingsForPrincipals":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 
+	// Visitor admission (federated accounts only). Every caller passes the
+	// ID of a *VisitorIdentity, and resolveFederatedVisitor builds one only
+	// for a kind federated account (federation_visitor.go:98, before the one
+	// NewVisitorIdentity call at :118). A user's kind never changes and
+	// federated is no test identity kind, so the clamps would remove nothing.
+	"federation_visitor_agents.go:visitorGrantBindings:ListRoleBindingsForPrincipal": "visitor admission: the caller's own project-visitor grants (project scope only) for the visitor agent list and read routes and its own grant list; reached only with a *VisitorIdentity, built only for a kind federated account (federation_visitor.go:98), never a test identity; federated accounts only",
+
 	// Sign-in (every sign-in path refuses test identities).
 	"handlers_auth.go:hasUIPromotedBinding:ListRoleBindingsForPrincipal": "sign-in: admin_emails demotion protection; test identities never sign in",
 

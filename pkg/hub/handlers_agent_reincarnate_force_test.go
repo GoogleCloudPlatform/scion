@@ -106,20 +106,6 @@ func TestReincarnateMove_ForceDryRun_RecreateVerdictNoSideEffects(t *testing.T) 
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// A real request whose verdict is recreate is refused with 501 until the
-// forced move itself exists, without any side effect.
-func TestReincarnateMove_ForceReal_RecreateNotEnabled(t *testing.T) {
-	f := setupForceMoveFixture(t, true, nil)
-	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
-	count := f.agentCount(t)
-	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID, ForceMove: true})
-	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "forced moves are not enabled yet")
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation stays on the source")
-	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
-	f.assertNoMoveSideEffects(t, count)
-}
-
 // End to end: --force on an export-eligible agent is an export move.
 func TestReincarnateMove_ForceDryRun_ExportEligibleStaysExport(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)

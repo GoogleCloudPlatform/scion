@@ -377,7 +377,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
-	srv := New(cfg, defaultMgr, defaultRT)
+	srv := New(cfg, defaultMgr, defaultRT, config.RuntimeBuildRecord{})
 
 	// The default profile: SubstrateRuntime reports the
 	// PerProfileInstancesRuntime capability, so resolveManagerForOpts never
@@ -386,12 +386,12 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// with whatever actually determines a distinct instance — so this may
 	// or may not be srv.manager itself; either way it must be bound to
 	// substrate-prod's config and behave correctly.
-	prodMgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "prod-agent", Profile: "substrate", ProjectPath: projectDir})
+	prodMgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "prod-agent", Profile: "substrate", ProjectPath: projectDir}))
 	runSubstrateAgent(t, prodMgr, "proj--prod-agent", "prod-agent", "550e8400-e29b-41d4-a716-446655440010")
 
 	// The non-default profile: must resolve to a manager bound to
 	// substrate-nip's own config, not silently fall back to the default's.
-	nipMgr, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "nip-agent", Profile: "substrate-nip", ProjectPath: projectDir})
+	nipMgr, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "nip-agent", Profile: "substrate-nip", ProjectPath: projectDir}))
 	if nipMgr == srv.manager {
 		t.Fatal("resolveManagerForOpts(profile=substrate-nip) returned the default manager — the bug this test targets")
 	}
@@ -511,9 +511,9 @@ func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
-	srv := New(cfg, defaultMgr, defaultRT)
+	srv := New(cfg, defaultMgr, defaultRT, config.RuntimeBuildRecord{})
 
-	mgr, rtName := srv.resolveManagerForOpts(api.StartOptions{Name: "attacker-agent", Profile: "substrate", ProjectPath: projectDir})
+	mgr, rtName := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "attacker-agent", Profile: "substrate", ProjectPath: projectDir}))
 	if rtName != "error" {
 		t.Fatalf("resolveManagerForOpts(profile=substrate, project-defined) resolved runtime type = %q, want %q (the project-defined substrate block must be refused)", rtName, "error")
 	}
@@ -580,9 +580,9 @@ runtimes:
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
-	got, _ := srv.resolveManagerForOpts(api.StartOptions{Name: "test-agent", Profile: "local", ProjectPath: projectDir})
+	got, _ := managerAndType(srv.resolveManagerForOpts(api.StartOptions{Name: "test-agent", Profile: "local", ProjectPath: projectDir}))
 	if got != srv.manager {
 		t.Error("expected the default manager when a non-substrate profile resolves to the same runtime type")
 	}
