@@ -6065,6 +6065,20 @@ func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broke
 	return s.Store.UpdateRuntimeBroker(ctx, broker)
 }
 
+// RefreshRuntimeBrokerState is the heartbeat's broker write; a refresh that
+// reports a change and is stored counts as one broker row write.
+func (s *countingBrokerLoadStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(*store.RuntimeBroker) bool) error {
+	wrote := false
+	err := s.Store.RefreshRuntimeBrokerState(ctx, id, func(b *store.RuntimeBroker) bool {
+		wrote = refresh(b)
+		return wrote
+	})
+	if err == nil && wrote {
+		s.updateRuntimeBrokerCalls++
+	}
+	return err
+}
+
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
 	s.getRuntimeBrokerCalls++
 	if s.getRuntimeBrokerErr != nil {
