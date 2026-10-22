@@ -17,7 +17,9 @@ package transfer
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 )
@@ -466,10 +468,33 @@ func TestApplyStagedWorkspace_ShallowValidated(t *testing.T) {
 	}
 }
 
-// TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile stands in for a
-// case-insensitive receiver with a hard link: the destination's README.md
-// and Readme.md are one file, the source renamed it to Readme.md, and the
-// file must survive the deletion pass (in content and in the ref state).
+// foldingListing stands in for a case-insensitive filesystem's directory
+// listing: the destination holds one file under two names (a hard link),
+// and the listing shows only the on-disk spelling, hiding the other name.
+type foldingListing struct {
+	fs.FS
+	hidden map[string]bool
+}
+
+func (f foldingListing) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := fs.ReadDir(f.FS, name)
+	if err != nil {
+		return nil, err
+	}
+	out := entries[:0]
+	for _, e := range entries {
+		if !f.hidden[path.Join(name, e.Name())] {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile: on a case-insensitive
+// receiver, a source that renamed README.md to Readme.md (same content)
+// must not lose the file to the deletion pass, in content or in the ref
+// state. A hard link gives the destination the second name; the listing
+// hides it, as the folding filesystem lists only the on-disk spelling.
 func TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile(t *testing.T) {
 	staging, dest := t.TempDir(), t.TempDir()
 	writeTreeT(t, staging, map[string]string{
@@ -487,13 +512,47 @@ func TestApplyStagedWorkspace_CaseOnlyRenameKeepsFile(t *testing.T) {
 	if err := os.Link(filepath.Join(dest, ".git/refs/heads/main"), filepath.Join(dest, ".git/refs/heads/Main")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}); err != nil {
+	listing := func(r *os.Root) fs.FS {
+		return foldingListing{FS: r.FS(), hidden: map[string]bool{"Readme.md": true, ".git/refs/heads/Main": true}}
+	}
+	if _, err := applyStagedWorkspace(staging, dest, StagedApplyOptions{GitData: true}, listing); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	for _, rel := range []string{"README.md", "Readme.md", ".git/refs/heads/main", ".git/refs/heads/Main"} {
+	for _, rel := range []string{"README.md", ".git/refs/heads/main"} {
 		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
 			t.Errorf("%s removed: %v", rel, err)
 		}
+	}
+}
+
+// TestApplyStagedWorkspace_DeletedHardLinkRemoved checks the other side of
+// the alias rule: a genuine hard link the source no longer has (listed under
+// its own name) is removed like any extraneous file, in the same directory
+// or another one.
+func TestApplyStagedWorkspace_DeletedHardLinkRemoved(t *testing.T) {
+	staging, dest := t.TempDir(), t.TempDir()
+	writeTreeT(t, staging, map[string]string{"a.txt": "shared\n"})
+	writeTreeT(t, dest, map[string]string{"a.txt": "shared\n"})
+	if err := os.MkdirAll(filepath.Join(dest, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(dest, "a.txt"), filepath.Join(dest, "b.txt")); err != nil {
+		t.Skipf("hard links unsupported: %v", err)
+	}
+	if err := os.Link(filepath.Join(dest, "a.txt"), filepath.Join(dest, "sub/c.txt")); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := ApplyStagedWorkspace(staging, dest, StagedApplyOptions{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := readT(t, filepath.Join(dest, "a.txt")); got != "shared\n" {
+		t.Errorf("a.txt = %q", got)
+	}
+	absentT(t, filepath.Join(dest, "b.txt"))
+	absentT(t, filepath.Join(dest, "sub/c.txt"))
+	if stats.Deleted != 2 {
+		t.Errorf("Deleted = %d, want 2", stats.Deleted)
 	}
 }
 

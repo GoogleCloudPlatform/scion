@@ -143,6 +143,13 @@ func bytesSource(data []byte) fileSource {
 // staging is a private directory the caller filled (rclone with the
 // workspace sync filters); dest must already exist.
 func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (StagedApplyStats, error) {
+	return applyStagedWorkspace(staging, dest, opts, (*os.Root).FS)
+}
+
+// applyStagedWorkspace is ApplyStagedWorkspace with the view of the
+// destination its deletion passes walk (listing) as a parameter, so a test
+// can stand in for a filesystem that lists one spelling of a name.
+func applyStagedWorkspace(staging, dest string, opts StagedApplyOptions, listing func(*os.Root) fs.FS) (StagedApplyStats, error) {
 	var stats StagedApplyStats
 
 	type stagedFile struct {
@@ -262,13 +269,13 @@ func ApplyStagedWorkspace(staging, dest string, opts StagedApplyOptions) (Staged
 		}
 	}
 
-	deleted, err := deleteExtraneous(root, ".", keep, contentDirs, IsWorkspaceSyncContent)
+	deleted, err := deleteExtraneous(root, listing(root), ".", keep, contentDirs, IsWorkspaceSyncContent)
 	stats.Deleted += deleted
 	if err != nil {
 		return stats, err
 	}
 	if applyGitState {
-		deleted, err := deleteExtraneous(root, dotGit, keep, nil, IsWorkspaceGitState)
+		deleted, err := deleteExtraneous(root, listing(root), dotGit, keep, nil, IsWorkspaceGitState)
 		stats.Deleted += deleted
 		if err != nil {
 			return stats, err
@@ -556,11 +563,16 @@ func createTemp(dir *os.Root, mode fs.FileMode) (*os.File, error) {
 // for os.SameFile lookups.
 type keptFiles map[int64][]fs.FileInfo
 
-// indexKept resolves every kept path in scope to its destination file.
-func indexKept(root *os.Root, keep map[string]bool, inScope func(rel string, isDir bool) bool) keptFiles {
+// indexKept resolves to its destination file every kept path in scope that
+// the destination walk did not list under that spelling: such a path
+// reaches an entry listed under another name (a case-insensitive or
+// otherwise name-folding filesystem). A kept path that was listed is not
+// indexed, so a genuine hard link of it, listed under its own name, is not
+// protected. On a filesystem that does not fold names the index is empty.
+func indexKept(root *os.Root, keep, listed map[string]bool, inScope func(rel string, isDir bool) bool) keptFiles {
 	k := keptFiles{}
 	for rel := range keep {
-		if !inScope(rel, false) {
+		if listed[rel] || !inScope(rel, false) {
 			continue
 		}
 		if info, err := root.Lstat(rel); err == nil && info.Mode().IsRegular() {
@@ -580,13 +592,14 @@ func (k keptFiles) has(info fs.FileInfo) bool {
 	return false
 }
 
-// deleteExtraneous removes, under the directory start of root, the regular
+// deleteExtraneous walks listing (the destination's view of root) and
+// removes, under the directory start of root, the regular
 // files in scope (inScope, by root-relative path) that are not in keep, and
 // then the directories in scope that are not in keepDirs once they are
 // empty (keepDirs nil: no directory is removed). Directories out of scope
 // are not entered, and symlinks are never followed or removed. It returns
 // the number of files removed.
-func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]bool, inScope func(rel string, isDir bool) bool) (int, error) {
+func deleteExtraneous(root *os.Root, listing fs.FS, start string, keep, keepDirs map[string]bool, inScope func(rel string, isDir bool) bool) (int, error) {
 	if start != "." {
 		info, err := root.Lstat(start)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -600,7 +613,8 @@ func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]boo
 		}
 	}
 	var extraneous, dirs []string
-	err := fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
+	listed := map[string]bool{}
+	err := fs.WalkDir(listing, start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -616,6 +630,8 @@ func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]boo
 		switch {
 		case d.Type().IsRegular() && !keep[p]:
 			extraneous = append(extraneous, p)
+		case d.Type().IsRegular():
+			listed[p] = true
 		case d.IsDir() && keepDirs != nil && !keepDirs[p]:
 			dirs = append(dirs, p)
 		}
@@ -624,12 +640,14 @@ func deleteExtraneous(root *os.Root, start string, keep, keepDirs map[string]boo
 	if err != nil {
 		return 0, fmt.Errorf("failed to scan workspace: %w", err)
 	}
-	// A destination entry that is the same file as a kept entry is kept: on
-	// a case-insensitive (or otherwise name-folding) filesystem, a kept
-	// path spelled differently (a case-only rename) resolves to it.
+	// A destination entry that a kept path reaches under another spelling
+	// is kept: on a case-insensitive (or otherwise name-folding)
+	// filesystem, a kept path spelled differently (a case-only rename)
+	// resolves to it, and the walk lists it only under its on-disk name.
+	// A hard link listed under its own name is not protected (indexKept).
 	var kept keptFiles
 	if len(extraneous) > 0 {
-		kept = indexKept(root, keep, inScope)
+		kept = indexKept(root, keep, listed, inScope)
 	}
 	deleted := 0
 	for _, rel := range extraneous {

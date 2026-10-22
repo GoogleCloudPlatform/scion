@@ -235,6 +235,10 @@ func TestUploadWorkspace_SkipsUnsupportedRepository(t *testing.T) {
 			for _, rel := range []string{".git/HEAD", ".git/refs/heads/main"} {
 				assertAbsent(t, filepath.Join(bucket, rel))
 			}
+			// Clearing the ref state leaves the objects.
+			if got := readFile(t, filepath.Join(bucket, ".git/objects/ab/cd")); got != "o" {
+				t.Errorf("bucket object = %q, want kept", got)
+			}
 			assertAbsent(t, filepath.Join(bucket, marker))
 
 			writeTree(t, receiver, map[string]string{".git/HEAD": "ref: refs/heads/main\n", ".git/refs/heads/main": "receiver\n"})
