@@ -62,6 +62,12 @@ type startContext struct {
 	// default runtime. The create path reports it to the hub.
 	RuntimeType string
 
+	// Resolution is the full runtime resolution behind Manager and
+	// RuntimeType (the same resolveExistingAgentManager call), with How
+	// settled for the operation (forCreate / forExistingAgent). The create
+	// path resolves its Kubernetes placement from it.
+	Resolution runtimeResolution
+
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
 	// the hub sent none — see api.EnvKind's three-state contract. No consumer
@@ -454,6 +460,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+	if in.Operation == opCreate {
+		res = res.forCreate(in.Name)
+	} else {
+		res = res.forExistingAgent(in.Name)
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -1238,6 +1249,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		Resolution:                  res,
 		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,

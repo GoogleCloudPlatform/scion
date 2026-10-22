@@ -368,7 +368,7 @@ func (s *Server) deleteRecoveredRun(ctx context.Context, mgr agent.Manager, jr *
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return failCleanup(nil, cleanupFailRunList)
 	}
-	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.RunID)
+	target, found, err := agent.SelectExactRunTarget(infos, jr.AgentName, jr.ProjectPath, jr.ProjectID, jr.RunID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: run-scoped cleanup skipped", "agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error", err)
 		return nil

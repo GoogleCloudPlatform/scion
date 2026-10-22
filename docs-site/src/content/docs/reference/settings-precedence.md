@@ -60,6 +60,25 @@ exception: they are merged by scope rather than replaced along the ladder, by th
 and broker merge rules. Hub-injected skills keep travelling in the requester's inline config,
 labelled by scope.
 
+#### When an edit of an existing agent reaches it
+
+Editing an existing agent's config (`PATCH /api/v1/agents/{id}`) changes its requester inline
+config. A start merges that config into the agent's stored config, so most keys apply at the next
+start. Four job keys are different: `system_prompt`, `agent_instructions`, `skills` and
+`services` are rendered into files in the agent home when the agent is provisioned. The hub
+records which of them an edit changed (`changed_fields`), and a Runtime Broker with the
+`changedFields` capability renders those files again at the next start. It renders a key again
+only when the result differs from its last render, so a change made inside the agent to the
+installed skills, the services file, or the prompt files of a harness that reads them from the
+agent home is overwritten only when the hub's value for that key changes again (container-script
+harnesses still rebuild their managed instruction block at every start). A start does not apply
+a clear the merge into the stored config keeps (an empty `agent_instructions` or `services`, an
+emptied skill list) or a removed skill; those wait for the next reincarnation. A cleared key
+reverts to the inherited value (`cleared_fields`) at the next start on a Runtime Broker with the
+`clearedFields` capability; a cleared `system_prompt` is rendered again from the template. With
+an older Runtime Broker these edits apply at the next reincarnation, as before. See `PATCH /:id`
+in the [API reference](/scion/reference/api/).
+
 ### The telemetry ladder
 
 Lowest to highest:
@@ -504,26 +523,22 @@ provisioning** path. They differ in shape, not in mode: the env sub-ladder colla
 only-if-absent tier, and **only `resources` interleaves with the hub tier.**
 :::
 
-### A5. Secrets rank `user` and `project` in the opposite direction
+### A5. Secrets use the same scope order; variables beat environment-type secrets
 
-Secrets are resolved by a **different** ladder from environment variables, and the two disagree:
+Secrets are resolved by the same four-scope ladder as environment variables (`LocalBackend.Resolve`
+and `GCPBackend.Resolve` in `pkg/secret`):
 
 ```
 env vars:   runtime_broker  <  hub  <  project  <  user           (user wins)
-secrets:    hub  <  user  <  project  <  runtime_broker           (project wins)
+secrets:    runtime_broker  <  hub  <  project  <  user           (user wins)
 ```
 
-For environment variables, **`user` beats `project`**. For secrets, **`project` beats `user`** —
-and `runtime_broker` is still highest for secrets.
-
-This is a **known difference, not a documented design**. Nobody has established that the
-divergence is intentional, so this page does not present it as a second designed ladder.
-
-:::note[Related: two code comments state the secret order without `hub`]
-`pkg/secret/secret.go` and `pkg/hub/httpdispatcher.go` both describe the secret order as
-`user < project < runtime_broker`, omitting `hub`. Both backends do query the hub scope, and rank
-it lowest. The ladder above is taken from the resolver implementation, not from those comments.
-:::
+The scope order applies within variables and within secrets. Across the two kinds, for the same
+key a variable from any scope takes precedence over an environment-type secret: the hub fills the
+agent's environment from variables first, and environment-type secrets fill only keys that are
+still unset or empty. On the broker, the agent's config env likewise wins over an environment-type
+secret with the same target. So a `hub`- or `runtime_broker`-scoped variable beats a `user`-scoped
+environment-type secret with the same key.
 
 ### A6. `SCION_AUTO_EXPOSE_PORTS` has its own four-tier order
 
@@ -536,7 +551,7 @@ above it left the key unset:
 
 | Priority | Source | Where it is recorded |
 | --- | --- | --- |
-| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
+| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's Edit page | the agent's explicit config, so it survives reincarnate |
 | | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
 | | harness-config env | the harness config |
 | Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
@@ -1067,8 +1082,8 @@ The top tier carries **only the user's explicit image**. The Hub sends it as
 `Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and
 reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
-agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
-image back writes nothing into `InlineConfig`. A template's image is never sent and never
+agent written before `CreateInputs` existed. A PATCH that only echoes the current image back
+writes nothing into `InlineConfig`. A template's image is never sent and never
 applied.
 
 `AppliedConfig.Image` is the Hub's display record of the image the broker reports. The Hub no

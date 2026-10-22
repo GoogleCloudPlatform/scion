@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -520,6 +521,10 @@ const sharedHubProjectID = "44444444-4444-4444-4444-444444444444"
 func sharedRestartFixture(t *testing.T, external bool) (*Server, *mockManager, *int) {
 	t.Helper()
 	srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, `{"version": 1, "profile": "saved"}`)
+	// The container carries the Hub project ID, so the project-scoped
+	// restart resolves it without a project-id file at its path.
+	mgr.agents[0].ProjectID = sharedHubProjectID
+	mgr.agents[0].Labels[projectkeys.LabelProjectID] = sharedHubProjectID
 	// (No project-id marker is written here: the broker locates the external
 	// root from the Hub project ID alone. That a marker which disagrees does not
 	// move it is pinned by config's TestAgentsRootForProject_HubProjectIDWinsOverMarker.)

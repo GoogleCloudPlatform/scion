@@ -286,7 +286,8 @@ type RebuildServerExecutor struct {
 	serviceName string // systemd service name (e.g., "scion-hub")
 
 	// unitLocator and unitRevision back the systemd unit drift check;
-	// tests replace them so they never call the host's systemctl or git.
+	// tests replace them (RebuildServerOptions) so they never call the
+	// host's systemctl or git.
 	unitLocator  unitdrift.Locator
 	unitRevision unitdrift.Revision
 	unitTimeout  time.Duration // zero means unitdrift.DefaultTimeout
@@ -306,19 +307,34 @@ type RebuildServerOptions struct {
 	// Store, when set, keeps the last systemd unit check result for the
 	// Admin -> Maintenance page. Optional.
 	Store store.Store
+	// UnitLocator and UnitRevision back the systemd unit drift check; nil
+	// means unitdrift.SystemctlLocator and unitdrift.GitRevision. Tests set
+	// them so they never call the host's systemctl or git.
+	UnitLocator  unitdrift.Locator
+	UnitRevision unitdrift.Revision
+	// UnitTimeout bounds the unit check; zero means unitdrift.DefaultTimeout.
+	UnitTimeout time.Duration
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
-	return &RebuildServerExecutor{
+	e := &RebuildServerExecutor{
 		repoPath:     opts.RepoPath,
 		repoBranch:   opts.RepoBranch,
 		binaryDest:   opts.BinaryDest,
 		serviceName:  opts.ServiceName,
 		unitLocator:  unitdrift.SystemctlLocator,
 		unitRevision: unitdrift.GitRevision,
+		unitTimeout:  opts.UnitTimeout,
 		store:        opts.Store,
 	}
+	if opts.UnitLocator != nil {
+		e.unitLocator = opts.UnitLocator
+	}
+	if opts.UnitRevision != nil {
+		e.unitRevision = opts.UnitRevision
+	}
+	return e
 }
 
 func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -702,6 +718,7 @@ type BuildHarnessConfigImageExecutor struct {
 	registry   string
 	tag        string
 	gcpProject string
+	objectPath func(hc *store.HarnessConfig, f store.TemplateFile) string
 }
 
 // BuildHarnessConfigImageOptions configures a BuildHarnessConfigImageExecutor.
@@ -713,6 +730,9 @@ type BuildHarnessConfigImageOptions struct {
 	Registry   string
 	Tag        string
 	GCPProject string
+	// ObjectPath returns the storage object path of a harness-config file.
+	// Required: the executors call it for every file they materialize.
+	ObjectPath func(hc *store.HarnessConfig, f store.TemplateFile) string
 }
 
 // NewBuildHarnessConfigImageExecutor returns a BuildHarnessConfigImageExecutor
@@ -725,6 +745,7 @@ func NewBuildHarnessConfigImageExecutor(opts BuildHarnessConfigImageOptions) *Bu
 		registry:   opts.Registry,
 		tag:        opts.Tag,
 		gcpProject: opts.GCPProject,
+		objectPath: opts.ObjectPath,
 	}
 }
 
@@ -736,6 +757,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 			gcpProject: e.gcpProject,
 			registry:   e.registry,
 			tag:        e.tag,
+			objectPath: e.objectPath,
 		}
 		return cloudExecutor.Run(ctx, logger, params)
 	}
@@ -787,7 +809,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	if err := materializeHarnessConfigFiles(ctx, e.storage, hc, tmpDir, logger); err != nil {
+	if err := materializeHarnessConfigFiles(ctx, e.storage, e.objectPath, hc, tmpDir, logger); err != nil {
 		return err
 	}
 
@@ -856,12 +878,12 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 
 // materializeHarnessConfigFiles downloads all files of a harness config (its
 // blobs, or its path objects for a legacy row) into the given directory. It
-// is shared by both the local and Cloud Build executors.
-func materializeHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, destDir string, logger io.Writer) error {
+// is shared by both the local and Cloud Build executors. objectPath gives
+// each file's storage object path.
+func materializeHarnessConfigFiles(ctx context.Context, stor storage.Storage, objectPath func(hc *store.HarnessConfig, f store.TemplateFile) string, hc *store.HarnessConfig, destDir string, logger io.Writer) error {
 	_, _ = fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
 	for _, f := range hc.Files {
-		objectPath := harnessConfigFileObjectPath(hc, f)
-		reader, _, err := stor.Download(ctx, objectPath)
+		reader, _, err := stor.Download(ctx, objectPath(hc, f))
 		if err != nil {
 			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)
 		}
@@ -907,6 +929,7 @@ type CloudBuildHarnessConfigExecutor struct {
 	gcpProject string
 	registry   string
 	tag        string
+	objectPath func(hc *store.HarnessConfig, f store.TemplateFile) string
 }
 
 func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -965,7 +988,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	if err := materializeHarnessConfigFiles(ctx, e.storage, hc, tmpDir, logger); err != nil {
+	if err := materializeHarnessConfigFiles(ctx, e.storage, e.objectPath, hc, tmpDir, logger); err != nil {
 		return err
 	}
 
