@@ -425,6 +425,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = ""
 		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "no usable credential")
+		assert.Contains(t, errb.String(), "run scion hub auth login --hub "+tunnelclient.NormalizeEndpoint(hub.srv.URL))
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 	t.Run("refused credential", func(t *testing.T) {
@@ -433,6 +434,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = "wrong"
 		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "credential refused")
+		assert.Contains(t, errb.String(), "run scion hub auth login --hub "+tunnelclient.NormalizeEndpoint(hub.srv.URL))
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 }
