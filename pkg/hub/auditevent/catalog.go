@@ -136,6 +136,15 @@ var catalog = []CatalogEntry{{
 	// the X-Scion-Broker-ID header: unauthenticated, and admitted only
 	// within the resource.id bound (otherwise omitted with
 	// broker_id_invalid=true). The event is never dropped for it.
+	// The event is pre-authentication and caller-claimed: failure_code only
+	// classifies why the request was rejected, and neither it nor
+	// resource.id authenticates or identifies the caller.
+	// missing_credentials, malformed, clock_skew and replay are decided
+	// before any secret lookup. With resource.id they show neither that the
+	// claimed broker exists nor that a legitimate request was captured;
+	// replay means only that the nonce had been presented before (the nonce
+	// is recorded before signature verification; follow-up
+	// ptone/scion#5677).
 	AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeDeny}},
 	ResourceKind:           BrokerResourceKind,
 	RequiredEnvelopeLeaves: brokerEnvelopeLeavesWith(),

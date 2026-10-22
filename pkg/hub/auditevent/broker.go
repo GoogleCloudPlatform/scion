@@ -131,13 +131,15 @@ var (
 	brokerSourceIPUnparsedLeaf = brokerTrueLeaf("source_ip_unparsed")
 	// user_agent is caller-chosen text, emitted on auth_failure only (the
 	// only legacy event that carried it). The builder replaces invalid
-	// UTF-8 and control runes with U+FFFD (user_agent_sanitized) and
+	// UTF-8, control runes and Unicode format (Cf) runes with U+FFFD
+	// (user_agent_sanitized) and
 	// truncates at a UTF-8 boundary to 256 bytes (user_agent_truncated).
 	brokerUserAgentLeaf          = PayloadLeafSchema{Name: "user_agent", Type: PayloadString, MaxBytes: brokerUserAgentMaxBytes}
 	brokerUserAgentTruncatedLeaf = brokerTrueLeaf("user_agent_truncated")
 	brokerUserAgentSanitizedLeaf = brokerTrueLeaf("user_agent_sanitized")
 	// broker_id_invalid is set when the caller-claimed broker ID fails the
-	// resource.id bound, in which case the resource is omitted.
+	// resource.id bound or holds a Unicode format (Cf) rune (R15), in which
+	// case the resource is omitted.
 	brokerIDInvalidLeaf  = brokerTrueLeaf("broker_id_invalid")
 	brokerOperationLeaf  = PayloadLeafSchema{Name: "operation", Type: PayloadString, MaxBytes: 16, AllowedValues: []string{string(BrokerRegisterNew), string(BrokerRegisterReregister)}}
 	brokerSystemScope    = []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}}
@@ -291,7 +293,7 @@ func buildBrokerEvent(operation AuditOperationContext, input BrokerEventInput, e
 		if input.Principal != nil {
 			return EnvelopeV1{}, invalid("principal", "must be omitted for the action")
 		}
-		if validateBoundedString("resource.id", input.BrokerID, 128) == nil {
+		if validateBoundedString("resource.id", input.BrokerID, 128) == nil && !containsFormatRune(input.BrokerID) {
 			event.Resource = &ResourceRef{Kind: BrokerResourceKind, ID: input.BrokerID, Scope: ResourceScopeSystem}
 		} else {
 			payload.BrokerIDInvalid = true
@@ -359,8 +361,18 @@ func canonicalSourceIP(raw string) (ip string, unparsed bool) {
 	return "", true
 }
 
-// sanitizeUserAgent replaces invalid UTF-8 and control runes with U+FFFD
-// and truncates the result at a UTF-8 boundary to at most maxBytes.
+// containsFormatRune reports whether s holds a Unicode format character
+// (category Cf: bidi overrides and isolates such as U+202E and U+2066-2069,
+// zero-width characters such as U+200B). A caller-claimed broker ID holding
+// one fails the Q2 bound (architect ruling R15), so Trojan-Source-style text
+// never becomes a resource ID. The validator itself is unchanged.
+func containsFormatRune(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) >= 0
+}
+
+// sanitizeUserAgent replaces invalid UTF-8, control runes and Unicode
+// format (Cf) runes (R15) with U+FFFD and truncates the result at a UTF-8
+// boundary to at most maxBytes.
 // sanitized reports a replacement inside the returned value; truncated
 // reports that input was cut.
 func sanitizeUserAgent(raw string, maxBytes int) (value string, sanitized, truncated bool) {
@@ -372,7 +384,7 @@ func sanitizeUserAgent(raw string, maxBytes int) (value string, sanitized, trunc
 			break
 		}
 		r, size := utf8.DecodeRuneInString(raw[i:])
-		if (r == utf8.RuneError && size <= 1) || unicode.IsControl(r) {
+		if (r == utf8.RuneError && size <= 1) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			if firstReplacement < 0 {
 				firstReplacement = b.Len()
 			}

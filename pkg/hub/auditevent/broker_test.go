@@ -413,6 +413,9 @@ func TestBuildBrokerEvent_ClaimedBrokerIDBound(t *testing.T) {
 			"control chars": "broker\x00canary",
 			"invalid utf8":  "broker\xffcanary",
 			"empty":         "",
+			"bidi override": "broker\u202ecanary",
+			"bidi isolate":  "broker\u2066canary\u2069",
+			"zero width":    "broker\u200bcanary",
 		} {
 			t.Run(string(action)+"/"+name, func(t *testing.T) {
 				input := BrokerEventInput{Action: action, BrokerID: claimed}
@@ -511,6 +514,9 @@ func TestSanitizeUserAgent(t *testing.T) {
 		{"c1 control", "a\u0085b", "a�b", true, false, 256},
 		{"invalid utf8", "a\xffb", "a�b", true, false, 256},
 		{"genuine replacement char is not sanitization", "a�b", "a�b", false, false, 256},
+		{"bidi override (Cf, R15)", "a\u202eb", "a�b", true, false, 256},
+		{"bidi isolate (Cf, R15)", "a\u2066b\u2069c", "a�b�c", true, false, 256},
+		{"zero width space (Cf, R15)", "a\u200bb", "a�b", true, false, 256},
 		{"long", long, strings.Repeat("a", 256), false, true, 256},
 		{"cut at rune boundary", boundary, strings.Repeat("b", 255), false, true, 256},
 		{"replacement only beyond the cut", strings.Repeat("c", 300) + "\x00", strings.Repeat("c", 256), false, true, 256},
