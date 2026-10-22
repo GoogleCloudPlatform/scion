@@ -1,0 +1,295 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Starred messages in <scion-chat-thread> (web.chat_starred_messages):
+ * the message menu's Star/Unstar toggle (pending, error with retry,
+ * announcement), the private indicator, the per-page state fetch and the
+ * SSE invalidation. Flag off keeps the prior menu exactly.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+class FakeStateManager extends EventTarget {
+  currentScope: { type: string; userId: string } | null = null;
+  isConnected = false;
+  getAgent(): undefined {
+    return undefined;
+  }
+}
+const fakeStateManager = new FakeStateManager();
+
+const apiFetch = vi.fn();
+const showToastMock = vi.fn();
+
+vi.mock('../../../client/main.js', async () => ({
+  ...(await import('../../../client/__fixtures__/main-stub.js')),
+  navigateTo: vi.fn(),
+  get stateManager() {
+    return fakeStateManager;
+  },
+}));
+
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
+  extractApiError: (_res: unknown, fallback: string) => Promise.resolve(fallback),
+}));
+
+vi.mock('../../../utils/toast.js', () => ({
+  showToast: (...args: unknown[]) => showToastMock(...args) as unknown,
+}));
+
+await import('./chat-thread.js');
+type ScionChatThread = import('./chat-thread.js').ScionChatThread;
+type Message = import('../../../shared/types.js').Message;
+
+const TOPIC = 'topic-1';
+const M1 = '00000000-0000-4000-8000-000000000001';
+const M2 = '00000000-0000-4000-8000-000000000002';
+
+interface MenuActionLike {
+  id: string;
+  label: string;
+  icon?: string;
+  disabled?: boolean;
+  checked?: boolean;
+  run: () => void;
+}
+
+interface Internals {
+  messageMenuActions(msg: Message): MenuActionLike[];
+  starAnnouncement: string;
+}
+
+function message(id: string): Message {
+  return {
+    id,
+    projectId: 'p1',
+    sender: 'user:other@example.com',
+    senderId: 'user-other',
+    recipient: '',
+    recipientId: '',
+    msg: 'hello ' + id,
+    type: 'chat',
+    createdAt: '2026-10-20T10:00:00Z',
+  } as Message;
+}
+
+function json(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+/** Route fake hub answers: history, star state, PUT and DELETE. */
+function routeHub(opts: {
+  starred?: string[];
+  put?: () => Response | Promise<Response>;
+  del?: () => Response | Promise<Response>;
+}): void {
+  apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url.includes('/messages?')) {
+      return Promise.resolve(json({ messages: [message(M1), message(M2)] }));
+    }
+    if (url.startsWith('/api/v1/chat/stars/state')) {
+      return Promise.resolve(json({ starredMessageIds: opts.starred ?? [] }));
+    }
+    if (url.startsWith('/api/v1/chat/stars/') && init?.method === 'PUT') {
+      return Promise.resolve(
+        opts.put ? opts.put() : json({ starred: true, starredAt: '2026-10-22T10:00:00Z' })
+      );
+    }
+    if (url.startsWith('/api/v1/chat/stars/') && init?.method === 'DELETE') {
+      return Promise.resolve(opts.del ? opts.del() : json(null, 204));
+    }
+    return Promise.resolve(json({}));
+  });
+}
+
+function stateCalls(): string[] {
+  return apiFetch.mock.calls
+    .map((c) => String(c[0]))
+    .filter((u) => u.startsWith('/api/v1/chat/stars/state'));
+}
+
+async function mount(key = TOPIC): Promise<ScionChatThread> {
+  const el = document.createElement('scion-chat-thread') as ScionChatThread;
+  el.conversationKey = key;
+  el.currentUserId = 'user-me';
+  document.body.appendChild(el);
+  await el.updateComplete;
+  await vi.waitFor(() =>
+    expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('/messages?'))).toBe(true)
+  );
+  return el;
+}
+
+function starAction(el: ScionChatThread, id: string): MenuActionLike | undefined {
+  return (el as unknown as Internals).messageMenuActions(message(id)).find((a) => a.id === 'star');
+}
+
+function setFlag(on: boolean): void {
+  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+    'web.chat_starred_messages': on,
+  };
+}
+
+describe('scion-chat-thread starred messages', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    showToastMock.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  it('flag off: no star action and no state request (prior menu exactly)', async () => {
+    setFlag(false);
+    routeHub({});
+    const el = await mount();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(stateCalls()).toEqual([]);
+    expect(starAction(el, M1)).toBeUndefined();
+  });
+
+  it('fetches the state of a loaded page once and marks starred messages', async () => {
+    setFlag(true);
+    routeHub({ starred: [M2] });
+    const el = await mount();
+    await vi.waitFor(() => expect(stateCalls().length).toBe(1));
+    expect(stateCalls()[0]).toContain(`messageId=${M1}`);
+    expect(stateCalls()[0]).toContain(`messageId=${M2}`);
+    await vi.waitFor(() => expect(starAction(el, M2)?.label).toBe('Unstar message'));
+    const unstarred = starAction(el, M1);
+    expect(unstarred).toMatchObject({ label: 'Star message', icon: 'star', checked: false });
+    expect(starAction(el, M2)).toMatchObject({ icon: 'star-fill', checked: true });
+
+    await el.updateComplete;
+    const rendered = [...(el.shadowRoot?.querySelectorAll('scion-chat-message') ?? [])] as Array<
+      HTMLElement & { starred: boolean }
+    >;
+    expect(rendered.filter((m) => m.starred)).toHaveLength(1);
+  });
+
+  it('is disabled with a loading label until the state is known', async () => {
+    setFlag(true);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    apiFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/messages?')) return json({ messages: [message(M1)] });
+      if (url.startsWith('/api/v1/chat/stars/state')) {
+        await gate;
+        return json({ starredMessageIds: [] });
+      }
+      return json({});
+    });
+    const el = await mount();
+    expect(starAction(el, M1)).toMatchObject({ disabled: true, label: 'Star message (loading)' });
+    release();
+    await vi.waitFor(() => expect(starAction(el, M1)?.disabled).toBeFalsy());
+  });
+
+  it('stars with a pending state, then announces politely', async () => {
+    setFlag(true);
+    let resolvePut!: (r: Response) => void;
+    routeHub({
+      put: () => new Promise<Response>((r) => (resolvePut = r)),
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.disabled).toBeFalsy());
+
+    starAction(el, M1)?.run();
+    await vi.waitFor(() =>
+      expect(starAction(el, M1)).toMatchObject({ disabled: true, checked: true })
+    );
+    const put = apiFetch.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT'
+    );
+    expect(put?.[0]).toBe(`/api/v1/chat/stars/${M1}`);
+    expect(JSON.parse((put?.[1] as RequestInit).body as string)).toEqual({
+      conversationKey: TOPIC,
+    });
+
+    resolvePut(json({ starred: true, starredAt: '2026-10-22T10:00:00Z' }));
+    await vi.waitFor(() =>
+      expect((el as unknown as Internals).starAnnouncement).toBe('Message starred')
+    );
+    expect(starAction(el, M1)).toMatchObject({ label: 'Unstar message', disabled: false });
+    await el.updateComplete;
+    const region = el.shadowRoot?.querySelector('.star-live-region');
+    expect(region?.getAttribute('aria-live')).toBe('polite');
+    expect(region?.textContent).toContain('Message starred');
+  });
+
+  it('restores the prior state and offers a retry when unstarring fails', async () => {
+    setFlag(true);
+    let failures = 1;
+    routeHub({
+      starred: [M1],
+      del: () => (failures-- > 0 ? json({ error: { message: 'boom' } }, 500) : json(null, 204)),
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+
+    starAction(el, M1)?.run();
+    await vi.waitFor(() => expect(showToastMock).toHaveBeenCalled());
+    const [text, variant, options] = showToastMock.mock.calls[0] as [
+      string,
+      string,
+      { action: { label: string; run: () => void } },
+    ];
+    expect(text).toBe('Could not unstar message');
+    expect(variant).toBe('danger');
+    expect(starAction(el, M1)?.checked).toBe(true);
+
+    expect(options.action.label).toBe('Retry');
+    options.action.run();
+    await vi.waitFor(() =>
+      expect((el as unknown as Internals).starAnnouncement).toBe('Message unstarred')
+    );
+    expect(starAction(el, M1)?.checked).toBe(false);
+  });
+
+  it('refetches state on the SSE invalidation', async () => {
+    setFlag(true);
+    const starred: string[] = [];
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?')) return Promise.resolve(json({ messages: [message(M1)] }));
+      if (url.startsWith('/api/v1/chat/stars/state')) {
+        return Promise.resolve(json({ starredMessageIds: [...starred] }));
+      }
+      return Promise.resolve(json({}));
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(false));
+    starred.push(M1); // starred in another tab
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-stars-updated', { detail: { data: { action: 'changed' } } })
+    );
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+  });
+
+  it('offers no star action in a DM in phase 1', async () => {
+    setFlag(true);
+    routeHub({});
+    const el = await mount('dm:user:user-me:agent:a1');
+    expect(starAction(el, M1)).toBeUndefined();
+  });
+});

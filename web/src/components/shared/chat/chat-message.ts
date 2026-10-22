@@ -31,6 +31,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
@@ -628,6 +629,14 @@ export class ScionChatMessage extends LitElement {
   /** Whether this is a message from the agent (left-aligned) or user (right-aligned). */
   @property({ type: Boolean })
   fromAgent = false;
+
+  /**
+   * Whether the viewer starred this message (web.chat_starred_messages).
+   * Shows a small, noninteractive filled star in the message meta; the
+   * Star/Unstar toggle lives in the message menu.
+   */
+  @property({ type: Boolean })
+  starred = false;
 
   /**
    * Whether the message's actual sender is an agent, independent of
@@ -1591,6 +1600,26 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-neutral-400, #94a3b8);
     }
 
+    /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
+    .star-indicator {
+      display: inline-flex;
+      align-items: center;
+      color: var(--scion-warning-500, #d97706);
+      font-size: var(--chat-fs-xs);
+      margin-left: 0.25rem;
+    }
+
+    .star-meta {
+      display: flex;
+      justify-content: flex-end;
+      line-height: 1;
+      margin-top: 0.125rem;
+    }
+
+    .from-agent .star-meta {
+      justify-content: flex-start;
+    }
+
     /* ---- Phase-3: Edited label ---- */
     .edited-label {
       font-size: var(--chat-fs-xs);
@@ -2252,6 +2281,7 @@ export class ScionChatMessage extends LitElement {
                     : nothing}
                   <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
@@ -2265,6 +2295,7 @@ export class ScionChatMessage extends LitElement {
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
                   <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
@@ -2278,10 +2309,37 @@ export class ScionChatMessage extends LitElement {
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
+          ${isDeleted || this.hasHeaderMeta() ? nothing : this.renderStarMeta()}
         </div>
       </div>
       ${this.renderFullPreview()}
     `;
+  }
+
+  /** Whether this rendering shows a header carrying the time (and the star). */
+  private hasHeaderMeta(): boolean {
+    return this.showHeader && (this.fromAgent || !!this.routedTo);
+  }
+
+  /**
+   * The private starred indicator: a filled star with the accessible name
+   * "Starred by you". It is an image, not a control, so it adds no tab stop.
+   */
+  private renderStarIndicator(): TemplateResult | typeof nothing {
+    if (!this.starred || this.deletedAt) return nothing;
+    return html`<span
+      class="star-indicator"
+      role="img"
+      aria-label="Starred by you"
+      title="Starred by you"
+      ><sl-icon name="star-fill" aria-hidden="true"></sl-icon
+    ></span>`;
+  }
+
+  /** The indicator on its own meta line, for renderings without a header. */
+  private renderStarMeta(): TemplateResult | typeof nothing {
+    if (!this.starred) return nothing;
+    return html`<div class="star-meta">${this.renderStarIndicator()}</div>`;
   }
 
   /** Render delivery state indicator for outbound (user-sent) messages. */

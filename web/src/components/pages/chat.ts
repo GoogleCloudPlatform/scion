@@ -109,6 +109,14 @@ import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
+import '../shared/chat/chat-starred-list.js';
+import type { StarredMessageOpenDetail } from '../shared/chat/chat-starred-list.js';
+import {
+  conversationSupportsStars,
+  fetchStarDetail,
+  starredMessagesEnabled,
+} from '../../client/chat-stars.js';
+import { showToast } from '../../utils/toast.js';
 import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
@@ -6598,6 +6606,12 @@ export class ScionPageChat extends LitElement {
               </sl-menu>
             </sl-dropdown>
           </span>
+          ${this.headerShowsStars(conv)
+            ? html`<scion-chat-starred-list
+                conversationKey=${conv.conversationKey}
+                @starred-message-open=${this.handleStarredMessageOpen}
+              ></scion-chat-starred-list>`
+            : nothing}
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"
@@ -6655,6 +6669,53 @@ export class ScionPageChat extends LitElement {
     `;
   }
 
+  /**
+   * Whether the header shows the starred-messages button: the experiment is
+   * on and the conversation supports stars (phase 1: project threads). It
+   * sits in the always-visible action area, not the secondary span.
+   */
+  private headerShowsStars(conv: V2ConversationState): boolean {
+    return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
+  }
+
+  /**
+   * A header star entry was chosen: resolve the star's current target
+   * first, then jump with the existing around-message navigation. A star
+   * that is no longer available leaves the current conversation as it is.
+   */
+  private handleStarredMessageOpen = async (
+    e: CustomEvent<StarredMessageOpenDetail>
+  ): Promise<void> => {
+    const messageId = e.detail?.messageId;
+    if (!messageId) return;
+    let item;
+    try {
+      item = await fetchStarDetail(messageId);
+    } catch {
+      showToast('Could not open the starred message', 'danger', {
+        action: {
+          label: 'Retry',
+          run: (): void => void this.handleStarredMessageOpen(e),
+        },
+      });
+      return;
+    }
+    if (!item) {
+      showToast('This starred message is no longer available', 'warning');
+      return;
+    }
+    this.v2SearchActive = false;
+    if (item.conversationKey === this.v2Conversation?.conversationKey) {
+      await this.updateComplete;
+      const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
+        | import('../shared/chat/chat-thread.js').ScionChatThread
+        | null;
+      void thread?.scrollToMessageById(item.messageId);
+      return;
+    }
+    navigateTo(item.permalink);
+  };
+
   /** Whether the conversation header folds its secondary actions into the More menu. */
   private isHeaderCompact(conv: V2ConversationState): boolean {
     return isCompactHeaderWidth(
@@ -6676,6 +6737,7 @@ export class ScionPageChat extends LitElement {
           ? this.resolveDefaultAgentId(conv.defaultAgent)
           : '';
     let count = 3; // export, search, members
+    if (this.headerShowsStars(conv)) count += 1; // starred messages
     if (agentId) count += this.getAgentProjectId(agentId) ? 2 : 1; // terminal, graph
     if (!this.isMobileLayout) count += 1; // density
     if (conv.isDM && conv.peerKind === 'agent') count += 1; // promote

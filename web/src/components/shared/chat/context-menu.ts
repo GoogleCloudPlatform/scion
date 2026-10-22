@@ -69,6 +69,8 @@ export function renderMenuRows(actions: MenuAction[]): TemplateResult {
         class="context-menu-item ${a.destructive ? 'danger' : ''} ${a.className ?? ''}"
         style=${a.disabled ? 'opacity: 0.4; pointer-events: none;' : nothing}
         aria-disabled=${a.disabled ? 'true' : nothing}
+        role=${a.checked === undefined ? nothing : 'menuitemcheckbox'}
+        aria-checked=${a.checked === undefined ? nothing : a.checked ? 'true' : 'false'}
         @click=${(): void => a.run()}
       >
         ${a.icon ? html`<sl-icon name=${a.icon}></sl-icon>` : nothing} ${a.label}
