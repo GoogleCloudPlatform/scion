@@ -1243,3 +1243,46 @@ func TestEntrypointForwardsSignals(t *testing.T) {
 		})
 	}
 }
+
+// --- Warm-up mode (deploy-job.sh --warm-up) ---------------------------------------
+
+func warmupHarness(t *testing.T) (*harness, *claimServer) {
+	t.Helper()
+	cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+	h := newHarness(t, cs.URL)
+	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME"} {
+		delete(h.env, k)
+	}
+	h.env["RUNNER_WARMUP"] = "1"
+	return h, cs
+}
+
+func TestEntrypointWarmUp(t *testing.T) {
+	h, cs := warmupHarness(t)
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started in warm-up mode")
+	}
+	if n := len(cs.recorded()) + len(h.meta.recorded()); n != 0 {
+		t.Errorf("warm-up made %d mediator/metadata requests, want none", n)
+	}
+	if !strings.Contains(res.stderr, "warm-up OK") {
+		t.Errorf("stderr lacks the warm-up result:\n%s", res.stderr)
+	}
+	h.checkHomeLinks() // the checks still ran
+}
+
+func TestEntrypointWarmUpStillChecks(t *testing.T) {
+	h, _ := warmupHarness(t)
+	if err := os.RemoveAll(h.scratch); err != nil {
+		t.Fatal(err)
+	}
+	expectFailure(t, h, h.run(), 2, "does not exist")
+
+	h2, _ := warmupHarness(t)
+	h2.env["RUNNER_WARMUP"] = "yes"
+	expectFailure(t, h2, h2.run(), 2, "RUNNER_WARMUP must be 1 or unset")
+}

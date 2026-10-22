@@ -118,7 +118,7 @@ scripts/build-runner-image.sh --apply --local # or: local docker, pushed as BUIL
 ## 4. Runner job: `scripts/deploy-job.sh`
 
 ```bash
-scripts/deploy-job.sh --apply [--tag TAG]
+scripts/deploy-job.sh --apply [--tag TAG] [--warm-up]
 ```
 
 - Creates the Cloud Run Job `RUNNER_JOB_NAME`, or updates it in place, from
@@ -137,6 +137,15 @@ scripts/deploy-job.sh --apply [--tag TAG]
 - With `--apply` it refuses to run if the image tag does not exist.
 - Grants `MEDIATOR_SA_NAME` `roles/run.developer` on this job only (C10), then
   re-checks that `EXEC_SA_NAME` holds no project role.
+- `--warm-up` then runs one no-op execution and waits for it
+  (`gcloud run jobs execute --update-env-vars=RUNNER_WARMUP=1 --wait`). The
+  entrypoint runs its image, `/scratch` and HOME-link checks and exits 0 before
+  any claim. The first execution after an image change pays the image import (about
+  34 s for the 371 MiB image in the P6 PoC); the warm-up takes that hit instead
+  of the first real job, and it fails the deploy if the checks fail. The
+  mediator ignores the execution (it has no `RUNNER_NAME`); it counts toward
+  `MAX_CONCURRENT_RUNNERS` for the few seconds it runs. Executing with an env
+  override needs `run.jobs.runWithOverrides` (in `roles/run.developer`).
 
 ## 5. Mediator URL and the GitHub App
 

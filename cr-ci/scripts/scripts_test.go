@@ -266,6 +266,7 @@ var dryCases = []dryCase{
 	{"build-runner-image", "build-runner-image.sh", []string{"--tag", "golden"}, nil},
 	{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 	{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, nil},
+	{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, nil},
 	{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, nil},
 	{"deploy-mediator-no-invoker-iam-check", "deploy-mediator.sh", []string{"--tag", "golden", "--no-invoker-iam-check"}, nil},
 	{"deploy-scheduler", "deploy-scheduler.sh", nil, nil},
@@ -325,6 +326,9 @@ func TestApplyRunsExactlyTheDryRunCommands(t *testing.T) {
 		{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 		{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, func(e *env) {
 			// apply refuses a missing image; dry-run only shows the check.
+			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
+		}},
+		{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, func(e *env) {
 			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
 		}},
 		{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, func(e *env) {

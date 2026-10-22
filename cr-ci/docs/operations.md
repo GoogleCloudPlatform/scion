@@ -118,8 +118,9 @@ All tool versions and checksums are pinned in one place, the `ARG` block of
 1. Change the version **and** its sha256 there, and commit.
 2. `scripts/build-runner-image.sh --apply`: builds and pushes a new tag
    (`git-<tree hash of runner/>`), as `BUILD_SA_NAME`.
-3. `scripts/deploy-job.sh --apply`: points the job at the new tag. New
-   executions use it; running ones finish on the old image.
+3. `scripts/deploy-job.sh --apply --warm-up`: points the job at the new tag and
+   runs one no-op execution, so the first real job does not pay the image import.
+   New executions use the new tag; running ones finish on the old image.
 
 **Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Old tags
 stay in `ARTIFACT_REPO` (list them with

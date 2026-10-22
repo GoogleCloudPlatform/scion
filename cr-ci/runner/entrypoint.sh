@@ -23,6 +23,10 @@
 # claim and ID tokens reach curl on stdin (not argv), and responses stay in
 # shell memory.
 #
+# Warm-up: RUNNER_WARMUP=1 (deploy-job.sh --warm-up) runs only the checks in
+# sections 1-3 (HOME, /scratch, HOME links, run.sh present) and exits 0 before any
+# claim; none of the env below is needed then.
+#
 # Required env (set by the mediator as Cloud Run Job overrides):
 #   RUNNER_CLAIM_TOKEN  32 lowercase hex chars, single use
 #   MEDIATOR_URL        https origin of the mediator, no trailing slash
@@ -72,13 +76,30 @@ die() {
 
 # --- 1. Required env ----------------------------------------------------------
 
-for var in RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME; do
+# Warm-up mode (deploy-job.sh --warm-up): an execution with RUNNER_WARMUP=1 and no
+# claim env pulls and imports the image, runs the /scratch and HOME checks below,
+# and exits 0 before any claim, so the first real job does not pay the image import.
+warmup=0
+case ${RUNNER_WARMUP:-} in
+  "" | 0) ;;
+  1) warmup=1 ;;
+  *) die "$EXIT_CONFIG" "RUNNER_WARMUP must be 1 or unset" ;;
+esac
+
+if ((warmup)); then
+  required_vars=(HOME)
+else
+  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME)
+fi
+for var in "${required_vars[@]}"; do
   if [[ -z ${!var:-} ]]; then
     die "$EXIT_CONFIG" "required environment variable $var is not set"
   fi
 done
 
-if [[ ! $RUNNER_CLAIM_TOKEN =~ ^[0-9a-f]{32}$ ]]; then
+if ((warmup)); then
+  : # no claim env to check
+elif [[ ! $RUNNER_CLAIM_TOKEN =~ ^[0-9a-f]{32}$ ]]; then
   # Never echo the value, not even a malformed one.
   die "$EXIT_CONFIG" "RUNNER_CLAIM_TOKEN is not 32 lowercase hex characters"
 fi
@@ -86,15 +107,16 @@ fi
 if [[ $HOME != "$expected_home" ]]; then
   die "$EXIT_CONFIG" "HOME is '$HOME', want $expected_home (cache paths must match ubuntu-latest)"
 fi
-if [[ ! $GH_JOB_ID =~ ^[0-9]+$ ]]; then
-  die "$EXIT_CONFIG" "GH_JOB_ID must be numeric"
-fi
-
-claim_base=${MEDIATOR_URL%/}
-# https only; plain http is accepted for loopback so the offline harness works.
-if [[ ! $claim_base =~ ^https://[^/?#[:space:]]+$ &&
-  ! $claim_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
-  die "$EXIT_CONFIG" "MEDIATOR_URL must be an https origin with no path, got '$MEDIATOR_URL'"
+if ((!warmup)); then
+  if [[ ! $GH_JOB_ID =~ ^[0-9]+$ ]]; then
+    die "$EXIT_CONFIG" "GH_JOB_ID must be numeric"
+  fi
+  claim_base=${MEDIATOR_URL%/}
+  # https only; plain http is accepted for loopback so the offline harness works.
+  if [[ ! $claim_base =~ ^https://[^/?#[:space:]]+$ &&
+    ! $claim_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
+    die "$EXIT_CONFIG" "MEDIATOR_URL must be an https origin with no path, got '$MEDIATOR_URL'"
+  fi
 fi
 
 if [[ $metadata_base != http://metadata.google.internal &&
@@ -106,10 +128,14 @@ if [[ ! $backoff =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   die "$EXIT_CONFIG" "CR_CLAIM_BACKOFF_SECONDS must be a non-negative number"
 fi
 
-if [[ $RUNNER_NAME != "cr-job-$GH_JOB_ID" ]]; then
-  log "warning: RUNNER_NAME '$RUNNER_NAME' does not match cr-job-$GH_JOB_ID"
+if ((warmup)); then
+  log "warm-up execution: checking the image, /scratch and the HOME links; no claim"
+else
+  if [[ $RUNNER_NAME != "cr-job-$GH_JOB_ID" ]]; then
+    log "warning: RUNNER_NAME '$RUNNER_NAME' does not match cr-job-$GH_JOB_ID"
+  fi
+  log "starting runner $RUNNER_NAME for job $GH_JOB_ID"
 fi
-log "starting runner $RUNNER_NAME for job $GH_JOB_ID"
 
 # --- 2. /scratch must be a mounted, writable volume ---------------------------
 
@@ -223,6 +249,11 @@ if [[ ! -x $runner_dir/run.sh ]]; then
   die "$EXIT_CONFIG" "$runner_dir/run.sh not found or not executable"
 fi
 cd -- "$runner_dir"
+
+if ((warmup)); then
+  log "warm-up OK: image imported, $scratch mounted and writable, HOME links in place; exiting 0 before any claim"
+  exit 0
+fi
 
 # --- 4. Claim exchange (claim contract v2) -----------------------------------
 
