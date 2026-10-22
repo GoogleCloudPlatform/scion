@@ -1219,21 +1219,19 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID 
 		}
 	}
 	// Extra attempts, same reasoning as the completion write: a lost write
-	// here wedges the agent behind a permanent 409 with no worker left to
-	// retry it, and the boot/periodic sweep only clears non-terminal
-	// records/agent-states — an agent stuck mid-transition because this
-	// write never landed would not even match that backstop.
+	// here leaves the agent in its in-flight state, refused with 409, with
+	// no worker left to retry it, until the sweep's orphaned agent-state
+	// reset marks it failed (without restoring the configuration). With a
+	// restore, the assignment restore is lost with it: both roll back
+	// together.
 	agent, err := s.updateReincarnationStep(ctx, agentID, upd, reincarnationStepMaxAttempts+3)
 	if err != nil {
-		s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
-			"agent_id", agentID, "error", err)
 		if restoreConfig != nil {
-			// The agent write and the assignment restore roll back
-			// together, so the agent keeps its in-flight state and
-			// assignment; the sweep's orphaned agent-state reset clears the
-			// state later, without restoring the configuration.
-			s.agentLifecycleLog.Error("failReincarnation: agent write and assignment restore not applied; the agent is left for the orphaned agent-state sweep",
+			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries; the agent write and the assignment restore are not applied, and the agent is left for the orphaned agent-state sweep",
 				"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		} else {
+			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
+				"agent_id", agentID, "error", err)
 		}
 	} else if s.events != nil {
 		s.events.PublishAgentStatus(ctx, agent)

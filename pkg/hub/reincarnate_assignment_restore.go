@@ -53,37 +53,38 @@ const mutationTypeAgentReincarnateAssignmentRestore = "agent_reincarnate_assignm
 //     than the active row, and that account is withheld until assigned again.
 //
 // Each restore writes an agent_reincarnate_assignment_restore audit record in
-// the same transaction.
+// the same transaction. Errors name the step only; the caller adds the
+// "assignment restore" context.
 func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *store.Agent, reincarnationID string, cause store.EdgeDeactivationCause, now time.Time) error {
 	if agent == nil || reincarnationID == "" {
 		return nil
 	}
 	rows, err := tx.GetActiveAgentServiceAccountAssignments(ctx, agent.ID)
 	if err != nil {
-		return fmt.Errorf("reincarnation assignment restore: read active assignment: %w", err)
+		return fmt.Errorf("read active assignment: %w", err)
 	}
 	failed := store.Deactivation{Cause: cause, At: &now, OpID: reincarnationID}
 	var deactivated, reactivated, remarked int
 	switch {
 	case len(rows) == 1 && rows[0].ID == reincarnationID:
 		if deactivated, err = tx.DeactivateAgentServiceAccountAssignment(ctx, agent.ID, reincarnationID, failed); err != nil {
-			return fmt.Errorf("reincarnation assignment restore: deactivate replacement: %w", err)
+			return fmt.Errorf("deactivate replacement: %w", err)
 		}
 		if deactivated != 1 {
 			// A write between the read above and this one ended the
 			// replacement. A version conflict re-runs the failure write,
 			// whose fresh read then sees that write.
-			return fmt.Errorf("%w: reincarnation assignment restore: the replacement changed", store.ErrVersionConflict)
+			return fmt.Errorf("%w: the replacement changed", store.ErrVersionConflict)
 		}
 		reactivated, err = tx.ReactivateAgentServiceAccountAssignments(ctx, agent.ID, store.EdgeDeactivationReincarnateReplaced, reincarnationID)
 		if err != nil {
-			return fmt.Errorf("reincarnation assignment restore: reactivate replaced assignment: %w", err)
+			return fmt.Errorf("reactivate replaced assignment: %w", err)
 		}
 	case len(rows) == 0 && !agent.DeletedAt.IsZero() && agent.SoftDeleteOpID != "":
 		n, err := tx.RemarkDeactivatedAgentServiceAccountAssignments(ctx, agent.ID, reincarnationID,
 			store.EdgeDeactivationAgentSoftDelete, agent.SoftDeleteOpID, failed)
 		if err != nil {
-			return fmt.Errorf("reincarnation assignment restore: re-mark replacement: %w", err)
+			return fmt.Errorf("re-mark replacement: %w", err)
 		}
 		if n == 0 {
 			return nil
@@ -93,7 +94,7 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 			store.EdgeDeactivationReincarnateReplaced, reincarnationID,
 			store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: agent.SoftDeleteOpID})
 		if err != nil {
-			return fmt.Errorf("reincarnation assignment restore: re-mark replaced assignment: %w", err)
+			return fmt.Errorf("re-mark replaced assignment: %w", err)
 		}
 		remarked += m
 	default:
@@ -110,7 +111,7 @@ func restoreReincarnationAssignment(ctx context.Context, tx store.Store, agent *
 		return err
 	}
 	if err := tx.CreateMutationAudit(ctx, record); err != nil {
-		return fmt.Errorf("reincarnation assignment restore audit: %w", err)
+		return fmt.Errorf("audit: %w", err)
 	}
 	return nil
 }

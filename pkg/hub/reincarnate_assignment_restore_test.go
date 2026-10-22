@@ -284,6 +284,8 @@ func TestReincarnateSameAccountClaimIsNotRestored(t *testing.T) {
 
 	f.srv.failReincarnation(context.Background(), f.agent.ID, rec.ID, store.AgentReincarnationStatePending,
 		"no dispatcher available", rec.PreviousAppliedConfig)
+	assert.Equal(t, store.ReincarnationStateFailed, mustGetAgent(t, f.s, f.agent.ID).ReincarnationState,
+		"the failure write lands")
 	rows := activeAssignments(t, f.s, f.agent.ID)
 	require.Len(t, rows, 1)
 	assert.Equal(t, same.ID, rows[0].ID, "the same-account row stays")
