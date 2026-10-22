@@ -385,8 +385,11 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		resp.Federation = v1Server.Federation
 	}
 	// server.federation reports the same value, the one in effect, never
-	// the settings.yaml seed (ptone/scion#4326).
-	resp.Server.Federation = resp.Federation
+	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
+	// the check keeps this line safe if that changes.
+	if resp.Server != nil {
+		resp.Server.Federation = resp.Federation
+	}
 
 	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
 	// values. An empty map (len 0, non-nil) from the snapshot is intentional
