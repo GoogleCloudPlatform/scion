@@ -66,11 +66,17 @@ type AgentStore struct {
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
+
+	// lifecycle is the agent-write observer slot, shared with the
+	// transactional copies of this store; entTx is the ambient transaction
+	// when there is one (lifecycle_outbox_store.go).
+	lifecycle *lifecycleObserverSlot
+	entTx     *ent.Tx
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
 func NewAgentStore(client *ent.Client) *AgentStore {
-	return &AgentStore{client: client}
+	return &AgentStore{client: client, lifecycle: newLifecycleObserverSlot()}
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
@@ -273,6 +279,10 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 
 // CreateAgent creates a new agent record.
 func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+	obs := s.lifecycle.load()
+	if obs != nil && !s.inTx {
+		return s.withLifecycleTx(ctx, func(ts *AgentStore) error { return ts.CreateAgent(ctx, a) })
+	}
 	uid, err := parseUUID(a.ID)
 	if err != nil {
 		return err
@@ -398,6 +408,11 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	created, err := create.Save(ctx)
 	if err != nil {
 		return mapError(err)
+	}
+	if err := observeAgentWrite(ctx, obs, s.client, s.entTx, store.AgentWrite{
+		Op: store.AgentWriteCreate, After: entAgentToStore(created), Now: now,
+	}); err != nil {
+		return err
 	}
 
 	a.Created = created.Created
@@ -900,9 +915,22 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	obs := s.lifecycle.load()
+	if obs != nil && !s.inTx {
+		return s.withLifecycleTx(ctx, func(ts *AgentStore) error { return ts.DeleteAgent(ctx, id) })
+	}
+	before, err := s.lifecycleBeforeRow(ctx, obs, uid)
+	if err != nil {
+		return err
+	}
 	err = s.client.Agent.DeleteOneID(uid).Exec(ctx)
 	if err != nil {
 		return mapError(err)
+	}
+	if before != nil {
+		return observeAgentWrite(ctx, obs, s.client, s.entTx, store.AgentWrite{
+			Op: store.AgentWriteHardDelete, Before: before, Now: time.Now(),
+		})
 	}
 	return nil
 }
