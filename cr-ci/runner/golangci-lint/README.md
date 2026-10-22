@@ -9,7 +9,8 @@ build. Its users:
   it, then runs it with today's flags.
 - `make golangci-lint` (and `make ci-full`): builds `./build/tools/golangci-lint`
   first, unless `GOLANGCI_LINT` points at another binary.
-- `cr-ci/runner/Dockerfile`: the cr-ci runner image ships the same binary.
+- `cr-ci/runner/Dockerfile`: once cr-ci fixup PR 2 lands, the cr-ci runner
+  image builds and ships the same binary from this directory.
 
 ## Why
 
@@ -63,9 +64,11 @@ with the fix (watch dominikh/go-tools#1839, then golangci-lint's
 1. In `.github/workflows/ci.yml`'s lint job, delete the restore / build / save
    steps for the patched binary, and give `golangci-lint-action` back
    `version: <the fixed release>` instead of `install-mode: none`. Remove
-   `cr-ci/runner/golangci-lint/` from the `changes` job's `go` regex.
+   the `cr-ci/runner/golangci-lint/` alternative from the `changes` job's
+   `go` regex.
 2. In the Makefile, restore a plain `GOLANGCI_LINT` (installed binary) and
    delete the `golangci-lint-build` target.
-3. In `cr-ci/runner/Dockerfile`, go back to the release binary download
-   (pinned version and sha256 from the release checksums).
+3. In `cr-ci/runner/Dockerfile` (if cr-ci fixup PR 2 has landed its
+   build stage), go back to the release binary download (pinned version and
+   sha256 from the release checksums).
 4. Delete this directory.

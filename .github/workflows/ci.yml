@@ -148,11 +148,12 @@ jobs:
           #   - web/dist/ (web/embed.go embeds all:dist/client; only its
           #     .gitkeep is in git, the rest is a build output);
           #   - this workflow and the Go cache actions the lint job uses;
-          #   - cr-ci/runner/golangci-lint/ (the pins, patch and build
-          #     script of the golangci-lint binary the lint job runs).
+          #   - cr-ci/runner/golangci-lint/ build.sh, VERSIONS and *.patch
+          #     (the build script, pins and patch of the golangci-lint
+          #     binary the lint job runs; not its README.md).
           # Keep this regex in sync when a new go:embed reads files that do
           # not match it.
-          if grep -qE '(\.(go|c|h|s|S|syso)$|(^|/)go\.(mod|sum|work)$|^\.golangci|^(harnesses|resources|third_party)/|^pkg/config/(embeds|schemas)/|^web/dist/|^\.github/actions/(setup|save)-go-cache/|^\.github/workflows/ci\.yml$|^cr-ci/runner/golangci-lint/)' <<<"$changed"; then
+          if grep -qE '(\.(go|c|h|s|S|syso)$|(^|/)go\.(mod|sum|work)$|^\.golangci|^(harnesses|resources|third_party)/|^pkg/config/(embeds|schemas)/|^web/dist/|^\.github/actions/(setup|save)-go-cache/|^\.github/workflows/ci\.yml$|^cr-ci/runner/golangci-lint/(build\.sh|VERSIONS|[^/]*\.patch)$)' <<<"$changed"; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           else
             echo "go=false" >> "$GITHUB_OUTPUT"
@@ -1400,10 +1401,11 @@ jobs:
       # (dominikh/go-tools#1839: `unused` is quadratic in package size and
       # took 330-400 s on pkg/hub's test variant alone; the patch brings
       # that to ~6 s with identical findings). The pins, the patch and the
-      # removal plan are in cr-ci/runner/golangci-lint/ (README.md), which
-      # the cr-ci runner image builds from too. build.sh verifies the pinned
-      # module checksums and the patch sha256, and skips the build when the
-      # restored binary's stamp matches its inputs and the Go version.
+      # removal plan are in cr-ci/runner/golangci-lint/ (README.md); the
+      # cr-ci runner image is to build from it too (cr-ci fixup PR 2).
+      # build.sh verifies the pinned module checksums and the patch sha256,
+      # and skips the build when the restored binary's stamp matches its
+      # inputs and the Go version.
       # The binary is cached on its own key; like the Go caches, only pushes
       # to main save it. The build uses its own GOCACHE/GOMODCACHE so that
       # golangci-lint's dependencies stay out of the lint workload's cache.
@@ -1412,7 +1414,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/golangci-lint-patched
-          key: golangci-lint-patched-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**') }}
+          key: golangci-lint-patched-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**', '!cr-ci/runner/golangci-lint/README.md') }}
 
       - name: Build patched golangci-lint
         shell: bash

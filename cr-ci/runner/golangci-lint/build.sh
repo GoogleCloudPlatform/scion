@@ -5,9 +5,10 @@
 #
 # Usage: build.sh <output-binary-path>
 #
-# The single copy of this build: .github/workflows/ci.yml (the GitHub-hosted
-# lint job), the Makefile's golangci-lint target and cr-ci/runner/Dockerfile
-# all run this script.
+# The single copy of this build: .github/workflows/ci.yml (the lint job) and
+# the Makefile's golangci-lint target run this script, and the cr-ci runner
+# image (cr-ci/runner/Dockerfile) will build from it too once cr-ci fixup PR 2
+# lands.
 #
 # Inputs, all in this directory:
 #   VERSIONS              pinned versions, Go module checksums, patch sha256
@@ -17,7 +18,8 @@
 #   - the patch file's sha256 is PATCH_SHA256;
 #   - the golangci-lint and go-tools module zips that go downloads (through
 #     GOPROXY, verified against go.sum / sum.golang.org as usual) have exactly
-#     the pinned h1: checksums, so a GOSUMDB=off or GONOSUMCHECK environment
+#     the pinned h1: checksums, so an environment that weakens checksum
+#     verification (GOSUMDB=off, GONOSUMDB, GOPRIVATE, GOFLAGS=-insecure...)
 #     cannot slip in other source;
 #   - golangci-lint's go.mod requires exactly GO_TOOLS_VERSION, so the
 #     replace swaps in the patched copy of the same version it was released
