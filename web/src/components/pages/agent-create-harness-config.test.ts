@@ -44,6 +44,7 @@ interface CreatePrivate extends HTMLElement {
   projectId: string;
   templateId: string;
   harness: string;
+  error: string | null;
   updateComplete: Promise<unknown>;
   handleSubmit(e: Event, provisionOnly?: boolean): Promise<void>;
 }
@@ -158,6 +159,14 @@ async function choose(c: CreatePrivate, id: string, value: string): Promise<void
   const el = select(c, id);
   el.value = value;
   el.dispatchEvent(new Event('sl-change'));
+  await c.updateComplete;
+}
+
+/** Types into a page input the way a user does: set the value, fire sl-input. */
+async function type(c: CreatePrivate, id: string, value: string): Promise<void> {
+  const el = select(c, id);
+  el.value = value;
+  el.dispatchEvent(new Event('sl-input'));
   await c.updateComplete;
 }
 
@@ -284,5 +293,39 @@ describe('Create Agent: harness config is sent only when picked', () => {
     await choose(c, 'project', 'p2');
     await settle(c);
     expect((await submit(c)).harnessConfig).toBe('gemini');
+  });
+});
+
+describe('Create Agent: "Other..." harness config needs a name', () => {
+  it('blocks submit with an error when the custom name is blank', async () => {
+    projectSettings = { defaultHarnessConfig: 'project-hc' };
+    templates = [template({})];
+    const c = await mount();
+    await choose(c, 'harness', '__other__');
+    await type(c, 'custom-harness', '   ');
+    await c.handleSubmit(new Event('submit'));
+    await c.updateComplete;
+    expect(bodies).toHaveLength(0);
+    expect(c.error).toMatch(/custom harness config name/i);
+    expect(c.shadowRoot?.querySelector('.error-banner')?.textContent).toMatch(
+      /custom harness config name/i
+    );
+  });
+
+  it('sends the custom name when one is entered', async () => {
+    templates = [template({})];
+    const c = await mount();
+    await choose(c, 'harness', '__other__');
+    await type(c, 'custom-harness', ' my-custom-harness ');
+    const body = await submit(c);
+    expect(body.harnessConfig).toBe('my-custom-harness');
+  });
+
+  it('still omits harnessConfig when the picker is untouched', async () => {
+    templates = [template({})];
+    const c = await mount();
+    const body = await submit(c);
+    expect(body).not.toHaveProperty('harnessConfig');
+    expect(c.error).not.toMatch(/custom harness config name/i);
   });
 });

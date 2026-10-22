@@ -765,7 +765,7 @@ export class ScionPageAgentCreate extends LitElement {
 
   /** Resolved harness config name for submission */
   private get resolvedHarness(): string {
-    return this.harness === '__other__' ? this.customHarness : this.harness;
+    return this.harness === '__other__' ? this.customHarness.trim() : this.harness;
   }
 
   /** Placeholder for the harness picker: the inherited harness config, when known. */
@@ -800,6 +800,12 @@ export class ScionPageAgentCreate extends LitElement {
     }
     if (!this.projectId) {
       this.error = 'Please select a project.';
+      return;
+    }
+    // "Other..." needs a name; without one the form would quietly submit
+    // the inherited harness config instead.
+    if (this.harness === '__other__' && !this.customHarness.trim()) {
+      this.error = 'Enter a custom harness config name, or pick another harness config.';
       return;
     }
 
