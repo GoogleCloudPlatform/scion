@@ -1293,7 +1293,10 @@ export class ScionPageProjectSettings extends LitElement {
       } else {
         this.defaultModelSelection = '';
       }
-      this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
+      // The API accepts 1-100 (null clears); a value outside it is clamped,
+      // so a save never sends one the API refuses.
+      const tl = this.settings.defaultThinkingLevel;
+      this.defaultThinkingLevel = typeof tl === 'number' ? Math.min(100, Math.max(1, tl)) : null;
     } catch (err) {
       console.error('Failed to load project settings:', err);
     } finally {
@@ -2266,7 +2269,7 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
-                    min="0"
+                    min="1"
                     max="100"
                     step="1"
                     .value=${this.defaultThinkingLevel ?? 50}

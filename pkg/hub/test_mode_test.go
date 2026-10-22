@@ -23,7 +23,6 @@ import (
 	"go/parser"
 	"go/token"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -385,7 +384,13 @@ func TestTestMode_StateImmutable(t *testing.T) {
 
 	assignments := 0
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards testMode state assignments.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards testMode state assignments.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards testMode state assignments.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {

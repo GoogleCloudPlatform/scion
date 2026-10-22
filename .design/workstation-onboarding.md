@@ -158,8 +158,9 @@ are not stitched into a guided first-run flow. (Designed in
 - **Linked projects already exist in the model** — `ProjectProvider`
   (`pkg/store/models.go:337-379`) carries `LocalPath`/`BrokerID`/`LinkedBy`/`LinkedAt`;
   link API `POST /api/v1/projects/{projectId}/providers`
-  (`pkg/hub/handlers.go:7980-8043`); WebDAV honors a co-located broker's `LocalPath`
-  (`pkg/hub/project_webdav.go:136-190`). CLI precedent: `scion hub link`
+  (`pkg/hub/handlers.go:7980-8043`); the workspace path resolver honors a co-located
+  broker's `LocalPath` (`resolveProjectWorkspacePath` in
+  `pkg/hub/project_workspace_handlers.go`). CLI precedent: `scion hub link`
   (`cmd/hub.go:215-235`, `runHubLink`).
 - **The browser gap** — `web/src/components/pages/project-create.ts` only supports
   git-backed / hub-native projects. There is **no UI to register an arbitrary local

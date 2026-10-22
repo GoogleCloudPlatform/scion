@@ -155,8 +155,8 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 // its create claim, a start launch its user claim, a restart launch its
 // restart claim (the store's pairing, ptone/scion#4669). The launch has
 // ended (the caller checked), so the reaper settles the claim by the
-// launch's end, as the launch's terminal write would have. Only create
-// launches exist until asynchronous start ships.
+// launch's end, as the launch's terminal write would have. Start and
+// restart launches exist once asynchronous start is on.
 func claimPairsWithEndedLaunch(a *store.Agent) bool {
 	if a.StartClaimLaunchID == "" || a.StartClaimLaunchID != a.LaunchID {
 		return false

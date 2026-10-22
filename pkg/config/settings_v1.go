@@ -3020,6 +3020,16 @@ type V1RuntimeConfig struct {
 	// safe_to_evict wins over it, and a template's or agent's
 	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are Kubernetes-only
+	// placement defaults for agent pods started on the runtime this entry
+	// describes (matched by cluster identity and namespace, not by name).
+	// A profile on this entry adds to them: its selector keys win, its
+	// tolerations are combined with these, and its runtime class wins when
+	// set. Read from the global settings only. See resolvePlacement in
+	// pkg/runtimebroker and config.ApplyPlacement.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents whose profile uses this runtime entry.
 	// A profile's own value wins over it. The nfs details always come from
@@ -3582,6 +3592,14 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are Kubernetes-only
+	// placement defaults for agents whose runtime choice used this profile.
+	// They apply over the profile's runtime entry's values: selector keys
+	// win per key, tolerations are combined, and the runtime class wins
+	// when set. Read from the global settings only.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// CloneDepth is the git clone depth for agents using this profile:
 	// "full" or a positive integer. A template's or agent's clone_depth
 	// wins over it. Empty keeps the default shallow clone. See
