@@ -85,6 +85,21 @@ export class ScionChatStarredList extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       box-shadow: var(--sl-shadow-large, 0 8px 24px rgba(0, 0, 0, 0.15));
       padding: 0.5rem;
+      font-weight: 400;
+      text-align: left;
+    }
+
+    /* Narrow screens: span the viewport under the header instead of
+       anchoring to the button, so the panel is never clipped. */
+    @media (max-width: 768px) {
+      .panel {
+        position: fixed;
+        top: auto;
+        left: 0.5rem;
+        right: 0.5rem;
+        width: auto;
+        padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+      }
     }
 
     .panel-header {
