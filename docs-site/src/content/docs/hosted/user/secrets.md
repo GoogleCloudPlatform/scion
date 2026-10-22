@@ -31,7 +31,7 @@ Both variables and secrets can be scoped to different levels. Scion resolves the
 ```text
 runtime_broker  <  hub  <  project  <  user
 ```
-Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
+Therefore, user-scoped settings have the highest priority of the four scopes and will override project, hub, and broker-scoped variables or secrets of the same name. Environment values in the agent-create request (from the API, the web form or `--config`) outrank all four scopes when they are non-empty; an empty value yields to the scopes. A template's `env` block is a fallback, used only for keys that no other source sets. See [Settings Precedence](/scion/reference/settings-precedence/#system-a--environment-variables) for the full order.
 
 ### Scope and Sharing
 
@@ -492,13 +492,13 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 - **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
 
 ### Resolution Hierarchy
-When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. The Hub merges secret values in this order (last one wins for the same key):
-1. Broker Secrets
-2. Hub Secrets (global defaults)
-3. Project Secrets
-4. User Secrets
-5. Template `env` block
-6. CLI `--env` flags
+When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. For the same key, a later entry in this list wins over an earlier one:
+1. Template `env` block (a fallback: applied only to keys that no other source sets)
+2. Broker Secrets
+3. Hub Secrets (global defaults)
+4. Project Secrets
+5. User Secrets
+6. Environment values in the agent-create request (API, web form or `--config`), when non-empty
 
 ### Security
 Secrets are transmitted over TLS between the Hub and Runtime Brokers. They are only decrypted by the Hub during the dispatch process and sent over an encrypted channel to the Runtime Broker. The Broker then injects them directly into the container's memory space. Brokers never persist agent secrets to disk.
