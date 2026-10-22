@@ -33,6 +33,7 @@ import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import type { ScionPageAgentEdit } from './agent-edit.js';
 import {
   AGENT_EDIT_GROUPING_KEY,
+  agentEditTopValues,
   buildAgentEditPatchBody,
   dispositionSummary,
 } from './agent-edit.js';
@@ -497,6 +498,13 @@ describe('agent edit page Reincarnate… for held edits', () => {
     expect(posts()).toEqual([]);
   });
 
+  it('is not offered to a caller without the lifecycle permission', async () => {
+    const agent = heldAgent('stopped');
+    agent._capabilities = { actions: ['read', 'update', 'attach'] };
+    const el = await mount(agent);
+    expect(button(el, 'reincarnate')).toBeNull();
+  });
+
   it('is not offered when only container-creation edits are held', async () => {
     const el = await mount(
       makeAgent('running', 3, { pendingConfig: { config: { max_turns: 9 } } })
@@ -579,11 +587,61 @@ describe('agent edit page phases and gate', () => {
     expect(button(el, 'error')!.textContent).toContain('Max turns');
   });
 
-  it('renders not found, without loading, while the experiment is off', async () => {
+  it('experiment off: the page works, by function only, with no toggle and no strip', async () => {
     window.__SCION_FEATURES__ = { 'web.agent_edit': false };
+    localStorage.setItem(AGENT_EDIT_GROUPING_KEY, 'tier');
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    expect(el.shadowRoot!.querySelector('scion-page-404')).toBeNull();
+    expect(button(el, 'grouping')).toBeNull();
+    const form = formOf(el)!;
+    expect(form.grouping).toBe('function');
+    expect(form.shadowRoot!.querySelector('[data-testid="tier-summary"]')).toBeNull();
+    expect(form.shadowRoot!.querySelector('section[data-section="agent"]')).not.toBeNull();
+    await editField(el, 'config.max_turns', { type: '40' });
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([{ stateVersion: 5, config: { max_turns: 40 } }]);
+  });
+
+  it('experiment on: the grouping toggle and the tier summary strip', async () => {
+    window.__SCION_FEATURES__ = { 'web.agent_edit': true };
     const el = await mount(makeAgent('stopped', 5));
-    expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
-    expect(calls).toEqual([]);
+    expect(button(el, 'grouping')).not.toBeNull();
+    expect(formOf(el)!.shadowRoot!.querySelector('[data-testid="tier-summary"]')).not.toBeNull();
+  });
+
+  it('experiment off: /agents/{id}/configure lands on a working Edit page', async () => {
+    window.__SCION_FEATURES__ = { 'web.agent_edit': false };
+    const { legacyAgentRedirect } = await import('../../client/agent-routes.js');
+    const target = legacyAgentRedirect('/agents/a-1/configure')!;
+    window.history.pushState({}, '', target);
+    const el = await mount(makeAgent('stopped', 5));
+    expect(el.shadowRoot!.querySelector('scion-page-404')).toBeNull();
+    expect(formOf(el)).not.toBeNull();
+    expect(calls.some((c) => c.url === '/api/v1/agents/a-1')).toBe(true);
+  });
+});
+
+describe('agentEditTopValues: the explicit env record', () => {
+  it('keys the explicit record on CreateInputs when the agent has them', () => {
+    const agent = makeAgent('stopped', 1);
+    agent.appliedConfig = {
+      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+      createInputs: { inlineConfig: { env: {} } },
+    };
+    expect(agentEditTopValues(agent).explicitEnv).toEqual({});
+  });
+
+  it('falls back to the inline env without CreateInputs', () => {
+    const agent = makeAgent('stopped', 1);
+    agent.appliedConfig = { inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'false' } } };
+    expect(agentEditTopValues(agent).explicitEnv).toEqual({ SCION_AUTO_EXPOSE_PORTS: 'false' });
+  });
+
+  it('passes the hub default and env visibility', () => {
+    const v = agentEditTopValues(makeAgent('stopped', 1), true);
+    expect(v.autoExposeHubDefault).toBe(true);
+    expect(v.envVisible).toBe(true);
   });
 });
 

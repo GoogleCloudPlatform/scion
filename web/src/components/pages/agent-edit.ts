@@ -15,12 +15,14 @@
  */
 
 /**
- * Edit agent page (/agents/{id}/edit), behind the web.agent_edit
- * experiment (ptone/scion#3952, ptone/scion#3975).
+ * Edit agent page (/agents/{id}/edit), which replaced the Configure page
+ * (ptone/scion#3952, ptone/scion#3975).
  *
  * Loads the agent with its per-field editability and renders every field
- * of the shared <scion-agent-config-form>, grouped by function or by tier
- * (the user's last choice is remembered). Save sends only the touched
+ * of the shared <scion-agent-config-form>, grouped by function. With the
+ * web.agent_edit experiment on, the user can also group the fields by tier
+ * (the last choice is remembered) and the page shows the tier summary
+ * strip. Save sends only the touched
  * fields, always with the agent's stateVersion; a 409 means the agent
  * changed since the page loaded and offers a reload that keeps the user's
  * edits. The actions follow the phase: Save & Start (created, stopped,
@@ -38,6 +40,7 @@ import { navigateTo } from '../../client/navigation.js';
 import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import {
   heldReincarnateKeys,
@@ -156,8 +159,11 @@ export function agentEditValues(agent: Agent): AgentInlineConfig {
   return task ? { ...inline, task } : inline;
 }
 
-/** The agent's values outside its inline config, for the form. */
-export function agentEditTopValues(agent: Agent): AgentConfigEditValues {
+/**
+ * The agent's values outside its inline config, for the form. hubAutoExpose
+ * is the hub's auto-expose default, shown for an inherited value.
+ */
+export function agentEditTopValues(agent: Agent, hubAutoExpose = false): AgentConfigEditValues {
   const applied = agent.appliedConfig;
   return {
     name: agent.name,
@@ -169,6 +175,12 @@ export function agentEditTopValues(agent: Agent): AgentConfigEditValues {
     env: applied?.env,
     // The hub returns the env only to a caller with attach access.
     envVisible: can(agent._capabilities, 'attach'),
+    // The explicit record, as the hub reads it: CreateInputs when the agent
+    // has them, else the inline config.
+    explicitEnv: applied?.createInputs
+      ? applied.createInputs.inlineConfig?.env
+      : applied?.inlineConfig?.env,
+    autoExposeHubDefault: hubAutoExpose,
     detailHref: `/agents/${encodeURIComponent(agent.id)}`,
     fixed: {
       projectId: agent.project || agent.projectSlug || agent.projectId,
@@ -208,8 +220,15 @@ export class ScionPageAgentEdit extends LitElement {
   @state() private touched: string[] = [];
   @state() private warnings: string[] = [];
   @state() private grouping: AgentConfigGrouping = loadEditGrouping();
+
+  /** The by-tier view and the summary strip are behind web.agent_edit. */
+  private get tierView(): boolean {
+    return isFeatureEnabled(AGENT_EDIT_FLAG);
+  }
   /** The agent's runtime broker, to tell whether its target is Kubernetes. */
   @state() private targetBroker: RuntimeBroker | null = null;
+  /** The hub's auto-expose default (public settings), for an inherited value. */
+  @state() private hubAutoExpose = false;
 
   /**
    * The GCP identity picker's state: the agent's stored identity is shown,
@@ -241,7 +260,7 @@ export class ScionPageAgentEdit extends LitElement {
     super.connectedCallback();
     const match = window.location.pathname.match(/^\/agents\/([^/]+)\/edit$/);
     this.agentId = match ? decodeURIComponent(match[1]) : '';
-    if (!isFeatureEnabled(AGENT_EDIT_FLAG) || !this.agentId) {
+    if (!this.agentId) {
       this.loading = false;
       this.notFound = true;
       return;
@@ -286,6 +305,7 @@ export class ScionPageAgentEdit extends LitElement {
       }
       dispatchPageTitle(this, 'Edit', agent.name || this.agentId);
       if (first) {
+        void this.loadHubDefaults();
         void this.gcpAccounts.load();
         if (agent.runtimeBrokerId) void this.loadTargetBroker(agent.runtimeBrokerId);
       }
@@ -294,6 +314,12 @@ export class ScionPageAgentEdit extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  /** Loads the hub defaults shown for inherited values; none on failure. */
+  private async loadHubDefaults(): Promise<void> {
+    const settings = await getPublicSettings();
+    this.hubAutoExpose = settings?.autoExposePortsEnabled ?? false;
   }
 
   /** Loads the agent's runtime broker; an unknown broker leaves the target unknown. */
@@ -432,7 +458,8 @@ export class ScionPageAgentEdit extends LitElement {
   private renderActions() {
     const action = editStartAction(this.agent?.phase);
     const nothingTouched = this.touched.length === 0;
-    const held = heldReincarnateKeys(this.agent);
+    // Reincarnating needs the lifecycle permission, as on the agent page.
+    const held = can(this.agent?._capabilities, 'lifecycle') ? heldReincarnateKeys(this.agent) : [];
     return html`
       <div class="actions">
         <sl-button
@@ -523,12 +550,13 @@ export class ScionPageAgentEdit extends LitElement {
             ${this.warnings.map((w) => html`<div>${w}</div>`)}
           </sl-alert>`
         : nothing}
-      ${this.renderGroupingToggle()}
+      ${this.tierView ? this.renderGroupingToggle() : nothing}
       <scion-agent-config-form
         mode="edit"
-        .grouping=${this.grouping}
+        .grouping=${this.tierView ? this.grouping : 'function'}
+        .showTierSummary=${this.tierView}
         .values=${agentEditValues(agent)}
-        .editValues=${agentEditTopValues(agent)}
+        .editValues=${agentEditTopValues(agent, this.hubAutoExpose)}
         .placeholders=${agentEditPlaceholders(agent)}
         .editability=${agent.editability ?? null}
         .harnessCapabilities=${agent.harnessCapabilities ?? null}

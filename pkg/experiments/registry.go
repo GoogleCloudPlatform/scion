@@ -153,9 +153,12 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
-// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
-// button on the agent page. It is web-only for now: the hub's config PATCH
-// accepts edits of agents with no container whether or not it is on.
+// AgentEdit gates what the web Edit agent page (/agents/{id}/edit) adds
+// beyond the retired Configure page: the grouping of its fields by when an
+// edit applies, and the summary strip counting them. The page itself, and
+// the Edit button on the agent page, are always available. It is web-only:
+// the hub's config PATCH accepts edits of agents with no container whether
+// or not it is on.
 const AgentEdit = "web.agent_edit"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
@@ -342,7 +345,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
-		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
+		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,

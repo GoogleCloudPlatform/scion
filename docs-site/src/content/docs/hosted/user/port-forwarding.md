@@ -246,7 +246,7 @@ When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` wi
 
 The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project value, then harness-config env, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
 
-In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
+In the web UI, the agent **Edit** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key). A value set on the agent is shown as the control's value; an inherited one is shown as grey placeholder text, so picking it sets it on the agent. The page saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
 
 ---
 

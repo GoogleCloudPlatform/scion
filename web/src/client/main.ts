@@ -776,7 +776,7 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-graph.js'),
   },
   {
-    // Edit agent page (experiment web.agent_edit; the page renders 404 when off).
+    // Edit agent page (the by-tier view inside it is behind web.agent_edit).
     pattern: /^\/agents\/[^/]+\/edit$/,
     tag: 'scion-page-agent-edit',
     load: () => import('../components/pages/agent-edit.js'),

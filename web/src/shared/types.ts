@@ -881,7 +881,8 @@ export interface AgentFieldEditState {
 
 /**
  * Edits the hub holds for an agent until a start or a reincarnation applies
- * them (ptone/scion#3976): the raw present-key PATCH object (a null means
+ * them. Provisional, from the ptone/scion#3976 issue text, which owns the
+ * final shape: the raw present-key PATCH object (a null means
  * clear at apply) with who saved it and when.
  */
 export interface AgentPendingConfig {
@@ -1025,8 +1026,8 @@ export interface Agent {
 
   // Per-field editability for the caller; set on the single-agent GET only.
   editability?: AgentEditability;
-  // Edits the hub holds for the agent (ptone/scion#3976); absent until the
-  // hub stores held edits.
+  // Edits the hub holds for the agent; absent until the hub stores held
+  // edits. Provisional: ptone/scion#3976 owns the final shape.
   pendingConfig?: AgentPendingConfig | null;
   // Optimistic-concurrency version; send it back with a PATCH.
   stateVersion?: number;

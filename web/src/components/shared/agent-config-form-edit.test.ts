@@ -340,6 +340,13 @@ describe('environment in edit mode', () => {
     expect(el.missingRequiredEnv()).toEqual(['NEEDED']);
   });
 
+  it('says that saving replaces the stored environment', async () => {
+    const el = await mount('stopped');
+    expect(
+      field(el, 'config.env').querySelector('[data-testid="env-replace-note"]')!.textContent
+    ).toContain('replaces the agent');
+  });
+
   it('an untouched env sends nothing', async () => {
     const el = await mount('stopped');
     expect(el.collectConfigPatch()).toEqual({});
@@ -365,8 +372,10 @@ describe('environment in edit mode', () => {
     expect(el.missingRequiredEnv()).toEqual([]);
   });
 
-  it('the auto-expose control shows the stored keys; using it sends them with the stored rows', async () => {
-    const el = await mount('stopped');
+  it('the auto-expose control shows an explicit value; using it sends the keys with the stored rows', async () => {
+    const el = await mount('stopped', {
+      editValues: { ...EDIT_VALUES, explicitEnv: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
     const select = field(el, 'autoExpose').querySelector('sl-select') as HTMLElement & {
       value: string;
     };
@@ -399,7 +408,165 @@ describe('environment hidden from the caller', () => {
       expect(field(el, key).textContent).toContain(mod.ENV_HIDDEN_REASON);
     }
     expect(field(el, 'config.env').querySelector('scion-env-editor')).toBeNull();
+    expect(
+      field(el, 'config.env').querySelector('[data-testid="env-hidden"]')!.textContent
+    ).toContain('hidden from you');
+    expect(field(el, 'config.env').textContent).not.toContain('No environment variables');
     expect(el.collectConfigPatch()).toEqual({});
+  });
+});
+
+describe('effectiveAutoExposePorts (ported from the Configure page, ptone/scion#2562 AC7)', () => {
+  it('labels a value in the explicit record as explicit', () => {
+    expect(
+      mod.effectiveAutoExposePorts(
+        { SCION_AUTO_EXPOSE_PORTS: 'false' },
+        { SCION_AUTO_EXPOSE_PORTS: 'false' },
+        true
+      )
+    ).toEqual({ enabled: false, source: 'explicit' });
+  });
+
+  it('labels a value only in the live env as project/template', () => {
+    expect(mod.effectiveAutoExposePorts({ SCION_AUTO_EXPOSE_PORTS: 'true' }, {}, false)).toEqual({
+      enabled: true,
+      source: 'project/template',
+    });
+  });
+
+  it('reports the hub default as inherited when the live env lacks the key, ignoring the explicit record', () => {
+    expect(mod.effectiveAutoExposePorts({}, { SCION_AUTO_EXPOSE_PORTS: 'false' }, true)).toEqual({
+      enabled: true,
+      source: 'inherited',
+    });
+    expect(mod.effectiveAutoExposePorts(undefined, undefined, false)).toEqual({
+      enabled: false,
+      source: 'inherited',
+    });
+  });
+});
+
+describe('auto-expose source and inheritance in edit mode', () => {
+  const select = (el: ScionAgentConfigForm) =>
+    field(el, 'autoExpose').querySelector('sl-select') as HTMLElement & { value: string };
+  const source = (el: ScionAgentConfigForm) =>
+    field(el, 'autoExpose').querySelector('[data-testid="auto-expose-source"]')!.textContent!;
+
+  it('a project/template value starts blank with a labelled placeholder; an untouched save sends no env', async () => {
+    const el = await mount('stopped'); // env has the key, the explicit record does not
+    expect(select(el).value).toBe('');
+    expect(select(el).getAttribute('placeholder')).toBe('Enabled (project/template)');
+    expect(source(el)).toContain('project/template');
+    expect(el.collectConfigPatch()).toEqual({});
+  });
+
+  it('an inherited value shows the hub default, labelled inherited', async () => {
+    const el = await mount('stopped', {
+      editValues: { ...EDIT_VALUES, env: { FOO: 'bar' }, autoExposeHubDefault: true },
+    });
+    expect(select(el).value).toBe('');
+    expect(select(el).getAttribute('placeholder')).toBe(
+      'Enabled (inherited (hub default shown; template may override))'
+    );
+    expect(source(el)).toContain('inherited (hub default shown; template may override)');
+  });
+
+  it('an explicit value is the control value, labelled explicit', async () => {
+    const el = await mount('stopped', {
+      editValues: { ...EDIT_VALUES, explicitEnv: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
+    expect(select(el).value).toBe('true');
+    expect(source(el)).toContain('explicit');
+  });
+
+  it('the source label switches to explicit (unsaved) once the control changes', async () => {
+    const el = await mount('stopped');
+    const sel = select(el);
+    sel.value = 'false';
+    sel.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(source(el)).toContain('explicit (unsaved)');
+  });
+
+  it('picking the inherited value shown as the placeholder is a change (no same-value event needed)', async () => {
+    // Real Shoelace fires no sl-change when the shown value is re-picked;
+    // the control starts blank, so picking "Enabled" changes it from "".
+    const el = await mount('stopped');
+    expect(select(el).value).toBe('');
+    const sel = select(el);
+    sel.value = 'true';
+    sel.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({
+      env: {
+        FOO: 'bar',
+        NEEDED: '',
+        SCION_AUTO_EXPOSE_PORTS: 'true',
+        SCION_AUTO_EXPOSE_MODE: 'denylist',
+        SCION_AUTO_EXPOSE_PORTS_LIST: '22',
+        SCION_AUTO_EXPOSE_INTERVAL: '5s',
+      },
+    });
+  });
+
+  it("clearing the list sends LIST='' so it replaces the previous one", async () => {
+    const el = await mount('stopped', {
+      editValues: { ...EDIT_VALUES, explicitEnv: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
+    const list = field(el, 'autoExpose').querySelector('sl-input.ae-list') as HTMLInputElement;
+    list.value = '';
+    list.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.collectConfigPatch().env?.SCION_AUTO_EXPOSE_PORTS_LIST).toBe('');
+  });
+
+  it('Undo (not Clear) discards the edit in edit mode', async () => {
+    const el = await mount('stopped');
+    const f = field(el, 'autoExpose');
+    expect(f.querySelector('sl-button.clear')).toBeNull();
+    const sel = select(el);
+    sel.value = 'false';
+    sel.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    const undo = field(el, 'autoExpose').querySelector('sl-button.undo') as HTMLElement;
+    expect(undo.textContent).toContain('Undo');
+    undo.click();
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({});
+  });
+});
+
+describe('fields that are never sent from edit mode', () => {
+  type WithDrafts = { drafts: Record<string, unknown> };
+  const draft = { typed: true, text: 'x', cleared: false, unlimited: false };
+
+  it('never sends branch, even when the form state holds a value (ptone/scion#3984)', async () => {
+    const el = await mount('created');
+    (el as unknown as WithDrafts).drafts = { branch: { ...draft, text: 'other-branch' } };
+    await el.updateComplete;
+    expect(el.touchedKeys).toContain('branch');
+    expect(el.collectTopLevel()).toEqual({});
+  });
+
+  it('never sends messageMode, even when the form state holds a value', async () => {
+    const el = await mount('stopped');
+    (el as unknown as WithDrafts).drafts = { messageMode: { ...draft, text: 'hub' } };
+    await el.updateComplete;
+    expect(el.touchedKeys).toContain('messageMode');
+    expect(el.collectTopLevel()).toEqual({});
+  });
+
+  it('sends telemetry only after the user toggles it', async () => {
+    const el = await mount('stopped', { values: { telemetry: { enabled: true } } });
+    expect(el.collectConfigPatch()).toEqual({});
+    const sel = field(el, 'config.telemetry').querySelector('sl-select') as HTMLElement & {
+      value: string;
+    };
+    expect(sel.value).toBe('true');
+    sel.value = 'false';
+    sel.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ telemetry: { enabled: false } });
   });
 });
 

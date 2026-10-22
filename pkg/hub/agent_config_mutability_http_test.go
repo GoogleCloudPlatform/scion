@@ -608,7 +608,10 @@ func TestAgentEditGoldens(t *testing.T) {
 		// agentCheck, when set, checks the agent as written (its
 		// top-level fields and applied config).
 		agentCheck func(t *testing.T, after *store.Agent)
-		warnings   int
+		// phases, when set, replays the body for an agent in each phase
+		// (one subtest per phase); otherwise the agent is stopped.
+		phases   []state.Phase
+		warnings int
 		// notWarned are keys no warning may name: Unlimited on Max duration
 		// ("0") applies at the next start, so it is not "cleared".
 		notWarned []string
@@ -633,8 +636,9 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Equal(t, "2h", inline.MaxDuration)
 		}},
 		// The Edit page's metadata, timezone, env and task edits
-		// (ptone/scion#3975).
-		{name: "metadata", applied: []string{"labels", "name"}, check: func(t *testing.T, inline *api.ScionConfig) {
+		// (ptone/scion#3975). Name and labels apply immediately in every
+		// phase the Edit page is reachable in.
+		{name: "metadata", phases: []state.Phase{state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended, state.PhaseRunning}, applied: []string{"labels", "name"}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, "old-model", inline.Model)
 		}, agentCheck: func(t *testing.T, after *store.Agent) {
 			assert.Equal(t, "renamed-agent", after.Name)
@@ -657,7 +661,7 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Equal(t, "fix the bug", after.AppliedConfig.Task)
 		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		run := func(t *testing.T, phase state.Phase) {
 			raw, err := os.ReadFile(filepath.Join("testdata", "agent-edit-"+tc.name+"-body.json"))
 			require.NoError(t, err)
 			var body map[string]interface{}
@@ -665,7 +669,7 @@ func TestAgentEditGoldens(t *testing.T) {
 
 			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 			srv, s, project, broker := setupReincarnateTestServer(t, disp)
-			agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
+			agent := newEditTestAgent(t, s, project, broker, phase)
 			body["stateVersion"] = agent.StateVersion
 
 			resp, code, respBody := patchAgentBody(t, srv, agent.ID, body)
@@ -686,6 +690,15 @@ func TestAgentEditGoldens(t *testing.T) {
 			tc.check(t, after.AppliedConfig.InlineConfig)
 			if tc.agentCheck != nil {
 				tc.agentCheck(t, after)
+			}
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.phases) == 0 {
+				run(t, state.PhaseStopped)
+				return
+			}
+			for _, phase := range tc.phases {
+				t.Run(string(phase), func(t *testing.T) { run(t, phase) })
 			}
 		})
 	}

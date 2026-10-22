@@ -35,8 +35,8 @@ import (
 // options.md §5): PATCH /api/v1/agents/{id} must keep AppliedConfig.CreateInputs
 // in sync with any config edit that actually changes a field's live value
 // (invariant E), and leave it alone for an edit that merely echoes the live
-// value back -- which is what the configure page's Save and Start both do on
-// every call. All eight hub-side test-plan items live here; the ninth was a
+// value back -- which is what the retired Configure page's Save and Start
+// both did on every call. All eight hub-side test-plan items live here; the ninth was a
 // Vitest test of the Configure page, which the Edit page replaced
 // (ptone/scion#3975).
 //

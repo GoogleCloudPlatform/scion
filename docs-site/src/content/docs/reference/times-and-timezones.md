@@ -107,7 +107,7 @@ A pin is the agent's explicit timezone. It is set in three ways:
   - `""` unpins it, and the agent follows steps 2-5 from then on.
 
   The field is accepted in any phase except on a deleted agent (`409`). A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). See the [Agents API](/scion/reference/api/).
-- **Later, in the web dashboard.** The agent's **Configure** page has a **Timezone** row. It shows the resolved zone and its source, and offers **Pin** and **Unpin**.
+- **Later, in the web dashboard.** The agent's **Edit** page has a **Timezone** field on its General tab. Pick a zone to pin it, or press **Clear** to unpin it; either is saved with the page's **Save**, like any other field, and applies at the agent's next start.
 
 An agent created by an older Hub may have a `TZ` saved in its applied config env. The Hub converts that value to a pin (source `legacy`) the first time it reads the agent's timezone. The `applied-config-tz-cleanup` operation does the same for every agent in one pass (see [Operator steps](#operator-steps)).
 

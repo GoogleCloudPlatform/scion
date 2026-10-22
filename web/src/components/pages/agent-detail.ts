@@ -92,7 +92,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
@@ -172,9 +172,6 @@ function parseDuration(s: string): number {
  * it and use fake timers.
  */
 export const DELETE_REDIRECT_DELAY_MS = 1000;
-
-// Shared with the Edit page (shared/agent-reincarnate.ts); re-exported for existing importers.
-export { REINCARNATE_CONFIRM_MESSAGE };
 
 /**
  * Format seconds as "Xh Ym Zs".
@@ -1971,7 +1968,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
+          ${can(agent._capabilities, 'update')
             ? html`
                 <a
                   href="/agents/${this.agentId}/edit"

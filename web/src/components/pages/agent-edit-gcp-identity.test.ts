@@ -282,6 +282,14 @@ describe('agent edit: GCP identity on a Kubernetes target (Block offered)', () =
     expect(hint(el)).not.toContain('Token requests are denied');
   });
 
+  it('keeps a stored Block selected on a known-Kubernetes target', async () => {
+    stubFetch({ agent: makeAgent({ gcpIdentity: { metadataMode: 'block' } }) });
+    const el = await mount();
+    expect(modeSelect(el).value).toBe('block');
+    expect(formOf(el)!.gcpIdentity!.gcpMetadataMode).toBe('block');
+    expect(formOf(el)!.gcpIdentity!.gcpIdentityUserSet).toBe(false);
+  });
+
   it('keeps the generic Block text for a stored Block on a docker broker', async () => {
     stubFetch({
       agent: makeAgent({ gcpIdentity: { metadataMode: 'block' } }),
@@ -444,6 +452,25 @@ describe('agent edit: service-account mapping state (ptone/scion#4391)', () => {
     const help = statusHelp(el);
     expect(help?.textContent?.trim()).toBe('Not mapped: test message A.');
     expect(help?.classList.contains('warning')).toBe(true);
+  });
+
+  it('shows a mapped selection without the warning style', async () => {
+    stubFetch({ agent: assigned('k8s-a', 'sa-b') });
+    const el = await mount();
+    const help = statusHelp(el);
+    expect(help?.textContent?.trim()).toBe('Mapped: test message B.');
+    expect(help?.classList.contains('warning')).toBe(false);
+  });
+
+  it('keeps the labels when the plain list lands after the mapping-state list', async () => {
+    stubFetch({ agent: assigned('k8s-a'), hold: ['list-plain'] });
+    const el = await mount();
+    expect(held.map((h) => h.kind)).toEqual(['list-plain']);
+    const i = held.findIndex((h) => h.kind === 'list-plain');
+    held.splice(i, 1)[0]!.release();
+    await settle(el);
+    expect(options(el)[0]).toEqual(['sa-b', 'sa-b@example.com — mapped']);
+    expect(options(el)[2]).toEqual(['sa-a', 'sa-a@example.com — not mapped on this profile']);
   });
 
   it("labels the agent's own profile", async () => {

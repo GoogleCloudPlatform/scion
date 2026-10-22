@@ -161,8 +161,9 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 }
 
 /**
- * Edit agent page (ptone/scion#3952): the Edit button on the agent page and
- * the /agents/{id}/edit route. Default OFF.
+ * Edit agent page (ptone/scion#3952): the by-tier grouping of its fields
+ * and the tier summary strip. The page and its by-function view are always
+ * available. Default OFF.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
 

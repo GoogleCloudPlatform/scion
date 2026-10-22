@@ -168,9 +168,10 @@ describe('agent detail header actions order', () => {
     expect(message.querySelector(':scope > sl-button')!.hasAttribute('disabled')).toBe(true);
   });
 
-  // The Edit page (experiment web.agent_edit, ptone/scion#3975) replaced
-  // the Configure page: Edit shows in every phase for a caller who may
-  // update the agent, in Configure's place before Delete.
+  // The Edit page (ptone/scion#3975) replaced the Configure page: Edit shows
+  // in every phase for a caller who may update the agent, in Configure's
+  // place before Delete, whatever the web.agent_edit experiment (which
+  // gates only the Edit page's by-tier view).
   describe('Edit button', () => {
     afterEach(() => {
       window.__SCION_FEATURES__ = {};
@@ -210,12 +211,11 @@ describe('agent detail header actions order', () => {
       expect(renderHeaderActions(agent).querySelector('a[href$="/configure"]')).toBeNull();
     });
 
-    it('hides Edit while the experiment is off', () => {
+    it('shows Edit while the experiment is off too', () => {
       window.__SCION_FEATURES__ = { 'web.agent_edit': false };
-      const labels = headerActionLabels(
-        makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } })
-      );
-      expect(labels).not.toContain('Edit');
+      const agent = makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } });
+      expect(headerActionLabels(agent)).toContain('Edit');
+      expect(renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')).not.toBeNull();
     });
 
     it('hides Edit without update capability, a created agent included', () => {

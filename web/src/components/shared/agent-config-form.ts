@@ -174,6 +174,14 @@ export interface AgentConfigEditValues {
    * would drop the keys the caller cannot see.
    */
   envVisible?: boolean | undefined;
+  /**
+   * The requester's explicit env record (CreateInputs.InlineConfig.Env when
+   * the agent has CreateInputs, else InlineConfig.Env): tells an explicit
+   * auto-expose choice from a project-derived one in env.
+   */
+  explicitEnv?: Record<string, string> | undefined;
+  /** The hub's default for auto-expose ports (public settings). */
+  autoExposeHubDefault?: boolean | undefined;
   /** Display values of the fixed fields, by field key (projectId, template, branch, ...). */
   fixed?: Record<string, string> | undefined;
   /** The agent's detail page, linked from read-only fields. */
@@ -611,6 +619,39 @@ const TZ_ENV_KEY = 'TZ';
 export const ENV_HIDDEN_REASON =
   "You cannot see this agent's environment, so it cannot be edited here.";
 
+/**
+ * Where an agent's auto-expose value comes from: the requester set it
+ * (explicit record), the hub derived it from the project or a template
+ * config (in the live env only), or it is inherited (absent from the live
+ * env: a template's value, if any, applies, otherwise the hub default).
+ */
+export type AutoExposeSource = 'explicit' | 'project/template' | 'inherited';
+
+/** The source label of each AutoExposeSource. */
+export const AUTO_EXPOSE_SOURCE_LABELS: Record<AutoExposeSource, string> = {
+  explicit: 'explicit',
+  'project/template': 'project/template',
+  inherited: 'inherited (hub default shown; template may override)',
+};
+
+/**
+ * The effective SCION_AUTO_EXPOSE_PORTS of an agent and its source. The
+ * live env holds the explicit or project-derived value; when it lacks the
+ * key the value is inherited, and the hub default is shown (the page cannot
+ * see a template's value, which the broker applies first).
+ */
+export function effectiveAutoExposePorts(
+  liveEnv: Record<string, string> | undefined,
+  explicitEnv: Record<string, string> | undefined,
+  hubDefault: boolean
+): { enabled: boolean; source: AutoExposeSource } {
+  const value = liveEnv?.SCION_AUTO_EXPOSE_PORTS;
+  if (value === undefined) return { enabled: hubDefault, source: 'inherited' };
+  const source: AutoExposeSource =
+    explicitEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
+  return { enabled: value === 'true', source };
+}
+
 /** The sections of the by-tier grouping, in display order. */
 export type AgentTierSection = 'container' | 'reincarnate' | 'immediate' | 'fixed';
 
@@ -715,6 +756,9 @@ export class ScionAgentConfigForm extends LitElement {
 
   /** Edit mode: group the sections by function (the default) or by tier. */
   @property() grouping: AgentConfigGrouping = 'function';
+
+  /** Edit mode: show the summary strip counting the fields by disposition. */
+  @property({ type: Boolean }) showTierSummary = true;
 
   @state() private drafts: Record<string, FieldDraft> = {};
   @state() private resourceDrafts: Record<string, string> = {};
@@ -1088,10 +1132,25 @@ export class ScionAgentConfigForm extends LitElement {
       .map((e) => e.key);
   }
 
-  /** Edit mode: the auto-expose control's stored state, from the agent's env. */
+  /** Edit mode: the agent's effective auto-expose value and its source. */
+  private autoExposeEffective(): { enabled: boolean; source: AutoExposeSource } {
+    return effectiveAutoExposePorts(
+      this.editValues.env,
+      this.editValues.explicitEnv,
+      this.editValues.autoExposeHubDefault ?? false
+    );
+  }
+
+  /**
+   * Edit mode: the auto-expose control's starting state. The value shows
+   * only when it is the agent's explicit choice; a project-derived or
+   * inherited value starts blank (shown as the placeholder), so picking it
+   * is a change. The sub-fields start from the live env.
+   */
   private storedAutoExpose(): AutoExposeDraft {
     const env = this.mode === 'edit' ? (this.editValues.env ?? {}) : {};
-    const ports = env.SCION_AUTO_EXPOSE_PORTS;
+    const explicit = this.mode === 'edit' && this.autoExposeEffective().source === 'explicit';
+    const ports = explicit ? env.SCION_AUTO_EXPOSE_PORTS : undefined;
     return {
       enabled: ports === 'true' || ports === 'false' ? ports : '',
       mode: env.SCION_AUTO_EXPOSE_MODE || 'allowlist',
@@ -1676,12 +1735,18 @@ export class ScionAgentConfigForm extends LitElement {
       };
       this.emitChange();
     };
+    const edit = this.mode === 'edit';
+    const eff = edit ? this.autoExposeEffective() : null;
+    const placeholder =
+      eff && eff.source !== 'explicit'
+        ? `${eff.enabled ? 'Enabled' : 'Disabled'} (${AUTO_EXPOSE_SOURCE_LABELS[eff.source]})`
+        : this.placeholderFor(f);
     return html`<div class="row">
         <sl-select
           id=${id}
           size="small"
           .value=${shown?.enabled ?? ''}
-          placeholder=${this.placeholderFor(f)}
+          placeholder=${placeholder}
           ?disabled=${off}
           @sl-change=${(e: Event) => {
             const v = (e.target as HTMLElement & { value: string })
@@ -1693,15 +1758,24 @@ export class ScionAgentConfigForm extends LitElement {
         </sl-select>
         <sl-button
           size="small"
-          class="clear"
+          class=${edit ? 'undo' : 'clear'}
           ?disabled=${off || !a}
           @click=${() => {
             this.autoExpose = null;
             this.emitChange();
           }}
-          >Clear</sl-button
+          >${edit ? 'Undo' : 'Clear'}</sl-button
         >
       </div>
+      ${eff
+        ? html`<div class="inherited" data-testid="auto-expose-source">
+            Source:
+            ${a ? 'explicit (unsaved)' : AUTO_EXPOSE_SOURCE_LABELS[eff.source]}${eff.source ===
+              'explicit' || a
+              ? nothing
+              : '. Pick a value to set it on this agent.'}
+          </div>`
+        : nothing}
       ${shown?.enabled === 'true'
         ? html`<div class="grid auto-expose-sub">
             <div class="sub">
@@ -1753,6 +1827,12 @@ export class ScionAgentConfigForm extends LitElement {
    */
   private renderEnv(off: boolean) {
     const entries = this.envEntries ?? this.storedEnvEntries();
+    if (this.mode === 'edit' && this.editValues.envVisible === false) {
+      // The hub withheld the env: say so, and claim nothing about it.
+      return html`<div class="inherited" data-testid="env-hidden">
+        The environment is hidden from you.
+      </div>`;
+    }
     if (off && this.mode === 'edit') {
       return html`<div class="env-readonly" data-testid="env-readonly">
         ${entries.length === 0
@@ -1762,8 +1842,12 @@ export class ScionAgentConfigForm extends LitElement {
     }
     return html`${this.mode === 'edit'
         ? html`<div class="hint">
-            TZ is not set here: the Timezone field on the General tab pins the timezone.
-          </div>`
+              TZ is not set here: the Timezone field on the General tab pins the timezone.
+            </div>
+            <div class="hint" data-testid="env-replace-note">
+              Saving a change here replaces the agent's stored environment with this list. Values
+              this page cannot show you, such as GITHUB_TOKEN, are not kept.
+            </div>`
         : nothing}
       <scion-env-editor
         .entries=${entries}
@@ -1931,7 +2015,7 @@ export class ScionAgentConfigForm extends LitElement {
     }
     const tier = this.grouping === 'tier';
     return html`
-      ${this.renderSummary()}
+      ${this.showTierSummary ? this.renderSummary() : nothing}
       ${this.sections.map(
         (g) => html`
           <section
