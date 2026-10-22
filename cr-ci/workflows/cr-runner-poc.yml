@@ -179,12 +179,16 @@ jobs:
           samples="$RUNNER_TEMP/samples.log"
           : >"$samples"
           (
+            # On TERM, stop the pending sleep too, so no sleep outlives the step.
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
             while :; do
               mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
               ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
               used_kb=$(df -k --output=used /scratch | tail -1 | tr -d ' ')
               echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) scratch_used_mb=$(( used_kb / 1024 ))" | tee -a "$samples"
-              sleep 5
+              sleep 5 &
+              nap=$!
+              wait "$nap"
             done
           ) &
           sampler=$!
@@ -193,6 +197,7 @@ jobs:
           golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
           echo "golangci-lint exit=$rc duration=$(( $(date +%s) - start ))s"
           kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
           awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[2] + 0 > max[kv[1]]) max[kv[1]] = kv[2] + 0 }}
             END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], NR}' "$samples"
           exit "$rc"

@@ -77,7 +77,8 @@ RUN curl -fsSL -o /tmp/golangci-lint.tgz \
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.
-# _diag (the runner's own logs, about 1 MB per job) stays a plain directory on the
+# _diag (the runner's logs and the job's step logs under _diag/pages; about 1 MB for
+# the P6 lint job, more for jobs with large output) stays a plain directory on the
 # root filesystem, NOT on /scratch: when a job fills /scratch, the runner must still be
 # able to write its logs and report the failure (P6 PoC run 2 lost the runner, and the
 # job's log, to ENOSPC on _diag).

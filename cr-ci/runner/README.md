@@ -128,8 +128,9 @@ this, in order:
    on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
    `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.
    For job steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself,
-   under its work folder. The runner's `_diag` directory (its own logs, about
-   1 MB per job) is deliberately **not** on `/scratch`: it stays on the root
+   under its work folder. The runner's `_diag` directory (its own logs, and
+   the job's step logs under `_diag/pages`, which grow with the job's output:
+   about 1 MB for the P6 lint job) is deliberately **not** on `/scratch`: it stays on the root
    filesystem, so a job that fills `/scratch` cannot crash the runner and lose the
    job log with it (P6 PoC run 2). The image also keeps a
    `_work` symlink to `/scratch/_work` in the runner directory, for a JIT

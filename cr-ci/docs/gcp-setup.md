@@ -28,10 +28,12 @@ nothing exists yet), and `#` lines are notes.
   Artifact Registry are available works: the job, the mediator, the image
   repository and the staging bucket all go to `REGION`. Cost differs:
   `us-central1` has Tier 1 Cloud Run pricing, while for example `us-west2` is
-  Tier 2 ([Cloud Run locations](https://docs.cloud.google.com/run/docs/locations)),
-  roughly 25 % more per vCPU and GiB-second. The design's remark that Cloud Run
-  *Instances* are not available in some regions does not matter here: cr-ci uses
-  Jobs, which are GA everywhere. The ephemeral-disk quotas (section 9) are per
+  Tier 2 ([Cloud Run locations](https://docs.cloud.google.com/run/docs/locations));
+  Tier 2 costs more per vCPU-second and GiB-second (current rates:
+  [Cloud Run pricing](https://cloud.google.com/run/pricing)). The design's remark
+  that Cloud Run *Instances* are not available in some regions does not matter
+  here: cr-ci uses Jobs. Check that the region offers Cloud Run Jobs, and the
+  ephemeral-disk volumes they use, before choosing it. The ephemeral-disk quotas (section 9) are per
   region, so a new region needs its own quota requests. Moving region means
   redeploying everything (a new `MEDIATOR_URL`, so the App's webhook URL changes too).
 - **Tools:** bash >= 4, the gcloud CLI (version floor `CRCI_MIN_GCLOUD` in
@@ -153,7 +155,12 @@ scripts/deploy-job.sh --apply [--tag TAG] [--warm-up]
   entrypoint runs its image, `/scratch` and HOME-link checks and exits 0 before
   any claim. The first execution after an image change pays the image import (about
   34 s for the 371 MiB image in the P6 PoC); the warm-up takes that hit instead
-  of the first real job, and it fails the deploy if the checks fail. The
+  of the first real job, and it fails the deploy if the checks fail. A failed
+  warm-up leaves the job on the new image, so real jobs would fail the same
+  way: roll back with `scripts/deploy-job.sh --apply --tag <previous tag>`
+  (list tags with `gcloud artifacts docker tags list
+  REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`), then fix
+  the image. The
   mediator ignores the execution (it has no `RUNNER_NAME`); it counts toward
   `MAX_CONCURRENT_RUNNERS` for the few seconds it runs. Executing with an env
   override needs `run.jobs.runWithOverrides` (in `roles/run.developer`).
