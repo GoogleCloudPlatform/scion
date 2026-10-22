@@ -26,13 +26,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
 	goruntime "runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -147,9 +144,6 @@ type doctorReport struct {
 	// authSource names where the Hub credential came from (a
 	// hubAuthSource value); empty when no Hub client was set up.
 	authSource string
-	// hubEP is the configured Hub endpoint once the Hub checks started;
-	// URLs on its host are shown as doctorDisplayEndpoint shows it.
-	hubEP string
 }
 
 // doctorJSONFormatVersion is the version of the --format json document.
@@ -270,8 +264,8 @@ func (r *doctorReport) add(section *[]scionruntime.CheckResult, c scionruntime.C
 	// Messages can carry text from the Hub, brokers and integrations
 	// (names, reasons); never let it drive the terminal. Errors can quote
 	// a URL, which is shown without its user info.
-	c.Message = config.RedactURLsIn(scrubDoctorHubURLs(stripControlChars(c.Message), r.hubEP))
-	c.Remediation = config.RedactURLsIn(scrubDoctorHubURLs(stripControlChars(c.Remediation), r.hubEP))
+	c.Message = config.RedactURLsIn(stripControlChars(c.Message))
+	c.Remediation = config.RedactURLsIn(stripControlChars(c.Remediation))
 	*section = append(*section, c)
 	var icon string
 	switch c.Status {
@@ -391,132 +385,53 @@ func (r *doctorReport) overallStatus() string {
 	return status
 }
 
-// doctorURLRe matches a URL in free text: a scheme, "://" and everything
-// up to white space or a quote.
-var doctorURLRe = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+// The Hub endpoint comes from --hub or SCION_HUB_ENDPOINT, unvalidated, and
+// can carry a credential. Rather than recognise credentials in it, doctor
+// applies a fixed rule (see the "scion doctor" JSON section of
+// docs-site reference/cli.md):
+//   - (A) an endpoint containing "@" anywhere is never shown, not even in
+//     part: doctorDisplayEndpoint returns doctorEndpointRedacted;
+//   - (B) for an endpoint containing "@", "?" or "#", no error text from
+//     the Hub client or the HTTP transport (which can quote the request
+//     URL) reaches any message: doctorHubError returns
+//     doctorHubErrorHidden instead;
+//   - (C) any other endpoint cannot hold a credential: it is shown as
+//     scheme, host, port and path, and error text is shown, with the
+//     shared URL redaction (config.RedactURL, config.RedactURLsIn in add)
+//     as a second line of defence.
 
-// doctorTokenRe matches a run of text up to white space or a quote.
-var doctorTokenRe = regexp.MustCompile(`[^\s"'<>]+`)
+// doctorEndpointRedacted is shown in place of an endpoint containing "@".
+const doctorEndpointRedacted = "(endpoint not shown: it contains @)"
 
-// doctorTrailingPunct is punctuation that ends a sentence, not a URL.
-const doctorTrailingPunct = ".,;:!?)]}"
-
-// scrubDoctorHubURLs removes the Hub endpoint's credentials from text, so
-// errors from the Hub client, which quote the request URL built from the
-// configured endpoint, never show them. It fails closed, in this order:
-//   - the endpoint's user info (everything between the scheme and the
-//     last "@"), as one string and in pieces, becomes "xxxxx" (see
-//     doctorEndpointUserinfo); this runs first, so no later step can
-//     split a secret before it is replaced;
-//   - every run of text (up to white space or a quote) that contains the
-//     endpoint's host and path is shown as doctorDisplayEndpoint shows
-//     it, whether or not the endpoint parses;
-//   - when the endpoint parses, every URL on its host is shown that way
-//     too.
-//
-// Other URLs are left to config.RedactURLsIn.
-func scrubDoctorHubURLs(text, hubEP string) string {
-	if hubEP == "" {
-		return text
-	}
-	for _, part := range doctorEndpointUserinfo(hubEP) {
-		text = strings.ReplaceAll(text, part, "xxxxx")
-	}
-	// The host and path alone: the client can rewrite the user info it
-	// quotes, and the step above has replaced it anyway.
-	hostPath := doctorDisplayEndpoint(hubEP)
-	if i := strings.Index(hostPath, "://"); i >= 0 {
-		hostPath = hostPath[i+3:]
-	}
-	if key := strings.TrimRight(hostPath, "/"); key != "" {
-		text = doctorTokenRe.ReplaceAllStringFunc(text, func(m string) string {
-			if !strings.Contains(m, key) {
-				return m
-			}
-			trimmed := strings.TrimRight(m, doctorTrailingPunct)
-			return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
-		})
-	}
-	if hub, err := url.Parse(stripDoctorUserinfo(hubEP)); err == nil && hub.Hostname() != "" {
-		text = doctorURLRe.ReplaceAllStringFunc(text, func(m string) string {
-			trimmed := strings.TrimRight(m, doctorTrailingPunct)
-			u, err := url.Parse(trimmed)
-			if err != nil || !strings.EqualFold(u.Hostname(), hub.Hostname()) {
-				return m
-			}
-			return doctorDisplayEndpoint(trimmed) + m[len(trimmed):]
-		})
-	}
-	return text
-}
+// doctorHubErrorHidden replaces Hub client and transport error text for an
+// endpoint containing "@", "?" or "#".
+const doctorHubErrorHidden = "error details not shown because the Hub endpoint contains @, ? or #"
 
 // doctorDisplayEndpoint is hubEP as doctor shows it, in text and JSON:
-// scheme, host, port and path only. It fails closed: before anything else,
-// everything between the scheme (or the start) and the LAST "@" of the
-// whole string is dropped, so user info containing "/", "?", "#", ":" or
-// white space cannot hide from the parser. What remains is shown as
-// scheme, host, port and path when it parses as an absolute URL, and
-// otherwise cut at its first "?" or "#".
+// doctorEndpointRedacted when it contains "@" (rule A); otherwise its
+// scheme, host, port and path when it parses as an absolute URL, or the
+// endpoint cut at its first "?" or "#" when it does not.
 func doctorDisplayEndpoint(hubEP string) string {
-	s := stripDoctorUserinfo(hubEP)
+	if strings.Contains(hubEP, "@") {
+		return doctorEndpointRedacted
+	}
+	s := cutDoctorQueryFragment(hubEP)
 	if u, err := url.Parse(s); err == nil && u.Scheme != "" && u.Host != "" {
 		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 		// Path parameters (";jsessionid=...") can carry credentials too.
 		return config.RedactURL(clean.String())
 	}
-	return config.RedactURL(cutDoctorQueryFragment(s))
+	return config.RedactURL(s)
 }
 
-// splitDoctorUserinfo splits hubEP into the part up to and including
-// "://" (empty without a scheme), the user info before the last "@" of
-// the rest (empty without an "@"), and what follows that "@".
-func splitDoctorUserinfo(hubEP string) (prefix, userinfo, rest string) {
-	rest = hubEP
-	if i := strings.Index(rest, "://"); i >= 0 {
-		prefix, rest = rest[:i+3], rest[i+3:]
+// doctorHubError is the text of err, an error from the Hub client or the
+// HTTP transport for a request to hubEP, as a check message may show it:
+// doctorHubErrorHidden when hubEP contains "@", "?" or "#" (rule B).
+func doctorHubError(hubEP string, err error) string {
+	if strings.ContainsAny(hubEP, "@?#") {
+		return doctorHubErrorHidden
 	}
-	if i := strings.LastIndex(rest, "@"); i >= 0 {
-		userinfo, rest = rest[:i], rest[i+1:]
-	}
-	return prefix, userinfo, rest
-}
-
-// stripDoctorUserinfo is hubEP without its user info (see
-// splitDoctorUserinfo).
-func stripDoctorUserinfo(hubEP string) string {
-	prefix, _, rest := splitDoctorUserinfo(hubEP)
-	return prefix + rest
-}
-
-// doctorEndpointUserinfo returns the strings to mask in free text for
-// hubEP's user info, longest first: the whole user info (any length), and
-// its pieces of 3 characters or more split at ":", "/", "?", "#" and
-// white space, each also in its unescaped form.
-func doctorEndpointUserinfo(hubEP string) []string {
-	_, userinfo, _ := splitDoctorUserinfo(hubEP)
-	if userinfo == "" {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	add := func(s string, minLen int) {
-		if len(s) >= minLen && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-		if u, err := url.PathUnescape(s); err == nil && u != s && len(u) >= minLen && !seen[u] {
-			seen[u] = true
-			out = append(out, u)
-		}
-	}
-	add(userinfo, 1)
-	for _, piece := range strings.FieldsFunc(userinfo, func(r rune) bool {
-		return strings.ContainsRune(":/?#", r) || unicode.IsSpace(r)
-	}) {
-		add(piece, 3)
-	}
-	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
-	return out
+	return err.Error()
 }
 
 // cutDoctorQueryFragment returns s up to its first "?" or "#".
@@ -605,7 +520,6 @@ func runDoctor() error {
 // replaces the list-based broker (D3) and agent (D4) checks; otherwise
 // those run as a fallback.
 func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedProjectID string) doctorPlatformHealth {
-	r.hubEP = hubEP
 	// D1: Hub Connectivity
 	d1, healthz := probeDoctorHubConnectivity(hubEP, client)
 	r.add(&r.HubChecks, d1)
@@ -957,7 +871,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 			return scionruntime.CheckResult{
 				Name:        "hub-connectivity",
 				Status:      "fail",
-				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", doctorDisplayEndpoint(hubEP), hubclient.HintProxyError(err)),
+				Message:     fmt.Sprintf("Cannot reach Hub at %s: %s", doctorDisplayEndpoint(hubEP), doctorHubError(hubEP, hubclient.HintProxyError(err))),
 				Remediation: "Verify the Hub is running and the endpoint is correct",
 			}, doctorHealthzProbe{}
 		}
@@ -983,7 +897,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Invalid Hub endpoint: %v", err),
+			Message:     fmt.Sprintf("Invalid Hub endpoint: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check the Hub endpoint URL",
 		}, doctorHealthzProbe{}
 	}
@@ -993,7 +907,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", doctorDisplayEndpoint(hubEP), err),
+			Message:     fmt.Sprintf("Cannot reach Hub at %s: %s", doctorDisplayEndpoint(hubEP), doctorHubError(hubEP, err)),
 			Remediation: "Verify the Hub is running and the endpoint is correct",
 		}, doctorHealthzProbe{}
 	}
@@ -1088,7 +1002,7 @@ func checkDoctorHubAuth(hubEP string, hubConnected bool, client hubclient.Client
 		return scionruntime.CheckResult{
 			Name:        "hub-auth",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Authentication failed: %v", err),
+			Message:     fmt.Sprintf("Authentication failed: %s", doctorHubError(hubEP, err)),
 			Remediation: "Run 'scion hub auth login' to authenticate",
 		}
 	}
@@ -1133,7 +1047,7 @@ func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubcl
 		return scionruntime.CheckResult{
 			Name:        "broker-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Failed to query brokers: %v", err),
+			Message:     fmt.Sprintf("Failed to query brokers: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check Hub server logs",
 		}
 	}
@@ -1197,7 +1111,7 @@ func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Cli
 		return scionruntime.CheckResult{
 			Name:    name,
 			Status:  "warn",
-			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %v", err),
+			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %s", doctorHubError(hubEP, err)),
 		}
 	}
 	if len(warnings) > 0 {
@@ -1278,7 +1192,7 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		return scionruntime.CheckResult{
 			Name:        "agent-health",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Failed to query agents: %v", err),
+			Message:     fmt.Sprintf("Failed to query agents: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check Hub server logs",
 		}
 	}

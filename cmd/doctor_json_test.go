@@ -343,87 +343,56 @@ func TestDoctorJSON_MessagesAreOneLine(t *testing.T) {
 
 func TestDoctorDisplayEndpoint(t *testing.T) {
 	tests := map[string]string{
-		"https://hub.example.com":                                    "https://hub.example.com",
-		"https://hub.example.com:8443/scion/":                        "https://hub.example.com:8443/scion/",
-		"https://alice:pa55word@hub.example.com/p?token=s3cr3t#frag": "https://hub.example.com/p",
-		"https://alice@hub.example.com?access_token=s3cr3t":          "https://hub.example.com",
-		// Endpoints that do not parse as an absolute URL fail closed.
-		"https://alice:pw@hub.example.com:80a/p?k=s3cr3t-tok#frag": "https://hub.example.com:80a/p",
-		"alice:pw@hub.example.com/p?k=s3cr3t-tok#frag":             "hub.example.com/p",
-		"alice:pw@%zz?k=s3cr3t-tok#frag":                           "%zz",
-		// User info with "/", "?", "#", ":" or white space in the
-		// password: everything up to the last "@" is dropped first.
-		"https://svc:Zm9v/YmFy@hub.example.com":     "https://hub.example.com",
-		"https://alice:hunter2?x@hub.example.com":   "https://hub.example.com",
-		"https://alice:se#cret@hub.example.com":     "https://hub.example.com",
-		"https://alice:1234/56@hub.example.com":     "https://hub.example.com",
-		"https://alice:long secret@hub.example.com": "https://hub.example.com",
+		// Rule C: no "@", shown as scheme, host, port and path.
+		"https://hub.example.com":                         "https://hub.example.com",
+		"https://hub.example.com:8443/scion/":             "https://hub.example.com:8443/scion/",
+		"https://hub.example.com/p?token=s3cr3t-tok#frag": "https://hub.example.com/p",
+		"https://hub.example.com:80a/p?k=s3cr3t-tok#frag": "https://hub.example.com:80a/p",
+		"hub.example.com/p?k=s3cr3t-tok#frag":             "hub.example.com/p",
 	}
 	for in, want := range tests {
 		assert.Equal(t, want, doctorDisplayEndpoint(in), in)
 	}
+	// Rule A: any "@" and nothing of the endpoint is shown.
+	for _, ep := range secretEndpoints {
+		assert.Equal(t, doctorEndpointRedacted, doctorDisplayEndpoint(ep), ep)
+	}
 }
 
-// credentialedEndpoint returns base with user info, a path, a token
-// query parameter and a fragment.
-func credentialedEndpoint(base string) string {
-	return strings.Replace(base, "http://", "http://alice:pa55word@", 1) + "/base?token=s3cr3t-tok#frag"
+func TestDoctorHubError(t *testing.T) {
+	err := errors.New(`Get "https://hub.example.com/healthz": connection refused`)
+	assert.Equal(t, err.Error(), doctorHubError("https://hub.example.com", err), "rule C keeps the error text")
+	for _, ep := range []string{"https://u:p@hub.example.com", "https://hub.example.com/?k=v", "https://hub.example.com/#f"} {
+		assert.Equal(t, doctorHubErrorHidden, doctorHubError(ep, err), ep)
+	}
+}
+
+// secretEndpoints all contain "@" (and most a query and a fragment): user
+// info that parses or not, user info whose password holds characters that
+// break URL parsing or Go's quoting, and an "@" in the path. None of
+// "alice", "pa55", "word", "s3cr3t-tok", "token=", "#frag" or "acme" may
+// appear in doctor's output for any of them.
+var secretEndpoints = []string{
+	"https://alice:pa55word@hub.example.com/p?token=s3cr3t-tok#frag",
+	"https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag",
+	"alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"alice:pa55word@%zz?k=s3cr3t-tok#frag",
+	"https://alice:pa55/word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"https://alice:pa55?word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"https://alice:pa55#word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"https://alice:pa55 word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"https://alice:1234/pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+	`https://alice:pa55"word/x@hub.example.com/p?k=s3cr3t-tok#frag`,
+	`https://alice:pa55\word/x@hub.example.com/p?k=s3cr3t-tok#frag`,
+	"https://alice:pa/pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
+	"https://hub.example.com/team@acme",
 }
 
 func assertNoEndpointCredentials(t *testing.T, out string) {
 	t.Helper()
-	for _, secret := range []string{"alice", "pa55", "word", "s3cr3t-tok", "token=", "#frag", "frag/"} {
+	for _, secret := range []string{"alice", "pa55", "word", "s3cr3t-tok", "token=", "#frag", "frag/", "acme", `":pa"`} {
 		assert.NotContains(t, out, secret)
 	}
-}
-
-func TestDoctorHubEndpointCredentialsNeverShown(t *testing.T) {
-	t.Run("reachable", func(t *testing.T) {
-		srv := (&fakeDoctorHub{summaryBody: summaryJSON(t, degradedSummary())}).serve(t)
-		ep := credentialedEndpoint(srv.URL)
-		// The client talks to the fake hub; doctor is given the
-		// credentialed endpoint to display.
-		client := newDoctorTestClient(t, srv.URL)
-
-		var text bytes.Buffer
-		r := &doctorReport{stdout: &text, authSource: hubAuthSourceEnvHubToken}
-		r.platformHealthSection(r.hubChecks(ep, client, ""))
-		assert.Contains(t, text.String(), "Hub at "+srv.URL+"/base is healthy")
-		assertNoEndpointCredentials(t, text.String())
-
-		out, doc := runDoctorJSON(t, ep, client, hubAuthSourceEnvHubToken)
-		assertNoEndpointCredentials(t, string(out))
-		assert.JSONEq(t, `"`+srv.URL+`/base"`, string(hubObject(t, doc)["endpoint"]))
-	})
-
-	t.Run("unreachable", func(t *testing.T) {
-		// The client's error quotes the request URL built from the
-		// credentialed endpoint.
-		ep := credentialedEndpoint(closedServerURL())
-		client := newDoctorTestClient(t, ep)
-
-		var text bytes.Buffer
-		r := &doctorReport{stdout: &text}
-		r.platformHealthSection(r.hubChecks(ep, client, ""))
-		assert.Contains(t, text.String(), "Cannot reach Hub at ")
-		assertNoEndpointCredentials(t, text.String())
-
-		out, _ := runDoctorJSON(t, ep, client, "")
-		assertNoEndpointCredentials(t, string(out))
-	})
-}
-
-// malformedEndpoints do not parse as absolute URLs; each carries user
-// info, a query and a fragment.
-var malformedEndpoints = map[string]string{
-	"bad port":               "https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag",
-	"no scheme":              "alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"garbage":                "alice:pa55word@%zz?k=s3cr3t-tok#frag",
-	"slash in password":      "https://alice:pa55/word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"question in password":   "https://alice:pa55?word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"hash in password":       "https://alice:pa55#word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"space in password":      "https://alice:pa55 word@hub.example.com/p?k=s3cr3t-tok#frag",
-	"password reads as port": "https://alice:1234/pa55word@hub.example.com/p?k=s3cr3t-tok#frag",
 }
 
 // refusingTransport fails every request without touching the network.
@@ -433,53 +402,83 @@ func (refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("connection refused")
 }
 
-func TestDoctorHubEndpointCredentialsNeverShown_MalformedEndpoint(t *testing.T) {
-	// An endpoint that parses with another host ("alice:1234") would
-	// otherwise send a request; the client's error still quotes its URL.
+func TestDoctorHubEndpointCredentialsNeverShown(t *testing.T) {
+	// Some endpoints parse with another host ("alice:1234"); none may
+	// send a request. The client's errors still quote the request URL.
 	orig := http.DefaultTransport
 	http.DefaultTransport = refusingTransport{}
 	t.Cleanup(func() { http.DefaultTransport = orig })
 
-	for name, ep := range malformedEndpoints {
-		t.Run(name, func(t *testing.T) {
+	for _, ep := range secretEndpoints {
+		t.Run(ep, func(t *testing.T) {
 			client := newDoctorTestClient(t, ep)
 
 			var text bytes.Buffer
-			r := &doctorReport{stdout: &text}
+			r := &doctorReport{stdout: &text, authSource: hubAuthSourceEnvHubToken}
 			r.platformHealthSection(r.hubChecks(ep, client, ""))
-			assertNoEndpointCredentials(t, text.String())
+			out := text.String()
+			assertNoEndpointCredentials(t, out)
+			assert.Contains(t, out, "Cannot reach Hub at "+doctorEndpointRedacted+": "+doctorHubErrorHidden)
 
-			out, doc := runDoctorJSON(t, ep, client, "")
-			assertNoEndpointCredentials(t, string(out))
-			assert.JSONEq(t, `"`+doctorDisplayEndpoint(ep)+`"`, string(hubObject(t, doc)["endpoint"]))
+			js, doc := runDoctorJSON(t, ep, client, hubAuthSourceEnvHubToken)
+			assertNoEndpointCredentials(t, string(js))
+			assert.JSONEq(t, `"`+doctorEndpointRedacted+`"`, string(hubObject(t, doc)["endpoint"]))
 		})
 	}
 }
 
-func TestScrubDoctorHubURLs_MalformedEndpoint(t *testing.T) {
-	ep := "https://alice:pw@hub.example.com:80a/?k=SECRET#f"
-	in := `parse "https://alice:pw@hub.example.com:80a/?k=SECRET#f/healthz": invalid port ":80a" after host`
-	got := scrubDoctorHubURLs(in, ep)
-	assert.Equal(t, `parse "https://hub.example.com:80a/": invalid port ":80a" after host`, got)
+func TestDoctorHubEndpoint_ReachableWithAt(t *testing.T) {
+	// The client talks to the fake hub; doctor is given an endpoint with
+	// user info to display.
+	srv := (&fakeDoctorHub{summaryBody: summaryJSON(t, degradedSummary())}).serve(t)
+	ep := strings.Replace(srv.URL, "http://", "http://alice:pa55word@", 1) + "/base?token=s3cr3t-tok#frag"
+	client := newDoctorTestClient(t, srv.URL)
+
+	var text bytes.Buffer
+	r := &doctorReport{stdout: &text}
+	r.platformHealthSection(r.hubChecks(ep, client, ""))
+	assert.Contains(t, text.String(), "Hub at "+doctorEndpointRedacted+" is healthy")
+	assertNoEndpointCredentials(t, text.String())
+
+	js, doc := runDoctorJSON(t, ep, client, "")
+	assertNoEndpointCredentials(t, string(js))
+	assert.JSONEq(t, `"`+doctorEndpointRedacted+`"`, string(hubObject(t, doc)["endpoint"]))
 }
 
-func TestScrubDoctorHubURLs_SpaceInPassword(t *testing.T) {
-	ep := "https://alice:long secret@hub.example.com"
-	in := `parse "https://alice:long secret@hub.example.com/healthz": net/url: invalid userinfo`
-	assert.Equal(t, `parse "https://hub.example.com/healthz": net/url: invalid userinfo`, scrubDoctorHubURLs(in, ep))
+func TestDoctorHubEndpoint_QueryHidesErrorText(t *testing.T) {
+	// Rule B without "@": the endpoint is shown without its query, and
+	// the client's error (which quotes the query) is not.
+	ep := closedServerURL() + "/base?token=s3cr3t-tok#frag"
+	client := newDoctorTestClient(t, ep)
+
+	var text bytes.Buffer
+	r := &doctorReport{stdout: &text}
+	r.platformHealthSection(r.hubChecks(ep, client, ""))
+	assertNoEndpointCredentials(t, text.String())
+	assert.Contains(t, text.String(), "Cannot reach Hub at "+doctorDisplayEndpoint(ep)+": "+doctorHubErrorHidden)
+	assert.True(t, strings.HasSuffix(doctorDisplayEndpoint(ep), "/base"))
 }
 
-func TestScrubDoctorHubURLs_ShortPassword(t *testing.T) {
-	ep := "https://u:p@hub.example.com"
-	in := `request to u:p@hub.example.com failed`
-	assert.Equal(t, `request to hub.example.com failed`, scrubDoctorHubURLs(in, ep))
+func TestDoctorHubEndpoint_PlainEndpointKeepsErrorText(t *testing.T) {
+	// Rule C: nothing in the endpoint can be a credential, so the error
+	// text is shown.
+	ep := closedServerURL()
+	var text bytes.Buffer
+	r := &doctorReport{stdout: &text}
+	r.platformHealthSection(r.hubChecks(ep, newDoctorTestClient(t, ep), ""))
+	assert.Contains(t, text.String(), "Cannot reach Hub at "+ep+": ")
+	assert.Contains(t, text.String(), "connection refused")
+	assert.NotContains(t, text.String(), doctorHubErrorHidden)
 }
 
-func TestScrubDoctorHubURLs(t *testing.T) {
-	ep := "http://alice:pw@hub.example.com:8080/base?token=t#f"
-	in := `request failed: Get "http://alice:xxxxx@hub.example.com:8080/base?token=xxxxx#f/healthz": refused; see https://docs.example.com/x?y=1#z.`
-	assert.Equal(t, `request failed: Get "http://hub.example.com:8080/base": refused; see https://docs.example.com/x?y=1#z.`, scrubDoctorHubURLs(in, ep))
-	assert.Equal(t, in, scrubDoctorHubURLs(in, ""))
+func TestDoctorPlatformHealth_ErrorTextHiddenForQueryEndpoint(t *testing.T) {
+	srv := (&fakeDoctorHub{summaryStatus: http.StatusInternalServerError, summaryBody: `{"error":{"code":"internal","message":"boom s3cr3t-tok"}}`, brokersBody: `{"brokers":[]}`, agentsBody: `{"agents":[]}`}).serve(t)
+	ep := srv.URL + "?token=s3cr3t-tok"
+	_, doc := runDoctorJSON(t, ep, newDoctorTestClient(t, srv.URL), "")
+	var ph doctorJSONPlatformHealth
+	require.NoError(t, json.Unmarshal(doc["platformHealth"], &ph))
+	assert.Equal(t, doctorPHReasonError, ph.Reason)
+	assert.Equal(t, "Could not read the health summary: "+doctorHubErrorHidden, ph.Message)
 }
 
 func TestDoctorHubHealth_CredentialLine(t *testing.T) {

@@ -1678,7 +1678,7 @@ doctor did not learn is omitted, never filled in with a guess.
 | `generatedAt` | When doctor wrote the report, from this machine's clock, UTC (RFC 3339). |
 | `status` | `fail` when any check in any section failed, `warn` when any warned, `pass` otherwise. It includes the local checks (for example a missing Docker), and does not affect the exit status. |
 | `hub` | The Hub that answered. Omitted when no Hub endpoint is configured. |
-| `hub.endpoint` | The configured endpoint's scheme, host, port and path. User info, query and fragment are never shown: everything up to the last `@` is dropped first, and an endpoint that does not parse as a URL is cut at its first `?` or `#`. |
+| `hub.endpoint` | The configured endpoint's scheme, host, port and path, or `(endpoint not shown: it contains @)` (see "Hub endpoint credentials" below). Its query and fragment are never shown. |
 | `hub.source` | `healthSummary` when `version`, `instanceId` and `summaryGeneratedAt` come from the health summary; `healthz` when the summary could not be read and `version` comes from `/healthz`. Omitted when the Hub gave neither. |
 | `hub.version` | From the summary: the version every live Hub instance reports, or `mixed` when they differ. From `/healthz`: the version of the Hub process that answered. |
 | `hub.instanceId` | The Hub instance that served the summary. Only from the summary: `/healthz` does not report an instance. |
@@ -1699,7 +1699,7 @@ like `error`:
 |---|---|---|
 | `skipped` | `no_hub_endpoint` | No Hub endpoint is configured. |
 | `skipped` | `hub_unreachable` | The Hub did not answer `/healthz` (connection refused, DNS, TLS or timeout), or answered it with an HTTP error. |
-| `skipped` | `client_unavailable` | Doctor could not set up a Hub client. |
+| `skipped` | `client_unavailable` | Reserved: doctor could not set up a Hub client. Not normally expected. |
 | `skipped` | `permission_denied` | HTTP 403: the caller lacks `hub.health.read`, or is not a user identity (an agent token). |
 | `skipped` | `not_supported` | HTTP 404: the Hub predates the health summary. |
 | `unavailable` | `hub_unavailable` | HTTP 503: the Hub instance cannot read its database. |
@@ -1719,6 +1719,20 @@ them:
 
 The text output shows the same source as the `hub-credential` line of Hub Health.
 
+**Hub endpoint credentials.** The Hub endpoint (from `--hub` or `SCION_HUB_ENDPOINT`) can carry a
+credential, for example in user info or a query parameter. Doctor does not try to recognise one;
+it applies a fixed rule, in the text and the JSON output alike:
+
+- An endpoint that contains `@` anywhere is never shown, not even in part. Every mention of it,
+  including `hub.endpoint`, reads `(endpoint not shown: it contains @)`. This also applies to an
+  `@` that is not user info, such as one in the path.
+- For an endpoint that contains `@`, `?` or `#`, no error text from the Hub client or the network
+  (which can quote the request URL) appears in any check message or in `platformHealth.message`.
+  The message ends with "error details not shown because the Hub endpoint contains @, ? or #"
+  instead.
+- Any other endpoint cannot hold such a credential. It is shown as scheme, host, port and path,
+  and error text is shown in full.
+
 **Changes from the earlier format.** The JSON output before format version 2 had no
 `formatVersion`. Version 2 breaks it, with no compatibility keys:
 
@@ -1734,8 +1748,7 @@ The text output shows the same source as the `hub-credential` line of Hub Health
 | - | new `hubHealth` check `hub-credential` (also in the text output) |
 
 `status` and the exit status are unchanged. The text output and the check names are unchanged
-except for the new `hub-credential` line in Hub Health, and the Hub endpoint is shown without
-user info, query or fragment.
+except for the new `hub-credential` line in Hub Health and the endpoint rules below.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an

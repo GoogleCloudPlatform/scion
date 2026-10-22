@@ -156,7 +156,7 @@ func fetchDoctorPlatformHealth(hubEP string, hubReachable bool, client hubclient
 	return notRead(doctorPHStateUnavailable, doctorPHReasonError, statusCode, scionruntime.CheckResult{
 		Status: "warn",
 		// The error can carry a proxy's or the Hub's response body.
-		Message: singleLine(fmt.Sprintf("Could not read the health summary: %v", err)),
+		Message: singleLine("Could not read the health summary: " + doctorHubError(hubEP, err)),
 	})
 }
 
