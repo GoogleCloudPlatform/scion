@@ -414,3 +414,32 @@ func TestAuthenticatedHTTPClient_CrossOriginRedirectDropsCallerScionHeaders(t *t
 		})
 	}
 }
+
+// The hop contract here rests on net/http copying redirect headers from
+// the initial request before the first send, so headers that the round
+// tripper adds never reach a hop. That is an implementation detail, not a
+// documented guarantee, and this test pins it: do not retire it as a test
+// of the standard library.
+func TestAuthenticatedHTTPClient_AgentTokenRedirectToOtherHostOmitsAgentHeaders(t *testing.T) {
+	rec := &hopRecorder{}
+	n := redirectNet(t, rec, "http://storage.test/landed")
+	c := n.client("http://hub.test", &AgentTokenAuth{Token: "agent-token", RunID: "run-1"})
+	req := newGet(t, "http://hub.test/start")
+	req.Header.Set("X-Custom", "kept")
+	mustGet(t, c, req)
+
+	start, _ := rec.headers("hub.test/start")
+	if got := headerNames(start); got != "X-Custom,X-Scion-Agent-Token,X-Scion-Run-Id" {
+		t.Errorf("hub request headers = %s, want X-Custom,X-Scion-Agent-Token,X-Scion-Run-Id", got)
+	}
+	if start["X-Scion-Agent-Token"] != "agent-token" || start["X-Scion-Run-Id"] != "run-1" {
+		t.Errorf("hub request agent headers = %v, want agent-token and run-1", start)
+	}
+	landed, ok := rec.headers("storage.test/landed")
+	if !ok {
+		t.Fatal("redirect to storage.test was not followed")
+	}
+	if got := headerNames(landed); got != "X-Custom" {
+		t.Errorf("hop to storage.test carried headers %s, want only X-Custom", got)
+	}
+}
