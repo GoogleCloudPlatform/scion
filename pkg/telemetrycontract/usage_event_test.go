@@ -15,6 +15,7 @@
 package telemetrycontract
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -162,3 +163,5 @@ func TestUsageEventDecodesMockSeedRow(t *testing.T) {
 		t.Errorf("decoded tokens = %+v", ev)
 	}
 }
+
+func jsonUnmarshalForTest(data []byte, v any) error { return json.Unmarshal(data, v) }

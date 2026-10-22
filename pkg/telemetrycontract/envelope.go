@@ -38,11 +38,13 @@ package telemetrycontract
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -233,6 +235,10 @@ type Label struct {
 // Labels is a label set in its wire form: an array of key/value pairs with
 // unique keys in bytewise (UTF-8 byte) key order. Keys and values are
 // carried verbatim: no key filter, no normalization, no truncation.
+//
+// Do not tag a Labels field with omitempty: encoding/json checks omitempty
+// before calling MarshalJSON, so a known-empty set would be omitted (read
+// as unknown) instead of written as [].
 type Labels []Label
 
 // LabelsFromMap returns m as Labels in canonical order. A nil or empty map
@@ -353,23 +359,42 @@ func isNilPointer(v any) bool {
 }
 
 var (
-	labelsType     = reflect.TypeOf(Labels(nil))
-	jsonNumberType = reflect.TypeOf(json.Number(""))
+	labelsType        = reflect.TypeOf(Labels(nil))
+	jsonNumberType    = reflect.TypeOf(json.Number(""))
+	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
-// checkValues walks the fields encoding/json serializes (exported, not
-// tagged "-") and reports the first float/complex value, json.Number
-// (which can carry a fraction), integer outside ±MaxSafeInteger, string
-// that is not valid UTF-8, or invalid Labels value. path names the
-// offending field for the error message.
+// checkValues walks exactly the fields encoding/json serializes and reports
+// the first value that would break the wire conventions:
+//   - a float/complex value, a json.Number (it can carry a fraction), or an
+//     integer outside ±MaxSafeInteger;
+//   - a numeric or bool field tagged ",string" (written as a JSON string);
+//   - a string that is not valid UTF-8;
+//   - a Labels value that fails Labels.Validate;
+//   - any other type with its own JSON or text encoding (time.Time
+//     included): the walk cannot see what it writes, and timestamps must be
+//     FormatTS strings.
+//
+// Field selection mirrors encoding/json: exported fields, plus embedded
+// structs (or pointers to structs) even when their type is unexported,
+// whose exported fields are promoted; json:"-" is skipped. path uses the
+// wire (json tag) names.
 func checkValues(v reflect.Value, path string) error {
-	if v.Type() == labelsType {
-		if err := v.Interface().(Labels).Validate(); err != nil {
+	t := v.Type()
+	if t == labelsType {
+		if err := labelsFromValue(v).Validate(); err != nil {
 			return fmt.Errorf("field %s: %w", path, err)
 		}
+		return nil
 	}
-	if v.Type() == jsonNumberType {
+	if t == jsonNumberType {
 		return fmt.Errorf("telemetrycontract: field %s has type json.Number; analytics numerics must be Go integers", path)
+	}
+	if v.Kind() != reflect.Pointer && v.Kind() != reflect.Interface &&
+		(t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
+			reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
+		return fmt.Errorf("telemetrycontract: field %s has type %s with its own encoding; use plain strings (FormatTS for timestamps) and integers", path, t)
 	}
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Interface:
@@ -378,15 +403,40 @@ func checkValues(v reflect.Value, path string) error {
 		}
 		return checkValues(v.Elem(), path)
 	case reflect.Struct:
-		t := v.Type()
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
-			if !f.IsExported() || f.Tag.Get("json") == "-" {
+			tag := f.Tag.Get("json")
+			if tag == "-" {
 				continue
 			}
-			name := f.Name
-			if path != "" {
-				name = path + "." + name
+			wireName, opts, _ := strings.Cut(tag, ",")
+			if f.Anonymous {
+				ft := f.Type
+				if ft.Kind() == reflect.Pointer {
+					ft = ft.Elem()
+				}
+				if !f.IsExported() && ft.Kind() != reflect.Struct {
+					continue
+				}
+			} else if !f.IsExported() {
+				continue
+			}
+			name := path
+			switch {
+			case f.Anonymous && wireName == "" && derefKind(f.Type) == reflect.Struct:
+				// Promoted: its fields are written at this level.
+			case wireName != "":
+				name = joinPath(path, wireName)
+			default:
+				name = joinPath(path, f.Name)
+			}
+			if hasTagOption(opts, "string") {
+				switch derefKind(f.Type) {
+				case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+					reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+					reflect.Float32, reflect.Float64:
+					return fmt.Errorf("telemetrycontract: field %s uses the \",string\" option; numeric and bool fields must keep their JSON type", name)
+				}
 			}
 			if err := checkValues(v.Field(i), name); err != nil {
 				return err
@@ -425,4 +475,44 @@ func checkValues(v reflect.Value, path string) error {
 		}
 	}
 	return nil
+}
+
+func derefKind(t reflect.Type) reflect.Kind {
+	if t.Kind() == reflect.Pointer {
+		return t.Elem().Kind()
+	}
+	return t.Kind()
+}
+
+func joinPath(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
+}
+
+func hasTagOption(opts, want string) bool {
+	for opts != "" {
+		var o string
+		o, opts, _ = strings.Cut(opts, ",")
+		if o == want {
+			return true
+		}
+	}
+	return false
+}
+
+// labelsFromValue reads a Labels value through reflection, so it also works
+// for a value reached via an unexported embedded struct, where
+// reflect.Value.Interface is not allowed.
+func labelsFromValue(v reflect.Value) Labels {
+	if v.IsNil() {
+		return nil
+	}
+	out := make(Labels, v.Len())
+	for i := range out {
+		e := v.Index(i)
+		out[i] = Label{Key: e.Field(0).String(), Value: e.Field(1).String()}
+	}
+	return out
 }

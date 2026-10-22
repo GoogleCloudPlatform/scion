@@ -338,8 +338,8 @@ func TestNewEventIDUnique(t *testing.T) {
 	}
 }
 
-// The repository's mock seed (shared contract mock-events.jsonl, first
-// usage row) decodes into an Envelope-based type unchanged.
+// A row from the shared telemetry exchange's contract mock
+// (mock-events.jsonl, first usage row; not a fixture in this repository) decodes into an Envelope-based type unchanged.
 func TestMockSeedEnvelopeDecodes(t *testing.T) {
 	row := `{"schema_version": 1, "event_id": "u1", "producer_namespace": "mock-hub/agent-a/inc-1", "event_type": "agent.usage", "event_ts": "2026-10-22T00:05:00Z", "observed_ts": "2026-10-22T00:20:00Z", "hub_id": "mock-hub", "project_id": "mock-project", "agent_id": "agent-a", "incarnation_id": "inc-1", "launch_id": "launch-1", "broker_id": "mock-broker", "producer_build": "mock-v0", "calls": 1}`
 	var ev testEvent
@@ -485,4 +485,88 @@ func TestUnmarshalNullLabels(t *testing.T) {
 	}
 }
 
-func jsonUnmarshalForTest(data []byte, v any) error { return json.Unmarshal(data, v) }
+// R2-1: fields promoted from an embedded struct of unexported type are
+// serialized by encoding/json, so the walk must check them too.
+type innerPayload struct {
+	Ratio  *float64 `json:"ratio,omitempty"`
+	Labels Labels   `json:"labels"`
+	Note   string   `json:"note,omitempty"`
+}
+
+type embeddedUnexportedEvent struct {
+	Envelope
+	innerPayload
+}
+
+func (e *embeddedUnexportedEvent) Validate() error { return e.Envelope.Validate() }
+
+type embeddedUnexportedPtrEvent struct {
+	Envelope
+	*innerPayload
+}
+
+func (e *embeddedUnexportedPtrEvent) Validate() error { return e.Envelope.Validate() }
+
+func TestMarshalChecksEmbeddedUnexportedStructs(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	ok := &embeddedUnexportedEvent{Envelope: env, innerPayload: innerPayload{Labels: Labels{{"a", "1"}}, Note: "n"}}
+	got, err := Marshal(ok)
+	if err != nil {
+		t.Fatalf("valid embedded payload rejected: %v", err)
+	}
+	if !strings.Contains(string(got), `"labels":[{"key":"a","value":"1"}],"note":"n"`) {
+		t.Errorf("embedded fields must be written flat: %s", got)
+	}
+	bad := map[string]innerPayload{
+		"float":          {Ratio: new(float64)},
+		"invalid labels": {Labels: Labels{{"b", ""}, {"a", ""}}},
+		"invalid utf-8":  {Note: "x\xff"},
+	}
+	for name, p := range bad {
+		if _, err := Marshal(&embeddedUnexportedEvent{Envelope: env, innerPayload: p}); err == nil {
+			t.Errorf("%s in embedded unexported struct: Marshal accepted it", name)
+		}
+		p := p
+		if _, err := Marshal(&embeddedUnexportedPtrEvent{Envelope: env, innerPayload: &p}); err == nil {
+			t.Errorf("%s in embedded unexported *struct: Marshal accepted it", name)
+		}
+	}
+	if _, err := Marshal(&embeddedUnexportedPtrEvent{Envelope: env}); err != nil {
+		t.Errorf("nil embedded pointer must be allowed: %v", err)
+	}
+}
+
+type timeEvent struct {
+	Envelope
+	At time.Time `json:"at"`
+}
+
+func (e *timeEvent) Validate() error { return e.Envelope.Validate() }
+
+type stringOptEvent struct {
+	Envelope
+	Count int64 `json:"count,string"`
+}
+
+func (e *stringOptEvent) Validate() error { return e.Envelope.Validate() }
+
+// N1/N2: types with their own encoding and ",string" numerics are rejected.
+func TestMarshalRejectsSelfEncodingTypesAndStringOption(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	if _, err := Marshal(&timeEvent{Envelope: env, At: testEventTS}); err == nil {
+		t.Error("Marshal accepted a time.Time payload field")
+	}
+	if _, err := Marshal(&stringOptEvent{Envelope: env, Count: 3}); err == nil {
+		t.Error(`Marshal accepted a ",string" integer field`)
+	}
+}
+
+// N5: walk errors name wire fields.
+func TestMarshalErrorsUseWireNames(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	env.AgentID = "a\xff"
+	_, err := Marshal(&testEvent{Envelope: env})
+	if err == nil || !strings.Contains(err.Error(), "field agent_id ") {
+		t.Errorf("error = %v, want it to name agent_id", err)
+	}
+}
