@@ -25,6 +25,14 @@
  * and, for its owner or an admin, offers Move…. Rows open the artifact page.
  * Owner and project names are looked up best-effort; the ids are shown when
  * a lookup is not allowed.
+ *
+ * New artifact (ptone/scion#5477) opens the publish dialog with a project
+ * picker. The page checks whether the user may publish anywhere (global
+ * project first, stopping at the first publishable one): the button is
+ * disabled while that runs, disabled with an explanation when there is
+ * nowhere, and enabled otherwise, including when the check failed (the
+ * dialog then shows the error). After publishing, the user lands on the
+ * new artifact's page.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -37,7 +45,10 @@ import {
   ARTIFACTS_FLAG,
   artifactListUrl,
   artifactPagePath,
+  filterPublishable,
+  listMemberProjects,
   type Artifact,
+  type ArtifactResponse,
   type ArtifactAccess,
   type ArtifactListItem,
   type ArtifactListResponse,
@@ -46,6 +57,7 @@ import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import '../shared/artifact-move-dialog.js';
+import '../shared/artifact-publish-dialog.js';
 import './not-found.js';
 
 /** How each access value is shown in the Access column. */
@@ -58,6 +70,16 @@ const ACCESS_BADGES: Record<ArtifactAccess, { label: string; variant: string; ic
 /** The reference page for artifacts on the documentation site. */
 export const ARTIFACTS_DOCS_URL =
   'https://googlecloudplatform.github.io/scion/reference/artifacts/';
+
+/** Why New artifact is disabled when the user may publish nowhere. */
+export const NOWHERE_TO_PUBLISH =
+  "You can't publish in any of your projects. Ask a project owner for access.";
+
+/**
+ * Whether the user may publish somewhere: still checking, yes, no, or
+ * unknown (the check failed; the dialog shows why).
+ */
+type PublishAccess = 'checking' | 'yes' | 'no' | 'unknown';
 
 /** Delay before a search box change reloads the list. */
 const SEARCH_DEBOUNCE_MS = 300;
@@ -81,6 +103,8 @@ export class ScionPageArtifacts extends LitElement {
   @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
   @state() private names = new Map<string, string>();
+  @state() private publishAccess: PublishAccess = 'checking';
+  @state() private publishOpen = false;
 
   /** Bumped on every reload, so a slow response for old filters is dropped. */
   private generation = 0;
@@ -130,6 +154,9 @@ export class ScionPageArtifacts extends LitElement {
         justify-content: center;
         margin-top: 1rem;
       }
+      .nowhere {
+        font-size: 0.875rem;
+      }
       .empty-actions {
         display: flex;
         flex-wrap: wrap;
@@ -148,6 +175,25 @@ export class ScionPageArtifacts extends LitElement {
       return;
     }
     void this.load();
+    void this.checkPublishAccess();
+  }
+
+  /** Works out whether the user may publish in any project. */
+  private async checkPublishAccess(): Promise<void> {
+    this.publishAccess = 'checking';
+    try {
+      const found = await filterPublishable(await listMemberProjects(), { firstOnly: true });
+      if (!this.isConnected) return;
+      this.publishAccess = found.length > 0 ? 'yes' : 'no';
+    } catch {
+      if (!this.isConnected) return;
+      this.publishAccess = 'unknown';
+    }
+  }
+
+  private onPublished(e: CustomEvent<ArtifactResponse>): void {
+    this.publishOpen = false;
+    navigateTo(artifactPagePath(e.detail.artifact));
   }
 
   override disconnectedCallback(): void {
@@ -313,10 +359,43 @@ export class ScionPageArtifacts extends LitElement {
     return html`
       <div class="header">
         <h1>Artifacts</h1>
+        <div class="header-actions">${this.renderNewButton()}</div>
       </div>
       <p class="subtitle">Artifacts you own, shared with you, or published in your projects.</p>
       ${this.renderFilterBar()} ${this.renderBody()}
+      <scion-artifact-publish-dialog
+        chooseProject
+        ?open=${this.publishOpen}
+        @artifact-published=${(e: CustomEvent<ArtifactResponse>): void => this.onPublished(e)}
+        @artifact-publish-closed=${(): void => {
+          this.publishOpen = false;
+        }}
+      ></scion-artifact-publish-dialog>
     `;
+  }
+
+  private renderNewButton(): TemplateResult {
+    const disabled = this.publishAccess === 'checking' || this.publishAccess === 'no';
+    const button = html`<sl-button
+      class="new-artifact"
+      size="small"
+      variant="primary"
+      ?disabled=${disabled}
+      @click=${(): void => {
+        this.publishOpen = true;
+      }}
+    >
+      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+      New artifact
+    </sl-button>`;
+    if (this.publishAccess !== 'no') return button;
+    // A disabled button gets no pointer or focus events: the wrapper takes
+    // them, so hovering or tabbing to it shows why.
+    return html`<sl-tooltip content=${NOWHERE_TO_PUBLISH}>
+      <span class="nowhere-wrap" tabindex="0" aria-label=${`New artifact: ${NOWHERE_TO_PUBLISH}`}
+        >${button}</span
+      >
+    </sl-tooltip>`;
   }
 
   private renderFilterBar(): TemplateResult {
@@ -430,6 +509,9 @@ export class ScionPageArtifacts extends LitElement {
           Artifacts are documents and reports that you and your agents publish. Ones you own, ones
           shared with you, and ones published in your projects appear here.
         </p>
+        ${this.publishAccess === 'no'
+          ? html`<p class="nowhere muted">${NOWHERE_TO_PUBLISH}</p>`
+          : nothing}
         <div class="empty-actions">
           <sl-button variant="primary" href="/projects">
             <sl-icon slot="prefix" name="folder"></sl-icon>

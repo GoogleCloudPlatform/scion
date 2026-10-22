@@ -443,7 +443,10 @@ describe('artifacts list page lifecycle', () => {
     });
     const el = await mount(true);
     expect(rows(el)).toHaveLength(1);
-    const lookups = m.urls.filter((u) => !u.startsWith('/api/v1/artifacts?'));
+    // The New artifact check's project list is not a name lookup.
+    const lookups = m.urls.filter(
+      (u) => !u.startsWith('/api/v1/artifacts?') && !u.startsWith('/api/v1/projects?')
+    );
     expect(lookups.filter((u) => /\/api\/v1\/(users|agents|projects)\/$/.test(u))).toEqual([]);
     expect(lookups).toEqual([]);
   });
@@ -480,6 +483,10 @@ function scriptedListFetch(): ScriptedList {
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      // The New artifact check's project list is not a name lookup.
+      if (url.startsWith('/api/v1/projects?')) {
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      }
       if (!url.startsWith('/api/v1/artifacts?')) {
         s.lookups.push(url);
         return Promise.resolve(new Response('{}', { status: 404 }));
@@ -598,5 +605,161 @@ describe('artifacts list page sharing', () => {
     expect(moved.textContent).not.toContain('Deleted project');
     expect(moved.querySelector('a.move')).toBeNull();
     expect(moved.querySelector('a[href="/projects/proj-9"]')).not.toBeNull();
+  });
+});
+
+describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
+  beforeAll(async () => {
+    await import('./artifacts.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  /**
+   * Mocks fetch: an empty artifact list, the caller's projects (or
+   * projectsStatus; 'hang' never answers), and canCreate per project id in
+   * publishable.
+   */
+  function mockPublish(
+    projects: Array<{ id: string; name: string; slug: string }>,
+    publishable: Set<string>,
+    projectsStatus: number | 'hang' = 200
+  ): Mock {
+    const m: Mock = { urls: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        m.urls.push(url);
+        if (url.startsWith('/api/v1/projects?')) {
+          if (projectsStatus === 'hang') return new Promise<Response>(() => {});
+          if (projectsStatus !== 200) {
+            return Promise.resolve(
+              json({ error: { code: 'internal', message: 'boom' } }, projectsStatus)
+            );
+          }
+          return Promise.resolve(json({ projects }));
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          const scope = new URL(url, 'http://x').searchParams.get('scope');
+          if (!scope) return Promise.resolve(json({ artifacts: [] }));
+          return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
+        }
+        return Promise.resolve(json({ error: { code: 'forbidden', message: 'denied' } }, 403));
+      })
+    );
+    return m;
+  }
+
+  const GLOBAL = { id: 'g-1', name: 'Global', slug: 'global' };
+  const WEB = { id: 'w-1', name: 'Web', slug: 'web' };
+
+  function newButton(el: ScionPageArtifacts): HTMLElement {
+    return el.shadowRoot!.querySelector('.header sl-button.new-artifact') as HTMLElement;
+  }
+
+  /** Shoelace is not registered here: read the attribute Lit sets. */
+  function disabled(e: Element): boolean {
+    return e.hasAttribute('disabled');
+  }
+
+  function scopedChecks(m: Mock): string[] {
+    return listUrls(m)
+      .map((p) => p.get('scope'))
+      .filter((s): s is string => !!s);
+  }
+
+  it('enables New artifact after checking the global project only', async () => {
+    const m = mockPublish([WEB, GLOBAL], new Set(['g-1', 'w-1']));
+    const el = await mount(true);
+    const btn = newButton(el);
+    expect(btn.textContent).toContain('New artifact');
+    expect(disabled(btn)).toBe(false);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+    // Global is checked first, in the first batch, and the walk stops there.
+    expect(scopedChecks(m)[0]).toBe('g-1');
+    expect(scopedChecks(m).length).toBeLessThanOrEqual(2);
+  });
+
+  it('opens the publish dialog with the project picker', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']));
+    const el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog') as HTMLElement & {
+      open: boolean;
+      chooseProject: boolean;
+    };
+    expect(dialog.chooseProject).toBe(true);
+    expect(dialog.open).toBe(false);
+    newButton(el).click();
+    await settle(el);
+    expect(dialog.open).toBe(true);
+  });
+
+  it('disables New artifact with an explanation when there is nowhere to publish', async () => {
+    mockPublish([GLOBAL, WEB], new Set());
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    const tip = el.shadowRoot!.querySelector('sl-tooltip')!;
+    expect(tip.getAttribute('content')).toContain("can't publish in any of your projects");
+    // The wrapper takes focus, so the reason is reachable from the keyboard.
+    expect(tip.querySelector('[tabindex="0"]')).not.toBeNull();
+    // The empty state says it too.
+    expect(el.shadowRoot!.querySelector('.empty-state .nowhere')!.textContent).toContain(
+      "can't publish"
+    );
+  });
+
+  it('disables New artifact for a user with no projects', async () => {
+    mockPublish([], new Set());
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).not.toBeNull();
+  });
+
+  it('keeps New artifact disabled, without the explanation, while checking', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 'hang');
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(true);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+  });
+
+  it('enables New artifact when the check fails (the dialog shows why)', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']), 500);
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+  });
+
+  it('lands on the new artifact page after publishing', async () => {
+    mockPublish([GLOBAL], new Set(['g-1']));
+    const el = await mount(true);
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-publish-dialog')!;
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-published', {
+        detail: { artifact: { id: 'new-1', scopeRef: 'g-1' }, version: { seq: 1 } },
+      })
+    );
+    await settle(el);
+    document.removeEventListener('nav-click', onNav);
+    expect(paths).toEqual(['/projects/g-1/artifacts/new-1']);
+  });
+
+  it('does not check where to publish when the experiment is off', async () => {
+    const m = mockPublish([GLOBAL], new Set(['g-1']));
+    await mount(false);
+    expect(m.urls).toEqual([]);
   });
 });

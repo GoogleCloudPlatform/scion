@@ -21,11 +21,15 @@ import {
   artifactListUrl,
   artifactPagePath,
   baseName,
+  canPublishIn,
+  defaultProjectChoice,
   expiryImpact,
+  filterPublishable,
   formatArtifactRef,
   formatBytes,
   isInlineType,
   linkLifetimeChoices,
+  listMemberProjects,
   listProjectArtifacts,
   orderArtifactRefs,
   parseArtifactPagePath,
@@ -35,7 +39,9 @@ import {
   rendererFor,
   sha256Hex,
   shareLinkUrl,
+  sortProjectChoices,
   type ArtifactGrant,
+  type ProjectChoice,
   type MessageArtifactRef,
   type ShareLink,
 } from './artifacts.js';
@@ -643,5 +649,117 @@ describe('sharing helpers', () => {
       grantsRemoved: 2,
     });
     expect(expiryImpact(null, links, grants, now)).toEqual({ linksCutShort: 0, grantsRemoved: 0 });
+  });
+});
+
+describe('where the caller may publish (ptone/scion#5477)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const choice = (id: string, name: string, slug = id): ProjectChoice => ({ id, name, slug });
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('orders the global project first, then by name', () => {
+    const sorted = sortProjectChoices([
+      choice('w', 'Web'),
+      choice('g', 'Global', 'global'),
+      choice('a', 'Alpha'),
+    ]);
+    expect(sorted.map((p) => p.id)).toEqual(['g', 'a', 'w']);
+  });
+
+  it('preselects the global project, else the only choice, else nothing', () => {
+    const global = choice('g', 'Global', 'global');
+    expect(defaultProjectChoice([choice('a', 'A'), global])).toBe('g');
+    expect(defaultProjectChoice([choice('a', 'A')])).toBe('a');
+    expect(defaultProjectChoice([choice('a', 'A'), choice('b', 'B')])).toBe('');
+    expect(defaultProjectChoice([])).toBe('');
+  });
+
+  it('keeps only the projects that pass the check, in order', async () => {
+    const projects = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => choice(id, id));
+    const allowed = new Set(['b', 'e', 'f']);
+    const check = vi.fn((id: string) => Promise.resolve(allowed.has(id)));
+    const out = await filterPublishable(projects, { check });
+    expect(out.map((p) => p.id)).toEqual(['b', 'e', 'f']);
+    expect(check).toHaveBeenCalledTimes(6);
+  });
+
+  it('with firstOnly, stops after the batch holding the first publishable project', async () => {
+    const projects = ['g', 'a', 'b', 'c', 'd', 'e', 'f', 'h', 'i'].map((id) => choice(id, id));
+    const check = vi.fn((id: string) => Promise.resolve(id === 'a' || id === 'f'));
+    const out = await filterPublishable(projects, { check, firstOnly: true });
+    expect(out.map((p) => p.id)).toEqual(['a']);
+    // One batch of four checks, not all nine.
+    expect(check).toHaveBeenCalledTimes(4);
+  });
+
+  it('fails the whole filter when one check fails', async () => {
+    const check = (id: string): Promise<boolean> =>
+      id === 'b' ? Promise.reject(new Error('boom')) : Promise.resolve(true);
+    await expect(
+      filterPublishable([choice('a', 'a'), choice('b', 'b')], { check })
+    ).rejects.toThrow('boom');
+  });
+
+  it('reads canCreate from a one-row list narrowed to the project', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        urls.push(url);
+        if (url.includes('scope=yes'))
+          return Promise.resolve(json({ artifacts: [], canCreate: true }));
+        if (url.includes('scope=no')) return Promise.resolve(json({ artifacts: [] }));
+        if (url.includes('scope=hidden')) {
+          return Promise.resolve(json({ error: { code: 'forbidden', message: 'no' } }, 403));
+        }
+        return Promise.resolve(json({ error: { code: 'internal', message: 'boom' } }, 500));
+      })
+    );
+    expect(await canPublishIn('yes')).toBe(true);
+    expect(await canPublishIn('no')).toBe(false);
+    expect(await canPublishIn('hidden')).toBe(false);
+    await expect(canPublishIn('broken')).rejects.toThrow();
+    expect(urls[0]).toBe('/api/v1/artifacts?mine=1&scope=yes&limit=1');
+  });
+
+  it("lists the caller's projects across pages, global first", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        urls.push(url);
+        if (url.includes('cursor=c1')) {
+          return Promise.resolve(json({ projects: [{ id: 'g', name: 'Global', slug: 'global' }] }));
+        }
+        return Promise.resolve(
+          json({
+            projects: [
+              { id: 'w', name: 'Web', slug: 'web' },
+              { id: 'x', slug: 'x' },
+            ],
+            nextCursor: 'c1',
+          })
+        );
+      })
+    );
+    const out = await listMemberProjects();
+    expect(out).toEqual([
+      { id: 'g', name: 'Global', slug: 'global' },
+      { id: 'w', name: 'Web', slug: 'web' },
+      { id: 'x', name: 'x', slug: 'x' },
+    ]);
+    expect(urls).toEqual([
+      '/api/v1/projects?mine=true&limit=200',
+      '/api/v1/projects?mine=true&limit=200&cursor=c1',
+    ]);
   });
 });

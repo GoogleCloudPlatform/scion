@@ -19,6 +19,9 @@
  *
  * Uploads a file or a folder through the two-step publish API, either as a
  * new artifact homed in a project or as a new version of an artifact.
+ * With chooseProject (the hub Artifacts page, ptone/scion#5477) the user
+ * picks the home project from those where they may publish, the global
+ * project or the only choice preselected.
  * Fires `artifact-published` with the finalized ArtifactResponse, and
  * `artifact-publish-closed` whenever it closes; the parent owns `open`.
  */
@@ -29,11 +32,19 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 
 import {
   PublishError,
+  defaultProjectChoice,
+  filterPublishable,
   formatBytes,
+  listMemberProjects,
   publishErrorMessage,
   publishFiles,
 } from '../../client/artifacts.js';
-import type { ArtifactResponse, PendingPublish, PublishFile } from '../../client/artifacts.js';
+import type {
+  ArtifactResponse,
+  PendingPublish,
+  ProjectChoice,
+  PublishFile,
+} from '../../client/artifacts.js';
 
 /** A file picked for upload, with its path inside the bundle. */
 export interface PickedFile {
@@ -81,6 +92,8 @@ export class ScionArtifactPublishDialog extends LitElement {
   /** Set to publish a new version of this artifact. */
   @property({ type: String }) artifactId = '';
   @property({ type: Boolean, reflect: true }) open = false;
+  /** Let the user pick the home project (projectId is then ignored). */
+  @property({ type: Boolean }) chooseProject = false;
 
   @state() private mode: 'file' | 'folder' = 'file';
   @state() private picked: PickedFile[] = [];
@@ -93,6 +106,14 @@ export class ScionArtifactPublishDialog extends LitElement {
   @state() private progress = '';
   @state() private error: string | null = null;
   @state() private dragOver = false;
+  /** The projects where the user may publish, with chooseProject. */
+  @state() private choices: ProjectChoice[] = [];
+  @state() private choicesLoading = false;
+  @state() private choicesError: string | null = null;
+  /** The picked home project, with chooseProject. */
+  @state() private chosen = '';
+  /** Bumped per choices load, so a stale one is dropped. */
+  private choicesGen = 0;
   /** The version a failed attempt left pending; the next attempt resumes it. */
   private pending: PendingPublish | null = null;
 
@@ -144,6 +165,22 @@ export class ScionArtifactPublishDialog extends LitElement {
     sl-alert {
       margin-top: 0.75rem;
     }
+    .project {
+      padding-bottom: 0.75rem;
+      margin-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+    .project sl-alert {
+      margin-top: 0;
+    }
+    .project sl-alert sl-button {
+      margin-left: 0.5rem;
+    }
+    .slug {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
     input[type='file'] {
       display: none;
     }
@@ -170,7 +207,33 @@ export class ScionArtifactPublishDialog extends LitElement {
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('open') && this.open && !changed.get('open')) {
       this.reset();
+      if (this.chooseProject) void this.loadChoices();
     }
+  }
+
+  /** Loads the projects where the user may publish and preselects one. */
+  private async loadChoices(): Promise<void> {
+    const gen = ++this.choicesGen;
+    this.choicesLoading = true;
+    this.choicesError = null;
+    this.choices = [];
+    this.chosen = '';
+    try {
+      const publishable = await filterPublishable(await listMemberProjects());
+      if (gen !== this.choicesGen) return;
+      this.choices = publishable;
+      this.chosen = defaultProjectChoice(publishable);
+    } catch (err) {
+      if (gen !== this.choicesGen) return;
+      this.choicesError = err instanceof Error ? err.message : 'Could not load projects';
+    } finally {
+      if (gen === this.choicesGen) this.choicesLoading = false;
+    }
+  }
+
+  /** The home project of a new artifact. */
+  private get scope(): string {
+    return this.chooseProject ? this.chosen : this.projectId;
   }
 
   /** Closes the dialog and tells the parent, which owns the open flag. */
@@ -226,6 +289,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       !this.busy &&
       this.picked.length > 0 &&
       this.entry !== '' &&
+      (this.isVersion || !this.chooseProject || this.chosen !== '') &&
       (this.isVersion || this.titleValue.trim() !== '')
     );
   }
@@ -239,7 +303,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       const files: PublishFile[] = this.picked.map((p) => ({ path: p.path, data: p.file }));
       const res: ArtifactResponse = await publishFiles({
         artifactId: this.artifactId || undefined,
-        scope: this.projectId || undefined,
+        scope: this.scope || undefined,
         title: this.isVersion ? undefined : this.titleValue.trim(),
         key: this.isVersion ? undefined : this.key.trim() || undefined,
         note: this.note.trim() || undefined,
@@ -296,6 +360,51 @@ export class ScionArtifactPublishDialog extends LitElement {
     `;
   }
 
+  /** The Project field, with chooseProject on a new artifact. */
+  private renderProjectPicker(): TemplateResult | typeof nothing {
+    if (!this.chooseProject || this.isVersion) return nothing;
+    if (this.choicesError) {
+      return html`<div class="project">
+        <sl-alert variant="danger" open class="choices-error">
+          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+          Could not load your projects: ${this.choicesError}
+          <sl-button size="small" @click=${(): void => void this.loadChoices()}>
+            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            Retry
+          </sl-button>
+        </sl-alert>
+      </div>`;
+    }
+    const none = !this.choicesLoading && this.choices.length === 0;
+    return html`<div class="project">
+      <sl-select
+        class="project-select"
+        label="Project"
+        size="small"
+        required
+        hoist
+        placeholder=${this.choicesLoading ? 'Loading projects…' : 'Choose a project'}
+        help-text=${none
+          ? "You can't publish in any of your projects."
+          : "The artifact's home. Members of this project can read it."}
+        ?disabled=${this.busy || this.choicesLoading || none}
+        .value=${this.chosen}
+        @sl-change=${(e: Event): void => {
+          this.chosen = (e.target as HTMLSelectElement).value;
+        }}
+      >
+        ${this.choices.map(
+          (p) =>
+            html`<sl-option value=${p.id}
+              >${p.name}${p.slug
+                ? html`<span slot="suffix" class="slug">${p.slug}</span>`
+                : nothing}</sl-option
+            >`
+        )}
+      </sl-select>
+    </div>`;
+  }
+
   override render(): TemplateResult {
     const heading = this.isVersion ? 'Upload new version' : 'New artifact';
     return html`
@@ -309,6 +418,7 @@ export class ScionArtifactPublishDialog extends LitElement {
           if (e.target === e.currentTarget && this.open) this.close();
         }}
       >
+        ${this.renderProjectPicker()}
         <sl-radio-group
           class="mode"
           size="small"

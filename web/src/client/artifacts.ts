@@ -324,6 +324,112 @@ export async function listProjectArtifacts(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Where the caller may publish (the hub Artifacts page's New artifact,
+// ptone/scion#5477)
+// ---------------------------------------------------------------------------
+
+/** The hub's global project's slug (pkg/hub globalProjectSlug). */
+export const GLOBAL_PROJECT_SLUG = 'global';
+
+/** A project offered as the home of a new artifact. */
+export interface ProjectChoice {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+/** Projects requested per page when listing the caller's projects. */
+const MEMBER_PROJECTS_PAGE = 200;
+/** Pages followed at most, so a runaway cursor cannot loop forever. */
+const MEMBER_PROJECTS_MAX_PAGES = 10;
+/** canCreate checks in flight at once. */
+const PUBLISH_CHECK_CONCURRENCY = 4;
+
+/**
+ * The projects the caller owns or is a member of (GET
+ * /api/v1/projects?mine=true), global first, then by name.
+ */
+export async function listMemberProjects(): Promise<ProjectChoice[]> {
+  const out: ProjectChoice[] = [];
+  let cursor = '';
+  for (let page = 0; page < MEMBER_PROJECTS_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ mine: 'true', limit: String(MEMBER_PROJECTS_PAGE) });
+    if (cursor) params.set('cursor', cursor);
+    const body = await okJSON<{
+      projects?: Array<{ id: string; name?: string; slug?: string }>;
+      nextCursor?: string;
+    }>(await apiFetch(`/api/v1/projects?${params.toString()}`));
+    for (const p of body.projects ?? []) {
+      if (!p.id) continue;
+      out.push({ id: p.id, name: p.name || p.slug || p.id, slug: p.slug ?? '' });
+    }
+    cursor = body.nextCursor ?? '';
+    if (!cursor) break;
+  }
+  return sortProjectChoices(out);
+}
+
+/** Orders choices global first, then by name. */
+export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
+  return [...projects].sort((a, b) => {
+    const ga = a.slug === GLOBAL_PROJECT_SLUG;
+    const gb = b.slug === GLOBAL_PROJECT_SLUG;
+    if (ga !== gb) return ga ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Whether the caller may publish artifacts in project: the list's
+ * canCreate, which is the decision publish makes (pkg/artifacts canCreateIn).
+ * A list the caller may not read (403, 404) answers false; other failures
+ * throw.
+ */
+export async function canPublishIn(projectId: string): Promise<boolean> {
+  const params = new URLSearchParams({ mine: '1', scope: projectId, limit: '1' });
+  const res = await apiFetch(`/api/v1/artifacts?${params.toString()}`, {
+    suppressAccessDeniedToast: true,
+  });
+  if (res.status === 403 || res.status === 404) return false;
+  const body = await okJSON<ArtifactListResponse>(res);
+  return body.canCreate === true;
+}
+
+/**
+ * Checks projects in order, a few at a time. With firstOnly it stops after
+ * the batch that holds the first publishable project. Returns the
+ * publishable ones in the order given. Any failed check fails the whole
+ * call, so a hub error never looks like "nowhere to publish".
+ */
+export async function filterPublishable(
+  projects: ProjectChoice[],
+  opts: { firstOnly?: boolean; check?: (id: string) => Promise<boolean> } = {}
+): Promise<ProjectChoice[]> {
+  const check = opts.check ?? canPublishIn;
+  const out: ProjectChoice[] = [];
+  for (let i = 0; i < projects.length; i += PUBLISH_CHECK_CONCURRENCY) {
+    const batch = projects.slice(i, i + PUBLISH_CHECK_CONCURRENCY);
+    const allowed = await Promise.all(batch.map((p) => check(p.id)));
+    batch.forEach((p, j) => {
+      if (allowed[j]) out.push(p);
+    });
+    if (opts.firstOnly && out.length > 0) return out.slice(0, 1);
+  }
+  return out;
+}
+
+/**
+ * The project preselected for a new artifact: the global project when it
+ * is publishable (the list only holds projects the caller is a member of),
+ * or the only choice when there is exactly one; otherwise none.
+ */
+export function defaultProjectChoice(publishable: ProjectChoice[]): string {
+  const global = publishable.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
+  if (global) return global.id;
+  return publishable.length === 1 ? publishable[0].id : '';
+}
+
 /** One page of an artifact's ready versions, newest first. */
 export async function listVersions(id: string, before = 0): Promise<VersionListResponse> {
   const query = before > 0 ? `?before=${before}` : '';
