@@ -111,7 +111,8 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import { agentBadges } from '../shared/agent-badges.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import '../shared/artifact-list.js';
 
@@ -3264,6 +3265,8 @@ export class ScionPageProjectDetail extends LitElement {
    * the wrong order meanwhile.
    */
   private renderAgentRows(): TemplateResult | typeof nothing {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const win = this.agentWindow;
     if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
       return this.agentsLoading
@@ -3289,7 +3292,7 @@ export class ScionPageProjectDetail extends LitElement {
         ${items.length === 0
           ? this.renderNoAgentRows()
           : html`<div class="agent-grid ${this.agentsExpanded ? '' : 'agents-collapsed'}">
-              ${items.map((agent) => this.renderAgentCard(agent))}
+              ${items.map((agent) => this.renderAgentCard(agent, badgesOn))}
             </div>`}
         ${this.renderAgentPager(items.length)}
       `;
@@ -3367,6 +3370,8 @@ export class ScionPageProjectDetail extends LitElement {
   /** The list view: the window's page `items` and the pager, in every state. */
   private renderAgentWindowList() {
     const items = this.agentWindow.items;
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${items.length === 0
@@ -3375,7 +3380,7 @@ export class ScionPageProjectDetail extends LitElement {
               <table>
                 ${this.renderAgentTableHead()}
                 <tbody>
-                  ${items.map((agent) => this.renderAgentRow(agent))}
+                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn))}
                 </tbody>
               </table>
             `}
@@ -3435,7 +3440,7 @@ export class ScionPageProjectDetail extends LitElement {
     this.onAgentViewStateChanged();
   }
 
-  private renderAgentRow(agent: Agent) {
+  private renderAgentRow(agent: Agent, badgesOn: boolean) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -3445,7 +3450,7 @@ export class ScionPageProjectDetail extends LitElement {
       <tr>
         <td>
           <span class="name-cell">
-            <sl-icon name="cpu"></sl-icon>
+            ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
@@ -3608,7 +3613,7 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
-  private renderAgentCard(agent: Agent) {
+  private renderAgentCard(agent: Agent, badgesOn: boolean) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -3619,7 +3624,7 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="agent-header">
           <div>
             <h3 class="agent-name">
-              <sl-icon name="cpu"></sl-icon>
+              ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>
