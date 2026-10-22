@@ -18,7 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,5 +60,52 @@ func TestRedactURL_KeepHostAndPath(t *testing.T) {
 		if got := redactURL(k.URL); got != k.Want {
 			t.Errorf("%s: redactURL(%q) = %q, want %q", k.Name, k.URL, got, k.Want)
 		}
+	}
+}
+
+// A failed fetch of a URL whose host or port may be part of a credential (a
+// token read as a host, a password read as a port) logs and returns no part
+// of it: the Detail is hiddenDetail, the Reason is kept, and the denied
+// address warning shows hiddenHost. An ordinary URL keeps its detail.
+func TestFetchDetail_HostNotShown(t *testing.T) {
+	const tokenHost = "https://tKn7Qz/x@img.example.com/a.png"
+	for _, tc := range []struct {
+		name, url, secret string
+		allowed           []string
+		answers           map[string][]netip.Addr
+		reason            Reason
+	}{
+		{"host not allowed", tokenHost, "tKn7Qz/x", []string{"img.example.com"}, nil, ReasonHostNotAllowed},
+		{"resolve fails", tokenHost, "tKn7Qz/x", nil, nil, ReasonResolve},
+		{"no addresses", tokenHost, "tKn7Qz/x", nil, map[string][]netip.Addr{"tKn7Qz": {}}, ReasonResolve},
+		{"denied address", tokenHost, "tKn7Qz/x", nil, map[string][]netip.Addr{"tKn7Qz": addrs("127.0.0.1")}, ReasonDeniedAddress},
+		{"password read as a port", "https://u:8461/Wx2@img.example.com/a.png", "8461/Wx2", nil, nil, ReasonPort},
+	} {
+		var logs bytes.Buffer
+		f := New(Config{Timeout: 5 * time.Second, AllowedHosts: tc.allowed, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+		f.resolver = &fakeResolver{answers: tc.answers}
+		_, err := f.FetchBytes(context.Background(), tc.url)
+		var fe *Error
+		if !errors.As(err, &fe) {
+			t.Fatalf("%s: error %v is not an *Error", tc.name, err)
+		}
+		if fe.Reason != tc.reason || fe.Detail != hiddenDetail {
+			t.Errorf("%s: error = %q, %q; want %q, %q", tc.name, fe.Reason, fe.Detail, tc.reason, hiddenDetail)
+		}
+		for what, out := range map[string]string{"error": err.Error(), "logs": logs.String()} {
+			if frag := urlredacttest.SecretFragment(out, tc.secret); frag != "" {
+				t.Errorf("%s: %s %q shows %q", tc.name, what, out, frag)
+			}
+		}
+		if tc.reason == ReasonDeniedAddress && !strings.Contains(logs.String(), `"host":"`+hiddenHost+`"`) {
+			t.Errorf("%s: the denied address warning does not show %q: %s", tc.name, hiddenHost, logs.String())
+		}
+	}
+
+	// An ordinary URL keeps its detail.
+	f := New(Config{Timeout: 5 * time.Second, AllowedHosts: []string{"img.example.com"}, Logger: slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))})
+	_, err := f.FetchBytes(context.Background(), "https://cdn.example.com/a.png")
+	if want := `remote fetch failed: host_not_allowed: host "cdn.example.com" is not allowed`; err == nil || err.Error() != want {
+		t.Errorf("ordinary URL: error %v, want %q", err, want)
 	}
 }
