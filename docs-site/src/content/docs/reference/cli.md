@@ -680,6 +680,8 @@ The project-level forms (bare `scion sync`, `scion sync push` and `scion sync pu
     - `--dry-run`: Preview changes without syncing.
     - `--exclude <glob>`: Exclude files matching the pattern.
 
+Sync carries workspace files only. It never carries git metadata or project configuration: no `.git` entry (at the root or below it, such as a submodule's), no `.scion` entry at any depth (a project kept in a subdirectory included), and no `.DS_Store`. `sync from` never writes into your checkout's own repository or project settings. If the agent's reply still lists such entries (an older Runtime Broker), they are skipped, and the command prints how many. Commits reach other machines by `git push`, not by sync. `sync from` also warns, naming each file, before it replaces an executable file in your checkout. The replaced file keeps its mode. `sync to` leaves the agent's repository as it is.
+
 ### `scion reset-auth`
 
 Injects a fresh Hub token into a **running** agent's container and signals it to reload, without

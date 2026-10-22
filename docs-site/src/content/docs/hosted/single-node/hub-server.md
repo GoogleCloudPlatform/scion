@@ -277,6 +277,14 @@ Templates and harness-configs stored before this layout keep their old layout (o
 
 For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
 
+The Hub and the Runtime Brokers move a workspace through the bucket in a fixed way. At create time the Hub uploads its copy, and the Runtime Broker downloads it. At stop time and on `scion sync from` the Runtime Broker uploads the agent's workspace, and the Hub downloads it back into its copy. What travels:
+
+- **Workspace files.** Downloads make the destination match them.
+- **Repository history:** `.git/HEAD`, `.git/packed-refs`, `.git/index`, `.git/refs/` and `.git/objects/` (except `.git/objects/info/`). Unpushed commits in a shared workspace therefore reach the Hub's copy and later Runtime Brokers. History is written only into a real `.git` directory, and it is never deleted on the receiving side.
+- **Never:** any other `.git` content (`config`, `hooks/`, `info/`, `modules/`, `worktrees/`, `logs/`, alternates), any `.git` below the workspace root, and any `.scion` entry at any depth. Each host keeps its own repository configuration, hooks and project settings. The one cost: a `.scion` directory that is not a project's configuration is not synced either.
+
+Every download first goes to a private temporary directory on the receiving host. It is then applied without following symbolic links in the destination, and anything outside the list above is refused again at that point. Entries an earlier upload left in the bucket are therefore never applied. Each download fetches the whole upload, and needs temporary disk space about the size of the workspace. When a first download leaves a repository without a `.git/config`, the Runtime Broker writes a minimal one. It holds core settings and, for a shared workspace, the project's clone URL as `origin` (only `https://`, `http://`, `ssh://`, `git://` or `git@host:path` URLs). Applying a `scion sync to` upload changes only workspace files, never the agent's repository.
+
 This upload works only with GCS Hub storage. On any other storage provider, a Hub-managed project that has a git remote still works on a remote Runtime Broker, because the Runtime Broker builds the workspace from the remote. A project with no git remote does not. Creating an agent for it on a remote Runtime Broker that has no local path for the project fails up front with `412 unsupported_capability`. Use GCS Hub storage, add a git remote to the project, or link the project at a local path on that Runtime Broker.
 
 ## Deployment
