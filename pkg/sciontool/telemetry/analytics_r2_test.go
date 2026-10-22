@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
@@ -114,9 +115,14 @@ func TestOutboxDirSyncFaultOnStagingCreate(t *testing.T) {
 		}
 		return syncDir(dir)
 	}
-	_, _ = o.AppendUsage(requestIDDraft(5))
+	if _, err := o.AppendUsage(requestIDDraft(5)); err == nil {
+		t.Fatal("append with a failed directory sync on create must fail (the write is taken back)")
+	}
 	if !failed {
 		t.Fatal("dir sync fault was not injected")
+	}
+	if got := o.Stats().PersistedAppendFailed; got != 1 {
+		t.Errorf("append_failed = %d, want 1", got)
 	}
 	// Whatever the first outcome, the retry must not produce a second
 	// line with the same event_id.
@@ -144,7 +150,7 @@ func TestOutboxCommitFaultIsCompletedByRecovery(t *testing.T) {
 	}
 	o.crashAt = ""
 	mustAppend(t, o, requestIDDraft(5), AppendCertainDuplicate)
-	if st := o.Stats(); st.PersistedAppendFailed != 0 || st.SyncUncertain != 1 {
+	if st := o.Stats(); st.PersistedAppendFailed != 0 || st.CommitDeferred != 1 || st.PersistedCommitDeferred != 1 {
 		t.Errorf("stats = %+v", st)
 	}
 	if n := len(stagingLines(t, o)); n != 1 {
@@ -288,5 +294,110 @@ func TestOutboxMalformedIntentWithLandedLineIsReindexed(t *testing.T) {
 	}
 	if reopened.Stats().CorruptIntents != 1 {
 		t.Errorf("corrupt intents = %d", reopened.Stats().CorruptIntents)
+	}
+}
+
+// WP2 r3 R2: the truncate-back cuts only the faulted append. Committed
+// lines before it (including a torn tail left by a crashed writer) stay
+// byte-identical and indexed.
+func TestOutboxTruncateBackKeepsCommittedLines(t *testing.T) {
+	o := testOutbox(t)
+	mustAppend(t, o, requestIDDraft(5), AppendWritten)
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:c", 1), AppendWritten)
+	// A torn fragment from a crashed writer.
+	f, _ := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.WriteString(`{"torn":`)
+	_ = f.Close()
+	before, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
+
+	failNextFileSync(o)
+	if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityRequestID, "rid1:third", 1)); err == nil {
+		t.Fatal("faulted append reported success")
+	}
+	after, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
+	if string(after) != string(before) {
+		t.Fatalf("truncate-back changed committed bytes:\nbefore %q\nafter  %q", before, after)
+	}
+	mustAppend(t, o, requestIDDraft(5), AppendCertainDuplicate)
+	if c := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:c", 1), AppendWritten); c.SourceOccurrence != 2 {
+		t.Errorf("composite repeat occurrence = %d, want 2", c.SourceOccurrence)
+	}
+	// The torn fragment stayed its own line: the next append wrote the
+	// separator, and only valid lines decode.
+	lines := stagingLines(t, o)
+	if len(lines) != 4 || lines[2] != `{"torn":` {
+		t.Errorf("staging lines = %q", lines)
+	}
+}
+
+// WP2 r3 O6: ExpireIndex re-checks each entry under the lock (an entry
+// refreshed after listing survives) and works over several batches.
+func TestOutboxExpireIndexRecheckAndBatches(t *testing.T) {
+	o := testOutbox(t)
+	for _, id := range []string{"cmp1:a", "cmp1:b", "cmp1:c"} {
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, id, 1), AppendWritten)
+	}
+	o.now = func() time.Time { return time.Now().Add(analyticsIndexTTL + time.Hour) }
+	o.expireBatch = 1
+	refreshed := analyticsIndexName("sciontool/project/p/agent/a", "claude.api_request", "cmp1:b")
+	batches := 0
+	o.beforeExpireBatch = func() {
+		batches++
+		if batches == 1 {
+			// An appender refreshes cmp1:b after the listing: it is now
+			// newer than the cutoff and must survive.
+			future := time.Now().Add(analyticsIndexTTL + 2*time.Hour)
+			_ = os.Chtimes(filepath.Join(o.indexDir(), refreshed), future, future)
+		}
+	}
+	removed, err := o.ExpireIndex()
+	if err != nil || removed != 2 || batches != 3 {
+		t.Errorf("ExpireIndex = %d, %v over %d batches; want 2 removed over 3 batches", removed, err, batches)
+	}
+	if _, err := os.Stat(filepath.Join(o.indexDir(), refreshed)); err != nil {
+		t.Error("an entry refreshed after listing must survive")
+	}
+}
+
+// WP2 r3 O1: finalizing files get monotonic names and never replace a
+// leftover.
+func TestOutboxFinalizingNamesMonotonic(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	for i := 0; i < 2; i++ {
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:"+string(rune('a'+i)), 1), AppendWritten)
+		if _, err := o.rotateStaging(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, _ := o.finalizingFiles()
+	want := []string{"finalizing-00000000000000000001.jsonl", "finalizing-00000000000000000002.jsonl"}
+	if len(files) != 2 || files[0] != want[0] || files[1] != want[1] {
+		t.Errorf("finalizing files = %v, want %v", files, want)
+	}
+	if n, err := o.Finalize(); err != nil || n != 2 {
+		t.Errorf("Finalize = %d, %v", n, err)
+	}
+}
+
+// WP2 r3 O4: leftover finalizing files are still delivered while a stuck
+// intent holds rotation.
+func TestOutboxFinalizeStreamsLeftoversWhileHeld(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub")
+	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:old", 1), AppendWritten)
+	if _, err := o.rotateStaging(); err != nil {
+		t.Fatal(err)
+	}
+	o.fsyncFile = func(*os.File) error { return errInjectedSync }
+	o.truncateHook = func() error { return errInjectedSync }
+	if _, err := o.AppendUsage(requestIDDraft(5)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		t.Fatalf("append = %v; want held", err)
+	}
+	o.fsyncFile = func(f *os.File) error { return f.Sync() }
+	o.fsyncDir = func(string) error { return errInjectedSync } // staging stays unsyncable
+	n, err := o.Finalize()
+	if n != 1 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		t.Errorf("Finalize while held = %d, %v; want the leftover finalized and the hold reported", n, err)
 	}
 }

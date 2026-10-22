@@ -125,7 +125,11 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 	}
 	ev, err := a.build(obs)
 	if err != nil {
-		a.droppedNoIdentity.Add(1)
+		if errors.Is(err, errNoAgentIdentity) {
+			a.droppedNoIdentity.Add(1)
+		} else {
+			a.invalid.Add(1)
+		}
 		return 0, err
 	}
 	if err := a.ensureOpen(); err != nil {

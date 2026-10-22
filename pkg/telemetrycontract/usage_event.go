@@ -16,13 +16,14 @@ package telemetrycontract
 
 // This file holds the agent.usage analytics event (WP2 design note
 // telemetry/design/wp2-design.md, section 3). One event is produced per
-// accepted usage increment -- the same increment that updates the canonical
-// gen_ai.api.calls / scion.usage.tokens counters -- and never from session
-// summaries. A repeat the counters' in-memory dedupe rejects is still
-// offered to the outbox: a verified request ID repeat is suppressed as a
-// certain duplicate, any other repeat is written as a further occurrence
-// marked identity_ambiguous (counted only toward WP4's upper bound). Field types are fixed forever: a type change on an existing
-// field becomes a BigQuery export error.
+// accepted usage increment -- the same increment that updates the
+// canonical gen_ai.api.calls / scion.usage.tokens counters -- and never
+// from session summaries. A repeat the counters' in-memory dedupe rejects
+// is still offered to the outbox: a verified request ID repeat is
+// suppressed as a certain duplicate, any other repeat is written as a
+// further occurrence marked identity_ambiguous (counted only toward WP4's
+// upper bound). Field types are fixed forever: a type change on an
+// existing field becomes a BigQuery export error.
 
 import (
 	"errors"
