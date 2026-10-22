@@ -2364,7 +2364,7 @@ authDone:
 	if finalScionCfg != nil {
 		agentK8s = finalScionCfg.Kubernetes
 	}
-	placedK8s, placementWarnings, err := m.applyStartPlacement(opts, agentK8s)
+	placedK8s, placementWarnings, err := m.applyStartPlacement(ctx, opts, agentK8s)
 	if err != nil {
 		return nil, err
 	}
