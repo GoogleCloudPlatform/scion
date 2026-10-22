@@ -17,8 +17,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -44,8 +48,8 @@ func installWaitingSSHClient(t *testing.T, ignoreSignals bool) string {
 	if ignoreSignals {
 		script += "trap '' HUP TERM\n"
 	}
-	script += "echo $$ > '" + pidFile + ".tmp'\n" +
-		"mv '" + pidFile + ".tmp' '" + pidFile + "'\n" +
+	// Only shell builtins and absolute paths: PATH holds the fake alone.
+	script += "echo $$ > '" + pidFile + "'\n" +
 		"exec /bin/sleep 30\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o755))
 	t.Setenv("PATH", bin)
@@ -58,8 +62,18 @@ func installWaitingSSHClient(t *testing.T, ignoreSignals bool) string {
 // instead of ending the test binary.
 func startSSHForSignal(t *testing.T, pidFile string) <-chan int {
 	t.Helper()
+	return startSSHForSignalExe(t, pidFile, "")
+}
+
+// startSSHForSignalExe is startSSHForSignal with exe as the scion path in
+// the ProxyCommand ("" keeps the test default).
+func startSSHForSignalExe(t *testing.T, pidFile, exe string) <-chan int {
+	t.Helper()
 	hub := twoProjectHub(t, "tok")
 	env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+	if exe != "" {
+		env.exe = exe
+	}
 	codes := make(chan int, 1)
 	go func() { codes <- runSSH(context.Background(), env, []string{"a-b/c"}) }()
 	deadline := time.Now().Add(10 * time.Second)
@@ -146,4 +160,60 @@ func TestSSH_InterruptLeftToSSH(t *testing.T) {
 	}
 	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 	assert.Equal(t, 143, waitSSHCode(t, codes, 5*time.Second))
+}
+
+// processGone reports whether pid has exited: it no longer exists, or it
+// is a zombie its new parent has not reaped yet.
+func processGone(pid int) bool {
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	// The state follows the parenthesised command name.
+	if i := strings.LastIndexByte(string(stat), ')'); i >= 0 && i+2 < len(stat) {
+		return stat[i+2] == 'Z'
+	}
+	return false
+}
+
+// With the system ssh client, a termination request to scion ssh also ends
+// the ProxyCommand ssh started. The fake ProxyCommand stands in for scion
+// tunnel --stdio, which ends when its stdin closes; it reads its stdin to
+// EOF and records its pid.
+func TestSSH_ParentSignalEndsProxyCommand(t *testing.T) {
+	sshBin, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("no ssh client")
+	}
+	for _, p := range []string{"/bin/sh", "/bin/cat"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("needs %s", p)
+		}
+	}
+	old := sshSignalGrace
+	sshSignalGrace = time.Minute
+	t.Cleanup(func() { sshSignalGrace = old })
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	proxy := filepath.Join(t.TempDir(), "scion")
+	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nexec /bin/cat > /dev/null\n"
+	require.NoError(t, os.WriteFile(proxy, []byte(script), 0o755))
+	t.Setenv("PATH", filepath.Dir(sshBin))
+	codes := startSSHForSignalExe(t, pidFile, proxy)
+	var pid int
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "the ProxyCommand did not record its pid")
+
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	assert.Equal(t, 143, waitSSHCode(t, codes, 5*time.Second))
+	assert.Eventually(t, func() bool { return processGone(pid) }, 5*time.Second, 20*time.Millisecond,
+		"the ProxyCommand (pid %d) is still running", pid)
 }
