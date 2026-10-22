@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -277,6 +278,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 			path:    relPath,
 			absPath: path,
 			size:    info.Size(),
+			mode:    publishFileMode(info.Mode()),
 		})
 		return nil
 	})
@@ -385,19 +387,9 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build manifest with file hashes
-	manifest := &hubclient.SkillManifest{
-		Files: make([]hubclient.TemplateFile, len(files)),
-	}
-	for i, f := range files {
-		hash, err := hashFile(f.absPath)
-		if err != nil {
-			return fmt.Errorf("failed to hash %s: %w", f.path, err)
-		}
-		manifest.Files[i] = hubclient.TemplateFile{
-			Path: f.path,
-			Size: f.size,
-			Hash: hash,
-		}
+	manifest, err := buildSkillManifest(files)
+	if err != nil {
+		return err
 	}
 
 	// Finalize
@@ -421,6 +413,42 @@ type publishFile struct {
 	path    string
 	absPath string
 	size    int64
+	// mode is the normalised mode recorded in the manifest: "0755" for an
+	// executable file, otherwise "0644" (ptone/scion#5657).
+	mode string
+}
+
+// publishFileMode is the manifest mode for a local file with mode m. Only
+// the executable bit is carried. On Windows, whose file modes carry no
+// executable bit, every file is "0644".
+func publishFileMode(m os.FileMode) string {
+	if !localModesCarryExecBit() {
+		return transfer.FormatMode(transfer.ModeRegular)
+	}
+	return transfer.NormalizedModeString(transfer.FormatMode(m))
+}
+
+// buildSkillManifest returns the finalize manifest for files: each file's
+// path, size, sha256 hash and mode. The Hub serves the mode back with the
+// download URLs, so the broker installs an executable skill script
+// executable (ptone/scion#5657).
+func buildSkillManifest(files []publishFile) (*hubclient.SkillManifest, error) {
+	manifest := &hubclient.SkillManifest{
+		Files: make([]hubclient.TemplateFile, len(files)),
+	}
+	for i, f := range files {
+		hash, err := hashFile(f.absPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hash %s: %w", f.path, err)
+		}
+		manifest.Files[i] = hubclient.TemplateFile{
+			Path: f.path,
+			Size: f.size,
+			Hash: hash,
+			Mode: f.mode,
+		}
+	}
+	return manifest, nil
 }
 
 func skillDisplayName(slug string) string {

@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -248,6 +249,12 @@ type ResolvedFile struct {
 	URL  string
 	Hash string
 	Size int64
+	// Mode is the file's recorded mode as the Hub serves it: "0755"
+	// (executable) or "0644" (ptone/scion#5657). Resolvers that know no
+	// mode, and Hubs from before modes were carried, leave it empty; the
+	// install step writes such a file 0644 (transfer.NormalizeMode). Only
+	// the executable bit is ever applied, never setuid, setgid or sticky.
+	Mode string `json:",omitempty"`
 	// Content holds the pre-fetched file bytes when available (e.g. from the
 	// GitHub resolver, which downloads each file during resolution for hashing).
 	// If non-nil, installOneSkill writes this directly and skips the network
@@ -711,10 +718,16 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	// Check cache before downloading
 	cache := SkillCacheFromContext(ctx)
 	if cache != nil && skill.Hash != "" {
-		if cachedPath, hit := cache.Get(skill.Hash); hit {
+		if cachedPath, hit := cache.Get(skillCacheKey(skill)); hit {
 			copyErr := cache.CopyToDir(cachedPath, skillStagingDir)
 			if copyErr == nil {
 				copyErr = verifyInstalledSkillHash(skillStagingDir, skill)
+			}
+			if copyErr == nil {
+				// The entry key already covers the executable bits, but
+				// set each file's mode again so the install does not depend
+				// on how the cached copy was written.
+				copyErr = applySkillFileModes(skillStagingDir, skill)
 			}
 			if copyErr == nil {
 				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
@@ -783,6 +796,13 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			}
 		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghCred); err != nil {
 			return nil, wrapSkillFileError("failed to download", f.Path, err)
+		}
+
+		// Both writers create the file 0644 (under the umask); give it
+		// the recorded mode, so an executable skill script stays
+		// executable (ptone/scion#5657).
+		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil {
+			return nil, wrapSkillFileError("failed to set mode of", f.Path, err)
 		}
 
 		// S2: Verify per-file hash, in whichever format the resolver supplied.
@@ -893,9 +913,42 @@ func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolu
 	}, nil
 }
 
-// populateSkillCache stores downloaded skill files in the cache.
+// skillFileModes returns the normalised mode of each file of skill, keyed
+// by its path in the skill.
+func skillFileModes(skill ResolvedSkill) map[string]os.FileMode {
+	modes := make(map[string]os.FileMode, len(skill.Files))
+	for _, f := range skill.Files {
+		modes[f.Path] = transfer.NormalizeMode(f.Mode)
+	}
+	return modes
+}
+
+// skillCacheKey is the skill cache entry name for skill. The bundle hash
+// does not cover file modes, so a skill with an executable file is keyed
+// by templatecache.EntryKey over the hash and its executable paths: an
+// entry cached before modes were carried (every file 0644) is then never
+// served for it (ptone/scion#5657). A skill with no executable file keeps
+// the bare bundle hash, so its existing entries stay valid. Both forms are
+// canonical "sha256:<hex64>" names.
+func skillCacheKey(skill ResolvedSkill) string {
+	return templatecache.EntryKey(skill.Hash, skillFileModes(skill))
+}
+
+// applySkillFileModes sets each file of skill under dir to its normalised
+// mode.
+func applySkillFileModes(dir string, skill ResolvedSkill) error {
+	for _, f := range skill.Files {
+		if err := os.Chmod(filepath.Join(dir, f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
+			return fmt.Errorf("failed to set mode of %s: %w", f.Path, err)
+		}
+	}
+	return nil
+}
+
+// populateSkillCache stores downloaded skill files in the cache, with
+// their modes, under skillCacheKey.
 func populateSkillCache(cache interface {
-	Put(string, map[string][]byte) (string, error)
+	PutWithModes(string, map[string][]byte, map[string]os.FileMode) (string, error)
 }, skill ResolvedSkill, installedDir string) {
 	files := make(map[string][]byte, len(skill.Files))
 	for _, f := range skill.Files {
@@ -906,10 +959,11 @@ func populateSkillCache(cache interface {
 		}
 		files[f.Path] = content
 	}
-	if _, err := cache.Put(skill.Hash, files); err != nil {
+	key := skillCacheKey(skill)
+	if _, err := cache.PutWithModes(key, files, skillFileModes(skill)); err != nil {
 		util.Debugf("provision: failed to cache skill %s@%s: %v", LoggedSkillName(skill.URI, skill.Name), skill.Version, err)
 	} else {
-		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, skill.Hash)
+		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, key)
 	}
 }
 
