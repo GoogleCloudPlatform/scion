@@ -323,7 +323,7 @@ func TestSafeToEvictSettings_DBOverlay(t *testing.T) {
 			"db":      {Runtime: "db-k8s"},
 			"db-true": {Runtime: "db-k8s", SafeToEvict: boolPtr(true)},
 		},
-		nil, "")
+		nil)
 	SetGlobalSettingsOverlay(o)
 	t.Cleanup(func() { SetGlobalSettingsOverlay(nil) })
 

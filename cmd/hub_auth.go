@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -88,24 +87,18 @@ that you can enter on any device with a browser.
 
 ` + hubAuthURLPrecedence + `
 
-After a successful login, when no hub.endpoint is set in the settings that
-apply (the current project's own settings, else global), the hub URL is saved
-so 'scion hub status' and other hub commands use it. It is saved to global
-settings, since credentials are global and project settings are often
-tracked in git; it goes to the project's settings only when that project
-already has hub settings, or with an explicit --global=false. An existing
-hub.endpoint is never overwritten. A configured endpoint is all the CLI
-needs to use the hub.
+A login never changes settings files. Credentials are stored in
+~/.scion/credentials.json, keyed by the hub URL.
 
---hub-url and --hub accept a hub nickname ('scion hub list'). A hub URL
-given with either flag that is not in the hub list yet is added to it after
-a successful login, with a nickname derived from its host; it does not
-become the current hub.
+--hub accepts a hub nickname ('scion hub list'). A hub URL given with
+--hub that is not in the hub list yet is added to it after a successful
+login, with a nickname derived from its host; it does not become the
+current hub. To make it the current hub, run 'scion use --hub <name>'.
 
 Example:
   scion hub auth login
-  scion hub auth login --hub-url https://hub.example.com
   scion --hub https://hub.example.com hub auth login
+  scion --hub prod hub auth login
   scion hub auth login --no-browser
   scion hub auth login --provider github`,
 	RunE: runHubAuthLogin,
@@ -125,24 +118,26 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
 	// Flags for login command
-	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub nickname or server URL; takes precedence over --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings and SCION_HUB_URL")
+	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Deprecated alias of --hub")
+	// --hub-url is kept for one release as a hidden alias of --hub; pflag
+	// prints the deprecation on stderr when it is used.
+	_ = hubAuthLoginCmd.Flags().MarkDeprecated("hub-url", "use --hub")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
 	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
-	// Resolve hub URL: --hub-url, --hub, SCION_HUB_ENDPOINT, settings, SCION_HUB_URL.
-	// Both flags accept a hub nickname.
-	hubURLFlag, err := hubAuthURLFlag(hubAuthHubURL)
+	// The hub of this invocation (see hubAuthURLPrecedence); the
+	// deprecated --hub-url wins, and like --hub accepts a nickname.
+	hubURL, err := hubAuthURL(hubAuthHubURL)
 	if err != nil {
 		return err
 	}
-	hubURL := resolveHubAuthURL(hubURLFlag, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	if hubURL == "" {
-		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings or SCION_HUB_URL")
+		return errHubNotConfigured
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", hubURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", config.RedactURL(hubURL))
 
 	provider, err := cmd.Flags().GetString("provider")
 	if err != nil {
@@ -185,23 +180,20 @@ func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubc
 }
 
 // finishHubAuthLogin completes a successful login: it stores the
-// credential, adds a URL given explicitly with --hub-url or --hub to the
-// hub list, and records the endpoint in settings where that applies.
+// credential and then updates the hub list (recordLoginHub). No settings
+// file is written.
 func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.CLITokenResponse) error {
 	if err := storeTokenAndPrintResult(cmd.OutOrStdout(), hubURL, tokenResp); err != nil {
 		return err
 	}
-	if loginHubURLGivenExplicitly() {
-		registerLoginHub(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL)
-	}
-	recordLoginEndpoint(cmd, hubURL)
+	recordLoginHub(cmd.OutOrStdout(), cmd.ErrOrStderr(), hubURL)
 	return nil
 }
 
 // loginHubURLGivenExplicitly reports whether 'hub auth login' got its hub
 // as a URL in --hub-url or --hub (not as a nickname, and not from the
-// environment, settings or the current context). Only such a URL is added
-// to the hub list.
+// environment, a link entry or the current context). Only such a URL is
+// added to the hub list.
 func loginHubURLGivenExplicitly() bool {
 	if hubAuthHubURL != "" {
 		return !isHubNickname(hubAuthHubURL)
@@ -209,16 +201,17 @@ func loginHubURLGivenExplicitly() bool {
 	return hubFlagEndpoint() != "" && hubFlagName == ""
 }
 
-// registerLoginHub adds a hub entry for hubURL, after a successful login,
-// when no entry has that endpoint. The nickname is derived from the host
-// and printed. It does not change the current hub. A failure is a warning:
-// the login itself succeeded.
-func registerLoginHub(out, stderr io.Writer, hubURL string) {
+// registerHubInList adds a hub entry for hubURL, after a successful
+// command against that hub (today: a login), when no entry has that
+// endpoint. The nickname is derived from the host and printed. It does not
+// change the current hub. A failure is a warning: the command itself
+// succeeded. Inside an agent the hub list is not used.
+func registerHubInList(out, stderr io.Writer, hubURL string) {
 	if contextDisabled(resolveMode()) {
 		return
 	}
 	if err := config.ValidateHubURL(hubURL); err != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %s\n", config.RedactURL(hubURL), config.RedactURLsIn(err.Error()))
 		return
 	}
 	var name string
@@ -226,42 +219,57 @@ func registerLoginHub(out, stderr io.Writer, hubURL string) {
 	err := config.UpdateCLIContext(func(c *config.CLIContext) error {
 		name, created = c.EnsureHub(hubURL, useHubBaseName(hubURL))
 		if !created {
-			return errLoginHubKnown
+			return errHubAlreadyListed
 		}
 		return nil
 	})
 	switch {
-	case errors.Is(err, errLoginHubKnown):
+	case errors.Is(err, errHubAlreadyListed):
 	case err != nil:
-		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", hubURL, err)
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", config.RedactURL(hubURL), err)
 	case created:
 		printRegisteredHub(out, name, config.NormalizeEndpoint(hubURL))
 	}
 }
 
-// errLoginHubKnown stops the context update of registerLoginHub when the
-// hub already has an entry, so the file is not rewritten.
-var errLoginHubKnown = errors.New("hub already registered")
+// errHubAlreadyListed stops the context update of registerHubInList when
+// the hub already has an entry, so the file is not rewritten.
+var errHubAlreadyListed = errors.New("hub already registered")
 
-// recordLoginEndpoint makes a successful login usable by the rest of the
-// CLI. When the hub came from the current context ('scion use'; no
-// --hub-url, --hub or environment variable chose it), or from the link
-// entry of the directory project, the settings are left alone: the hub
-// list already targets that hub, and writing it to the global hub.endpoint
-// would make the workstation server advertise it. Otherwise
-// persistLoginEndpointForInvocation saves the endpoint as before.
-func recordLoginEndpoint(cmd *cobra.Command, hubURL string) {
-	if hubAuthHubURL == "" && hubSource == targetSourceContext {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
+// recordLoginHub is everything a successful login does with the hub list.
+// It never writes settings: the hub list is the CLI's only hub
+// configuration.
+//
+//   - The current hub ('scion use') or the hub of the linked directory:
+//     one line saying which hub that was.
+//   - A URL given with --hub or --hub-url: added to the hub list when it
+//     has no entry (registerHubInList). A login never makes a hub current;
+//     when the hub is not the current hub, a hint says how to select it.
+//   - A hub from the environment: nothing (it is a one-off override).
+func recordLoginHub(out, stderr io.Writer, hubURL string) {
+	if contextDisabled(resolveMode()) {
 		return
 	}
-	// The hub of a linked directory comes from its link entry in the hub
-	// list, so it is not written to settings either.
-	if hubAuthHubURL == "" && hubSource == targetSourceDirectory {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (the hub this directory is linked to); settings unchanged.\n", hubURL)
+	switch {
+	case hubAuthHubURL == "" && hubSource == targetSourceContext:
+		_, _ = fmt.Fprintf(out, "Logged in to %s (current hub, selected with 'scion use').\n", config.RedactURL(hubURL))
+		return
+	case hubAuthHubURL == "" && hubSource == targetSourceDirectory:
+		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", config.RedactURL(hubURL))
+		return
+	case hubAuthHubURL == "" && hubFlagEndpoint() == "":
 		return
 	}
-	persistLoginEndpointForInvocation(cmd, hubURL)
+	if loginHubURLGivenExplicitly() {
+		registerHubInList(out, stderr, hubURL)
+	}
+	c, err := config.LoadCLIContext()
+	if err != nil {
+		return
+	}
+	if name, h := c.HubByEndpoint(hubURL); h != nil && name != c.CurrentHub {
+		_, _ = fmt.Fprintf(out, "To make it the current hub, run 'scion use --hub %s'.\n", name)
+	}
 }
 
 func newDeviceFlowAuth(authSvc hubclient.AuthService, provider string) *auth.DeviceFlowAuth {
@@ -371,11 +379,10 @@ func runHubAuthLogout(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getDefaultHubURL returns the hub URL logout uses: the root --hub flag,
-// then SCION_HUB_ENDPOINT, then settings, then SCION_HUB_URL (see
-// resolveHubAuthURL).
+// getDefaultHubURL returns the hub URL logout uses: the hub of this
+// invocation (see hubAuthURLPrecedence).
 func getDefaultHubURL() string {
-	return resolveHubAuthURL("", hubEndpoint, os.Getenv, settingsHubEndpoint)
+	return invocationHubEndpoint()
 }
 
 func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType hubclient.OAuthClientType, requestedProvider string) (string, error) {

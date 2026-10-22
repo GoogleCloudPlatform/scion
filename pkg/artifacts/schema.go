@@ -379,3 +379,70 @@ ALTER TABLE artifact_version ADD COLUMN fail_reason TEXT;
 const postgresVersionFailReason = `
 ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS fail_reason TEXT;
 `
+
+// migrationAttachments supports web-chat attachments stored as artifacts
+// (ptone/scion#4595): artifact.legacy_attachment_id names the attachment of
+// the hub's older attachment store a row stands for, so its id keeps
+// resolving (unique where set); artifact_version.source_attachment_id and
+// source_message_id record the attachment, and the message it was sent in,
+// that a version was published from. Every column is nullable and nothing
+// is backfilled. The index serves the retirement of unsent uploads by age.
+const migrationAttachments = "0009_attachments"
+
+const sqliteAttachments = `
+ALTER TABLE artifact ADD COLUMN legacy_attachment_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_legacy_attachment
+    ON artifact (legacy_attachment_id) WHERE legacy_attachment_id IS NOT NULL;
+ALTER TABLE artifact_version ADD COLUMN source_attachment_id TEXT;
+ALTER TABLE artifact_version ADD COLUMN source_message_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_artifact_scope_created
+    ON artifact (scope_kind, created_at) WHERE deleted_at IS NULL;
+`
+
+const postgresAttachments = `
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS legacy_attachment_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_legacy_attachment
+    ON artifact (legacy_attachment_id) WHERE legacy_attachment_id IS NOT NULL;
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS source_attachment_id TEXT;
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS source_message_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_artifact_scope_created
+    ON artifact (scope_kind, created_at) WHERE deleted_at IS NULL;
+`
+
+// migrationAttachmentProject records, on an attachment bound to a message,
+// the project of that message as the hub derived it from the message's
+// conversation at bind time (ptone/scion#4596). NULL means unknown: an
+// upload not yet bound, or a row bound before this step (nothing is
+// backfilled); an empty string means the message has no project.
+const migrationAttachmentProject = "0010_attachment_project"
+
+const sqliteAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN message_project_id TEXT;
+`
+
+const postgresAttachmentProject = `
+ALTER TABLE artifact ADD COLUMN IF NOT EXISTS message_project_id TEXT;
+`
+
+// migrationDeliveryRedemptions records the redeemed nonces of attachment
+// delivery capabilities (ptone/scion#4596), so each capability serves at
+// most once. Rows older than a day are swept by the maintenance pass.
+const migrationDeliveryRedemptions = "0011_delivery_redemptions"
+
+const sqliteDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`
+
+const postgresDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`

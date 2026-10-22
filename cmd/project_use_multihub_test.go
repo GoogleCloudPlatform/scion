@@ -409,7 +409,7 @@ func TestUseMultiHub_KnownProjectHubUnreachable(t *testing.T) {
 	prod.srv.Close()
 	stdout, stderr, err := runScion(t, "use", "foo")
 	require.NoError(t, err)
-	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+url+").\n", stdout)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+url+") (unverified).\n", stdout)
 	assert.Contains(t, stderr, "Warning: could not check project 'foo' on hub 'prod': ")
 	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
 }
@@ -438,8 +438,8 @@ func TestUseMultiHub_NotLoggedIn(t *testing.T) {
 	}))
 	stdout, _, err = runScion(t, "use", "bar")
 	require.NoError(t, err)
-	assert.Equal(t, "Now using project 'bar' on hub 'staging' ("+staging2.URL()+").\n"+
-		"Not logged in to hub 'staging'. Run: scion hub auth login --hub staging\n", stdout)
+	assert.Equal(t, "Now using project 'bar' on hub 'staging' ("+staging2.URL()+") (unverified).\n"+
+		"Not logged in to hub 'staging', so the project is unverified. Run: scion hub auth login --hub "+staging2.URL()+"\n", stdout)
 	assert.Zero(t, staging2.calls())
 
 	// Not found on the logged-in hub: the error names the skipped hub and
@@ -639,8 +639,9 @@ func TestUseMultiHub_EnvHubRestrictsCandidates(t *testing.T) {
 	assert.Zero(t, prod.calls())
 }
 
-// The hub in the settings joins the registered hubs when it has no entry.
-func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
+// A hub.endpoint in the settings is not a hub: only registered hubs are
+// searched, and the settings hub gets no entry.
+func TestUseMultiHub_SettingsHubIsNotSearched(t *testing.T) {
 	prod, staging := setupTwoHubs(t)
 	prod.setProjects()
 	staging.setProjects()
@@ -648,20 +649,23 @@ func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
 	storeTestLogin(t, other.URL())
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+other.URL()+"\n")
 
-	stdout, _, err := runScion(t, "use", "foo")
-	require.NoError(t, err)
-	assert.Positive(t, prod.lists.Load(), "the registered hubs are searched too")
-	assert.Positive(t, staging.lists.Load(), "the registered hubs are searched too")
-	// The settings hub gets an entry with a nickname derived from its URL
-	// (not "local": that is only for a hub reached with dev auth), and is
-	// now the current hub. The test server listens on 127.0.0.1, an IPv4
-	// address, whose nickname is the address with '-' for '.'.
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "project 'foo' not found on hubs: prod, staging")
+	assert.Zero(t, other.calls(), "the settings hub is not searched")
 	c := readTestContext(t)
-	name, h := c.HubByEndpoint(other.URL())
-	require.NotNil(t, h, "the settings hub got an entry")
-	assert.Equal(t, "127-0-0-1", name)
-	assert.Equal(t, name, c.CurrentHub)
-	assert.Equal(t, "Now using project 'foo' on hub '127-0-0-1' ("+other.URL()+").\n", stdout)
+	_, h := c.HubByEndpoint(other.URL())
+	assert.Nil(t, h, "the settings hub got no entry")
+	assert.Empty(t, c.CurrentHub)
+}
+
+// makeCurrentHub makes the registered hub name the current hub, as
+// 'scion use --hub <name>' would.
+func makeCurrentHub(t *testing.T, name string) {
+	t.Helper()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.CurrentHub = name
+		return nil
+	}))
 }
 
 // Each hub's lookup has its own timeout: a hub that never answers is
@@ -740,7 +744,7 @@ func TestUseMultiHub_LoneHubChosenOrEffectiveGetsFullChain(t *testing.T) {
 	})
 	t.Run("effective hub", func(t *testing.T) {
 		prod := setupOneHubNoLogin(t)
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"/\n")
+		makeCurrentHub(t, "prod")
 		_, _, err := runScion(t, "project", "list", "--refresh")
 		require.NoError(t, err)
 		assert.Positive(t, prod.lists.Load())
@@ -767,15 +771,15 @@ func TestUseMultiHub_KnownProjectCheckFollowsCredentialRule(t *testing.T) {
 		seed(t)
 		stdout, _, err := runScion(t, "use", "foo")
 		require.NoError(t, err)
-		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
-			"Not logged in to hub 'prod'. Run: scion hub auth login --hub prod\n", stdout)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+") (unverified).\n"+
+			"Not logged in to hub 'prod', so the project is unverified. Run: scion hub auth login --hub "+prod.URL()+"\n", stdout)
 		assert.Zero(t, prod.calls())
 		assert.Zero(t, staging.calls())
 	})
 	t.Run("effective", func(t *testing.T) {
 		prod, staging := setupTwoHubsNoLogins(t)
 		seed(t)
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 		stdout, _, err := runScion(t, "use", "foo")
 		require.NoError(t, err)
 		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
@@ -930,7 +934,8 @@ func TestUseLoginOffer_TransportOnlyTheHubsOwn(t *testing.T) {
 	}))
 	assert.Equal(t, []string{"Bearer staging-aud-token"}, login(), "a hub the lookup picked: exactly its entry's own transport")
 
-	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+staging.URL()+"\n")
+	// The effective hub (here the current hub, as the resolver fills it).
+	hubEndpoint, hubSource = staging.URL(), targetSourceContext
 	assert.Equal(t, []string{envTransportHeader}, login(), "the effective hub: environment transport as for 'hub auth login'")
 }
 
@@ -953,7 +958,7 @@ func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
 func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
 	t.Run("other hub without a login", func(t *testing.T) {
 		prod, staging := setupTwoHubsNoLogins(t) // both have "foo"
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 
 		stdout, stderr, err := runScion(t, "use", "foo", "--refresh")
 		require.NoError(t, err)
@@ -967,7 +972,7 @@ func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
 		withEnvTransport(t)
 		storeTestLogin(t, staging.URL())
 		staging.setProjects()
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 
 		stdout, _, err := runScion(t, "use", "foo", "--refresh")
 		require.NoError(t, err)
@@ -1138,8 +1143,8 @@ func TestUseMultiHub_KnownProjectHubRefusesLogin(t *testing.T) {
 	}))
 	stdout, _, err := runScion(t, "use", "foo")
 	require.NoError(t, err)
-	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
-		"Hub 'prod' refused the login. Run: scion hub auth login --hub prod\n", stdout)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+") (unverified).\n"+
+		"Hub 'prod' refused the login, so the project is unverified. Run: scion hub auth login --hub "+prod.URL()+"\n", stdout)
 	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
 	assert.Zero(t, staging.calls())
 }
@@ -1167,4 +1172,63 @@ func TestUseMultiHub_NotFoundSkippedHubsWording(t *testing.T) {
 	want = "project 'foo' not found on the hubs searched (prod); it may be on the hubs that could not be searched (dev: login refused; staging: unreachable: "
 	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
 	assert.True(t, strings.HasSuffix(err.Error(), "\n\nLog in with: scion hub auth login --hub dev"), err.Error())
+}
+
+// A known project whose hub cannot confirm it (no login there) is selected
+// with exit 0 but marked unverified: in the switch output, which names the
+// hub URL to log in to, in context.yaml, and in bare 'scion use' as text
+// and JSON. A later switch the hub confirms clears the mark.
+func TestUseMultiHub_UnconfirmedProjectMarkedUnverified(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+		return nil
+	}))
+
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err, "an unconfirmed switch still exits 0")
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+") (unverified).\n"+
+		"Not logged in to hub 'prod', so the project is unverified. Run: scion hub auth login --hub "+prod.URL()+"\n", stdout)
+	assert.Zero(t, prod.calls())
+	assert.Zero(t, staging.calls())
+	saved := readTestContext(t).Hubs["prod"].CurrentProject
+	require.NotNil(t, saved)
+	assert.Equal(t, "p-foo", saved.ID)
+	assert.True(t, saved.Unverified, "context.yaml marks the project unverified")
+
+	stdout, _, err = runScion(t, "use")
+	require.NoError(t, err)
+	assert.Regexp(t, `Project:\s+foo\s+p-foo\s+\(current context, unverified\)`, stdout)
+	assert.Contains(t, stdout, "Note: project 'foo' was selected while the hub could not confirm it. To verify it, run: scion hub auth login --hub "+prod.URL()+", then scion use foo\n")
+
+	stdout, _, err = runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	var show struct {
+		Effective struct {
+			Project struct {
+				ID         string `json:"id"`
+				Unverified bool   `json:"unverified"`
+			} `json:"project"`
+		} `json:"effective"`
+		Context struct {
+			Project struct {
+				ID         string `json:"id"`
+				Unverified bool   `json:"unverified"`
+			} `json:"project"`
+		} `json:"context"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &show), stdout)
+	assert.Equal(t, "p-foo", show.Effective.Project.ID)
+	assert.True(t, show.Effective.Project.Unverified, "effective project is unverified in JSON")
+	assert.True(t, show.Context.Project.Unverified, "saved context project is unverified in JSON")
+
+	// prod is now the current hub, so its credential applies and the hub
+	// confirms the project: the mark is cleared.
+	stdout, _, err = runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.False(t, readTestContext(t).Hubs["prod"].CurrentProject.Unverified, "a confirmed switch clears the mark")
+	stdout, _, err = runScion(t, "use")
+	require.NoError(t, err)
+	assert.NotContains(t, stdout, "unverified")
 }

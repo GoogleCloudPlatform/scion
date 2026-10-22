@@ -126,6 +126,11 @@ func (Message) Indexes() []ent.Index {
 		// every unread refresh. Both read-switch paths order by created, id.
 		index.Fields("conversation_id", "channel", "created", "id"),
 		index.Fields("thread_id", "channel", "created", "id"),
+		// Project-scoped pages (the conversation backfill, project message
+		// listings) filter on project_id and order by created, id with a
+		// (created, id) keyset cursor. Without this index every page reads
+		// and sorts all of the project's messages.
+		index.Fields("project_id", "created", "id"),
 	}
 }
 

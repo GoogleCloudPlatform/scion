@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +32,11 @@ import (
 // global settings' hub configuration. The context returned with it already
 // holds the import, so callers can warn and carry on.
 var ErrCLIContextImport = errors.New("could not save the imported hub settings to context.yaml")
+
+// HubEndpointConfigKey is the config key ('scion config set|get|unset')
+// that names the hub. The config commands map it to the hub list (the
+// current hub, or a project's link entry); no settings file holds it.
+const HubEndpointConfigKey = "hub.endpoint"
 
 // HubNames returns the names of the hub entries, sorted.
 func (c *CLIContext) HubNames() []string {
@@ -51,15 +57,100 @@ func ValidateHubName(name string) error {
 }
 
 // ValidateHubURL returns an error when endpoint is not an http or https URL
-// with a host. User info, a query and a fragment are refused too: the hub
-// list holds no credentials, and a hub URL needs neither.
+// with a host. User info, any '@', a query and a fragment are refused too:
+// the hub list holds no credentials, and a hub URL needs none of them.
 func ValidateHubURL(endpoint string) error {
+	// A hub URL never needs an '@'; with one, a password containing '/'
+	// can parse as a port and path, so the URL is not repeated.
+	//
+	// This check must stay BEFORE the parse-and-scheme check below. That
+	// check formats the endpoint with RedactURL and is the one place that
+	// gets non-http(s) URLs (a schemeless "user:pass@host" parses as an
+	// opaque URL that RedactURL leaves unchanged). It is safe only because
+	// every endpoint with an '@' has already returned here; swapping the
+	// two blocks would print such credentials.
+	if strings.Contains(endpoint, "@") {
+		return fmt.Errorf("invalid hub URL %q: a hub URL must not contain '@'", maskWholeURL(strings.TrimSpace(endpoint)))
+	}
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(endpoint, "#") {
-		return fmt.Errorf("invalid hub URL %q: use an http:// or https:// URL", endpoint)
+		return fmt.Errorf("invalid hub URL %q: use an http:// or https:// URL", RedactURL(endpoint))
 	}
 	return nil
+}
+
+// userInfoRe matches the user info of a URL that url.Parse rejects, up to
+// the last '@' before the host.
+// pkg/apiclient keeps a copy of these rules (redactURLCredentials), since it
+// imports no scion package; change both together.
+var userInfoRe = regexp.MustCompile("^(" + urlSchemePrefix + ")?[^/?#]*@")
+
+// textURLRe matches the scheme and authority of each http(s) URL in a
+// text. The authority ends at the path, query or fragment, at white space,
+// or at a character that delimits a URL in a message and cannot appear in
+// user info.
+var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)*")
+
+// textFullURLRe matches each http(s) URL in a text: textURLRe's scheme and
+// authority, then its path, query and fragment, which end at white space,
+// a quote, an angle bracket, a backtick or a backslash. A JSON escape
+// inside them (\u0026 for "&", \/ for "/") does not end the URL, so a URL
+// quoted in JSON text is redacted whole; any other backslash (\" in a Go
+// %q string, for example) ends it. The path, query and fragment start at a
+// literal "/", "?" or "#" (encoding/json never escapes those).
+var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#](?:[^\\s\"<>`\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\/)*)?")
+
+// RedactURL returns raw for display with any credential in it replaced:
+// in its user info, the password (see url.URL.Redacted), or a user name
+// given without a password, which may itself be a token; in its query and
+// fragment, the value of every parameter with a credential-like name (see
+// isURLCredentialParam). A URL that does not parse has its whole user info
+// replaced. A URL whose user info cannot be delimited (see
+// undelimitedUserInfo) shows only its scheme and a mask. A URL with
+// nothing to mask is returned as given.
+func RedactURL(raw string) string {
+	if undelimitedUserInfo(raw, userInfoRe) {
+		return maskWholeURL(raw)
+	}
+	s := raw
+	if u, err := url.Parse(raw); err == nil {
+		if u.User != nil {
+			if _, hasPassword := u.User.Password(); hasPassword {
+				s = u.Redacted()
+			} else {
+				u.User = url.User("xxxxx")
+				s = u.String()
+			}
+		}
+	} else {
+		s = userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
+	}
+	return redactURLParams(s)
+}
+
+// RedactURLsIn returns text (for example an error message) with every
+// http(s) URL in it redacted as RedactURL does: its user info, and the
+// credential parameters of its query and fragment. A URL whose user info
+// cannot be delimited (see undelimitedUserInfo) shows only its scheme and
+// a mask.
+func RedactURLsIn(text string) string {
+	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
+		authority := textURLRe.FindString(m)
+		rest := m[len(authority):]
+		// Punctuation that ends a sentence is not part of the URL.
+		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
+		tail := rest[len(trimmed):]
+		// The whole URL, not its authority cut at the first '/', '?' or
+		// '#': user info containing one of those ends the authority early.
+		if full := authority + trimmed; undelimitedUserInfo(full, userInfoRe) {
+			return maskWholeURL(full) + tail
+		}
+		if strings.Contains(authority, "@") {
+			authority = RedactURL(authority)
+		}
+		return authority + redactURLParams(trimmed) + tail
+	})
 }
 
 // AddHub adds a hub entry named name for endpoint. The name and the URL
@@ -83,6 +174,37 @@ func (c *CLIContext) AddHub(name, endpoint string) error {
 	}
 	c.Hubs[name] = &HubEntry{Endpoint: NormalizeEndpoint(endpoint)}
 	return nil
+}
+
+// EnsureHubURL returns the name of the hub entry for endpoint, adding one
+// named baseName (with -2, -3, ... on a collision) when no entry has that
+// normalised endpoint. endpoint must pass ValidateHubURL, the rule 'scion
+// hub add' applies.
+func (c *CLIContext) EnsureHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	if err := ValidateHubURL(endpoint); err != nil {
+		return "", false, err
+	}
+	name, created = c.EnsureHub(endpoint, baseName)
+	return name, created, nil
+}
+
+// SelectHubURL makes the hub at endpoint the current hub, adding an entry
+// for it as EnsureHubURL does. It returns the entry's name.
+func (c *CLIContext) SelectHubURL(endpoint, baseName string) (name string, created bool, err error) {
+	name, created, err = c.EnsureHubURL(endpoint, baseName)
+	if err != nil {
+		return "", false, err
+	}
+	c.CurrentHub = name
+	return name, created, nil
+}
+
+// ClearCurrentHub makes no hub current and returns the name of the hub
+// that was current, or "". The hub entry itself is kept.
+func (c *CLIContext) ClearCurrentHub() string {
+	name := c.CurrentHub
+	c.CurrentHub = ""
+	return name
 }
 
 // RenameHub renames the hub entry oldName to newName and rewrites every
@@ -121,7 +243,10 @@ func (c *CLIContext) RenameHub(oldName, newName string) error {
 
 // RemoveHub removes the hub entry name together with its known projects
 // and refresh time. When it was the current hub, there is no current hub
-// afterwards. It returns the removed entry and whether it was current.
+// afterwards. It returns the removed entry and whether it was current. The
+// path of each link entry it drops is marked as imported (see
+// LinkEntryForProject), so the one-time import of that project's settings
+// does not link it again.
 func (c *CLIContext) RemoveHub(name string) (*HubEntry, bool, error) {
 	h := c.Hubs[name]
 	if h == nil {
@@ -132,11 +257,17 @@ func (c *CLIContext) RemoveHub(name string) (*HubEntry, bool, error) {
 	if wasCurrent {
 		c.CurrentHub = ""
 	}
+	var dropped []string
 	kept := c.Projects[:0]
 	for _, p := range c.Projects {
 		if p.Hub != name {
 			kept = append(kept, p)
+		} else if p.Source == KnownProjectSourceLink && p.LocalPath != "" {
+			dropped = append(dropped, p.LocalPath)
 		}
+	}
+	for _, path := range dropped {
+		c.markProjectImported(path, time.Now())
 	}
 	c.Projects = kept
 	if len(c.Projects) == 0 {
@@ -167,23 +298,53 @@ func (c *CLIContext) GlobalImported() bool {
 // ImportGlobalHub records the global settings' hub endpoint as a hub entry
 // (named baseName, de-duplicated, unless an entry already has that
 // endpoint), copies transport onto the entry when the entry has none, and
-// records the import time. It returns the entry's name.
-//
-// It does not make the entry the current hub. While the CLI still reads
-// hub.endpoint from settings, a user who never selected a hub keeps
-// following the global hub.endpoint outside projects, including later
-// changes to it. Only an explicit selection sets the current hub.
+// records the import time. It returns the entry's name. It does not make
+// the entry the current hub: ImportCurrentHub does that, once.
 func (c *CLIContext) ImportGlobalHub(endpoint string, transport *HubTransportConfig, baseName string, now time.Time) string {
 	name, _ := c.EnsureHub(endpoint, baseName)
-	if h := c.Hubs[name]; transport != nil && h.Transport == nil && (transport.Mode != "" || transport.Audience != "") {
-		t := *transport
-		h.Transport = &t
-	}
+	setTransportIfUnset(c.Hubs[name], transport)
 	if c.Imported == nil {
 		c.Imported = &CLIContextImports{}
 	}
 	c.Imported.Global = now.UTC().Truncate(time.Second)
 	return name
+}
+
+// setTransportIfUnset copies transport onto h when h has no transport and
+// transport sets a mode or an audience.
+func setTransportIfUnset(h *HubEntry, transport *HubTransportConfig) {
+	if h == nil || h.Transport != nil || transport == nil || (transport.Mode == "" && transport.Audience == "") {
+		return
+	}
+	t := *transport
+	h.Transport = &t
+}
+
+// CurrentImported reports whether the current hub was already imported
+// from the global settings (see ImportCurrentHub).
+func (c *CLIContext) CurrentImported() bool {
+	return c.Imported != nil && !c.Imported.Current.IsZero()
+}
+
+// ImportCurrentHub makes the global settings' hub.endpoint the current hub
+// when no hub is current, adding an entry for it (named baseName,
+// de-duplicated) when none has that endpoint, copies the global
+// hub.transport onto that entry when it has none, and records that this
+// ran.
+// Until this step the CLI followed the global hub.endpoint outside
+// projects, so it keeps the same target: also when an earlier binary
+// imported another endpoint, or the user removed the imported entry. It
+// runs once, so a current hub that is cleared or removed later is not set
+// again.
+func (c *CLIContext) ImportCurrentHub(endpoint string, transport *HubTransportConfig, baseName string, now time.Time) {
+	if c.CurrentHub == "" {
+		c.CurrentHub, _ = c.EnsureHub(endpoint, baseName)
+		setTransportIfUnset(c.Hubs[c.CurrentHub], transport)
+	}
+	if c.Imported == nil {
+		c.Imported = &CLIContextImports{}
+	}
+	c.Imported.Current = now.UTC().Truncate(time.Second)
 }
 
 // globalHubSettings returns hub.endpoint and hub.transport from the global
@@ -201,22 +362,58 @@ var globalHubSettings = func() (string, *HubTransportConfig) {
 	return strings.TrimSpace(s.Hub.Endpoint), s.Hub.Transport
 }
 
+// GlobalSettingsFileWithHubEndpoint returns the path of the global settings
+// file when that file sets hub.endpoint (in any spelling the settings loader
+// reads), or "". Environment variables are not applied: only the file is
+// looked at.
+func GlobalSettingsFileWithHubEndpoint() string {
+	if ep, _ := globalHubSettings(); ep == "" {
+		return ""
+	}
+	dir, err := GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	return GetSettingsPath(dir)
+}
+
 // LoadCLIContextImported is LoadCLIContext plus the one-time import of the
-// global settings' hub.endpoint (and hub.transport) into the hub list. The
-// import runs when it has not run before and the global settings file has
-// an endpoint that is a valid hub URL (ValidateHubURL); it is written under
-// the lock, once. baseName names the new
-// entry (callers name the local workstation hub "local"). The import does
-// not set the current hub (see ImportGlobalHub). No settings file is
-// changed.
+// global settings' hub configuration into the hub list. The CLI reads no
+// hub setting itself; this import is how an existing hub.endpoint carries
+// over. It runs when the global settings file has an endpoint that is a
+// valid hub URL (ValidateHubURL) and one of its two steps has not run yet:
+//
+//   - the global import: hub.endpoint (and hub.transport) become a hub
+//     entry; baseName names a new entry (callers name the local
+//     workstation hub "local");
+//   - the current-hub import: the global hub.endpoint becomes the current
+//     hub when no hub is current, with an entry added for it if none has
+//     that endpoint (ImportCurrentHub).
+//
+// Both are written together under the lock, once. Without a usable
+// endpoint nothing is written, and the import stays pending. No settings
+// file is changed.
 //
 // A file that cannot be read returns the same error as LoadCLIContext, and
 // a file written by a newer version is returned without the import. When
 // the import cannot be saved, the returned context holds it anyway, with an
 // error wrapping ErrCLIContextImport.
 func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, true)
+}
+
+// LoadCLIContextImportedInMemory is LoadCLIContextImported without the
+// save: the returned context holds the pending one-time import, and
+// nothing is written (no context.yaml, no lock). Read-only commands use
+// it, so they see the same hub as the next command that saves the import
+// (ptone/scion#5483).
+func LoadCLIContextImportedInMemory(baseName func(endpoint string) string) (*CLIContext, error) {
+	return loadCLIContextImported(baseName, false)
+}
+
+func loadCLIContextImported(baseName func(endpoint string) string, save bool) (*CLIContext, error) {
 	c, err := LoadCLIContext()
-	if err != nil || c.GlobalImported() || c.Version > CLIContextVersion {
+	if err != nil || c.Version > CLIContextVersion || (c.GlobalImported() && c.CurrentImported()) {
 		return c, err
 	}
 	endpoint, transport := globalHubSettings()
@@ -225,16 +422,26 @@ func LoadCLIContextImported(baseName func(endpoint string) string) (*CLIContext,
 	if endpoint == "" || ValidateHubURL(endpoint) != nil {
 		return c, nil
 	}
+	importInto := func(target *CLIContext, now time.Time) {
+		if !target.GlobalImported() {
+			target.ImportGlobalHub(endpoint, transport, baseName(endpoint), now)
+		}
+		if !target.CurrentImported() {
+			target.ImportCurrentHub(endpoint, transport, baseName(endpoint), now)
+		}
+	}
+	if !save {
+		importInto(c, time.Now())
+		return c, nil
+	}
 	var imported *CLIContext
 	err = UpdateCLIContext(func(fresh *CLIContext) error {
-		if !fresh.GlobalImported() {
-			fresh.ImportGlobalHub(endpoint, transport, baseName(endpoint), time.Now())
-		}
+		importInto(fresh, time.Now())
 		imported = fresh
 		return nil
 	})
 	if err != nil {
-		c.ImportGlobalHub(endpoint, transport, baseName(endpoint), time.Now())
+		importInto(c, time.Now())
 		return c, fmt.Errorf("%w: %w", ErrCLIContextImport, err)
 	}
 	return imported, nil

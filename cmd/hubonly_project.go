@@ -51,16 +51,23 @@ type hubOnlyProject struct {
 // resolveHubOnlyProject returns the project for tunnel, ssh and ssh-config,
 // after resolveInvocationTarget filled projectPath. The precedence is that
 // of resolveInvocationTarget: --project, then the directory project, then
-// the current context ('scion use'). The global settings are never a
+// the current context ('scion use'). --global adds nothing: with
+// --project the --project value is used, without it there is no project.
+// The global settings are never a
 // directory project, and a local project id is never used for a directory
 // project that is not linked to a hub.
 func resolveHubOnlyProject() hubOnlyProject {
 	switch {
-	case globalMode:
+	case globalMode && (projectPath == "" || projectPath == "global"):
 		// --global names the global settings, which never give these
 		// commands a project; resolveInvocationTarget applies no context
-		// project either.
+		// project either. The root hook sets projectPath to global for
+		// --global alone before RunE.
 		return hubOnlyProject{}
+	case globalMode:
+		// --global with --project: --global gives no project, so the
+		// --project value is the hub project, as without --global.
+		return hubOnlyProject{ref: projectPath, label: projectPath, source: hubOnlySourceFlag}
 	case projectSource == targetSourceContext:
 		return hubOnlyProject{ref: projectPath, label: contextProjectSlug, source: hubOnlySourceContext}
 	case projectPath != "":
@@ -116,7 +123,12 @@ func ownProjectIDs(dir string) (hubID, localID string) {
 	for _, d := range dirs {
 		versioned := isVersionedSettingsDir(d)
 		if s, err := config.LoadSettingsFromDir(d); err == nil && s != nil {
-			if s.Hub != nil && s.Hub.ProjectID != "" {
+			// A versioned file keeps the project's own id at
+			// hub.project_id, which the settings view also reports as
+			// Hub.ProjectID; it is read in the versioned branch below,
+			// where it counts only with hub.linked. So both ids are read
+			// from the view for a legacy file only.
+			if !versioned && s.Hub != nil && s.Hub.ProjectID != "" {
 				hubID = s.Hub.ProjectID
 			}
 			// A versioned file keeps the id at hub.project_id only; a
@@ -180,5 +192,5 @@ func (p hubOnlyProject) unlinkedError() error {
 // notFoundError is the error for a project the hub at endpoint does not
 // know.
 func (p hubOnlyProject) notFoundError(endpoint string) error {
-	return tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "%s not found on hub %s", p.describe(), endpoint)
+	return tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "%s not found on hub %s", p.describe(), config.RedactURL(endpoint))
 }

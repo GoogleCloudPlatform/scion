@@ -198,22 +198,29 @@ func TestClaudeSubagent_NoHoldUpdatesAsBefore(t *testing.T) {
 	}
 }
 
-// claudeHubSetup points a StatusHandler and a HubHandler at a temp HOME and
-// an httptest Hub, and returns them with a func that reports the Hub status
-// values sent so far.
-func claudeHubSetup(t *testing.T) (*StatusHandler, *HubHandler, func() []string) {
+// hubReport is one status update the Hub received.
+type hubReport struct {
+	Phase    string `json:"phase"`
+	Activity string `json:"activity"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+}
+
+// hubRecorderSetup points a StatusHandler and a HubHandler at a temp HOME
+// and an httptest Hub, and returns them with a func that reports the Hub
+// status updates received so far.
+func hubRecorderSetup(t *testing.T) (*StatusHandler, *HubHandler, func() []hubReport) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	var mu sync.Mutex
-	var statuses []string
+	var reports []hubReport
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]interface{}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		s, _ := payload["status"].(string)
+		var rep hubReport
+		_ = json.NewDecoder(r.Body).Decode(&rep)
 		mu.Lock()
-		statuses = append(statuses, s)
+		reports = append(reports, rep)
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
@@ -230,10 +237,23 @@ func claudeHubSetup(t *testing.T) (*StatusHandler, *HubHandler, func() []string)
 	hubHandler := NewHubHandler()
 	require.NotNil(t, hubHandler)
 
-	return statusHandler, hubHandler, func() []string {
+	return statusHandler, hubHandler, func() []hubReport {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]string(nil), statuses...)
+		return append([]hubReport(nil), reports...)
+	}
+}
+
+// claudeHubSetup is hubRecorderSetup with only the Hub status values.
+func claudeHubSetup(t *testing.T) (*StatusHandler, *HubHandler, func() []string) {
+	t.Helper()
+	statusHandler, hubHandler, reports := hubRecorderSetup(t)
+	return statusHandler, hubHandler, func() []string {
+		var statuses []string
+		for _, rep := range reports() {
+			statuses = append(statuses, rep.Status)
+		}
+		return statuses
 	}
 }
 
@@ -309,8 +329,8 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 // A sub-agent's AskUserQuestion or ExitPlanMode tool-start asks the user, so
 // it still sets waiting_for_input locally and reports it to the Hub, as the
 // parent's does. The wait is recorded as notification-set. A
-// waiting_for_input the agent set itself is kept, with no marker, and no Hub
-// update replaces its message. blocked, completed, limits_exceeded and
+// waiting_for_input the agent set itself is kept as parentWaitAgent next to
+// the sub-agent's entry, and no Hub update replaces its message. blocked, completed, limits_exceeded and
 // crashed are kept too; status_subagent_held_question_test.go covers them.
 func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
@@ -327,7 +347,9 @@ func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 				info := readAgentInfoMap(t, statusHandler.StatusPath)
 				assert.Equal(t, "waiting_for_input", info["activity"])
 				if held == state.ActivityWaitingForInput {
-					assert.NotContains(t, info, activitySourceKey, "the agent-set wait is kept")
+					assert.Equal(t, activitySourceNotification, info[activitySourceKey])
+					assert.Equal(t, []string{claudeSubagentChildID}, notificationWaitOwners(info))
+					assert.Equal(t, parentWaitAgent, info[parentWaitKey], "the agent-set wait is kept")
 					assert.Empty(t, sent(), "no hub update replaces the agent-set wait")
 					return
 				}

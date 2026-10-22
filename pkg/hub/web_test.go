@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -253,17 +254,19 @@ func cacheControlOf(t *testing.T, ws *WebServer, p string) string {
 }
 
 // TestStaticAssetFingerprintedCaching pins ptone/scion#3789: the files Vite
-// fingerprinted, read from its build manifest, get the long cache lifetime,
-// from the disk and the embedded asset source alike; the entry, source maps,
-// public files and unlisted names stay no-cache; hex names keep working.
+// fingerprinted, read from its build manifest, get the immutable one-year
+// lifetime (ptone/scion#5348), from the disk and the embedded asset source
+// alike; the entry, source maps, public files and unlisted names stay
+// no-cache; hex names not in the manifest keep the one-day lifetime.
 func TestStaticAssetFingerprintedCaching(t *testing.T) {
-	const long = "public, max-age=86400"
+	const long = "public, max-age=31536000, immutable"
+	const day = "public, max-age=86400"
 	want := map[string]string{
 		"/assets/shoelace-B3-XBhED.js":              long,       // chunk
 		"/assets/project-detail-CeCkJL--.js":        long,       // dynamic entry chunk, hash ends in --
 		"/assets/model-utils-UsxIS_8q.js":           long,       // hash contains _
 		"/assets/shoelace-BZzytDYN.css":             long,       // css listed by a chunk
-		"/assets/chunk-abc12345.js":                 long,       // hex name, not in the manifest
+		"/assets/chunk-abc12345.js":                 day,        // hex name, not in the manifest
 		"/assets/font-Xy_z9-Ab.woff2":               long,       // listed in a chunk's assets
 		"/assets/main.js":                           "no-cache", // the unhashed entry
 		"/assets/entry-AbCdEfGh.js":                 "no-cache", // an entry, even with a hash-like name
@@ -287,7 +290,7 @@ func TestStaticAssetFingerprintedCaching(t *testing.T) {
 		ws.assets = os.DirFS(dir)
 		ws.assetsDisk = ""
 		ws.hasAssets = ws.detectWebAssets()
-		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 		assert.Len(t, ws.fingerprintedAssets, 5)
 		for p, cc := range want {
 			assert.Equal(t, cc, cacheControlOf(t, ws, p), p)
@@ -1423,6 +1426,38 @@ func TestIsProxyRoute(t *testing.T) {
 		{"/api/v1/agents/abc/ports/8080", false},
 		{"/api/v1/agents/abc/status", false},
 		{"/healthz", false},
+		// isProxyRoute also decides which credential-less requests get the
+		// port proxy's plain-text 401 (ptone/scion#5566), so the set it
+		// matches is pinned here.
+		// Other port routes of an agent.
+		{"/api/v1/agents/abc/ports", false},
+		{"/api/v1/agents/abc/ports/", false},
+		{"/api/v1/agents/abc/ports/tunnel", false},
+		{"/api/v1/agents/abc/ports/8080/", false},
+		{"/api/v1/agents/abc/ports/8080/proxyx", false},
+		{"/api/v1/agents/abc/ports/8080/xproxy", false},
+		{"/api/v1/agents/abc/ports/8080/Proxy", false},
+		{"/api/v1/agents/abc/ports/8080/proxy.html", false},
+		// The router sends this to the proxy route too, whose handler
+		// refuses the non-numeric port.
+		{"/api/v1/agents/abc/ports/tunnel/proxy", true},
+		// Agent routes that are not port routes.
+		{"/api/v1/agents/abc", false},
+		{"/api/v1/agents/abc/pty", false},
+		{"/api/v1/agents/abc/workspace/ports/8080/proxy", false},
+		{"/api/v1/agents/abc/proxy", false},
+		{"/api/v1/agents/abc/logs", false},
+		// Look-alike prefixes.
+		{"/api/v1/agentsx/abc/ports/8080/proxy", false},
+		{"/api/v1/agent/abc/ports/8080/proxy", false},
+		{"/api/v2/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/agents/abc/portsx/8080/proxy", false},
+		{"/api/v1/agents/abc/Ports/8080/proxy", false},
+		{"/x/api/v1/agents/abc/ports/8080/proxy", false},
+		{"api/v1/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/projects/p/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/artifacts/view/abc/ports/8080/proxy", false},
+		{"", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -1454,6 +1489,89 @@ func TestDevAuth_AutoLogin(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, sessionCookie, "session cookie should be set")
+}
+
+func TestDevAuth_RecordsLastLogin(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		previous    time.Time
+		wantUpdates int
+	}{
+		{name: "first login", wantUpdates: 1},
+		{name: "older login", previous: time.Now().Add(-6 * time.Minute), wantUpdates: 1},
+		{name: "recent login", previous: time.Now().Add(-time.Minute)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := newDevAuthWebServer(t)
+			s := newFakeUserStore()
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: DevUserID, Email: "dev@localhost", LastLogin: tt.previous,
+			}))
+			ws.store = s
+			handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			before := time.Now()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err := s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			if tt.wantUpdates > 0 {
+				require.False(t, user.LastLogin.Before(before))
+				require.False(t, user.LastLogin.After(time.Now()))
+			} else {
+				assert.Equal(t, tt.previous, user.LastLogin)
+			}
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls, "login must not write the full user record")
+			loginTime := user.LastLogin
+
+			// Reusing a session must not turn last login into last activity.
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for _, cookie := range rec.Result().Cookies() {
+				req.AddCookie(cookie)
+			}
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
+
+			// Clients that discard cookies must not write on every request.
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.lastLoginUpdateCalls)
+			assert.Zero(t, s.updateCalls)
+		})
+	}
+}
+
+func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	s := newFakeUserStore()
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{ID: DevUserID}))
+	s.lastLoginUpdateErr = errors.New("last login write failed")
+	ws.store = s
+	handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	user, err := s.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	assert.True(t, user.LastLogin.IsZero())
+	assert.Equal(t, 1, s.lastLoginUpdateCalls)
+	assert.Zero(t, s.updateCalls)
 }
 
 func TestDevAuth_SessionPersists(t *testing.T) {

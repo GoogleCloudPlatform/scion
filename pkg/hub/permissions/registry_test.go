@@ -54,6 +54,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"artifact:delete":                 {"artifact.delete"},
 	"artifact:manage":                 {"artifact.manage"},
 	"artifact:read":                   {"artifact.read"},
+	"artifact:steward":                {"artifact.steward"},
 	"artifact:update":                 {"artifact.update"},
 	"broker:create":                   {"broker.create"},
 	"broker:list":                     {"broker.list"},
@@ -99,13 +100,18 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_metrics:read":                {"hub.metrics.read"},
 	"hub_github_app:read":             {"hub.github_app.read"},
 	"hub_github_app:update":           {"hub.github_app.update"},
+	"hub_allow_list:read":             {"hub.allow_list.read"},
+	"hub_allow_list:update":           {"hub.allow_list.update"},
 	"inbox:read":                      {"inbox.read"},
 	"inbox:write":                     {"inbox.write"},
 	"project:clone":                   {"project.clone"},
 	"project:manage":                  {"project.manage"},
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
+	"project:list":                    {"project.list"},
+	"project:create":                  {"project.create"},
 	"skill:create":                    {"skill.create"},
+	"skill:create_global":             {"skill.create_global"},
 	"skill:delete":                    {"skill.delete"},
 	"skill:list":                      {"skill.list"},
 	"skill:manage":                    {"skill.create", "skill.delete", "skill.list", "skill.read", "skill.register", "skill.update"},
@@ -121,16 +127,33 @@ var expectedSelectorRegistry = map[string][]string{
 	"user:invite":                     {"user.invite"},
 	"user:list":                       {"user.list"},
 	"user:read":                       {"user.read"},
+	"user:update":                     {"user.update"},
+	"user:suspend":                    {"user.suspend"},
 	"user_skill_injection:update":     {"user_skill_injection.update"},
 
 	// Project messaging policy (owner rule applies on top of the selector).
 	"project:set_messaging_policy": {"project.set_messaging_policy"},
 
-	// scheduled_event selectors (reads, cancellation and pause).
+	// scheduled_event selectors (reads, cancellation, pause and authoring).
 	"scheduled_event:delete": {"scheduled_event.delete"},
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+	"scheduled_event:create": {"scheduled_event.create"},
+
+	// Identity governance reads and hub audit (hub boundary only).
+	"role:read":              {"role.read"},
+	"role_binding:read":      {"role_binding.read"},
+	"access_constraint:read": {"access_constraint.read"},
+	"hub_audit:read":         {"hub.audit.read"},
+
+	// Identity governance administration (hub boundary only).
+	"role:create":             {"role.create"},
+	"role:update":             {"role.update"},
+	"role:delete":             {"role.delete"},
+	"role_binding:create":     {"role_binding.create"},
+	"role_binding:delete":     {"role_binding.delete"},
+	"access_constraint:admin": {"access_constraint.admin"},
 
 	// agent selectors outside the agent:manage alias.
 	"agent:set_message_mode": {"agent.set_message_mode"},
@@ -508,7 +531,7 @@ func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testin
 // coverage this table requires: ResolveTargetScope's collection-evidence
 // cross-check
 // needs a reviewed class set for every Registry permission, not just
-// mintable ones (project.create has no UATScope at all).
+// mintable ones (for example project.register, which has no UATScope).
 func TestCollectionTargetClasses_CoversEveryRegistryPermission(t *testing.T) {
 	for _, p := range Registry {
 		if _, reviewed := CollectionTargetClassesFor(p.ID); !reviewed {
@@ -571,7 +594,7 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	}
 	for _, id := range []string{
 		"artifact.update", "artifact.delete",
-		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update",
 		"agent.log_append",
 	} {
 		if !slices.Contains(got, id) {

@@ -108,6 +108,16 @@ func TestBrokerDualDial_IndependentLifecycles(t *testing.T) {
 	// End the conduit session (a planned relay close).
 	first := f.conduitSessionID(t)
 	ccSession := b.cc.SessionID()
+	// The session row is written before the relay records the session as
+	// pending, and CloseSessionsOf only sees registered sessions: poll
+	// Local until it is registered (ptone/scion#5338). Each call is bounded
+	// so a pending session cannot block on the relay clock.
+	require.Eventually(t, func() bool {
+		lctx, lcancel := context.WithTimeout(context.Background(), time.Second)
+		defer lcancel()
+		_, _, ok := f.srv.conduit.Load().relay.Local(lctx, first)
+		return ok
+	}, 10*time.Second, 10*time.Millisecond, "conduit session registers on the relay")
 	n := f.srv.conduit.Load().relay.CloseSessionsOf(registry.PrincipalBroker, f.brokerID, conduit.CloseRelayRestart, "relay_restart")
 	require.Equal(t, 1, n)
 	require.Eventually(t, func() bool {

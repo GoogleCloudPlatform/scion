@@ -56,7 +56,12 @@ func newRealHub(t *testing.T) (*httptest.Server, store.Store) {
 	t.Helper()
 	ctx := context.Background()
 	dbName := fmt.Sprintf("%s_%d", strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()), realHubSeq.Add(1))
-	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
+	// MaxOpenConns must be 1, as in the production SQLite pool and the
+	// pkg/hub test store: with more than one connection to a shared-cache
+	// database, the Hub's asynchronous user last-seen write can hold a table
+	// lock that fails a concurrent transaction with SQLITE_LOCKED
+	// (ptone/scion#5291).
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(ctx, client))
 	s := entadapter.NewCompositeStore(client)
@@ -168,7 +173,7 @@ func TestRegisterInstance_CapabilitiesBeforeFirstHeartbeat(t *testing.T) {
 	row, err := s.GetRuntimeBroker(context.Background(), ti.id.RuntimeBrokerID)
 	require.NoError(t, err)
 	require.NotNil(t, row.Capabilities)
-	want := runtimebroker.StaticCapabilities(rt)
+	want := runtimebroker.StaticCapabilities(rt, "")
 	assert.Equal(t, want.Sync, row.Capabilities.Sync)
 	assert.Equal(t, want.Attach, row.Capabilities.Attach)
 	assert.Equal(t, want.Reprovision, row.Capabilities.Reprovision)
@@ -176,6 +181,10 @@ func TestRegisterInstance_CapabilitiesBeforeFirstHeartbeat(t *testing.T) {
 	assert.Equal(t, want.EmptyPerAgentWorkspace, row.Capabilities.EmptyPerAgentWorkspace)
 	assert.Equal(t, want.AgentMove, row.Capabilities.AgentMove)
 	assert.Equal(t, want.ReprovisionEmptyPerAgent, row.Capabilities.ReprovisionEmptyPerAgent)
+	assert.Equal(t, want.ChangedFields, row.Capabilities.ChangedFields)
+	assert.True(t, row.Capabilities.ChangedFields, "changedFields is known before the first heartbeat")
+	assert.Equal(t, want.ClearedFields, row.Capabilities.ClearedFields)
+	assert.True(t, row.Capabilities.ClearedFields, "clearedFields is known before the first heartbeat")
 	assert.True(t, row.Capabilities.AsyncLaunch, "asyncLaunch is known before the first heartbeat")
 	assert.True(t, row.Capabilities.EmptyPerAgentWorkspace, "a Docker instance supports empty-per-agent workspaces")
 }

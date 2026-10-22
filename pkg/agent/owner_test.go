@@ -79,12 +79,12 @@ func TestOwner_StopNeverPassesAnUnresolvedName(t *testing.T) {
 	m := NewManager(rt).(*AgentManager)
 	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
 
-	err := m.Stop(context.Background(), "worker", "", "")
+	err := m.Stop(context.Background(), "worker", "", "", "")
 	assert.ErrorIs(t, err, ErrNotOwned)
 	assert.Empty(t, stopped, "neither another instance's object nor the bare name is stopped")
 
 	rt.ListFunc = func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, errors.New("down") }
-	assert.Error(t, m.Stop(context.Background(), "worker", "", ""))
+	assert.Error(t, m.Stop(context.Background(), "worker", "", "", ""))
 	assert.Empty(t, stopped, "a list failure never falls back to the bare name")
 }
 
@@ -108,7 +108,7 @@ func TestOwner_UnresolvedLabelledObjectIsNotOwned(t *testing.T) {
 		}, nil
 	}}
 	m := NewManager(rt).(*AgentManager)
-	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryUnresolved: func(l map[string]string) bool { return l["agent_id"] == "agent-1" }})
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryUnresolved: func(l map[string]string, key func(string) string) bool { return l[key("agent_id")] == "agent-1" }})
 	owned, err := m.listRuntime(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, owned, 1, "an object of a conflicting key is not owned even with this instance's label")

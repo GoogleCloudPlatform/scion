@@ -11,8 +11,25 @@
     "chat-unread-dms.test.ts",
     "state.test.ts",
     "state-message-clear.test.ts",
+    "sorted-log-buffer.test.ts",
+    "main-admin-status.test.ts",
+    "main-auth-me.test.ts",
+    "main-boot-waterfall.test.ts",
+    "main-chat-flag-gate.test.ts",
+    "main-terminal-lazy.test.ts",
+    "main-terminal-load-failure.test.ts",
+    "main-terminal-superseded.test.ts",
+    "main-leave-guard.test.ts",
+    "main-terminal-hides-outlet.test.ts",
+    "main-terminal-loading.test.ts",
+    "main-terminal-loading-handoff.test.ts",
+    "main-terminal-loading-teardown.test.ts",
+    "main-onboarding-base-path.test.ts",
     "__fixtures__/agent-store-harness.ts",
-    "__fixtures__/request-url.ts"
+    "__fixtures__/request-url.ts",
+    "__fixtures__/main-boot.ts",
+    "__fixtures__/terminal-workspace-fake.ts",
+    "visible-interval.test.ts"
   ],
   "exclude": []
 }

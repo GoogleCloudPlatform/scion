@@ -61,6 +61,9 @@ var migrations = []migration{
 	{name: migrationBlobGC, sqlite: sqliteBlobGC, postgres: postgresBlobGC},
 	{name: migrationOrphans, sqlite: sqliteOrphans, postgres: postgresOrphans},
 	{name: migrationVersionFailReason, sqlite: sqliteVersionFailReason, postgres: postgresVersionFailReason},
+	{name: migrationAttachments, sqlite: sqliteAttachments, postgres: postgresAttachments},
+	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
+	{name: migrationDeliveryRedemptions, sqlite: sqliteDeliveryRedemptions, postgres: postgresDeliveryRedemptions},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -339,6 +342,9 @@ func (s *sqlStore) CreateVersion(ctx context.Context, v *Version, files []File, 
 	}
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
 		return ErrNotFound
+	}
+	if err := s.refuseAttachmentTx(ctx, tx, v.ArtifactID); err != nil {
+		return err
 	}
 	var maxSeq, pending int
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COALESCE(MAX(seq), 0),
@@ -677,9 +683,11 @@ func (s *sqlStore) reapVersion(ctx context.Context, versionID, artifactID string
 	return true, nil
 }
 
-// GetArtifact implements Store.
+// GetArtifact implements Store. A row of an attachment scope is never
+// returned (GetAttachment is its lookup), so every artifact route, message
+// reference and recipient check answers for it as for an unknown id.
 func (s *sqlStore) GetArtifact(ctx context.Context, id string) (*Artifact, error) {
-	return s.getArtifact(ctx, "id = ?", id)
+	return s.getArtifact(ctx, "id = ? AND "+notAttachmentScope("scope_kind"), id)
 }
 
 // getArtifact returns the live artifact matching where.
@@ -691,13 +699,14 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		expires, created     dbTime
 		updated, deletedTime dbTime
 		orphaned             dbTime
+		messageProject       sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
 		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
-		orphaned_at
+		orphaned_at, message_project_id
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime, &orphaned)
+		&expires, &created, &updated, &deletedTime, &orphaned, &messageProject)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -711,6 +720,7 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.UpdatedAt = updated.Time
 	a.DeletedAt = deletedTime.ptr()
 	a.OrphanedAt = orphaned.ptr()
+	a.MessageProjectID = nullStringPtr(messageProject)
 	return &a, nil
 }
 
@@ -980,6 +990,8 @@ const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner
 // collation rules.
 func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q CandidateQuery) {
 	now := s.timeArg(q.Now)
+	// Attachments are never listed: they are read through their message.
+	b.WriteString(" AND " + notAttachmentScope("a.scope_kind"))
 	b.WriteString(" AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)")
 	*args = append(*args, now)
 	if q.Search != "" {

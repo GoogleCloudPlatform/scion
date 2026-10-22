@@ -35,10 +35,10 @@ import (
 // options.md §5): PATCH /api/v1/agents/{id} must keep AppliedConfig.CreateInputs
 // in sync with any config edit that actually changes a field's live value
 // (invariant E), and leave it alone for an edit that merely echoes the live
-// value back -- which is what the configure page's Save and Start both do on
-// every call. All eight hub-side test-plan items live here; the ninth
-// (web/src/components/pages/agent-configure.ts's buildConfig) is a Vitest
-// test alongside that file.
+// value back -- which is what the retired Configure page's Save and Start
+// both did on every call. All eight hub-side test-plan items live here; the ninth was a
+// Vitest test of the Configure page, which the Edit page replaced
+// (ptone/scion#3975).
 //
 // newReincarnateTestAgent and setupReincarnateTestServer (defined in
 // handlers_agent_reincarnate_test.go) are reused throughout: they build a
@@ -130,8 +130,8 @@ func TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical(t *testing.T)
 	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
 	require.NoError(t, err)
 
-	// Echo every live value back, exactly as agent-configure.ts's
-	// populateForm/buildConfig round trip does -- including the image in its
+	// Echo every live value back, as the retired Configure page's
+	// load-and-save round trip did -- including the image in its
 	// BARE form (as a user could type, or as a stale page echoes it): the
 	// registry-qualified comparison must still see this as unchanged.
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
@@ -170,7 +170,7 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-v1",
-		Config:      &store.TemplateConfig{Env: map[string]string{"K": "a"}},
+		AgentConfig: &api.ScionConfig{Env: map[string]string{"K": "a"}},
 	}
 	require.NoError(t, s.CreateTemplate(ctx, template))
 
@@ -197,8 +197,9 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 	}
 
 	// Now the template's default changes.
-	template.Config.Env["K"] = "b"
-	require.NoError(t, s.UpdateTemplate(ctx, template))
+	template.AgentConfig.Env["K"] = "b"
+	template.ContentHash = "template-hash-v2"
+	require.NoError(t, setTemplateContentForTest(ctx, s, template))
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, updated, project, "")
 	require.NoError(t, err)
@@ -521,9 +522,9 @@ func TestApplyAgentUpdate_ImageChangeIsRecorded(t *testing.T) {
 // Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
 // never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
 // a second PATCH that only edits the one custom env key (step 2, as the
-// FIXED buildConfig would send after a reload -- see
-// agent-configure-build-config.test.ts's matching "facet (a)" vitest case)
-// must not synthesize one.
+// Configure page sent after a reload, and as the shared agent form's env
+// editor sends: the rows only, no untouched auto-expose key) must not
+// synthesize one.
 func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)

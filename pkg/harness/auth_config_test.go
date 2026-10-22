@@ -505,7 +505,8 @@ func TestAutoDetectAuthType_BuiltInHarnesses(t *testing.T) {
 		{"antigravity", nil, []string{"AGY_TOKEN"}, true, "oauth-token"},
 		// A non-default credential also wins over identity.
 		{"claude", nil, []string{"CLAUDE_CODE_OAUTH_TOKEN"}, true, "oauth-token"},
-		// A file secret outranks env vars and identity.
+		// A file secret outranks env vars and identity (the API key over
+		// gcloud-adc exception is pinned in auth_autodetect_adc_test.go).
 		{"claude", []string{"CLAUDE_AUTH"}, []string{"ANTHROPIC_API_KEY"}, true, "auth-file"},
 		// An ADC file present resolves to vertex-ai without needing identity.
 		{"claude", []string{"gcloud-adc"}, nil, false, "vertex-ai"},

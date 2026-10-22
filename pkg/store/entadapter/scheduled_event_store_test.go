@@ -94,6 +94,39 @@ func TestCancelScheduledEvent(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+func TestCancelScheduledEventWithReason(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	pending := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, pending))
+	require.NoError(t, s.CancelScheduledEventWithReason(ctx, pending.ID, "target agent deleted"))
+	got, err := s.GetScheduledEvent(ctx, pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventCancelled, got.Status)
+	assert.Equal(t, "target agent deleted", got.Error)
+
+	// A fired event is no longer pending: ErrNotFound, and it keeps its
+	// status, fire time and (empty) error.
+	fired := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, fired))
+	claimed, err := s.ClaimScheduledEvent(ctx, fired.ID, store.ScheduledEventFired)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	err = s.CancelScheduledEventWithReason(ctx, fired.ID, "target agent deleted")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	got, err = s.GetScheduledEvent(ctx, fired.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, got.Status)
+	assert.NotNil(t, got.FiredAt)
+	assert.Empty(t, got.Error)
+
+	// A missing event is ErrNotFound.
+	err = s.CancelScheduledEventWithReason(ctx, uuid.NewString(), "target agent deleted")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 func TestListScheduledEventsFilter(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()

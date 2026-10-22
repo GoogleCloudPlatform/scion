@@ -67,21 +67,28 @@ test('classifyRead: only a 404 or a soft-deleted record is gone', () => {
 });
 
 test('uiStepName turns a launch-step text back into the raw step name', () => {
-  expect(uiStepName('Step: image pull')).toBe('image_pull');
-  expect(uiStepName(' Step:  pre clean ')).toBe('pre_clean');
+  expect(uiStepName('Step: pulling the image')).toBe('image_pull');
+  expect(uiStepName(' Step:  removing a leftover   from an earlier agent ')).toBe('pre_clean');
+  expect(uiStepName('Step: preparing the container (image pull, volume mounts)')).toBe(
+    'container_create'
+  );
   expect(uiStepName('Step: launching')).toBe('launching');
+  // A step without a label is shown with "_" as a space.
+  expect(uiStepName('Step: warming up')).toBe('warming_up');
   expect(uiStepName('')).toBe('');
 });
 
 test('uiStepLabel and uiStepName are inverse for every canonical step', () => {
-  expect(uiStepLabel('pre_clean')).toBe('Step: pre clean');
+  expect(uiStepLabel('pre_clean')).toBe('Step: removing a leftover from an earlier agent');
+  expect(uiStepLabel('warming_up')).toBe('Step: warming up');
   for (const step of LAUNCH_STEPS) expect(uiStepName(uiStepLabel(step))).toBe(step);
 });
 
 test('launchStepProblems: canonical SSE order, page labels a matching subsequence', () => {
   const check = (sse: string[], ui: string[]): string[] =>
     launchStepProblems(sse, ui, LAUNCH_STEPS, uiStepLabel);
-  expect(check(['pre_clean', 'launching'], ['Step: pre clean', 'Step: launching'])).toEqual([]);
+  const preClean = 'Step: removing a leftover from an earlier agent';
+  expect(check(['pre_clean', 'launching'], [preClean, 'Step: launching'])).toEqual([]);
   expect(check(['launching'], [])).toEqual([]);
   expect(check([], [])).toEqual([]);
   expect(check(['pre_clean', 'launching'], ['Step: launching'])).toEqual([]);
@@ -93,14 +100,14 @@ test('launchStepProblems: canonical SSE order, page labels a matching subsequenc
     'SSE step "launching" goes back in the canonical order',
   ]);
   expect(check(['warming_up'], [])).toEqual(['SSE step "warming_up" is not in the canonical list']);
-  expect(check(['launching'], ['Step: image pull'])).toEqual([
-    'page label "Step: image pull" matches no SSE step',
+  expect(check(['launching'], ['Step: pulling the image'])).toEqual([
+    'page label "Step: pulling the image" matches no SSE step',
   ]);
   expect(check(['launching'], ['launching'])).toEqual([
     'page label "launching" matches no SSE step',
   ]);
-  expect(check(['pre_clean', 'launching'], ['Step: launching', 'Step: pre clean'])).toEqual([
-    'page label "Step: pre clean" is out of the SSE step order',
+  expect(check(['pre_clean', 'launching'], ['Step: launching', preClean])).toEqual([
+    `page label "${preClean}" is out of the SSE step order`,
   ]);
 });
 

@@ -64,7 +64,8 @@ var conversationCmd = &cobra.Command{
 	Long: `View and manage conversations you participate in.
 
 Conversations go through the hub (start the local one with 'scion server start',
-or set a remote one with 'scion config set hub.endpoint <url>').
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion conversation list                       List your conversations
@@ -128,8 +129,7 @@ Examples:
   scion conversation create "release-notes" --group Release
 
 --group files the new conversation into a thread group of the same project
-(a group ID, or a name resolved within the project). It requires the
-hub.chat_thread_groups experiment on the hub.`,
+(a group ID, or a name resolved within the project).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConversationCreate,
 }
@@ -498,10 +498,11 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// isThreadGroupsDisabledCreateError reports whether err is the hub's 400 for
-// a threadGroupId sent while the hub.chat_thread_groups experiment is off.
-// --group normally lists the project's groups first, which already reports
-// a disabled hub; this covers a group ID used with no resolved project.
+// isThreadGroupsDisabledCreateError reports whether err is an older hub's
+// 400 for a threadGroupId sent while its thread groups experiment is off
+// (ptone/scion#5546 removed it). --group normally lists the
+// project's groups first, which already reports such a hub; this covers a
+// group ID used with no resolved project.
 func isThreadGroupsDisabledCreateError(err error) bool {
 	var apiErr *apiclient.APIError
 	return errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
@@ -844,6 +845,12 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		// A deferred message was never dispatched, so its attachments never
+		// reached this agent's home (ptone/scion#4596). The hub lists them
+		// only to a reader.
+		for _, a := range msg.DeferredAttachments {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
+		}
 	}
 	return tw.Flush()
 }

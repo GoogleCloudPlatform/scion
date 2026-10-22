@@ -17,11 +17,13 @@ package brokerclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
@@ -56,5 +58,41 @@ func TestAgentService_List_SendsProjectIDQueryKey(t *testing.T) {
 
 	if n := hits.Load(); n != 1 {
 		t.Fatalf("List made %d requests to the broker, want 1", n)
+	}
+}
+
+// TestAgentService_GetStats_NotImplemented verifies that GetStats surfaces
+// the broker's 501 stats_not_implemented answer as an *apiclient.APIError
+// carrying the status and code, rather than a nil error or zero values.
+func TestAgentService_GetStats_NotImplemented(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agents/agent-1/stats" {
+			t.Errorf("path = %q, want /api/v1/agents/agent-1/stats", r.URL.Path)
+		}
+		runtimebroker.StatsNotImplemented(w, "not implemented")
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	stats, err := client.Agents().GetStats(context.Background(), "agent-1")
+	if err == nil {
+		t.Fatalf("GetStats returned nil error and %+v, want a 501 error", stats)
+	}
+	if stats != nil {
+		t.Errorf("GetStats returned stats %+v alongside the error, want nil", stats)
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("GetStats error = %T %v, want *apiclient.APIError", err, err)
+	}
+	if apiErr.StatusCode != http.StatusNotImplemented {
+		t.Errorf("status = %d, want %d", apiErr.StatusCode, http.StatusNotImplemented)
+	}
+	if apiErr.Code != runtimebroker.ErrCodeStatsNotImplemented {
+		t.Errorf("code = %q, want %q", apiErr.Code, runtimebroker.ErrCodeStatsNotImplemented)
 	}
 }

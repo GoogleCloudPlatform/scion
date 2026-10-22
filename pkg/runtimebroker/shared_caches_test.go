@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -41,7 +43,7 @@ func newCacheTestServer(t *testing.T, brokerID, rtName string, sc *SharedCaches)
 	cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{BrokerID: brokerID, SecretKey: "c2VjcmV0", HubEndpoint: cfg.HubEndpoint}
 	cfg.TemplateCacheDir = filepath.Join(t.TempDir(), "own", "templates")
 	cfg.SharedCaches = sc
-	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }})
+	return New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }}, config.RuntimeBuildRecord{})
 }
 
 // TestSharedCaches_PartitionedPerInstanceAcrossScopes: two instances with
@@ -119,9 +121,10 @@ func TestSharedCaches_RefusesABrokerIDThatIsNotOnePathElement(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sc, err := NewSharedCaches(filepath.Join(t.TempDir(), "cache", "templates"), 0)
 	require.NoError(t, err)
-	for _, id := range []string{"", ".", "..", "../x", "a/b"} {
+	for _, id := range []string{"", ".", "..", "../x", "a/b", "/", "a..b", `a\b`, "a\x00b"} {
 		_, err := sc.forInstance(id)
-		assert.Error(t, err, "broker ID %q", id)
+		assert.Error(t, err, "shared caches accepted broker ID %q", id)
+		assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement), "broker ID %q", id)
 	}
 }
 

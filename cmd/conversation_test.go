@@ -281,7 +281,7 @@ func (s conversationCreateTestState) restore() {
 }
 
 // isolateHubEnvForTest overrides every SCION_ env var that
-// config.LoadSettingsKoanf's env layer (pkg/config/koanf.go) merges over
+// config.LoadSettings's env layer (pkg/config/settings_v1.go) merges over
 // project settings — SCION_HUB_ENDPOINT (-> hub.endpoint), SCION_HUB_URL
 // (cmd.GetHubEndpoint's secondary fallback), and SCION_PROJECT_ID (-> the
 // top-level, last-resort project ID resolveProjectID falls back to). Without
@@ -318,6 +318,9 @@ func setupConversationCreateProject(t *testing.T, home, endpoint, hubProjectID s
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return projectDir
 }
 

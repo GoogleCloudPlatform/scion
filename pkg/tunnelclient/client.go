@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -45,8 +46,8 @@ const (
 
 // Scope values reported for a credential.
 const (
-	// ScopeHub is an interactive user login (a stored OAuth login): the
-	// user's own permissions on the hub.
+	// ScopeHub is an interactive user login (a stored OAuth login) or the
+	// development token: the user's own permissions on the hub.
 	ScopeHub = "hub"
 	// ScopeUnknown is a credential whose scope the CLI holds no
 	// non-secret record of. The hub decides per tunnel.
@@ -107,15 +108,18 @@ type ScopeReporter interface {
 	Scope(cred Credential) string
 }
 
-// DefaultScope reports ScopeHub only for an interactive user login (a
-// stored OAuth login) and ScopeUnknown otherwise, including the
-// development token. It never reads the secret or guesses; unknown is
-// never treated as hub or as any broader scope.
+// DefaultScope reports ScopeHub for an interactive user login (a stored
+// OAuth login) and for the development token, which the hub accepts as
+// the development user with that user's own permissions, and ScopeUnknown
+// otherwise: a token from the environment may be a scoped user access
+// token. It never reads the secret or guesses; unknown is never treated as
+// hub or as any broader scope.
 type DefaultScope struct{}
 
 // Scope implements ScopeReporter.
 func (DefaultScope) Scope(cred Credential) string {
-	if cred.Kind == CredentialOAuth {
+	switch cred.Kind {
+	case CredentialOAuth, CredentialDev:
 		return ScopeHub
 	}
 	return ScopeUnknown
@@ -341,6 +345,8 @@ type client struct {
 	cur      *session
 	sessions []*session
 	tunnels  map[*tunnelEntry]struct{}
+	// listener is the open --local-port listener, or nil.
+	listener *ListenerRecord
 	started  time.Time
 	record   RecordWriter
 	pubSeq   uint64 // records built, guarded by mu
@@ -566,6 +572,9 @@ func (c *client) publish() {
 		}
 		rec.Tunnels = append(rec.Tunnels, tr)
 	}
+	if c.listener != nil {
+		rec.Listeners = []ListenerRecord{*c.listener}
+	}
 	c.mu.Unlock()
 	for id := range ids {
 		rec.SessionIDs = append(rec.SessionIDs, id)
@@ -662,8 +671,9 @@ func streamState(st conduit.Stream) conduit.StreamState {
 }
 
 // runListener listens on 127.0.0.1 and opens one tunnel per accepted
-// connection, until ctx ends, the session is lost, or a request fails in a
-// way no later connection can fix.
+// connection, until ctx ends or the session is lost. A request that fails
+// in a way no later connection can fix stops it accepting; it then ends
+// when its open connections have (stopAccepting).
 func (c *client) runListener(ctx context.Context) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(c.req.LocalPort)))
 	if err != nil {
@@ -675,12 +685,17 @@ func (c *client) runListener(ctx context.Context) error {
 	} else {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "Forwarding %s to port %d of agent %s\n", ln.Addr(), c.req.Port, c.req.Agent)
 	}
+	// The listener is listed in the status record while it accepts.
+	c.setListener(ln.Addr())
+	defer c.setListener(nil)
 	if c.req.Ready != nil {
 		c.req.Ready(ln.Addr())
 	}
 
 	fatal := make(chan error, 1)
 	var conns sync.WaitGroup
+	// open counts accepted connections whose serveConn has not returned.
+	var open atomic.Int64
 	connCtx, cancelConns := context.WithCancel(ctx)
 	acceptDone := make(chan struct{})
 	defer func() {
@@ -698,9 +713,14 @@ func (c *client) runListener(ctx context.Context) error {
 				return
 			}
 			conns.Add(1)
+			open.Add(1)
 			go func() {
-				defer conns.Done()
-				if err := c.serveConn(connCtx, conn); err != nil {
+				err := c.serveConn(connCtx, conn)
+				// Counted out before the fatal is sent, so stopAccepting
+				// sees only the other connections as open.
+				open.Add(-1)
+				conns.Done()
+				if err != nil {
 					select {
 					case fatal <- err:
 					default:
@@ -715,12 +735,65 @@ func (c *client) runListener(ctx context.Context) error {
 	case err := <-c.lost:
 		return err
 	case err := <-fatal:
-		return err
+		c.setListener(nil)
+		return c.stopAccepting(ctx, ln, acceptDone, &conns, &open, err)
 	}
 }
 
-// listenerFatal reports whether a failed tunnel request ends the listener:
-// failures that no later connection can fix.
+// setListener records the listener accepting on addr, or none for nil,
+// and publishes the record.
+func (c *client) setListener(addr net.Addr) {
+	var l *ListenerRecord
+	if tcp, ok := addr.(*net.TCPAddr); ok {
+		l = &ListenerRecord{
+			Agent:     c.req.Agent,
+			Project:   c.req.Project,
+			Kind:      c.req.Kind(),
+			LocalPort: tcp.Port,
+			OpenedAt:  c.cfg.now().UTC(),
+		}
+	}
+	c.mu.Lock()
+	c.listener = l
+	c.mu.Unlock()
+	c.publish()
+}
+
+// stopAccepting ends a listener after a request failure no later
+// connection can fix (listenerFatal). The listening socket is closed at
+// once, so new connections are refused, but connections already accepted
+// are left to end on their own: by either side closing, by the hub closing
+// their tunnel, or with the session. A refusal affects only the tunnel it
+// refused, and an expired credential bounds new tunnels only (design §3.8
+// rules 3 and 6). It returns err, the reason the listener stopped, once
+// the last connection has ended, or ctx's error on a signal (the caller's
+// deferred cleanup then closes what is left). The reason is printed once,
+// by the caller, with the exit; while connections are open, one line says
+// that the listener waits for them.
+func (c *client) stopAccepting(ctx context.Context, ln net.Listener, acceptDone <-chan struct{}, conns *sync.WaitGroup, open *atomic.Int64, err error) error {
+	_ = ln.Close()
+	// No connection is accepted or counted once the accept loop has
+	// exited.
+	<-acceptDone
+	if open.Load() == 0 {
+		return err
+	}
+	_, _ = fmt.Fprintln(c.cfg.stderr(), "not accepting new connections; open tunnels continue until they end")
+	drained := make(chan struct{})
+	go func() {
+		conns.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// listenerFatal reports whether a failed tunnel request stops the
+// listener from accepting: failures that no later connection can fix.
 func listenerFatal(code int) bool {
 	switch code {
 	case ExitCredential, ExitAgentNotFound, ExitForbidden, ExitNoTunnelSupport:
@@ -730,7 +803,8 @@ func listenerFatal(code int) bool {
 }
 
 // serveConn serves one local connection. It returns an error only when
-// the listener should end.
+// the listener should stop accepting. Any other refusal, such as a stopped
+// agent (exit 9), refuses this connection only, with one line on stderr.
 func (c *client) serveConn(ctx context.Context, conn net.Conn) error {
 	defer func() { _ = conn.Close() }()
 	st, entry, err := c.openTunnel(ctx)

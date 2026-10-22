@@ -189,7 +189,9 @@ func lifecycleAudit(mutationType, agentID string, actor AuditActor, now time.Tim
 // that ID (cause agent_soft_delete), run the soft-delete hooks, and write the
 // agent_soft_delete audit record. a is the post-write row. The agent's
 // service-account assignment is deactivated under the same operation ID and
-// cause, so a restore returns exactly it.
+// cause, so a restore returns exactly it. As in agentHardDeleteWork, only the
+// edges where the agent is the delegate are deactivated; its doc comment
+// gives the reason.
 func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
 	if a == nil {
 		return fmt.Errorf("%w: nil agent in softDeleteAgentTx", store.ErrInvalidInput)
@@ -238,10 +240,19 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // survive as history), then run the hard-delete hooks. Both the hard delete
 // (hardDeleteAgentTx) and the rollback of a committed create
 // (compensateAgentCreate) run it, so a hook registered for hard delete also
-// runs when a create is rolled back. The hooks run when rowRemoved is true
-// or anything was deactivated. label prefixes store errors; a hook error is
-// returned as is.
-func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string, rowRemoved bool) (edges, assignments int, err error) {
+// runs when a create is rolled back. label prefixes store errors; a hook
+// error is returned as is.
+//
+// Only the edges where the agent is the delegate are deactivated. Edges where
+// it is the delegator are left as they are: authorization re-loads each
+// agent delegator in a chain. The delegation ceiling walk
+// (walkDelegationChainHops, through checkAgentHoldsPermission) and the
+// standing check (resolveChainRoot with checkChain) refuse a chain that
+// reaches a missing or soft-deleted agent, and a restore reactivates an edge
+// only when its delegator is live (checkRestoreDelegatorsLive). A project
+// delete, which removes every agent of the project in one transaction,
+// deactivates both sides (deactivateProjectAgentEdges).
+func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate delegation edges: %w", label, err)
@@ -249,9 +260,6 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	assignments, err = tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
-	}
-	if !rowRemoved && edges == 0 && assignments == 0 {
-		return 0, 0, nil
 	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err
@@ -279,7 +287,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 		Cause: store.EdgeDeactivationAgentHardDelete,
 		At:    &now,
 		OpID:  opID,
-	}, "hard delete", true)
+	}, "hard delete")
 	if err != nil {
 		return err
 	}
@@ -287,7 +295,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	// on (fixturePurgeBasisFor: only when the context carries the purge's
 	// basis and the agent's own stamp names the same root).
 	basis := fixturePurgeBasisFor(ctx, a.Fixture)
-	if basis != nil && actor.CorrelationID == "" {
+	if basis != nil {
 		actor.CorrelationID = basis.RunID
 	}
 	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
@@ -300,6 +308,14 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
 	if err != nil {
 		return err
+	}
+	if basis != nil {
+		// The provenance_basis column (Phase 3c); a failure aborts the
+		// hard delete.
+		if err := writeFixturePurgeAuditTx(ctx, tx, record, *basis); err != nil {
+			return fmt.Errorf("hard delete audit: %w", err)
+		}
+		return nil
 	}
 	if err := tx.CreateMutationAudit(ctx, record); err != nil {
 		return fmt.Errorf("hard delete audit: %w", err)
@@ -538,10 +554,14 @@ type reincarnateAuthority struct {
 // Any error rolls everything back, so nothing is claimed.
 //
 // Without sa the existing assignment stays in force: the agent ID and its
-// account do not change. If the reincarnation later fails and restores the
-// previous configuration, a replaced assignment is not restored with it, so
-// the restored account differs from the active assignment and its use
-// is refused until the account is assigned again.
+// account do not change. When sa names another account than the agent's
+// active row (or the agent has none), the replacement is restorable: the
+// replaced row is deactivated with cause reincarnate_replaced under the
+// reincarnation ID, and the new row takes the reincarnation ID as its own
+// ID. A failure that restores the previous configuration then restores the
+// replaced row with it (restoreReincarnationAssignment). When sa names the
+// same account, the row is replaced as by any other write (sa_replaced) and
+// stays after a failure, like the re-recorded edge.
 func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, sa *store.AgentServiceAccountAssignment, actor AuditActor) error {
 	if agent == nil {
 		return fmt.Errorf("%w: nil agent in reincarnateClaimTx", store.ErrInvalidInput)
@@ -599,10 +619,26 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 				return fmt.Errorf("reincarnate: record delegation edge: %w", err)
 			}
 		}
+		restorable := false
 		if sa != nil {
 			sa.AgentID = row.ID
 			sa.ProjectID = row.ProjectID
-			if err := tx.ReplaceAgentServiceAccountAssignment(ctx, sa); err != nil {
+			changed, err := claimChangesAssignedAccount(ctx, tx, row.ID, sa.ServiceAccountID)
+			if err != nil {
+				return fmt.Errorf("reincarnate: read service-account assignment: %w", err)
+			}
+			if changed {
+				restorable = true
+				sa.ID = rec.ID
+				err = tx.ReplaceAgentServiceAccountAssignmentWith(ctx, sa, store.Deactivation{
+					Cause: store.EdgeDeactivationReincarnateReplaced,
+					At:    &now,
+					OpID:  rec.ID,
+				})
+			} else {
+				err = tx.ReplaceAgentServiceAccountAssignment(ctx, sa)
+			}
+			if err != nil {
 				return fmt.Errorf("reincarnate: record service-account assignment: %w", err)
 			}
 		}
@@ -626,7 +662,8 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			ReRecorded           bool   `json:"re_recorded"`
 			EdgesReplaced        int    `json:"edges_replaced"`
 			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
-		}{opID, rec.ID, auth != nil, replaced, saRecorded})
+			AssignmentRestorable bool   `json:"service_account_restorable,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable})
 		if err != nil {
 			return err
 		}
@@ -640,4 +677,23 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 	}
 	*agent = row
 	return nil
+}
+
+// claimChangesAssignedAccount reports whether a reincarnation claim that
+// records an assignment for serviceAccountID changes the agent's account:
+// the agent has no active assignment, or its one active row names another
+// account. More than one active row is ambiguous and is not treated as a
+// change, so the claim replaces it as any other write does.
+func claimChangesAssignedAccount(ctx context.Context, tx store.Store, agentID, serviceAccountID string) (bool, error) {
+	rows, err := tx.GetActiveAgentServiceAccountAssignments(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+	switch len(rows) {
+	case 0:
+		return true, nil
+	case 1:
+		return rows[0].ServiceAccountID != serviceAccountID, nil
+	}
+	return false, nil
 }

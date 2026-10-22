@@ -138,6 +138,15 @@ func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
 	}
 }
 
+// TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate pins that
+// the broker CLI reports agentMoveRecreate at join, as its heartbeat does
+// (ptone/scion#5441); the hub refuses a forced move to a broker without it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMoveRecreate(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMoveRecreate") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMoveRecreate", brokerRegistrationCapabilities())
+	}
+}
+
 // TestBrokerRegistrationCapabilities_IncludesAsyncLaunch pins that the
 // broker CLI reports asyncLaunch at join, as its heartbeat does
 // (runtimebroker.StaticCapabilities), so the Hub knows it before the first
@@ -145,5 +154,16 @@ func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
 func TestBrokerRegistrationCapabilities_IncludesAsyncLaunch(t *testing.T) {
 	if !slices.Contains(brokerRegistrationCapabilities(), "asyncLaunch") {
 		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncLaunch", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAsyncStart pins that the
+// broker CLI reports asyncStart at join, as its heartbeat does
+// (runtimebroker.StaticCapabilities): the join replaces the stored
+// capabilities, so without it the Hub would read the broker as lacking
+// async start until the next heartbeat (ptone/scion#4669).
+func TestBrokerRegistrationCapabilities_IncludesAsyncStart(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "asyncStart") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncStart", brokerRegistrationCapabilities())
 	}
 }

@@ -417,6 +417,86 @@ func (_u *RuntimeBrokerUpdate) ClearGcpHostProjectID() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdate) SetGcpHostSource(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetGcpHostSource(v)
+	return _u
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableGcpHostSource(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetGcpHostSource(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdate) ClearGcpHostSource() *RuntimeBrokerUpdate {
+	_u.mutation.ClearGcpHostSource()
+	return _u
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservedEmail(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservedEmail(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservedEmail() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservedEmail()
+	return _u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservation(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservation(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservation(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservation() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservation()
+	return _u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdate) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpdate {
+	_u.mutation.SetHostIdentityObservedAt(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetHostIdentityObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdate) ClearHostIdentityObservedAt() *RuntimeBrokerUpdate {
+	_u.mutation.ClearHostIdentityObservedAt()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdate) SetConnectedHubID(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetConnectedHubID(v)
@@ -534,6 +614,140 @@ func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetDisplayName(v *string) *R
 // ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
 func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpdate {
 	_u.mutation.ClearRuntimeTargetDisplayName()
+	return _u
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (_u *RuntimeBrokerUpdate) SetRuntimeTargetPresentation(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetRuntimeTargetPresentation(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetPresentation sets the "runtime_target_presentation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetPresentation(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetRuntimeTargetPresentation(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetPresentation() *RuntimeBrokerUpdate {
+	_u.mutation.ClearRuntimeTargetPresentation()
+	return _u
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (_u *RuntimeBrokerUpdate) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetRuntimeTargetPresentationHash(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableRuntimeTargetPresentationHash(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetRuntimeTargetPresentationHash(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (_u *RuntimeBrokerUpdate) ClearRuntimeTargetPresentationHash() *RuntimeBrokerUpdate {
+	_u.mutation.ClearRuntimeTargetPresentationHash()
+	return _u
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdate) SetPresentationEpoch(v int64) *RuntimeBrokerUpdate {
+	_u.mutation.ResetPresentationEpoch()
+	_u.mutation.SetPresentationEpoch(v)
+	return _u
+}
+
+// SetNillablePresentationEpoch sets the "presentation_epoch" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillablePresentationEpoch(v *int64) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetPresentationEpoch(*v)
+	}
+	return _u
+}
+
+// AddPresentationEpoch adds value to the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdate) AddPresentationEpoch(v int64) *RuntimeBrokerUpdate {
+	_u.mutation.AddPresentationEpoch(v)
+	return _u
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdate) ClearPresentationEpoch() *RuntimeBrokerUpdate {
+	_u.mutation.ClearPresentationEpoch()
+	return _u
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdate) SetPresentationSeq(v int64) *RuntimeBrokerUpdate {
+	_u.mutation.ResetPresentationSeq()
+	_u.mutation.SetPresentationSeq(v)
+	return _u
+}
+
+// SetNillablePresentationSeq sets the "presentation_seq" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillablePresentationSeq(v *int64) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetPresentationSeq(*v)
+	}
+	return _u
+}
+
+// AddPresentationSeq adds value to the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdate) AddPresentationSeq(v int64) *RuntimeBrokerUpdate {
+	_u.mutation.AddPresentationSeq(v)
+	return _u
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdate) ClearPresentationSeq() *RuntimeBrokerUpdate {
+	_u.mutation.ClearPresentationSeq()
+	return _u
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (_u *RuntimeBrokerUpdate) SetPresentationFencedAt(v time.Time) *RuntimeBrokerUpdate {
+	_u.mutation.SetPresentationFencedAt(v)
+	return _u
+}
+
+// SetNillablePresentationFencedAt sets the "presentation_fenced_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillablePresentationFencedAt(v *time.Time) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetPresentationFencedAt(*v)
+	}
+	return _u
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (_u *RuntimeBrokerUpdate) ClearPresentationFencedAt() *RuntimeBrokerUpdate {
+	_u.mutation.ClearPresentationFencedAt()
+	return _u
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (_u *RuntimeBrokerUpdate) SetPresentationObservedAt(v time.Time) *RuntimeBrokerUpdate {
+	_u.mutation.SetPresentationObservedAt(v)
+	return _u
+}
+
+// SetNillablePresentationObservedAt sets the "presentation_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillablePresentationObservedAt(v *time.Time) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetPresentationObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (_u *RuntimeBrokerUpdate) ClearPresentationObservedAt() *RuntimeBrokerUpdate {
+	_u.mutation.ClearPresentationObservedAt()
 	return _u
 }
 
@@ -725,6 +939,30 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.GcpHostProjectIDCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
 	}
+	if value, ok := _u.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostSourceCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservedEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservationCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservation, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.HostIdentityObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
 	}
@@ -760,6 +998,48 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.RuntimeTargetDisplayNameCleared() {
 		_spec.ClearField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetPresentation(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentation, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetPresentationCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetPresentation, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetPresentationHash(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentationHash, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetPresentationHashCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetPresentationHash, field.TypeString)
+	}
+	if value, ok := _u.mutation.PresentationEpoch(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationEpoch, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresentationEpoch(); ok {
+		_spec.AddField(runtimebroker.FieldPresentationEpoch, field.TypeInt64, value)
+	}
+	if _u.mutation.PresentationEpochCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationEpoch, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.PresentationSeq(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresentationSeq(); ok {
+		_spec.AddField(runtimebroker.FieldPresentationSeq, field.TypeInt64, value)
+	}
+	if _u.mutation.PresentationSeqCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationSeq, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.PresentationFencedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationFencedAt, field.TypeTime, value)
+	}
+	if _u.mutation.PresentationFencedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationFencedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.PresentationObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.PresentationObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationObservedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)
@@ -1173,6 +1453,86 @@ func (_u *RuntimeBrokerUpdateOne) ClearGcpHostProjectID() *RuntimeBrokerUpdateOn
 	return _u
 }
 
+// SetGcpHostSource sets the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdateOne) SetGcpHostSource(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetGcpHostSource(v)
+	return _u
+}
+
+// SetNillableGcpHostSource sets the "gcp_host_source" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableGcpHostSource(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetGcpHostSource(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostSource clears the value of the "gcp_host_source" field.
+func (_u *RuntimeBrokerUpdateOne) ClearGcpHostSource() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearGcpHostSource()
+	return _u
+}
+
+// SetHostIdentityObservedEmail sets the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservedEmail(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservedEmail(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedEmail sets the "host_identity_observed_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservedEmail(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservedEmail(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedEmail clears the value of the "host_identity_observed_email" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservedEmail() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservedEmail()
+	return _u
+}
+
+// SetHostIdentityObservation sets the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservation(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservation(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservation sets the "host_identity_observation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservation(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservation(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservation clears the value of the "host_identity_observation" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservation() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservation()
+	return _u
+}
+
+// SetHostIdentityObservedAt sets the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) SetHostIdentityObservedAt(v time.Time) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetHostIdentityObservedAt(v)
+	return _u
+}
+
+// SetNillableHostIdentityObservedAt sets the "host_identity_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableHostIdentityObservedAt(v *time.Time) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetHostIdentityObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearHostIdentityObservedAt clears the value of the "host_identity_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) ClearHostIdentityObservedAt() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearHostIdentityObservedAt()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdateOne) SetConnectedHubID(v string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetConnectedHubID(v)
@@ -1290,6 +1650,140 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetDisplayName(v *string)
 // ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
 func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpdateOne {
 	_u.mutation.ClearRuntimeTargetDisplayName()
+	return _u
+}
+
+// SetRuntimeTargetPresentation sets the "runtime_target_presentation" field.
+func (_u *RuntimeBrokerUpdateOne) SetRuntimeTargetPresentation(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetRuntimeTargetPresentation(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetPresentation sets the "runtime_target_presentation" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetPresentation(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetRuntimeTargetPresentation(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetPresentation clears the value of the "runtime_target_presentation" field.
+func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetPresentation() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearRuntimeTargetPresentation()
+	return _u
+}
+
+// SetRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field.
+func (_u *RuntimeBrokerUpdateOne) SetRuntimeTargetPresentationHash(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetRuntimeTargetPresentationHash(v)
+	return _u
+}
+
+// SetNillableRuntimeTargetPresentationHash sets the "runtime_target_presentation_hash" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimeTargetPresentationHash(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetRuntimeTargetPresentationHash(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeTargetPresentationHash clears the value of the "runtime_target_presentation_hash" field.
+func (_u *RuntimeBrokerUpdateOne) ClearRuntimeTargetPresentationHash() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearRuntimeTargetPresentationHash()
+	return _u
+}
+
+// SetPresentationEpoch sets the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdateOne) SetPresentationEpoch(v int64) *RuntimeBrokerUpdateOne {
+	_u.mutation.ResetPresentationEpoch()
+	_u.mutation.SetPresentationEpoch(v)
+	return _u
+}
+
+// SetNillablePresentationEpoch sets the "presentation_epoch" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillablePresentationEpoch(v *int64) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetPresentationEpoch(*v)
+	}
+	return _u
+}
+
+// AddPresentationEpoch adds value to the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdateOne) AddPresentationEpoch(v int64) *RuntimeBrokerUpdateOne {
+	_u.mutation.AddPresentationEpoch(v)
+	return _u
+}
+
+// ClearPresentationEpoch clears the value of the "presentation_epoch" field.
+func (_u *RuntimeBrokerUpdateOne) ClearPresentationEpoch() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearPresentationEpoch()
+	return _u
+}
+
+// SetPresentationSeq sets the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdateOne) SetPresentationSeq(v int64) *RuntimeBrokerUpdateOne {
+	_u.mutation.ResetPresentationSeq()
+	_u.mutation.SetPresentationSeq(v)
+	return _u
+}
+
+// SetNillablePresentationSeq sets the "presentation_seq" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillablePresentationSeq(v *int64) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetPresentationSeq(*v)
+	}
+	return _u
+}
+
+// AddPresentationSeq adds value to the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdateOne) AddPresentationSeq(v int64) *RuntimeBrokerUpdateOne {
+	_u.mutation.AddPresentationSeq(v)
+	return _u
+}
+
+// ClearPresentationSeq clears the value of the "presentation_seq" field.
+func (_u *RuntimeBrokerUpdateOne) ClearPresentationSeq() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearPresentationSeq()
+	return _u
+}
+
+// SetPresentationFencedAt sets the "presentation_fenced_at" field.
+func (_u *RuntimeBrokerUpdateOne) SetPresentationFencedAt(v time.Time) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetPresentationFencedAt(v)
+	return _u
+}
+
+// SetNillablePresentationFencedAt sets the "presentation_fenced_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillablePresentationFencedAt(v *time.Time) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetPresentationFencedAt(*v)
+	}
+	return _u
+}
+
+// ClearPresentationFencedAt clears the value of the "presentation_fenced_at" field.
+func (_u *RuntimeBrokerUpdateOne) ClearPresentationFencedAt() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearPresentationFencedAt()
+	return _u
+}
+
+// SetPresentationObservedAt sets the "presentation_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) SetPresentationObservedAt(v time.Time) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetPresentationObservedAt(v)
+	return _u
+}
+
+// SetNillablePresentationObservedAt sets the "presentation_observed_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillablePresentationObservedAt(v *time.Time) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetPresentationObservedAt(*v)
+	}
+	return _u
+}
+
+// ClearPresentationObservedAt clears the value of the "presentation_observed_at" field.
+func (_u *RuntimeBrokerUpdateOne) ClearPresentationObservedAt() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearPresentationObservedAt()
 	return _u
 }
 
@@ -1511,6 +2005,30 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	if _u.mutation.GcpHostProjectIDCleared() {
 		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
 	}
+	if value, ok := _u.mutation.GcpHostSource(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostSource, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostSourceCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostSource, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedEmail(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservedEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservation(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservation, field.TypeString, value)
+	}
+	if _u.mutation.HostIdentityObservationCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservation, field.TypeString)
+	}
+	if value, ok := _u.mutation.HostIdentityObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.HostIdentityObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldHostIdentityObservedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
 	}
@@ -1546,6 +2064,48 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.RuntimeTargetDisplayNameCleared() {
 		_spec.ClearField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetPresentation(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentation, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetPresentationCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetPresentation, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeTargetPresentationHash(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetPresentationHash, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeTargetPresentationHashCleared() {
+		_spec.ClearField(runtimebroker.FieldRuntimeTargetPresentationHash, field.TypeString)
+	}
+	if value, ok := _u.mutation.PresentationEpoch(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationEpoch, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresentationEpoch(); ok {
+		_spec.AddField(runtimebroker.FieldPresentationEpoch, field.TypeInt64, value)
+	}
+	if _u.mutation.PresentationEpochCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationEpoch, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.PresentationSeq(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresentationSeq(); ok {
+		_spec.AddField(runtimebroker.FieldPresentationSeq, field.TypeInt64, value)
+	}
+	if _u.mutation.PresentationSeqCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationSeq, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.PresentationFencedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationFencedAt, field.TypeTime, value)
+	}
+	if _u.mutation.PresentationFencedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationFencedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.PresentationObservedAt(); ok {
+		_spec.SetField(runtimebroker.FieldPresentationObservedAt, field.TypeTime, value)
+	}
+	if _u.mutation.PresentationObservedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldPresentationObservedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)

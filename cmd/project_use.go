@@ -148,14 +148,12 @@ func loadUseContext(stderr io.Writer) *config.CLIContext {
 // Source codes of the effective hub and project (JSON "source"), and their
 // display labels.
 const (
-	useSourceFlag            = "flag"
-	useSourceEnv             = "env"
-	useSourceProjectSettings = "project_settings"
-	useSourceDirectory       = "directory"
-	useSourceContext         = targetSourceContext
-	useSourceGlobalSettings  = "global_settings"
-	useSourceGlobal          = "global"
-	useSourceNone            = "none"
+	useSourceFlag      = "flag"
+	useSourceEnv       = "env"
+	useSourceDirectory = targetSourceDirectory
+	useSourceContext   = targetSourceContext
+	useSourceGlobal    = "global"
+	useSourceNone      = "none"
 )
 
 // useTarget is the effective hub and project of the invocation, computed
@@ -173,6 +171,9 @@ type useTarget struct {
 	ProjectLabel  string
 	// ProjectDir is the directory project's display path, if any.
 	ProjectDir string
+	// ProjectUnverified: the context project was selected while its hub
+	// could not confirm it.
+	ProjectUnverified bool
 }
 
 // describeUseTarget computes the effective target the way
@@ -180,36 +181,11 @@ type useTarget struct {
 // calls.
 func describeUseTarget(c *config.CLIContext) useTarget {
 	var t useTarget
-	envHub, envName := envHubEndpoint()
 	dir, inDir := filesystemProject()
 	dirIsGlobal := inDir && config.IsGlobalProjectDir(dir)
 
-	switch {
-	case hubSource == targetSourceContext:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceContext, "current context"
-	case hubSource == targetSourceDirectory:
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceDirectory, "directory link"
-	case hubEndpoint != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
-	case envHub != "":
-		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	case inDir:
-		if ep, scope := fileHubEndpoint(dir, dirIsGlobal); ep != "" {
-			t.HubEndpoint = ep
-			if scope == "project" {
-				t.HubSource, t.HubLabel = useSourceProjectSettings, "project settings: "+displayProjectDir(dir)
-			} else {
-				t.HubSource, t.HubLabel = useSourceGlobalSettings, "global settings"
-			}
-		}
-	default:
-		if ep, _ := fileHubEndpoint("", true); ep != "" {
-			t.HubEndpoint, t.HubSource, t.HubLabel = ep, useSourceGlobalSettings, "global settings"
-		}
-	}
-	if t.HubEndpoint == "" {
-		t.HubSource, t.HubLabel = useSourceNone, "none"
-	}
+	h := resolveCLIHub()
+	t.HubEndpoint, t.HubSource, t.HubLabel = h.Endpoint, h.Source, h.Label
 
 	switch {
 	case projectSource == targetSourceContext:
@@ -250,6 +226,10 @@ func describeUseTarget(c *config.CLIContext) useTarget {
 func (t *useTarget) setContextProject(c *config.CLIContext, p *config.ProjectRef) {
 	t.ProjectSource, t.ProjectLabel = useSourceContext, "current context"
 	t.ProjectID, t.ProjectSlug = p.ID, p.Slug
+	if saved := c.ProjectFor(t.HubEndpoint); saved != nil && saved.ID == p.ID && saved.Unverified {
+		t.ProjectUnverified = true
+		t.ProjectLabel = "current context, unverified"
+	}
 	hubName, _ := c.HubByEndpoint(t.HubEndpoint)
 	for _, kp := range c.Projects {
 		if kp.Hub == hubName && kp.ID == p.ID {
@@ -301,6 +281,9 @@ type useProjectJSON struct {
 	Name   string `json:"name,omitempty"`
 	Path   string `json:"path,omitempty"`
 	Source string `json:"source"`
+	// Unverified marks a context project selected while its hub could not
+	// confirm it.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 type useAuthJSON struct {
@@ -339,7 +322,7 @@ func hubLoginCommand(c *config.CLIContext, endpoint string) string {
 	if name, _ := c.HubByEndpoint(endpoint); name != "" {
 		return "scion hub auth login --hub " + name
 	}
-	return "scion hub auth login --hub " + endpoint
+	return "scion hub auth login --hub " + config.RedactURL(endpoint)
 }
 
 // useAuthLine is the human "Auth:" text. Bare 'scion use' makes no network
@@ -394,10 +377,11 @@ func runUseShow(out, stderr io.Writer) error {
 	if isJSONOutput() {
 		res := useShowJSON{
 			Effective: useEffectiveJSON{
-				Hub: useHubJSON{Name: hubName, Endpoint: t.HubEndpoint, Source: t.HubSource},
+				Hub: useHubJSON{Name: hubName, Endpoint: config.RedactURL(t.HubEndpoint), Source: t.HubSource},
 				Project: useProjectJSON{
 					ID: t.ProjectID, Slug: t.ProjectSlug, Name: t.ProjectName,
 					Path: t.ProjectDir, Source: t.ProjectSource,
+					Unverified: t.ProjectUnverified,
 				},
 			},
 			Context:    saved,
@@ -425,10 +409,16 @@ func runUseShow(out, stderr io.Writer) error {
 			projectValue = t.ProjectID
 		}
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, t.HubEndpoint, t.HubLabel)
+		// The endpoint may come from SCION_HUB_ENDPOINT/SCION_HUB_URL; user
+		// info in it is not shown.
+		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, config.RedactURL(t.HubEndpoint), t.HubLabel)
 		_, _ = fmt.Fprintf(w, "Project:\t%s\t%s\t(%s)\n", shownProject, projectValue, t.ProjectLabel)
 		_ = w.Flush()
 		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, hubLoginCommand(c, t.HubEndpoint)))
+		if t.ProjectUnverified {
+			_, _ = fmt.Fprintf(out, "Note: project '%s' was selected while the hub could not confirm it. To verify it, run: scion hub auth login --hub %s, then scion use %s\n",
+				shownProject, config.RedactURL(t.HubEndpoint), shownProject)
+		}
 	}
 	if t.HubSource == useSourceContext {
 		warnHubTokenForContextHub(stderr, hubName)
@@ -443,8 +433,13 @@ func runUseShow(out, stderr io.Writer) error {
 		}
 		_, _ = fmt.Fprintf(out, "Saved context (applies outside scion project directories): %s / %s\n", saved.Hub, project)
 	}
-	if envHub, envName := envHubEndpoint(); envHub != "" && saved != nil && !sameHubURL(envHub, c.Hubs[saved.Hub].Endpoint) {
-		_, _ = fmt.Fprintf(out, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+	if envHub, envName := envHubEndpoint(); envHub != "" {
+		if _, h := c.HubByEndpoint(envHub); h == nil {
+			// The environment's hub is a one-off override; it is not saved.
+			_, _ = fmt.Fprintf(out, "Note: %s=%s overrides the current hub in this shell; 'scion hub add <name> <url>' saves it.\n", envName, config.RedactURL(envHub))
+		} else if saved != nil && !sameHubURL(envHub, c.Hubs[saved.Hub].Endpoint) {
+			_, _ = fmt.Fprintf(out, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+		}
 	}
 	return nil
 }
@@ -526,7 +521,7 @@ func runUseClear(out io.Writer) error {
 
 // printRegisteredHub announces a hub entry that was added for a URL.
 func printRegisteredHub(out io.Writer, name, endpoint string) {
-	_, _ = fmt.Fprintf(out, "Registered hub '%s' (%s); rename with 'scion hub rename'.\n", name, endpoint)
+	_, _ = fmt.Fprintf(out, "Registered hub '%s' (%s); rename with 'scion hub rename'.\n", name, config.RedactURL(endpoint))
 }
 
 // warnHubTokenForContextHub warns that SCION_HUB_TOKEN, which is not tied
@@ -582,7 +577,7 @@ func runUseSwitch(out, stderr io.Writer) error {
 
 	if isJSONOutput() {
 		return outputJSON(useSwitchJSON{
-			Hub:        useHubJSON{Name: name, Endpoint: endpoint, Source: useSourceContext},
+			Hub:        useHubJSON{Name: name, Endpoint: config.RedactURL(endpoint), Source: useSourceContext},
 			Project:    project,
 			Registered: registered,
 		})
@@ -595,9 +590,9 @@ func runUseSwitch(out, stderr io.Writer) error {
 		if shown == "" {
 			shown = project.ID
 		}
-		_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, name, endpoint)
+		_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, name, config.RedactURL(endpoint))
 	} else {
-		_, _ = fmt.Fprintf(out, "Now using hub '%s' (%s).\n", name, endpoint)
+		_, _ = fmt.Fprintf(out, "Now using hub '%s' (%s).\n", name, config.RedactURL(endpoint))
 		_, _ = fmt.Fprintf(out, "No project selected on hub '%s'; run 'scion use <project>' or 'scion project list --hub %s'.\n", name, name)
 	}
 	settings, err := config.LoadSettings(useSettingsPath())

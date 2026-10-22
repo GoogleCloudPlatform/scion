@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -461,6 +462,79 @@ func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx contex
 		return 0, mapError(err)
 	}
 	return affected, nil
+}
+
+// expirePageSize bounds how many rows one ExpireAndListStuckPendingMessages
+// call expires, so a large backlog cannot outlast the sweep's context and
+// roll back every sweep; later sweeps drain the rest. A var (not const) so
+// tests can shrink it.
+var expirePageSize = 500
+
+// ExpireAndListStuckPendingMessages transitions up to expirePageSize messages
+// stuck in pending state past the given cutoff to failed, recording the
+// reason, and returns the rows it transitioned, oldest first. It matches the
+// same rows as ExpireStuckPendingMessages (agent recipients only). Each row
+// is flipped by its own compare-and-swap on dispatch_state inside one
+// transaction, so a row that a concurrent writer dispatched after the select
+// is neither expired nor returned. Inside WithTx it runs in the caller's
+// transaction.
+func (s *BrokerDispatchStore) ExpireAndListStuckPendingMessages(ctx context.Context, before time.Time, reason string) ([]store.ExpiredPendingMessage, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return nil, mapError(err)
+		}
+		// s.client already wraps the caller's transaction (store.WithTx);
+		// the caller owns commit and rollback.
+		return expireAndListStuckPending(ctx, s.client, before, reason)
+	}
+	defer func() { _ = tx.Rollback() }()
+	expired, err := expireAndListStuckPending(ctx, tx.Client(), before, reason)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, mapError(err)
+	}
+	return expired, nil
+}
+
+// expireAndListStuckPending runs ExpireAndListStuckPendingMessages on c,
+// which must be a transactional client.
+func expireAndListStuckPending(ctx context.Context, c *ent.Client, before time.Time, reason string) ([]store.ExpiredPendingMessage, error) {
+	candidates, err := c.Message.Query().
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
+		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
+		Limit(expirePageSize).
+		Select(message.FieldID, message.FieldRecipient, message.FieldCreated).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	expired := make([]store.ExpiredPendingMessage, 0, len(candidates))
+	for _, m := range candidates {
+		n, err := c.Message.Update().
+			Where(message.IDEQ(m.ID), message.DispatchStateEQ(store.MessageDispatchPending)).
+			SetDispatchState(store.MessageDispatchFailed).
+			SetNillableDispatchFailureReason(&reason).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n == 0 {
+			continue
+		}
+		expired = append(expired, store.ExpiredPendingMessage{
+			ID:        m.ID.String(),
+			Recipient: m.Recipient,
+			CreatedAt: m.Created,
+		})
+	}
+	return expired, nil
 }
 
 // backfillPageSize bounds how many rows BackfillNonAgentDispatchState repairs

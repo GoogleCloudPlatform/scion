@@ -48,10 +48,42 @@ interface OnboardingStatus {
   complete: boolean;
   embeddedBrokerID?: string;
   imageRegistry?: string;
+  /** Layer imageRegistry comes from: node_env, hub_db, file or default. */
+  imageRegistrySource?: string;
+  /** The value the wizard may pre-fill and save; never a node env. */
+  imageRegistrySaveable?: string;
   gitVersion?: string;
   gitVersionOK?: boolean;
   gcloudADCAvailable?: boolean;
   autoInjectGcloudADC?: boolean;
+}
+
+/** Default registry suggested when nothing is configured. */
+const DEFAULT_REGISTRY_SUGGESTION = 'ghcr.io/homebrew-scion';
+
+/**
+ * How the registry step starts from the server's setup status
+ * (ptone/scion#3916): `effective` is the registry the hub resolves, `input`
+ * pre-fills the field and is what a save stores, and `fromNodeEnv` is true
+ * when SCION_IMAGE_REGISTRY on the server sets it, in which case nothing
+ * needs saving. The field never pre-fills a node env value, so a save
+ * cannot copy one server's environment into the shared setting. A hub that
+ * does not report the saveable value falls back to `imageRegistry`.
+ */
+export function registryPrefill(
+  status: Pick<
+    OnboardingStatus,
+    'imageRegistry' | 'imageRegistrySource' | 'imageRegistrySaveable'
+  > | null
+): { effective: string; input: string; fromNodeEnv: boolean } {
+  const effective = status?.imageRegistry ?? '';
+  const reportsSaveable = status?.imageRegistrySource !== undefined;
+  const saveable = reportsSaveable ? (status?.imageRegistrySaveable ?? '') : effective;
+  return {
+    effective,
+    input: saveable || DEFAULT_REGISTRY_SUGGESTION,
+    fromNodeEnv: status?.imageRegistrySource === 'node_env',
+  };
 }
 
 interface DiagnosticResult {
@@ -99,6 +131,8 @@ export class ScionPageOnboarding extends LitElement {
   // Step 3: Registry
   @state() private imageRegistry = '';
   @state() private registryInput = '';
+  /** The server's SCION_IMAGE_REGISTRY sets the registry; no save needed. */
+  @state() private registryFromNodeEnv = false;
   @state() private registrySaving = false;
   /** Set after a registry save when the server reports no embedded broker. */
   @state() private brokerRestartNeeded = false;
@@ -545,12 +579,10 @@ export class ScionPageOnboarding extends LitElement {
         }
       }
 
-      if (status?.imageRegistry) {
-        this.imageRegistry = status.imageRegistry;
-        this.registryInput = status.imageRegistry;
-      } else {
-        this.registryInput = 'ghcr.io/homebrew-scion';
-      }
+      const prefill = registryPrefill(status ?? null);
+      this.imageRegistry = prefill.effective;
+      this.registryInput = prefill.input;
+      this.registryFromNodeEnv = prefill.fromNodeEnv;
       if (status?.gitVersion !== undefined) this.gitVersion = status.gitVersion;
       if (status?.gitVersionOK !== undefined) this.gitVersionOK = status.gitVersionOK;
       if (status?.gcloudADCAvailable) this.gcloudADCAvailable = true;
@@ -930,6 +962,9 @@ export class ScionPageOnboarding extends LitElement {
   // ── Step 3: Registry ──
 
   private renderRegistry() {
+    if (this.registryFromNodeEnv) {
+      return this.renderRegistryFromNodeEnv();
+    }
     return html`
       <h2>Image Registry</h2>
       <p>
@@ -972,6 +1007,37 @@ export class ScionPageOnboarding extends LitElement {
             ?loading=${this.registrySaving}
             ?disabled=${!this.registryInput.trim()}
             @click=${this.handleSaveRegistryAndNext}
+            >Next</sl-button
+          >
+        </div>
+      </div>
+    `;
+  }
+
+  /** The registry step when SCION_IMAGE_REGISTRY on the server sets it. */
+  private renderRegistryFromNodeEnv() {
+    return html`
+      <h2>Image Registry</h2>
+      <p>
+        The server's <code>SCION_IMAGE_REGISTRY</code> environment variable sets the registry:
+        <code>${this.imageRegistry}</code>. It overrides any saved value on this server, so nothing
+        needs to be saved here.
+      </p>
+      <div class="footer">
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 2;
+          }}
+          >Back</sl-button
+        >
+        <div class="footer-right">
+          <sl-button
+            variant="primary"
+            @click=${() => {
+              this.currentStep = 4;
+              void this.loadHarnessConfigs();
+            }}
             >Next</sl-button
           >
         </div>

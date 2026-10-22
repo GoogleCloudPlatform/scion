@@ -1,0 +1,270 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// The one-time import of a linked project's hub into the hub list. A
+// project linked before link entries existed records its hub only as
+// hub.endpoint in its own settings (or inherits the global one). The CLI no
+// longer reads hub.endpoint, so the first time it resolves such a project
+// it records the hub as a link entry instead. No settings file is changed,
+// so an older binary still finds the endpoint there.
+
+// ProjectImported reports whether the hub of the project at localPath (see
+// LinkPathForProject) was already imported (see LinkEntryForProject).
+func (c *CLIContext) ProjectImported(localPath string) bool {
+	if c.Imported == nil {
+		return false
+	}
+	_, ok := c.Imported.Projects[localPath]
+	return ok
+}
+
+// markProjectImported records that the hub of the project at localPath was
+// imported.
+func (c *CLIContext) markProjectImported(localPath string, now time.Time) {
+	if c.Imported == nil {
+		c.Imported = &CLIContextImports{}
+	}
+	if c.Imported.Projects == nil {
+		c.Imported.Projects = map[string]time.Time{}
+	}
+	c.Imported.Projects[localPath] = now.UTC().Truncate(time.Second)
+}
+
+// projectHubLink is what a project's own settings files say about its link
+// to a hub.
+type projectHubLink struct {
+	// Linked reports whether the project was linked to a hub.
+	Linked bool
+	// ProjectID is the ID the hub knows the project by: hub.projectId,
+	// else project_id.
+	ProjectID string
+	// Endpoint is the project's own hub.endpoint ("" when its settings
+	// set none). Its hub.transport is never read: a project's settings do
+	// not configure how the CLI reaches a hub.
+	Endpoint string
+}
+
+// projectHubLinkSettings reads the project's own settings files: the
+// project directory and, for a git project with split storage (or a
+// directory left by the removed 'scion hub shadow'), its external settings
+// directory, the latter winning. The global settings and environment
+// variables are not applied. A project counts as linked when hub.linked is
+// true, or, with hub.linked unset, when it is a shadow directory or, in an
+// unversioned file, carries a hub project ID that differs from its local
+// project ID (a link made before hub.linked was recorded), as
+// EnsureHubReady decides it. A versioned file keeps one ID, at
+// hub.project_id. Tests replace it.
+var projectHubLinkSettings = func(projectDir string) projectHubLink {
+	dirs := []string{projectDir}
+	if ext := GetProjectConfigDir(projectDir); ext != "" && ext != projectDir {
+		dirs = append(dirs, ext)
+	}
+	var l projectHubLink
+	var linked *bool
+	var hubID, localID string
+	shadow := false
+	for _, dir := range dirs {
+		if versioned, _ := detectDirSettingsFormat(dir); versioned {
+			vs, err := LoadSingleFileVersioned(dir)
+			if err != nil || vs == nil {
+				continue
+			}
+			if vs.ProjectType == string(ProjectTypeShadow) {
+				shadow = true
+			}
+			if vs.Hub == nil {
+				continue
+			}
+			if vs.Hub.Linked != nil {
+				linked = vs.Hub.Linked
+			}
+			if vs.Hub.ProjectID != "" {
+				hubID, localID = vs.Hub.ProjectID, vs.Hub.ProjectID
+			}
+			if ep := strings.TrimSpace(vs.Hub.Endpoint); ep != "" {
+				l.Endpoint = ep
+			}
+			continue
+		}
+		s, err := LoadSettingsFromDir(dir)
+		if err != nil || s == nil {
+			continue
+		}
+		if s.ProjectID != "" {
+			localID = s.ProjectID
+		}
+		if s.Hub == nil {
+			continue
+		}
+		if s.Hub.Linked != nil {
+			linked = s.Hub.Linked
+		}
+		if s.Hub.ProjectID != "" {
+			hubID = s.Hub.ProjectID
+		}
+		if ep := strings.TrimSpace(s.Hub.Endpoint); ep != "" {
+			l.Endpoint = ep
+		}
+	}
+	switch {
+	case linked != nil:
+		l.Linked = *linked
+	case shadow:
+		l.Linked = true
+	default:
+		l.Linked = hubID != "" && hubID != localID
+	}
+	l.ProjectID = hubID
+	if l.ProjectID == "" {
+		l.ProjectID = localID
+	}
+	return l
+}
+
+// ProjectHubNotListedError is returned by LinkEntryForProject when a linked
+// project's hub is not in the hub list: no link entry is written, and the
+// import stays pending, so it completes once the hub is added.
+type ProjectHubNotListedError struct {
+	// Endpoint is the hub URL the project's settings name.
+	Endpoint string
+}
+
+func (e *ProjectHubNotListedError) Error() string {
+	ep := RedactURL(NormalizeEndpoint(e.Endpoint))
+	return fmt.Sprintf("this project's settings name the hub %s, which is not in your hub list; to use it here, add it with 'scion hub add <name> %s'; to stop using this project's hub setting, run 'scion config unset hub.endpoint' in this project", ep, ep)
+}
+
+// errProjectHubNotListed stops the context update of LinkEntryForProject
+// when the project's hub is not in the hub list, so nothing is written.
+var errProjectHubNotListed = errors.New("project hub not in the hub list")
+
+// LinkEntryForProject returns the link entry of the project at projectDir
+// and its hub entry, or nil and nil when it has none. When the project has
+// no link entry and its hub was never imported, it runs that import once:
+//
+//   - a linked project (see projectHubLinkSettings) gets a link entry for
+//     its own hub.endpoint, or, without one, for the global settings'
+//     hub.endpoint, but only when the hub list already has an entry with
+//     that endpoint. A project's settings never add a hub to the hub list
+//     and never set a hub entry's transport. When the hub is not in the
+//     list, nothing is written, the import stays pending, and the error is
+//     a *ProjectHubNotListedError;
+//   - otherwise the import is recorded for the project's link path, also
+//     when there was nothing usable to import (no valid endpoint or no
+//     project ID), so its settings are not read again, and a link entry
+//     removed later ('scion hub unlink', 'scion hub remove') is not brought
+//     back.
+//
+// A project that is not linked is not recorded and nothing is written. The
+// global directory is never imported here (the global import covers it),
+// and neither is a context file written by a newer version.
+//
+// The import is written under the lock, and c is updated to the saved
+// context. When it cannot be saved, c holds the import anyway and the error
+// wraps ErrCLIContextImport.
+func LinkEntryForProject(c *CLIContext, projectDir string) (*KnownProject, *HubEntry, error) {
+	return linkEntryForProject(c, projectDir, true)
+}
+
+// LinkEntryForProjectInMemory is LinkEntryForProject without the save: c
+// gets the pending one-time import of the project's link (for a hub in the
+// hub list, as LinkEntryForProject), and nothing is written. A hub that is
+// not in the hub list gives no link, without an error (ptone/scion#5483).
+//
+// The caller must not save the context it passed in (for example with
+// UpdateCLIContext): this path checks the hub list only in c, without the
+// re-check under the lock that LinkEntryForProject does, and the saved hub
+// list can change between this read and a later write.
+func LinkEntryForProjectInMemory(c *CLIContext, projectDir string) (*KnownProject, *HubEntry) {
+	p, h, _ := linkEntryForProject(c, projectDir, false)
+	return p, h
+}
+
+func linkEntryForProject(c *CLIContext, projectDir string, save bool) (*KnownProject, *HubEntry, error) {
+	localPath := LinkPathForProject(projectDir)
+	if localPath == "" {
+		return nil, nil, nil
+	}
+	if p, h := c.LinkEntryFor(localPath); h != nil {
+		return p, h, nil
+	}
+	if c.Version > CLIContextVersion || c.ProjectImported(localPath) || IsGlobalProjectDir(projectDir) {
+		return nil, nil, nil
+	}
+	link := projectHubLinkSettings(projectDir)
+	if !link.Linked {
+		return nil, nil, nil
+	}
+	endpoint := link.Endpoint
+	if endpoint == "" {
+		endpoint, _ = globalHubSettings()
+	}
+	if endpoint != "" && ValidateHubURL(endpoint) != nil {
+		endpoint = ""
+	}
+	usable := endpoint != "" && link.ProjectID != ""
+	notListed := func(target *CLIContext) bool {
+		_, h := target.HubByEndpoint(endpoint)
+		return usable && (h == nil || h.Endpoint == "")
+	}
+	if notListed(c) {
+		return nil, nil, &ProjectHubNotListedError{Endpoint: endpoint}
+	}
+	importInto := func(target *CLIContext, now time.Time) {
+		if _, h := target.LinkEntryFor(localPath); h != nil || target.ProjectImported(localPath) {
+			return
+		}
+		if usable {
+			name, _ := target.HubByEndpoint(endpoint)
+			// SetLinkEntry cannot fail here: the hub entry, the ID and
+			// the path are all set.
+			_ = target.SetLinkEntry(name, KnownProject{ID: link.ProjectID}, localPath, now)
+		}
+		target.markProjectImported(localPath, now)
+	}
+	if !save {
+		importInto(c, time.Now())
+		p, h := c.LinkEntryFor(localPath)
+		return p, h, nil
+	}
+	var saved *CLIContext
+	err := UpdateCLIContext(func(fresh *CLIContext) error {
+		if notListed(fresh) {
+			return errProjectHubNotListed
+		}
+		importInto(fresh, time.Now())
+		saved = fresh
+		return nil
+	})
+	if errors.Is(err, errProjectHubNotListed) {
+		return nil, nil, &ProjectHubNotListedError{Endpoint: endpoint}
+	}
+	if err != nil {
+		importInto(c, time.Now())
+		p, h := c.LinkEntryFor(localPath)
+		return p, h, fmt.Errorf("%w: %w", ErrCLIContextImport, err)
+	}
+	*c = *saved
+	p, h := c.LinkEntryFor(localPath)
+	return p, h, nil
+}

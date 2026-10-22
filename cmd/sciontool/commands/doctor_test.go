@@ -23,15 +23,26 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
+	// Drain concurrently so fn can write more than the pipe buffer holds.
+	// Buffered, so the reader can exit even if the receive below is never
+	// reached.
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
+		done <- buf.String()
+	}()
 	orig := os.Stdout
 	os.Stdout = w
-	fn()
-	os.Stdout = orig
-	_ = w.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
-	return buf.String()
+	// Restore and close in defers, so a panic or t.FailNow inside fn can't
+	// leave later tests writing to a closed pipe.
+	func() {
+		defer func() { _ = w.Close() }()
+		defer func() { os.Stdout = orig }()
+		fn()
+	}()
+	return <-done
 }
 
 // TestCheckWorkspaceGit_NoOpWhenEnvUnset proves the function does nothing

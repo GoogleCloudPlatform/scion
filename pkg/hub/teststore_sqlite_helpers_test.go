@@ -68,18 +68,30 @@ func newTestStore(t testing.TB, url string) (store.Store, error) {
 	if url != ":memory:" {
 		return newTestStoreAt(t, "file:"+url+"?cache=shared")
 	}
+	s, _, err := newTestStoreWithClient(t)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// newTestStoreWithClient is newTestStore(t, ":memory:") that also returns
+// the raw ent client, for tests that write rows past the store (for
+// example a stored document the store would never write).
+func newTestStoreWithClient(t testing.TB) (*entadapter.CompositeStore, *ent.Client, error) {
+	t.Helper()
 	dsn := fmt.Sprintf("file:hubtest%d?mode=memory&cache=shared", testStoreSeq.Add(1))
 	client, err := openTestClient(dsn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
 	if err := restoreTestStoreTemplate(context.Background(), s); err != nil {
 		_ = s.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s, nil
+	return s, client, nil
 }
 
 // newTestStoreAt opens a fresh, migrated Ent-backed store on the given SQLite

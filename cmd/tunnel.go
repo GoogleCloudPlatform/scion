@@ -106,7 +106,7 @@ func reportPlainError(w io.Writer, err error) int {
 	if errors.As(err, &te) {
 		code = te.Code
 	}
-	_, _ = fmt.Fprintf(w, "Error: %s\n", plainErrorLine(err.Error()))
+	_, _ = fmt.Fprintf(w, "Error: %s\n", plainErrorLine(config.RedactURLsIn(err.Error())))
 	return code
 }
 
@@ -114,39 +114,6 @@ func reportPlainError(w io.Writer, err error) int {
 func plainErrorLine(s string) string {
 	s = util.StripANSI(s)
 	return strings.Join(strings.Fields(s), " ")
-}
-
-// tunnelSettings loads the settings that supply the hub endpoint and
-// transport: the global settings when --project names a hub project,
-// otherwise the current directory's project (or the global settings).
-// Nothing is created, registered or synced.
-func tunnelSettings() *config.Settings {
-	// The global layer by its directory, never a "global" path that would
-	// resolve against the working directory.
-	path, err := config.GetGlobalDir()
-	if err != nil {
-		return nil
-	}
-	if projectPath == "" && !globalMode {
-		if p, _, err := config.ResolveProjectPath(""); err == nil {
-			path = p
-		}
-	}
-	settings, err := config.LoadSettings(path)
-	if err != nil {
-		return nil
-	}
-	return settings
-}
-
-// tunnelEndpoint resolves the hub endpoint through GetHubEndpoint. A nil
-// settings is passed as an untyped nil, so a failed settings load falls
-// through to the flag and environment.
-func tunnelEndpoint(settings *config.Settings) string {
-	if settings == nil {
-		return GetHubEndpoint(nil)
-	}
-	return GetHubEndpoint(settings)
 }
 
 // tunnelTransportSource is the transport resolver (a test seam).
@@ -180,6 +147,11 @@ type tunnelHub struct {
 	// lookupMissed records that ResolveAgent found no such project or
 	// agent, so runTunnel can name the project and its source.
 	lookupMissed atomic.Bool
+	// projectUnlisted records that, for a token from the environment, the
+	// project list was empty and the lookup by slug or id found nothing.
+	// A user access token without project:list sees an empty list, so the
+	// project may exist.
+	projectUnlisted atomic.Bool
 }
 
 func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, error) {
@@ -224,7 +196,13 @@ func (h *tunnelHub) ResolveAgent(ctx context.Context, cred tunnelclient.Credenti
 	} else {
 		p, err := c.Projects().Get(ctx, project)
 		if err != nil {
-			return tunnelclient.Target{}, h.lookupError(err)
+			err = h.lookupError(err)
+			var he *tunnelclient.HTTPError
+			if len(list.Projects) == 0 && cred.Kind == tunnelclient.CredentialToken &&
+				errors.As(err, &he) && he.Status == http.StatusNotFound {
+				h.projectUnlisted.Store(true)
+			}
+			return tunnelclient.Target{}, err
 		}
 		projectID = p.ID
 	}
@@ -308,10 +286,9 @@ func tunnelStateStore() (tunnelclient.StateStore, error) {
 }
 
 func runTunnel(cmd *cobra.Command, args []string) error {
-	settings := tunnelSettings()
-	endpoint := tunnelEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or configure hub.endpoint")
+		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or select a hub with 'scion use --hub <name>'")
 	}
 	target := resolveHubOnlyProject()
 	if err := target.unlinkedError(); err != nil {
@@ -336,7 +313,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tunnelSSHHostKeyHintIn(cmd, tunnelSSH, endpoint, project, args[0], pin)
-	cfg, hub, err := tunnelClientConfig(settings, endpoint, cmd.ErrOrStderr())
+	cfg, hub, err := tunnelClientConfig(endpoint, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -351,7 +328,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	}
 	var te *tunnelclient.Error
 	if errors.As(err, &te) {
-		return tunnelNotFoundError(te, hub.lookupMissed.Load(), args[0], target)
+		return tunnelNotFoundError(te, hub.lookupMissed.Load(), hub.projectUnlisted.Load(), args[0], target)
 	}
 	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 }
@@ -380,10 +357,11 @@ func tunnelPinSource() (sshPinSource, error) {
 }
 
 // tunnelClientConfig builds the tunnel client configuration for endpoint:
-// the transport auth from settings, the CLI credential chain and the state
-// store. The returned hub records agent lookup misses.
-func tunnelClientConfig(settings *config.Settings, endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
-	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
+// the transport auth of its hub list entry (or the environment), the CLI
+// credential chain and the state store. The returned hub records agent
+// lookup misses.
+func tunnelClientConfig(endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	src, mode, err := tunnelTransportSource(hubTransportSettings(endpoint))
 	if err != nil {
 		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
 	}
@@ -408,11 +386,15 @@ func tunnelClientConfig(settings *config.Settings, endpoint string, stderr io.Wr
 
 // tunnelNotFoundError names the project and its source in te when the
 // agent lookup found no such project or agent (missed); the hub's own
-// message would show the project as sent, often a raw id. Other errors are
-// returned as they are.
-func tunnelNotFoundError(te *tunnelclient.Error, missed bool, agent string, target hubOnlyProject) *tunnelclient.Error {
+// message would show the project as sent, often a raw id. When the project
+// was not listed for a token (unlisted), it adds that the token may lack
+// project:list. Other errors are returned as they are.
+func tunnelNotFoundError(te *tunnelclient.Error, missed, unlisted bool, agent string, target hubOnlyProject) *tunnelclient.Error {
 	if te.Code != tunnelclient.ExitAgentNotFound || !missed {
 		return te
+	}
+	if unlisted {
+		return tunnelclient.Errorf(te.Code, "agent %s not found in %s; the token may lack the project:list scope", agent, target.describe())
 	}
 	return tunnelclient.Errorf(te.Code, "agent %s not found in %s", agent, target.describe())
 }

@@ -18,12 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -41,15 +43,7 @@ var harnessConfigListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List available harness configurations",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		configs, err := config.ListHarnessConfigDirs(gp)
 		if err != nil {
@@ -83,8 +77,8 @@ var harnessConfigListCmd = &cobra.Command{
 
 		// Include Hub results if requested or when running in hub context (agent containers)
 		if includeHub {
-			hubCtx, err := requireHub(gp)
-			if err == nil && hubCtx != nil {
+			hubCtx, err := requireHubForUpload(projectPath)
+			if err == nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
 					Status: "active",
 				})
@@ -309,15 +303,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		// Find the local harness-config
 		hcDir, err := config.FindHarnessConfigDir(name, gp)
@@ -325,7 +311,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
 
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -354,17 +340,7 @@ var harnessConfigPullCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
-
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -406,15 +382,7 @@ var harnessConfigShowCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		// Try local first
 		hcDir, localErr := config.FindHarnessConfigDir(name, gp)
@@ -437,38 +405,36 @@ var harnessConfigShowCmd = &cobra.Command{
 		}
 
 		// Try Hub
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found locally and Hub unavailable: %w", name, err)
 		}
 
-		if hubCtx != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-			resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
-				Name:   name,
-				Status: "active",
-			})
-			if err == nil {
-				for _, hc := range resp.HarnessConfigs {
-					if hc.Name == name || hc.Slug == name {
-						if isJSONOutput() {
-							return outputJSON(hc)
-						}
-						fmt.Printf("Name:         %s\n", hc.Name)
-						fmt.Printf("Source:       hub\n")
-						fmt.Printf("ID:           %s\n", hc.ID)
-						fmt.Printf("Harness:      %s\n", hc.Harness)
-						fmt.Printf("Status:       %s\n", hc.Status)
-						fmt.Printf("Content Hash: %s\n", truncateHash(hc.ContentHash))
-						fmt.Printf("Scope:        %s\n", hc.Scope)
-						fmt.Printf("Files:        %d\n", len(hc.Files))
-						if hc.SourceURL != "" {
-							fmt.Printf("Source URL:   %s\n", hc.SourceURL)
-						}
-						return nil
+		resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
+			Name:   name,
+			Status: "active",
+		})
+		if err == nil {
+			for _, hc := range resp.HarnessConfigs {
+				if hc.Name == name || hc.Slug == name {
+					if isJSONOutput() {
+						return outputJSON(hc)
 					}
+					fmt.Printf("Name:         %s\n", hc.Name)
+					fmt.Printf("Source:       hub\n")
+					fmt.Printf("ID:           %s\n", hc.ID)
+					fmt.Printf("Harness:      %s\n", hc.Harness)
+					fmt.Printf("Status:       %s\n", hc.Status)
+					fmt.Printf("Content Hash: %s\n", truncateHash(hc.ContentHash))
+					fmt.Printf("Scope:        %s\n", hc.Scope)
+					fmt.Printf("Files:        %d\n", len(hc.Files))
+					if hc.SourceURL != "" {
+						fmt.Printf("Source URL:   %s\n", hc.SourceURL)
+					}
+					return nil
 				}
 			}
 		}
@@ -484,17 +450,7 @@ var harnessConfigDeleteCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
-
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -702,7 +658,10 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			// A new source URL still needs a finalize to record it, even
 			// when no file changed.
 			sourceChanged := sourceURL != "" && sourceURL != existing.SourceURL
-			if len(filesToUpload) == 0 && len(removed) == 0 && !sourceChanged {
+			// A changed executable bit alone needs a finalize too: the
+			// content hash does not cover modes (ptone/scion#5652).
+			modeChanged := modeOnlyChanges(files, downloadResp.Files)
+			if len(filesToUpload) == 0 && len(removed) == 0 && !sourceChanged && len(modeChanged) == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
@@ -718,6 +677,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 			if len(filesToUpload) > 0 {
 				fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			}
+			if len(modeChanged) > 0 {
+				fmt.Printf("Updating the executable bit of %d file(s):\n", len(modeChanged))
+				for _, p := range modeChanged {
+					fmt.Printf("  ~ %s\n", p)
+				}
 			}
 		}
 	} else {
@@ -741,7 +706,11 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Request upload URLs and upload. Skipped when files are only being
 	// dropped from the manifest: every file it lists is already stored, so
-	// Finalize alone replaces the manifest.
+	// Finalize alone replaces the manifest. The upload URLs stage the files
+	// under the response's upload ID, which the finalize sends back so the
+	// Hub commits exactly this upload (ptone/scion#4219); a Hub that predates
+	// upload IDs returns none and matches staged files by hash.
+	uploadID := ""
 	if len(filesToUpload) > 0 {
 		fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
 		uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
@@ -753,6 +722,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
 			return err
 		}
+		uploadID = uploadResp.UploadID
 	}
 
 	// Build manifest
@@ -772,7 +742,15 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Finalize
 	fmt.Println("Finalizing harness-config...")
-	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL, uploadID)
+	if isHarnessConfigConflictError(err) {
+		// Another commit changed the harness-config between the Hub's read
+		// and its write (409 harness_config_conflict). The local directory
+		// is the source of truth for a sync, so finalize once more against
+		// the Hub's fresh row (ptone/scion#4219).
+		fmt.Println("Harness-config was changed by another commit during finalize; retrying once...")
+		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL, uploadID)
+	}
 	if err != nil {
 		if !isHarnessConfigMissingFileError(err) {
 			return fmt.Errorf("failed to finalize: %w", err)
@@ -794,7 +772,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
 		}
-		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL, retryResp.UploadID)
 		if err != nil {
 			return fmt.Errorf("failed to finalize after retry: %w", err)
 		}
@@ -831,6 +809,17 @@ func isHarnessConfigNoFilesError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "harness config has no files")
+}
+
+// harnessConfigConflictErrorCode is the error code of a harness-config
+// finalize that lost the Hub's compare-and-swap (ptone/scion#4219).
+const harnessConfigConflictErrorCode = "harness_config_conflict"
+
+// isHarnessConfigConflictError reports whether err is the Hub refusing a
+// harness-config finalize with 409 harness_config_conflict.
+func isHarnessConfigConflictError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == harnessConfigConflictErrorCode
 }
 
 func isHarnessConfigMissingFileError(err error) bool {
@@ -887,6 +876,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	type pendingFile struct {
 		content []byte
 		relPath string
+		mode    string
 	}
 	// Every entry must be a canonical relative path before anything is fetched
 	// or written.
@@ -902,7 +892,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		if err := verifyHarnessConfigArtifactHash(fileInfo, content); err != nil {
 			return fmt.Errorf("harness-config %q: %w", name, err)
 		}
-		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path})
+		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path, mode: fileInfo.Mode})
 	}
 
 	// Files are written through an os.Root so they stay inside destPath.
@@ -912,7 +902,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 	defer func() { _ = root.Close() }()
 	for _, f := range pending {
-		if err := writeHarnessConfigFile(root, f.relPath, f.content); err != nil {
+		if err := writeHarnessConfigFile(root, f.relPath, f.content, f.mode); err != nil {
 			return err
 		}
 		fmt.Printf("  Downloaded: %s\n", f.relPath)

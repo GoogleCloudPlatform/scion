@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
@@ -68,11 +69,7 @@ type sshHubConn struct {
 // sshTransportResolver resolves transport-layer auth (for example IAP) for
 // the hub requests; tests replace it.
 var sshTransportResolver = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-	var ts *transportauth.TransportSettings
-	if s := tunnelSettings(); s != nil && s.Hub != nil && s.Hub.Transport != nil {
-		ts = &transportauth.TransportSettings{Mode: s.Hub.Transport.Mode, Audience: s.Hub.Transport.Audience}
-	}
-	return tunnelTransportSource(ts)
+	return tunnelTransportSource(hubTransportSettings(invocationHubEndpoint()))
 }
 
 // newSSHHubConn builds the hub access for endpoint with a user token.
@@ -142,7 +139,7 @@ func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
 		case http.StatusUnauthorized:
-			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login", endpoint)
+			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login --hub %s", endpoint, endpoint)
 		case http.StatusForbidden:
 			return tunnelclient.Errorf(tunnelclient.ExitForbidden, "not permitted by hub %s", endpoint)
 		case http.StatusBadGateway,
@@ -162,9 +159,9 @@ func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
 }
 
 // sshOneLine collapses s onto a single line for stderr output that lands in ssh
-// and editor logs.
+// and editor logs. URLs in s are shown without their user info.
 func sshOneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return strings.Join(strings.Fields(config.RedactURLsIn(s)), " ")
 }
 
 // resolveSSHProjectID returns the hub project id for a project slug or id.

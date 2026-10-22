@@ -155,9 +155,10 @@ type UploadURLInfo struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
-	// UploadID names the staging directory a template's upload URLs write
-	// to. The Hub accepts it back in FinalizeRequest.UploadID
-	// (ptone/scion#4221).
+	// UploadID names the staging directory a template's or
+	// harness-config's upload URLs write to. The Hub accepts it back in
+	// FinalizeRequest.UploadID or HarnessConfigFinalizeRequest.UploadID
+	// (ptone/scion#4221, ptone/scion#4219).
 	UploadID string `json:"uploadId,omitempty"`
 }
 
@@ -186,8 +187,9 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
-	// ContentHash is the content hash of the template version the URLs
-	// were signed for. Hubs before ptone/scion#4221 do not send it.
+	// ContentHash is the content hash of the template or harness-config
+	// version the URLs were signed for. Hubs before ptone/scion#4221
+	// (templates) or ptone/scion#4219 (harness-configs) do not send it.
 	ContentHash string `json:"contentHash,omitempty"`
 }
 
@@ -197,6 +199,10 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644"
+	// (ptone/scion#5652). Hubs before that do not send it: treat a missing
+	// mode as "0644" (transfer.NormalizeMode does).
+	Mode string `json:"mode,omitempty"`
 }
 
 // ValidationReport is the result of validating a resource's storage consistency.

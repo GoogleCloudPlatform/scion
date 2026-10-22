@@ -32,6 +32,7 @@ import (
 // resetServerFlags resets the package-level server flag variables to their
 // cobra default values so tests don't leak state.
 func resetServerFlags() {
+	serverRole = serverRoleHub
 	enableHub = false
 	enableRuntimeBroker = false
 	enableWeb = false
@@ -517,20 +518,11 @@ func TestGenerateSystemdUnit(t *testing.T) {
 		t.Skip("systemd tests only run on linux")
 	}
 
-	// Capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateSystemdUnit("/usr/local/bin/scion", false)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateSystemdUnit("/usr/local/bin/scion", false)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "[Unit]")
 	assert.Contains(t, output, "Scion Workstation Server")
@@ -544,19 +536,11 @@ func TestGenerateSystemdUnit_Hosted(t *testing.T) {
 		t.Skip("systemd tests only run on linux")
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateSystemdUnit("/usr/local/bin/scion", true)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateSystemdUnit("/usr/local/bin/scion", true)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "Scion Server (Hosted)")
 	assert.Contains(t, output, "--hosted")
@@ -567,19 +551,11 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 		t.Skip("launchd tests only run on darwin")
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateLaunchdPlist("/usr/local/bin/scion", false)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateLaunchdPlist("/usr/local/bin/scion", false)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "io.scion.server")
 	assert.Contains(t, output, "<string>/usr/local/bin/scion</string>")

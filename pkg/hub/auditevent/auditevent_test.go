@@ -112,6 +112,9 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 					if entry.Family == "authorization" && entry.Action == "decide" {
 						event = validAuthorizationDecisionEvent(OutcomeAllow)
 					}
+					if entry.Family == BrokerFamily {
+						event = validBrokerEnvelopeFixture(entry.Action)
+					}
 					event.Family = entry.Family
 					event.Action = entry.Action
 					event.Phase = phase
@@ -698,7 +701,7 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 	t.Parallel()
 
 	entries := Catalog()
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 7)
 	assert.Equal(t, []CatalogEntry{{
 		Family:                 "access_boundary",
 		Action:                 "create",
@@ -731,7 +734,7 @@ func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
 	t.Parallel()
 
 	entries := Catalog()
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 7)
 	assert.Equal(t, CatalogEntry{
 		Family:                  "authorization",
 		Action:                  "decide",
@@ -937,7 +940,7 @@ func TestCatalogAdditionalResourceKindsAreDefensiveCopies(t *testing.T) {
 	t.Parallel()
 
 	want := Catalog()
-	require.Len(t, want, 2)
+	require.Len(t, want, 7)
 	assert.Nil(t, want[0].AdditionalResourceKinds)
 	require.Equal(t, []string{"agent"}, want[1].AdditionalResourceKinds)
 	for _, boundary := range []string{"enumeration", "lookup"} {

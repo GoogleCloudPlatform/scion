@@ -210,6 +210,20 @@ func (_c *AgentReincarnationCreate) SetNillableSourceCleanup(v *string) *AgentRe
 	return _c
 }
 
+// SetTransferMode sets the "transfer_mode" field.
+func (_c *AgentReincarnationCreate) SetTransferMode(v string) *AgentReincarnationCreate {
+	_c.mutation.SetTransferMode(v)
+	return _c
+}
+
+// SetNillableTransferMode sets the "transfer_mode" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableTransferMode(v *string) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetTransferMode(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentReincarnationCreate) SetID(v uuid.UUID) *AgentReincarnationCreate {
 	_c.mutation.SetID(v)
@@ -402,6 +416,10 @@ func (_c *AgentReincarnationCreate) createSpec() (*AgentReincarnation, *sqlgraph
 	if value, ok := _c.mutation.SourceCleanup(); ok {
 		_spec.SetField(agentreincarnation.FieldSourceCleanup, field.TypeString, value)
 		_node.SourceCleanup = value
+	}
+	if value, ok := _c.mutation.TransferMode(); ok {
+		_spec.SetField(agentreincarnation.FieldTransferMode, field.TypeString, value)
+		_node.TransferMode = value
 	}
 	return _node, _spec
 }
@@ -639,6 +657,9 @@ func (u *AgentReincarnationUpsertOne) UpdateNewValues() *AgentReincarnationUpser
 		}
 		if _, exists := u.create.mutation.TargetBrokerID(); exists {
 			s.SetIgnore(agentreincarnation.FieldTargetBrokerID)
+		}
+		if _, exists := u.create.mutation.TransferMode(); exists {
+			s.SetIgnore(agentreincarnation.FieldTransferMode)
 		}
 	}))
 	return u
@@ -1046,6 +1067,9 @@ func (u *AgentReincarnationUpsertBulk) UpdateNewValues() *AgentReincarnationUpse
 			}
 			if _, exists := b.mutation.TargetBrokerID(); exists {
 				s.SetIgnore(agentreincarnation.FieldTargetBrokerID)
+			}
+			if _, exists := b.mutation.TransferMode(); exists {
+				s.SetIgnore(agentreincarnation.FieldTransferMode)
 			}
 		}
 	}))

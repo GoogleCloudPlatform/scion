@@ -18,9 +18,10 @@
  * Real paginated list adapter for the native chat quick command palette,
  * covering the Agents/DM, People, and Threads groups.
  *
- * Reads the hub agent list from the shared agent store, fetches GET
- * /api/v1/users (fully paginated, independent of current-space
- * membership), GET /api/v1/chat/dms, GET /api/v1/chat/spaces and per-space
+ * Reads the hub agent list from the shared agent store, the hub's recently
+ * seen users and server-side user search from the shared user directory
+ * (`user-directory.ts`, independent of current-space membership), GET
+ * /api/v1/chat/dms, GET /api/v1/chat/spaces and per-space
  * GET /api/v1/chat/spaces/{id}/threads, joins them into normalized
  * {@link PaletteCandidate}s, and exposes
  * cancellation so a page controller can discard a stale in-flight load
@@ -40,16 +41,15 @@ import type { PaletteCandidate, PaletteThreadTarget, RawPaletteAgent } from './p
 import { dmCandidateId, documentCandidateId, threadCandidateId } from './palette-types.js';
 import { agentRowText, type ProjectSlugLookup } from './agent-palette-candidate.js';
 import type { RecentFile } from './chat-recent-files.js';
+import { loadRecentUsers, searchUsers } from './user-directory.js';
 
-/** Users page size. The server default is 50; 100 keeps pages small enough to show progress. */
-const USERS_PAGE_LIMIT = 100;
+/** Shortest trimmed query the People group sends to the hub's user search. */
+export const PEOPLE_SEARCH_MIN_CHARS = 2;
 
-/**
- * Safety bound on pages followed for one users load. Well above any
- * realistic hub size: it exists only so a server bug cannot hang the
- * palette in an infinite pagination loop.
- */
-const MAX_USER_PAGES = 500;
+/** A query as sent to the hub's user search: trimmed, each run of whitespace one space. */
+export function normalizePeopleQuery(query: string): string {
+  return query.trim().replace(/\s+/g, ' ');
+}
 
 /** Maximum concurrent per-space thread-list requests. */
 const MAX_CONCURRENT_THREAD_REQUESTS = 4;
@@ -95,11 +95,6 @@ export interface RawPaletteUser {
   email?: string;
   avatarUrl?: string;
   status?: string;
-}
-
-interface UserListResponse {
-  users?: RawPaletteUser[];
-  nextCursor?: string;
 }
 
 /** The subset of a `/api/v1/chat/spaces` entry this module reads. */
@@ -231,64 +226,6 @@ export function buildAgentCandidates(
     });
   }
   return candidates;
-}
-
-/**
- * Fetch every authorized user, fully paginating `GET /api/v1/users`:
- * follows `nextCursor` until it is empty, not until a page's items array is
- * empty, and treats a cursor repeating across pages as a load error rather
- * than an infinite loop.
- */
-export async function fetchAllPaletteUsers(signal?: AbortSignal): Promise<RawPaletteUser[]> {
-  const all: RawPaletteUser[] = [];
-  const seenCursors = new Set<string>();
-  let cursor = '';
-  let pages = 0;
-
-  do {
-    const url = cursor
-      ? `/api/v1/users?limit=${USERS_PAGE_LIMIT}&cursor=${encodeURIComponent(cursor)}`
-      : `/api/v1/users?limit=${USERS_PAGE_LIMIT}`;
-    const options: ApiFetchOptions | undefined = signal ? { signal } : undefined;
-    const res = await apiFetch(url, options);
-    if (!res.ok) {
-      throw new PaletteLoadError(`users list request failed: ${res.status}`);
-    }
-    let data: UserListResponse | null;
-    try {
-      data = (await res.json()) as UserListResponse | null;
-    } catch (err) {
-      // See the matching comment in fetchPaletteDms: a
-      // cancelled/superseded load's abort can land mid-body-read, and that
-      // AbortError must propagate as-is rather than being repackaged as a
-      // load failure.
-      if (signal?.aborted) {
-        throw err;
-      }
-      throw new PaletteLoadError('users list response was not valid JSON');
-    }
-    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-      throw new PaletteLoadError('users list response body was not a JSON object');
-    }
-    if (Array.isArray(data.users)) {
-      all.push(...data.users);
-    }
-    const next = typeof data.nextCursor === 'string' ? data.nextCursor : '';
-    if (next) {
-      if (seenCursors.has(next)) {
-        throw new PaletteLoadError('users list returned a repeated pagination cursor');
-      }
-      seenCursors.add(next);
-    }
-    cursor = next;
-    pages++;
-  } while (cursor && pages < MAX_USER_PAGES);
-
-  if (cursor && pages >= MAX_USER_PAGES) {
-    throw new PaletteLoadError('users list did not terminate within the page safety bound');
-  }
-
-  return all;
 }
 
 /**
@@ -585,6 +522,30 @@ function reclassifyIfStale(err: unknown, aborted: boolean, stale: boolean): neve
   throw err;
 }
 
+/**
+ * Wait for `promise`, rejecting with an AbortError as soon as `signal`
+ * aborts. For a shared load (the recent-users page) that one caller must not
+ * abort for the others: the load runs on, this caller stops waiting.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('load aborted', 'AbortError'));
+  let onAbort = (): void => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new DOMException('load aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([promise, aborted]).finally(() =>
+    signal.removeEventListener('abort', onAbort)
+  );
+}
+
+/** What a People load read: the recent users, the DM list and who is asking. */
+interface PeopleBase {
+  users: RawPaletteUser[];
+  dms: RawPaletteDm[];
+  selfUserId: string;
+}
+
 /** The part of the agent store the palette's Agents group reads. */
 export type PaletteAgentSource = Pick<AgentStore, 'ensure' | 'peek'>;
 
@@ -617,6 +578,15 @@ export class ChatPaletteDataController {
   private agentDmsMarks = 0;
   private peopleGeneration = 0;
   private peopleAbort: AbortController | null = null;
+  /**
+   * Inputs of the last successful People load, kept so a search can rebuild
+   * the group without another request. Null until a load has succeeded.
+   */
+  private peopleBase: PeopleBase | null = null;
+  /** Search hits for the current query, merged into the group after the recent users. */
+  private peopleSearchHits: RawPaletteUser[] = [];
+  private peopleSearchGeneration = 0;
+  private peopleSearchAbort: AbortController | null = null;
   private threadsGeneration = 0;
   private threadsAbort: AbortController | null = null;
 
@@ -638,6 +608,7 @@ export class ChatPaletteDataController {
     this.peopleGeneration++;
     this.peopleAbort?.abort();
     this.peopleAbort = null;
+    this.abortPeopleSearch();
     this.threadsGeneration++;
     this.threadsAbort?.abort();
     this.threadsAbort = null;
@@ -777,38 +748,112 @@ export class ChatPaletteDataController {
   }
 
   /**
-   * Load the People group. Same shape and guarantees as
-   * {@link loadAgentsGroup}: a DM-join failure fails the whole group rather
-   * than silently degrading recency, and a superseded/aborted load rejects
-   * with an AbortError-like error.
+   * Load the People group: one page of the hub's most recently seen users
+   * (`loadRecentUsers`, cached page-wide for its TTL) joined with the DM
+   * list for recency, plus any search hits for the current query (see
+   * {@link searchPeople}). Users beyond that page are reached by search.
+   * Same shape and guarantees as {@link loadAgentsGroup}: a failure of
+   * either list fails the whole group, and a superseded/aborted load
+   * rejects with an AbortError-like error.
    */
   async loadPeopleGroup(selfUserId: string): Promise<PaletteCandidate[]> {
     this.peopleAbort?.abort();
     const controller = new AbortController();
     this.peopleAbort = controller;
     const myGeneration = ++this.peopleGeneration;
+    const isCurrent = (): boolean => myGeneration === this.peopleGeneration;
 
     try {
-      const users = await fetchAllPaletteUsers(controller.signal);
+      const recent = await untilAborted(loadRecentUsers(), controller.signal);
 
-      if (myGeneration !== this.peopleGeneration) {
+      if (!isCurrent() || controller.signal.aborted) {
         throw new DOMException('superseded by a later load', 'AbortError');
+      }
+      if (!recent) {
+        throw new PaletteLoadError('recent users could not be loaded');
       }
 
       const dms = await fetchPaletteDms(controller.signal);
 
-      if (myGeneration !== this.peopleGeneration) {
+      if (!isCurrent()) {
         throw new DOMException('superseded by a later load', 'AbortError');
       }
 
-      return buildUserCandidates(users, dms, selfUserId);
+      this.peopleBase = { users: recent.users, dms, selfUserId };
+      return this.buildPeopleCandidates(this.peopleBase);
     } catch (err) {
-      return reclassifyIfStale(
-        err,
-        controller.signal.aborted,
-        myGeneration !== this.peopleGeneration
-      );
+      return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
+    } finally {
+      if (this.peopleAbort === controller) this.peopleAbort = null;
     }
+  }
+
+  /**
+   * Search the hub's users for `query` (server-side `?search=`, bounded by
+   * `USER_SEARCH_LIMIT` and `USER_SEARCH_TIMEOUT_MS`) and return the People
+   * group with the hits merged in. Only active users are asked for; the
+   * group's own status check still applies. The query is normalized by
+   * {@link normalizePeopleQuery}. Any earlier search is aborted first. A
+   * query shorter than {@link PEOPLE_SEARCH_MIN_CHARS} sends nothing and
+   * behaves like {@link clearPeopleSearch}.
+   *
+   * Resolves to `null` until a People load has succeeded; the hits are
+   * kept and the next successful load includes them. A failed or timed-out
+   * search counts as no hits, so the group keeps its recent users. A search
+   * superseded by a later one, {@link abortPeopleSearch} or {@link cancel}
+   * rejects with an AbortError-like error.
+   */
+  async searchPeople(query: string): Promise<PaletteCandidate[] | null> {
+    const q = normalizePeopleQuery(query);
+    if (q.length < PEOPLE_SEARCH_MIN_CHARS) return this.clearPeopleSearch();
+    this.abortPeopleSearch();
+    const controller = new AbortController();
+    this.peopleSearchAbort = controller;
+    const myGeneration = this.peopleSearchGeneration;
+    const isCurrent = (): boolean => myGeneration === this.peopleSearchGeneration;
+
+    try {
+      const hits = await searchUsers(q, { signal: controller.signal, status: 'active' });
+      if (!isCurrent()) {
+        throw new DOMException('superseded by a later search', 'AbortError');
+      }
+      this.peopleSearchHits = hits;
+      return this.peopleBase ? this.buildPeopleCandidates(this.peopleBase) : null;
+    } catch (err) {
+      return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
+    } finally {
+      if (this.peopleSearchAbort === controller) this.peopleSearchAbort = null;
+    }
+  }
+
+  /**
+   * Abort an in-flight {@link searchPeople}, keeping the hits already
+   * merged. Called on every query edit, so a slow search cannot land after
+   * the query has moved on.
+   */
+  abortPeopleSearch(): void {
+    this.peopleSearchGeneration++;
+    this.peopleSearchAbort?.abort();
+    this.peopleSearchAbort = null;
+  }
+
+  /**
+   * Abort any search and drop its hits. Returns the People group rebuilt
+   * from the last load's recent users, or `null` when there were no hits to
+   * drop or no load has succeeded.
+   */
+  clearPeopleSearch(): PaletteCandidate[] | null {
+    this.abortPeopleSearch();
+    if (this.peopleSearchHits.length === 0) return null;
+    this.peopleSearchHits = [];
+    return this.peopleBase ? this.buildPeopleCandidates(this.peopleBase) : null;
+  }
+
+  /** The recent users followed by the search hits not among them, as candidates. */
+  private buildPeopleCandidates(base: PeopleBase): PaletteCandidate[] {
+    const seen = new Set(base.users.map((u) => u.id));
+    const extra = this.peopleSearchHits.filter((u) => !seen.has(u.id));
+    return buildUserCandidates([...base.users, ...extra], base.dms, base.selfUserId);
   }
 
   /**

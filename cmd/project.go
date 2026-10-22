@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -62,19 +63,22 @@ With --global, it initializes in the user's home folder.`,
 				fmt.Println("Initializing global scion directory...")
 			}
 
-			// Resolve image registry: flag > existing settings > prompt > skip
-			registryValue := initImageRegistry
-			if registryValue == "" {
+			// Resolve image registry: flag > existing settings > env
+			// (counts as configured, never saved) > prompt > skip
+			fileRegistry := ""
+			if initImageRegistry == "" {
 				// Check if existing global settings already have a registry configured
 				if globalDir, err := config.GetGlobalDir(); err == nil {
 					if vs, err := config.LoadVersionedSettings(globalDir); err == nil {
-						registryValue = vs.ImageRegistry
+						fileRegistry = vs.ImageRegistry
 					}
 				}
 			}
-			if registryValue == "" && !isJSONOutput() {
-				registryValue = promptImageRegistry()
+			var prompt func() string
+			if !isJSONOutput() {
+				prompt = promptImageRegistry
 			}
+			registryValue, envRegistry := resolveInitImageRegistry(initImageRegistry, fileRegistry, config.ImageRegistryFromEnv(), prompt)
 
 			opts := config.InitMachineOpts{
 				ImageRegistry: registryValue,
@@ -100,6 +104,8 @@ With --global, it initializes in the user's home folder.`,
 			fmt.Println("scion project successfully initialized.")
 			if registryValue != "" {
 				fmt.Printf("Image registry: %s\n", registryValue)
+			} else if envRegistry != "" {
+				fmt.Printf("Image registry: %s (from %s; not saved to settings)\n", config.RedactImageRegistry(envRegistry), config.EnvImageRegistry)
 			} else {
 				fmt.Println()
 				fmt.Println("Note: image_registry is not configured. Agents cannot start without it.")
@@ -183,7 +189,7 @@ With --global, it initializes in the user's home folder.`,
 			if projectID == "" {
 				projectID = config.GenerateProjectID()
 			}
-			if err := config.UpdateSetting(targetDir, "project_id", projectID, false); err != nil {
+			if err := config.UpdateSetting(targetDir, projectkeys.ConfigProjectIDKey, projectID, false); err != nil {
 				if !isJSONOutput() {
 					fmt.Printf("Warning: failed to save project_id: %v\n", err)
 				}
@@ -229,9 +235,9 @@ func promptHubRegistration(isGlobal bool) error {
 	if _, err := requireHub(gp); err != nil {
 		var notConfigured *hubsync.HubNotConfiguredError
 		if errors.As(err, &notConfigured) {
-			return errors.New("no hub is configured yet; this project links on first use. " +
+			return errors.New("no hub is selected yet; this project links on first use. " +
 				"Start the local hub with 'scion server start' (first run opens setup), " +
-				"or set a remote one with 'scion config set hub.endpoint <url>'")
+				"or add a remote one with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>'")
 		}
 		var notRunning *hubsync.LocalServerNotRunningError
 		if errors.As(err, &notRunning) {
@@ -274,6 +280,25 @@ func getLocalBrokerInfo(settings *config.Settings) (brokerID, brokerName string)
 	}
 
 	return brokerID, brokerName
+}
+
+// resolveInitImageRegistry decides the image registry 'scion init
+// --global/--machine' saves: the flag, else the existing settings value,
+// else (when SCION_IMAGE_REGISTRY is unset) the prompt's answer. A node env
+// value counts as configured, so it skips the prompt, but it is returned
+// separately and never saved: it is a node override, not a setting
+// (ptone/scion#3916). prompt may be nil (no prompting).
+func resolveInitImageRegistry(flag, fileValue, envValue string, prompt func() string) (save, env string) {
+	if flag != "" {
+		return flag, envValue
+	}
+	if fileValue != "" {
+		return fileValue, envValue
+	}
+	if envValue != "" || prompt == nil {
+		return "", envValue
+	}
+	return prompt(), ""
 }
 
 // promptImageRegistry prompts the user for their container image registry path.

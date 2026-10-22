@@ -18,6 +18,10 @@ package hub
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"net/http"
 	"strings"
 	"testing"
@@ -39,6 +43,8 @@ import (
 // TestLiveInventoryExclusionsNotStale asserts every key here still names a
 // real, currently-declared catalog HTTP entry point.
 var positiveCheckExclusions = map[liveInventoryKey]string{
+	{OperationID: "broker.attachment.redeem", Method: "GET", Pattern: "/api/v1/attachment-deliveries/{token}"}:              "handleAttachmentDelivery answers one uniform 404 to every refusal by design; a 200 needs a broker HMAC request and a capability the hub signed for that broker, which no fixture here has. TestDeliveryRedemption_UniformRefusal and the TestDeliveryRedemption_* tests redeem real capabilities through the route",
+	{OperationID: "testidentity.admin.residue", Method: "GET", Pattern: "/api/v1/test-identities/admin/{id}/residue"}:       "handleTestAdminResidue answers 404 unless the test admin tier is on (testAdminGate404) and, past it, for an ID that is not an admin-kind test identity, current or past; no fixture here is one (the dev token cannot issue them). TestTestAdminA3_ResidueRoute and TestTestAdminA3_PurgeRemovesStampedOnly drive the route with a real identity",
 	{OperationID: "artifact.grant.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/grants/{grantId}"}:            "handleDeleteGrant (pkg/artifacts/grants.go) answers 404 for a grant id that is not a canonical id before it looks at the artifact, and the fixture artifact has no grant to remove; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded removes a real grant through the route",
 	{OperationID: "artifact.link.revoke", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/links/{linkId}"}:               "handleRevokeLink (pkg/artifacts/links.go) answers 404 for a link id that is not a canonical id before it looks at the artifact, and the fixture artifact has no link to revoke; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded revokes a real link through the route",
 	{OperationID: "artifact.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}"}:                                   "handleDeleteArtifact (pkg/artifacts/retire.go) deletes the fixture artifact for the dev token, its owner, and later entries read that artifact; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded and TestArtifactDeleteOfOrphanOnRoutes delete real artifacts through the route",
@@ -46,6 +52,8 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:                  "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}:            "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
 	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                              "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
+	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:              "handleAttachmentDownload answers every id it cannot serve exactly like an unknown id (ptone/scion#4595): with the artifact service configured and no attachment storage backend in testServer, the placeholder id gets that 404 before any lookup; TestAttachmentArtifacts_NoLegacyStoreAnswersNotFound pins that answer, and the attachment tests read real attachments through the route",
+	{OperationID: "project.conversation.gcsobject.read", Method: "GET", Pattern: "/api/v1/gcs/object"}:                      "handleGCSObject (gcs_link.go) answers the same 404 to every caller while the web.gcs_links experiment is off or no token generator is configured, which is the case in this test server; TestGCSObjectToken_ProjectGroupNeedsProjectRead and the TestGCSLink_* tests enable it and drive the route",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -54,7 +62,7 @@ var positiveCheckExclusions = map[liveInventoryKey]string{
 // dispatch shape that makes a 405 control meaningless for that entry — not
 // merely that the control happens to fail today.
 var controlCheckExclusions = map[liveInventoryKey]string{
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "proxyAgentPort forwards every HTTP method to the tunnel with no method-based routing at all (see the entry's own comment in catalog.go); there is no unsupported method to control against",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "proxyAgentPort forwards every HTTP method to the tunnel (see the entry's own comment in catalog.go); the only method-based step is that GET and HEAD of the bare .../proxy URL get a 308 to .../proxy/ (ptone/scion#5566), so there is still no unsupported method to control against",
 	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                     "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
 	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                      "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
 	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                   "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
@@ -66,19 +74,8 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                   "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every method by design, the same as the GET /api/v1/policies entry above",
 	{OperationID: "user.session.logout", Method: "POST", Pattern: "/api/v1/auth/logout"}:                                     "every method on /api/v1/auth/logout gets the same route-guard answer, so there is no unsupported method to control against",
 	{OperationID: "broker.messagefailures.report", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/message-failures"}: "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"message-failures\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
-	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                      "the WebDAV handler (project_webdav.go) serves PROPFIND, this test's control method, as a real WebDAV method, so there is no unsupported method to control against",
-	{OperationID: "project.workspace.read", Method: "HEAD", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                     "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.read", Method: "OPTIONS", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                  "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                     "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "PROPPATCH", Pattern: "/api/v1/projects/{id}/dav/{path}"}:               "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "LOCK", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                    "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "UNLOCK", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                  "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "COPY", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                    "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "MOVE", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                    "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                    "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "PROPFIND", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                  "same as the WebDAV GET control entry above",
-	{OperationID: "project.workspace.write", Method: "MKCOL", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                   "same as the WebDAV GET control entry above",
+	{OperationID: "broker.heartbeat", Method: "POST", Pattern: "/api/v1/runtime-brokers/{id}/heartbeat"}:                     "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"heartbeat\" && method==POST as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
+	{OperationID: "broker.read", Method: "GET", Pattern: "/api/v1/runtime-brokers/{id}/projects"}:                            "handleRuntimeBrokerByIDInternal (handlers_runtime_brokers.go) matches subPath==\"projects\" && method==GET as a single condition; any other method falls through to the \"RuntimeBroker resource\" 404, never a 405",
 	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:                "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
 }
 
@@ -95,6 +92,7 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}:       "the file path is every segment after files/, so the bogus suffix becomes part of the file path, and the fixture's version 1 is ready, so handlePutFile (pkg/artifacts/versions.go) answers 409 conflict (not pending) before it looks the file up",
 	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "user.self.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                            "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
 	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
@@ -123,8 +121,8 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:                   "handleAdminServerConfigSectionReset (admin_settings.go) requires OperationalSettings and 400s \"Section reset requires DB-backed operational settings\" before it ever parses the section name from the path; testServer wires no OperationalSettings, so the same 400 happens on the bare path, independent of the suffix",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:           "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
 	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                          "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
-	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                   "handleAttachmentDownload needs an attachment storage backend testServer does not configure; the resulting pre-dispatch 503 fires regardless of the suffix",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "proxyAgentPort forwards the entire remaining path as part of the proxied request, with no path-based routing at all — the same design already excluded from the control check above",
+	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                   "handleAttachmentDownload needs an attachment storage backend testServer does not configure; it answers before it looks at the id (404, the answer for an unknown id, when the artifact service is configured; 503 otherwise), regardless of the suffix",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "proxyAgentPort forwards the entire remaining path as part of the proxied request; the only path-based step is the 308 from the bare .../proxy URL to .../proxy/ (ptone/scion#5566), so a suffix is always proxied, never routed — the same design already excluded from the control check above",
 	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                         "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "same as the GET .../proxy suffix entry above",
 	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                       "same as the GET .../proxy suffix entry above",
@@ -138,58 +136,7 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "inbox.conversation.create", Method: "POST", Pattern: "/api/v1/conversations/"}:                                "the pattern ends in a slash, so the suffixed path has an empty segment (\"//\"), which the server mux answers with a 307 redirect to the cleaned path before any handler runs",
 	{OperationID: "inbox.conversation.direct.read", Method: "GET", Pattern: "/api/v1/conversations/{id}/messages"}:               "a suffix on the messages collection is the messages/{messageId} route; handleGetConversationMessage checks the direct conversation's key before it looks the message up, and the dev caller is not named in the key, so it answers 403 on any message ID",
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
-	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
-	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
-	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
-	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                            "extractID truncates the suffix the same way as secret.read above; deleteSecret then panics on a nil secret backend the same way getSecret does, recovered as a 500",
-	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                       "parseInstallationIDFromPath (handlers_github_app.go) runs strconv.ParseInt on the entire remainder of the path, not just a leading segment, so a suffix makes parsing fail; the handler answers 400 \"invalid installation ID\", rejecting the suffix rather than ignoring it",
-	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/installations/{id}"}:                    "same as the PUT installations/{id} entry above",
-	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations/{id}"}:                         "same as the PUT installations/{id} entry above",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                       "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the real, un-suffixed ID and returns the entitlement (200) exactly as if the suffix were absent",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                                     "same truncation as the GET entitlements/{id} entry above; this test's generic empty PUT body then fails updateEntitlement's validation with 400 before the (correctly extracted) ID is used for anything — the same 400 the bare path gets",
-	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                                  "same truncation as the GET entitlements/{id} entry above; deleteEntitlement then deletes the real, un-suffixed entitlement (204) exactly as if the suffix were absent",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                             "handleAdminLimitByID (handlers_quota.go) splits on the first '/' and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, and the request proceeds on the real, un-suffixed ID",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                           "handleAdminLimitByID discards the suffix the same way as quota.read above; with a valid update body (see bodyOverrides) updateLimitDefinition succeeds on the real, un-suffixed ID and returns 200 exactly as if the suffix were absent",
-	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/limits/{id}"}:                                        "handleAdminLimitByID discards the suffix the same way as quota.read above; deleteLimitDefinition then fails deleting a limit this test's fixture entitlement still references, mapped to 400 — the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets"}:                                                      "the by-key route \"/api/v1/secrets/\" registers as a prefix, so a suffix on this bare collection route falls through to handleSecretByKey with the suffix as the key; getSecret then panics on a nil secret backend, recovered as a 500",
-	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks"}:                            "the by-ID route \"/api/v1/admin/lifecycle-hooks/\" registers as a prefix, so a suffix on this bare collection route falls through to handleAdminLifecycleHookByID with the suffix as the ID; getLifecycleHook then 400s failing to parse it as a UUID",
-	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations"}:                              "the by-ID route \"/api/v1/github-app/installations/\" registers as a prefix, so a suffix on this bare collection route falls through to handleGitHubAppInstallationByIDRead with the suffix as the ID; parseInstallationIDFromPath then 400s \"invalid installation ID\" failing to parse it as an integer",
-	{OperationID: "agent.stopall", Method: "POST", Pattern: "/api/v1/agents/stop-all"}:                                           "handleAgentByID checks id == \"stop-all\" before it looks at anything after that segment, so a suffix is silently ignored and stop-all runs exactly as it would on the bare path",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                           "handleAdminUsageByLimit (handlers_quota.go) extracts limitID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
-	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                      "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
-	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                       "handleEnvVarByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
-	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                       "handleAdminLifecycleHookByID (handlers_lifecycle_hooks.go) extracts the ID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches getLifecycleHook's lookup",
-	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}:       "handleGroupMemberByID (handlers_groups.go) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
-	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:                   "handleAdminServerConfigSectionReset (admin_settings.go) requires OperationalSettings and 400s \"Section reset requires DB-backed operational settings\" before it ever parses the section name from the path; testServer wires no OperationalSettings, so the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:           "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
-	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                          "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
-	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                   "handleAttachmentDownload needs an attachment storage backend testServer does not configure; the resulting pre-dispatch 503 fires regardless of the suffix",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "proxyAgentPort forwards the entire remaining path as part of the proxied request, with no path-based routing at all — the same design already excluded from the control check above",
-	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                         "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                          "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                       "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:                "same as the GET .../proxy suffix entry above",
-	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets"}:                                 "handleAgentSecrets (handlers_env_secrets.go) answers 501 when no secrets backend is configured, before it looks at the key; testServer configures no secrets backend, so a suffixed path gets the same 501 as the bare one",
-	{OperationID: "agent.secrets.access", Method: "GET", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
-	{OperationID: "agent.secrets.access", Method: "PUT", Pattern: "/api/v1/agents/{id}/secrets/{key}"}:                           "same as the GET .../secrets suffix entry above",
-	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies"}:                                            "the by-ID route \"/api/v1/policies/\" registers as a prefix, so a suffix on this bare collection route reaches handlePolicyRoutes, which answers 410 Gone for every sub-path by design",
-	{OperationID: "hub.policies.removed", Method: "GET", Pattern: "/api/v1/policies/{id}"}:                                       "handlePolicyRoutes (handlers_policies.go) answers 410 Gone for every sub-path by design, so a suffixed path gets the same 410 as the bare one",
-	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                                     "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
-	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                          "the WebDAV handler takes the whole remaining path as the workspace resource path, so a trailing segment names a deeper resource rather than an undeclared route",
-	{OperationID: "project.workspace.read", Method: "HEAD", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                         "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.read", Method: "OPTIONS", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                      "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                         "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "PROPPATCH", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                   "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "LOCK", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                        "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "UNLOCK", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                      "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "COPY", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                        "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "MOVE", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                        "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "POST", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                        "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "PROPFIND", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                    "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                      "same as the WebDAV GET suffix entry above",
-	{OperationID: "project.workspace.write", Method: "MKCOL", Pattern: "/api/v1/projects/{id}/dav/{path}"}:                       "same as the WebDAV GET suffix entry above",
+	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/stats"}:                                    "handleAdminInviteByID (admin_invites.go) answers the stats read for any path whose first segment is \"stats\" on a GET, so a trailing segment reaches the same stats handler as the bare path",
 	{OperationID: "project.workspace.read", Method: "GET", Pattern: "/api/v1/projects/{id}/workspace/files/{path}"}:              "handleProjectWorkspace takes the whole remaining path as the file path; a trailing segment below the seeded regular file is a path through a non-directory, answered 400",
 	{OperationID: "project.shareddir.read", Method: "GET", Pattern: "/api/v1/projects/{id}/shared-dirs/{name}/files/{path}"}:     "handleSharedDirFiles takes the whole remaining path as the file path; a trailing segment below the seeded regular file is a path through a non-directory, answered 400",
 	{OperationID: "project.workspace.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/workspace/files/{path}"}:             "handleProjectWorkspace takes the whole remaining path as the file path, so a trailing segment names a deeper file (written, 200) rather than an undeclared route",
@@ -202,17 +149,43 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "project.secret.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/secrets/{key}"}:                         "handleProjectSecretByKey takes the whole remaining path as the key, and this test's empty PUT body fails the value check with 400, the same 400 the bare path gets",
 	{OperationID: "project.secret.write", Method: "PATCH", Pattern: "/api/v1/projects/{id}/secrets/{key}"}:                       "same as the secrets GET by-key suffix entry above: the nil secret backend panics, recovered as a 500",
 	{OperationID: "project.secret.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/secrets/{key}"}:                      "same as the secrets GET by-key suffix entry above: the nil secret backend panics, recovered as a 500",
+	{OperationID: "broker.material.write", Method: "PUT", Pattern: "/api/v1/runtime-brokers/{id}/env/{key}"}:                     "handleBrokerEnvVarByKey takes the whole remaining path as the key, and this test's empty PUT body fails the value check with 400, the same 400 the bare path gets",
+	{OperationID: "broker.material.read", Method: "GET", Pattern: "/api/v1/runtime-brokers/{id}/secrets"}:                        "the by-key branch takes a suffix on the collection route as a key; with no secret backend configured in testServer the read panics on the nil backend, recovered as a 500",
+	{OperationID: "broker.material.read", Method: "GET", Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}"}:                  "handleBrokerSecretByKey takes the whole remaining path as the key; with no secret backend configured in testServer the read panics on the nil backend, recovered as a 500",
+	{OperationID: "broker.material.write", Method: "PUT", Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}"}:                 "handleBrokerSecretByKey takes the whole remaining path as the key, and this test's empty PUT body fails the value check with 400, the same 400 the bare path gets",
+	{OperationID: "broker.material.write", Method: "PATCH", Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}"}:               "same as the broker secrets GET by-key suffix entry above: the nil secret backend panics, recovered as a 500",
+	{OperationID: "broker.material.write", Method: "DELETE", Pattern: "/api/v1/runtime-brokers/{id}/secrets/{key}"}:              "same as the broker secrets GET by-key suffix entry above: the nil secret backend panics, recovered as a 500",
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics/summary"}:                       "a suffix on metrics/summary falls through to the metrics dashboard branch, which accepts any metrics/... path and answers 503 because testServer configures no telemetry project",
 	{OperationID: "project.metrics.read", Method: "GET", Pattern: "/api/v1/projects/{id}/metrics"}:                               "handleProjectMetricsDashboard accepts any metrics/... path and answers 503 because testServer configures no telemetry project, before path structure is examined",
-	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
-	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                     "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
-	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                  "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
 	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/health"}:                   "handleAdminIntegrationByName (handlers_integrations.go) splits the sub-path into at most three parts and the health branch ignores the third, so a suffix reaches the same health check as the bare path",
 	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/update/{id}"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts, so the suffix joins the update ID as one string and the status lookup answers for that ID instead of a routing 404",
 	{OperationID: "hub.integrations.update", Method: "PUT", Pattern: "/api/v1/admin/integrations/{name}/config"}:                 "handleAdminIntegrationByName splits the sub-path into at most three parts and the config branch ignores the third, so a suffix reaches the same config update as the bare path",
 	{OperationID: "hub.integrations.update", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/restart"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and the restart branch ignores the third, so a suffix restarts the integration as the bare path does",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/install"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts and the install branch ignores the third, so a suffix reaches the same install handling as the bare path",
 	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/update"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and a POST to update with a third part starts the same update as the bare path",
+	// handleSkillByID (skill_handlers.go) splits the path into at most
+	// three segments, so the action handlers below receive any trailing
+	// segment as part of the third one and ignore it, or treat it as a
+	// nested file path.
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/download"}:       "handleSkillByID passes the download action with a trailing segment to handleSkillDownload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.read", Method: "GET", Pattern: "/api/v1/skills/{id}/resolve"}:        "handleSkillByID passes the resolve action with a trailing segment to handleSkillResolveSingle, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/upload"}:      "handleSkillByID passes the upload action with a trailing segment to handleSkillUpload, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "POST", Pattern: "/api/v1/skills/{id}/finalize"}:    "handleSkillByID passes the finalize action with a trailing segment to handleSkillFinalize, which ignores it and answers as for the bare path",
+	{OperationID: "skill.update", Method: "PUT", Pattern: "/api/v1/skills/{id}/files/{path}"}: "the file path may be nested, so the trailing segment names a file below {path}; the write is checked like the bare path and answers 409 for the published version",
+	// The batch resolve is reached through the skill ID segment "resolve",
+	// so a trailing segment is ignored the same way.
+	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}:          "handleSkillByID sends any path whose first segment is \"resolve\" to handleSkillsResolve, which ignores the rest",
+	{OperationID: "skill.resolve.github.project", Method: "POST", Pattern: "/api/v1/skills/resolve"}: "same as skill.resolve.local above",
+	{OperationID: "skill.resolve.github.public", Method: "POST", Pattern: "/api/v1/skills/resolve"}:  "same as skill.resolve.local above",
+	// A template or harness config file path may be nested, so a trailing
+	// segment on a file write names a new file below {path}.
+	{OperationID: "template.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:            "handleTemplateFiles takes everything after files/ as the file path, so the write creates the nested file",
+	{OperationID: "harnessconfig.update", Method: "PUT", Pattern: "/api/v1/harness-configs/{id}/files/{path}"}: "handleHarnessConfigFiles takes everything after files/ as the file path, so the write creates the nested file",
+	// handleAdminAccessConstraintPreviews (handlers_access_constraints.go)
+	// splits the path after the prefix into at most two parts and reads the
+	// job for any second part other than "result".
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}"}:        "a trailing segment on the job path is a second part other than \"result\", so the request answers the job read",
+	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}/result"}: "a trailing segment joins \"result\" into one second part that is not \"result\", so the request answers the job read",
 }
 
 // catalogHTTPEntryPoints returns every (operationID, EntryPoint) pair in
@@ -447,6 +420,65 @@ func TestLiveInventoryExclusionsNotStale(t *testing.T) {
 		if !live[key] {
 			t.Errorf("stale suffix-check exclusion: operation %q method %q pattern %q does not match any current catalog HTTP entry point",
 				key.OperationID, key.Method, key.Pattern)
+		}
+	}
+}
+
+// TestLiveInventoryExclusionsNoRepeatedKeys parses this file,
+// authzop_catalog_method_inventory_test.go, and fails if a key appears more
+// than once in the composite literal of positiveCheckExclusions,
+// controlCheckExclusions or suffixCheckExclusions, or if one of those
+// variables is not found. Go accepts a repeated struct key in a map
+// literal (the later entry wins), so the maps themselves cannot report
+// one.
+func TestLiveInventoryExclusionsNoRepeatedKeys(t *testing.T) {
+	const file = "authzop_catalog_method_inventory_test.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	names := []string{"positiveCheckExclusions", "controlCheckExclusions", "suffixCheckExclusions"}
+	literals := make(map[string]*ast.CompositeLit)
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			if lit, ok := vs.Values[0].(*ast.CompositeLit); ok {
+				literals[vs.Names[0].Name] = lit
+			}
+		}
+	}
+	for _, name := range names {
+		lit, ok := literals[name]
+		if !ok {
+			t.Errorf("%s: no composite-literal declaration of %s found", file, name)
+			continue
+		}
+		seen := make(map[string]token.Position)
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				t.Errorf("%s: %s: element at %s is not a key-value pair", file, name, fset.Position(elt.Pos()))
+				continue
+			}
+			var b strings.Builder
+			if err := printer.Fprint(&b, fset, kv.Key); err != nil {
+				t.Fatalf("%s: %s: print key at %s: %v", file, name, fset.Position(kv.Key.Pos()), err)
+			}
+			key := b.String()
+			pos := fset.Position(kv.Key.Pos())
+			if first, dup := seen[key]; dup {
+				t.Errorf("%s: %s: key %s at line %d repeats the key at line %d", file, name, key, pos.Line, first.Line)
+				continue
+			}
+			seen[key] = pos
 		}
 	}
 }

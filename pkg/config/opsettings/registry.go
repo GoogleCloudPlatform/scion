@@ -111,6 +111,16 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// kubernetesBlockServiceAccountSchema mirrors kubernetes_block_service_account
+// in settings-v1.schema.json: empty, or a Kubernetes ServiceAccount name.
+func kubernetesBlockServiceAccountSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":      "string",
+		"pattern":   `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+		"maxLength": 253,
+	}
+}
+
 // profileCloneDepthSchema returns profileConfig.clone_depth from the
 // settings schema $defs, so the profiles section validates clone_depth
 // with the same rule as settings-v1.schema.json. It returns nil when the
@@ -541,6 +551,8 @@ func compileSchemas() {
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
 				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_delivery_max_bytes":   map[string]interface{}{"type": "integer", "minimum": 0},
+				"attachment_inbox_retention_days": map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},
@@ -698,7 +710,6 @@ func compileSchemas() {
 					"default_template":       map[string]interface{}{"type": "string"},
 					"default_harness_config": map[string]interface{}{"type": "string"},
 					"image_registry":         map[string]interface{}{"type": "string"},
-					"env":                    map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 					"volumes":                map[string]interface{}{"type": "array"},
 					"resources":              map[string]interface{}{"type": "object"},
 					"harness_overrides": map[string]interface{}{
@@ -728,7 +739,21 @@ func compileSchemas() {
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
+					// GCP identity "block" on Kubernetes.
+					"kubernetes_block_service_account": kubernetesBlockServiceAccountSchema(),
+
+					// Kubernetes placement defaults (ptone/scion#5085); shapes
+					// only.
+					"node_selector":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"tolerations":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+					"runtime_class_name": map[string]interface{}{"type": "string"},
 				},
+				// Each property is a V1ProfileConfig field (pinned by
+				// TestProfilesSectionSchema_MatchesProfileConfig). A key the
+				// struct has no field for would pass validation and then be
+				// dropped on decode, as profiles.<name>.env was
+				// (ptone/scion#3048).
+				"additionalProperties": false,
 			},
 		},
 		// harness_configs: map-of-objects — keys are harness config names,

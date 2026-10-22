@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -94,6 +95,12 @@ type HeartbeatService struct {
 	// never constructed here.
 	defaultRuntime scionrt.Runtime
 
+	// nodeImageRegistry is this broker's SCION_IMAGE_REGISTRY, read once
+	// when the service is constructed and reported in every heartbeat's
+	// capabilities (StaticCapabilities), so the hub resolves dispatches to
+	// this broker with its node env (ptone/scion#3916).
+	nodeImageRegistry string
+
 	// listingDeadline bounds how long a heartbeat waits for the agent
 	// listing of its runtime targets (default plus auxiliary). A target not
 	// listed in time is reported incomplete, so liveness and the other
@@ -145,6 +152,19 @@ type HeartbeatService struct {
 	// no profile-scoped data: no DefaultProfile, ProfileAttach or
 	// ProfileSAMappings, and no per-agent profile.
 	flat bool
+
+	// presentation is a flat instance's FC4-a presentation
+	// (config.PresentInstance(...).API()), computed once: the instance entry
+	// is fixed for the process life. Every flat heartbeat carries it in
+	// full, with presentationTargetID (the instance's runtime target ID),
+	// presentationEpoch (the instance server's start time, Unix
+	// nanoseconds) and the next value of nextPresentationSeq (the server's
+	// process-wide counter), so the Hub stores it only when this process's
+	// fence advances. Nil (legacy) omits all four.
+	presentation         *api.RuntimeTargetPresentation
+	presentationTargetID string
+	presentationEpoch    int64
+	nextPresentationSeq  func() int64
 
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
@@ -213,6 +233,8 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 		manager:         manager,
 		projectFilter:   projectFilter,
 		log:             log,
+		// Read once at construction (broker start).
+		nodeImageRegistry: config.ImageRegistryFromEnv(),
 	}
 }
 
@@ -431,7 +453,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is
 		// sent at registration (StaticCapabilities), plus TemplateTiers below.
-		Capabilities: heartbeatCapabilities(defaultRuntime),
+		Capabilities: heartbeatCapabilities(defaultRuntime, s.nodeImageRegistry),
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
@@ -447,6 +469,12 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			v := *name
 			heartbeat.DefaultProfile = &v
 		}
+	}
+	if s.flat && s.presentation != nil && s.nextPresentationSeq != nil {
+		heartbeat.RuntimeTargetPresentation = s.presentation
+		heartbeat.PresentationTargetID = s.presentationTargetID
+		heartbeat.PresentationEpoch = s.presentationEpoch
+		heartbeat.PresentationSeq = s.nextPresentationSeq()
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that
@@ -897,8 +925,8 @@ func (s *HeartbeatService) ForceHeartbeat(ctx context.Context) error {
 // heartbeatCapabilities is the capability set a heartbeat reports: the
 // static set (StaticCapabilities, also sent at registration) plus
 // TemplateTiers, which only the heartbeat and the info endpoint report.
-func heartbeatCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
-	c := StaticCapabilities(rt)
+func heartbeatCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient.BrokerCapabilities {
+	c := StaticCapabilities(rt, nodeImageRegistry)
 	// This broker applies hub telemetry defaults and policy as separate
 	// tiers (ptone/scion#4218).
 	c.TemplateTiers = true

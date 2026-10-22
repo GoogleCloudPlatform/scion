@@ -89,6 +89,46 @@ describe('mergeChanged', () => {
     expect(result).toBe(held);
   });
 
+  it('an upsert whose object is a content-identical copy keeps the held array and object', () => {
+    // The held copy can be a different reference from the store's (an
+    // optimistic patch the store later confirms with the same values).
+    const labels = { team: 'x' };
+    const a1 = agent('a1', { labels });
+    const a2 = agent('a2');
+    const held = [a1, a2];
+    const result = mergeChanged(held, changeOf({ upserted: ['a1', 'a2'] }), {
+      getAgent: (id) => (id === 'a1' ? { ...a1 } : { ...a2 }),
+    });
+    expect(result).toBe(held);
+    expect(result[0]).toBe(a1);
+  });
+
+  it('a copy that changes one field, or adds or drops a key, is still applied', () => {
+    const a1 = agent('a1', { labels: { team: 'x' } });
+    const cases: Agent[] = [
+      { ...a1, labels: { team: 'x' } }, // equal content, new nested reference
+      { ...a1, phase: 'stopped' } as Agent,
+      { ...a1, taskSummary: 'new' } as Agent,
+    ];
+    const { labels: _dropped, ...withoutLabels } = a1;
+    cases.push(withoutLabels as Agent);
+    for (const next of cases) {
+      const held = [a1];
+      const result = mergeChanged(held, changeOf({ upserted: ['a1'] }), { getAgent: () => next });
+      expect(result).not.toBe(held);
+      expect(result[0]).toBe(next);
+    }
+  });
+
+  it('a content-identical upsert keeps the held object when it only carried capabilities forward', () => {
+    const caps: Capabilities = { actions: ['stop'] };
+    const held = [agent('a1', { _capabilities: caps })];
+    const result = mergeChanged(held, changeOf({ upserted: ['a1'] }), {
+      getAgent: () => agent('a1'), // same fields, no _capabilities of its own
+    });
+    expect(result).toBe(held);
+  });
+
   it('applies a delete, dropping the row and changing the array identity', () => {
     const a1 = agent('a1');
     const a2 = agent('a2');

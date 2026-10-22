@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
@@ -293,7 +294,7 @@ func TestAttachEndProber_LookupStillResolves_RealServerListErrors(t *testing.T) 
 		auxMgr := &mockManager{listErr: errors.New("docker ps: connection refused")}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		srv := New(DefaultServerConfig(), defaultMgr, rt)
+		srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 		srv.auxiliaryRuntimesMu.Lock()
 		srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
 		srv.auxiliaryRuntimesMu.Unlock()
@@ -307,7 +308,7 @@ func TestAttachEndProber_LookupStillResolves_RealServerListErrors(t *testing.T) 
 	t.Run("primary manager fallback List error", func(t *testing.T) {
 		mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(DefaultServerConfig(), mgr, rt)
+		srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 		p := &attachEndProber{lookup: srv, slug: "ghost", projectID: "some-project"}
 		if got := p.lookupStillResolves(context.Background()); got != lookupUnknown {

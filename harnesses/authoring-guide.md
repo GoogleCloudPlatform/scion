@@ -51,6 +51,7 @@ list|show|upgrade|reset|sync|pull`.
   scion_harness.py   # vendored shared library imported by provision.py
   capture_auth.py    # thin shim: sys.exit(scion_harness.capture_auth_main())
   dialect.yaml       # optional — data-driven hook-event dialect
+  agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -61,7 +62,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -364,6 +365,30 @@ one for anything but `yes`). What each signals:
   reflects whether project-scoped servers are honored or demoted to global.
 - **resume** — whether `resume_flag` genuinely restores a session.
 
+**Agent Plugins support goes in `agent-plugins.yaml`, not in `capabilities`.**
+The bundle file sits next to `config.yaml` and has the same shape as a
+capability field:
+
+```yaml
+support: "partial"
+reason: "Native install via local marketplace; Codex skips sse MCP servers"
+```
+
+It declares what this bundle's `provision.py` can install, so it is refreshed
+together with the provisioner scripts on seeding and `harness-config upgrade`.
+The harness reports it as the `agent_plugins` capability. A bundle without the
+file (and without the deprecated key below) has no plugin support: Scion
+reports it as predating Agent Plugins. An unreadable or invalid file (including
+a support level this Scion version does not know) is a warning, not a load
+error: Agent Plugins is treated as `no` with the error as the reason. Every
+bundled harness must ship a valid file; CI parses them strictly.
+`capabilities.agent_plugins` in `config.yaml` is deprecated: it is still read
+when the bundle has no `agent-plugins.yaml`, but hubs, brokers and CLIs built
+before Agent Plugins reject `config.yaml` with that key
+(ptone/scion#5196). The same applies to any new key: binaries already deployed
+validate `config.yaml` against their own schema, so data they do not need to
+read belongs in a separate bundle file.
+
 ### Auth
 
 ```yaml
@@ -405,7 +430,9 @@ auth:
   - `required`: broker must source the secret before dispatch (vs.
     documentary).
 - `autodetect` — maps discovered env vars / file secrets to an auth type when
-  the user didn't select one explicitly.
+  the user didn't select one explicitly. A file credential wins over an env
+  credential, except that when `default_type` is `api-key`, an env API key
+  wins over a `vertex-ai` file credential (for example `gcloud-adc`).
 
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.

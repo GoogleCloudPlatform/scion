@@ -90,12 +90,12 @@ func TestRunServerStart_HubInitFailureReturnsAndRunsDeferredCleanups(t *testing.
 	logs := captureStdLog(t)
 
 	logCleanupRan := false
-	initServerLoggingFn = func(*cobra.Command) ([]func(), *slog.Logger, *slog.Logger, error) {
-		return []func(){func() { logCleanupRan = true }}, slog.Default(), slog.Default(), nil
+	initServerLoggingFn = func(*cobra.Command) ([]func(), *slog.Logger, *slog.Logger, *slog.Logger, error) {
+		return []func(){func() { logCleanupRan = true }}, slog.Default(), slog.Default(), slog.Default(), nil
 	}
 	initErr := errors.New("operational settings init failed after retries (driver=sqlite): injected")
 	hubCalls := 0
-	initHubServerFn = func(context.Context, *config.GlobalConfig, store.Store, *ent.Client, hub.HubEndpoints, string, []string, bool, string, *slog.Logger, *slog.Logger, string, *scionplugin.Manager, secret.SecretBackend) (*hub.Server, error) {
+	initHubServerFn = func(context.Context, *config.GlobalConfig, store.Store, *ent.Client, hub.HubEndpoints, string, []string, bool, string, *slog.Logger, *slog.Logger, *slog.Logger, string, *scionplugin.Manager, secret.SecretBackend) (*hub.Server, error) {
 		hubCalls++
 		return nil, initErr
 	}

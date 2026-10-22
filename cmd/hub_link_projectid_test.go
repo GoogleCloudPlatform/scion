@@ -85,7 +85,7 @@ func TestRunHubLink_RelinkWithLinkedGlobalKeepsProjectHubID(t *testing.T) {
 	t.Chdir(repo)
 
 	server, alreadyLinked := nameKeepingHub(t)
-	require.NoError(t, config.UpdateSetting(scionDir, "hub.endpoint", server.URL, false))
+	useHubForTest(t, server.URL)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	projectPath, globalMode, outputFormat, autoConfirm = "", false, "json", true
 
@@ -122,8 +122,8 @@ func TestPromptHubRegistration_AlwaysWritesHubProjectID(t *testing.T) {
 	const localID = "0b5e6a1c-0000-4000-8000-0000000000c1"
 	clearHubEnvForUnlinkTest(t)
 	t.Setenv("SCION_HUB_PROJECT_ID", "")
-	origYes, origNoHub := autoConfirm, noHub
-	t.Cleanup(func() { autoConfirm, noHub = origYes, origNoHub })
+	origYes := autoConfirm
+	t.Cleanup(func() { autoConfirm = origYes })
 
 	server, _ := nameKeepingHub(t)
 	home := t.TempDir()
@@ -144,7 +144,8 @@ func TestPromptHubRegistration_AlwaysWritesHubProjectID(t *testing.T) {
 	require.NotEqual(t, scionDir, extDir, "split storage puts settings outside the repo")
 	t.Chdir(repo)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
-	autoConfirm, noHub = true, false
+	autoConfirm = true
+	useHubForTest(t, server.URL)
 
 	var err error
 	captureStderr(t, func() {
@@ -190,6 +191,7 @@ func TestRunHubLink_RefusesGlobalFallbackInGitRepo(t *testing.T) {
 	gitRun(t, repo, "init", "-q")
 	t.Chdir(repo)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	useHubForTest(t, server.URL)
 	projectPath, globalMode, outputFormat, autoConfirm = "", false, "json", true
 
 	before, err := os.ReadFile(globalSettings)

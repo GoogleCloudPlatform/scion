@@ -36,9 +36,9 @@ import (
 func TestStartHub400OnCreate_NoUsage(t *testing.T) {
 	saveCLIModeState(t)
 	restoreAllSilenceUsage(t)
-	origProjectPath, origNoHub := projectPath, noHub
+	origProjectPath := projectPath
 	t.Cleanup(func() {
-		projectPath, noHub = origProjectPath, origNoHub
+		projectPath = origProjectPath
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
@@ -77,7 +77,6 @@ func TestStartHub400OnCreate_NoUsage(t *testing.T) {
 	resetCommandFlags(t, startCmd)
 	t.Cleanup(func() { resetCommandFlags(t, startCmd) })
 	projectPath = setupEnvProject(t, tmpHome, server.URL)
-	noHub = false
 
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)

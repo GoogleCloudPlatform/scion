@@ -75,7 +75,7 @@ func (c *CLIContext) SetLinkEntry(hubName string, p KnownProject, localPath stri
 		return fmt.Errorf("no hub named %q", hubName)
 	}
 	if p.ID == "" {
-		return errors.New("project has no ID")
+		return ErrLinkNoProjectID
 	}
 	if localPath == "" {
 		return errors.New("link has no local path")
@@ -106,8 +106,47 @@ func (c *CLIContext) SetLinkEntry(hubName string, p KnownProject, localPath stri
 	return nil
 }
 
+// ErrLinkNoProjectID is returned for a link entry without a project ID.
+var ErrLinkNoProjectID = errors.New("project has no ID")
+
+// LinkPathToHubURL links the project at localPath to the hub at endpoint,
+// adding a hub entry for it as EnsureHubURL does. A link entry that already
+// points at that hub is kept as it is (with its project ID); otherwise the
+// link entry for localPath is replaced by one for projectID on that hub.
+// It returns the hub entry's name.
+func (c *CLIContext) LinkPathToHubURL(endpoint, baseName, projectID, localPath string, now time.Time) (name string, created bool, err error) {
+	if err := ValidateHubURL(endpoint); err != nil {
+		return "", false, err
+	}
+	if localPath == "" {
+		return "", false, errors.New("link has no local path")
+	}
+	if p, h := c.LinkEntryFor(localPath); h != nil && NormalizeEndpoint(h.Endpoint) == NormalizeEndpoint(endpoint) {
+		return p.Hub, false, nil
+	}
+	if projectID == "" {
+		return "", false, ErrLinkNoProjectID
+	}
+	name, created = c.EnsureHub(endpoint, baseName)
+	if err := c.SetLinkEntry(name, KnownProject{ID: projectID}, localPath, now); err != nil {
+		return "", false, err
+	}
+	return name, created, nil
+}
+
+// ProjectLinkID returns the ID a link entry records for the project at
+// projectDir: its hub project ID, else its project ID, read from the
+// project's own settings files only (see projectHubLinkSettings; the
+// global settings and the environment do not apply). It returns "" when
+// they hold neither.
+func ProjectLinkID(projectDir string) string {
+	return projectHubLinkSettings(projectDir).ProjectID
+}
+
 // RemoveLinkEntry removes the link entry for localPath and reports whether
-// there was one. Entries from other sources are kept.
+// there was one. Entries from other sources are kept. A removed link entry
+// marks the path as imported (see LinkEntryForProject), so the one-time
+// import of a project's settings never brings the link back.
 func (c *CLIContext) RemoveLinkEntry(localPath string) bool {
 	if localPath == "" {
 		return false
@@ -125,7 +164,28 @@ func (c *CLIContext) RemoveLinkEntry(localPath string) bool {
 	if len(c.Projects) == 0 {
 		c.Projects = nil
 	}
+	if removed {
+		c.markProjectImported(localPath, time.Now())
+	}
 	return removed
+}
+
+// UnlinkPath removes the link entry for localPath, as RemoveLinkEntry does,
+// and marks the path as imported even when there was no link entry, so the
+// one-time import of the project's settings never links it later. It
+// reports whether the context changed.
+func (c *CLIContext) UnlinkPath(localPath string, now time.Time) bool {
+	if localPath == "" {
+		return false
+	}
+	if c.RemoveLinkEntry(localPath) {
+		return true
+	}
+	if c.ProjectImported(localPath) {
+		return false
+	}
+	c.markProjectImported(localPath, now)
+	return true
 }
 
 // LinkEntryFor returns the link entry for localPath and its hub entry, or

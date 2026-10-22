@@ -117,6 +117,7 @@ function agent(i) {
     detached: false,
     generation: 1,
     harnessConfig: 'default-claude',
+    harnessVendor: 'anthropic',
     id,
     labels: { bench: 'true', 'bench-seq': String(i), 'bench-tier': large ? 'large' : 'small' },
     lastActivityEvent: ZERO_TIME,
@@ -168,8 +169,9 @@ export function buildFixture() {
       body: {
         experiments: {
           'hub.artifacts': false,
-          'hub.chat_thread_groups': false,
-          'web.agent_edit': false,
+          'hub.attachment_artifacts': false,
+          'hub.flat_runtime_brokers': false,
+          'web.agent_edit': true,
           'web.chat_scheduled_send': false,
           'web.gcs_links': false,
         },
@@ -216,6 +218,8 @@ export function buildFixture() {
         testHubAdmin: false,
         testSuperAdmin: false,
         testIdentityWebSessions: false,
+        testIdentityWebSessionsUnavailableReason: '',
+        testAdminWebSessions: false,
         testIssuerAudience: '',
       },
     },

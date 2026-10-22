@@ -429,6 +429,8 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
+	// assignDeactErr fails DeactivateAgentServiceAccountAssignments.
+	assignDeactErr error
 	// outerDeleteErr fails DeleteAgent outside a transaction, and every
 	// FinalizeAgentDeletion (the conditional compensation's row delete).
 	outerDeleteErr error
@@ -2791,6 +2793,13 @@ func (s *createTxFaultStore) DeactivateDelegationEdgesForDelegate(ctx context.Co
 	return s.Store.DeactivateDelegationEdgesForDelegate(ctx, delegateType, delegateID, d)
 }
 
+func (s *createTxFaultStore) DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
+	if s.assignDeactErr != nil {
+		return 0, s.assignDeactErr
+	}
+	return s.Store.DeactivateAgentServiceAccountAssignments(ctx, agentID, d)
+}
+
 // createWithRequestID issues the fixture's create with request metadata
 // carrying requestID, as the request-log middleware installs it, and
 // returns the response and the compensation-failure records logged while
@@ -3679,7 +3688,7 @@ var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "projectSlug", "labels",
 	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
-	"_capabilities", "_messageability", "deletion",
+	"_capabilities", "_messageability", "deletion", "harnessVendor", "modelSize",
 }
 
 func rawKeys[V any](m map[string]V) []string {

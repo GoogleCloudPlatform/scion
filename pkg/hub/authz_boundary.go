@@ -791,13 +791,23 @@ func closureKeys(refs []store.PrincipalRef) (directKey string, groupKeys map[str
 // users rows for federated principals. Once one does, revisit this arm and
 // require an active row, as for local users.
 func (a *AuthzService) requireActiveUser(ctx context.Context, principal PrincipalContext) error {
-	normalizedType := NormalizePrincipalType(string(principal.Kind))
-	if normalizedType != store.RoleBindingPrincipalUser {
+	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
 		return nil
 	}
-	user, err := a.store.GetUser(ctx, principal.ID)
+	_, err := checkUserAccount(ctx, a.store, principal)
+	return err
+}
+
+// activeUserPredicate is requireActiveUser's decision on an already
+// performed users-row lookup (user, err from GetUser(principal.ID)). It is
+// shared with decide's account-status gate (principalStatusGate), so both
+// apply exactly the same rule. Principals that are not users pass.
+func activeUserPredicate(principal PrincipalContext, user *store.User, err error) error {
+	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
+		return nil
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
+		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %w", ErrProjectAccessDenied, err))
 	}
 	if principal.Kind == PrincipalKindFederatedUser {
 		if err != nil {
@@ -1147,6 +1157,22 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	}
 	if applies, reviewed := permissions.AppliesToExistingProjectTarget(permissionID); !reviewed || !applies {
 		return false, nil
+	}
+	// Test-admin policy: system authority never admits an admin-kind test
+	// identity for a deny-classified permission (for example secret.use in
+	// the agent material precheck and agent standing: an agent rooted at a
+	// test super-admin is admitted only where its root holds a project
+	// membership). The kind is read through kindForPrincipal; a read error
+	// fails closed.
+	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
+		caged, err := a.principalIsCagedTestAdmin(ctx, principal.ID)
+		if err != nil {
+			return false, projectAccessLookupFault(fmt.Errorf("%w: principal kind lookup failed: %v", ErrProjectAccessDenied, err))
+		}
+		if caged {
+			a.reportTestAdminPolicyDenial(ctx, principal.ID, "permission", permissionID+" (system authority)")
+			return false, nil
+		}
 	}
 	if err := validateRealProjectClass(permissionID, class); err != nil {
 		return false, err

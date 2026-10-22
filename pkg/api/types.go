@@ -540,6 +540,11 @@ type ScionConfig struct {
 	// Skills declares skill references to resolve at provision time.
 	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty" koanf:"skills"`
 
+	// AgentPlugins declares Agent Plugins bundles to install natively into the
+	// harness (experiment hub.agent_plugins). Phase 1 resolves only
+	// template-relative paths.
+	AgentPlugins []AgentPluginReference `json:"agent_plugins,omitempty" yaml:"agent_plugins,omitempty" koanf:"agent_plugins"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
@@ -587,6 +592,18 @@ type ScionConfig struct {
 	// carry it). A broker that ignores it starts the agent exactly as before
 	// the field existed.
 	ClearedFields []string `json:"cleared_fields,omitempty" yaml:"-"`
+
+	// ChangedFields lists the provision-rendered config keys (see
+	// RerenderableConfigKeys) the agent's owner changed after the agent was
+	// created. Like ClearedFields, the Hub records it on the agent's live
+	// inline config and sends it with every start; a Runtime Broker that
+	// advertises the changedFields capability re-renders the files
+	// provisioning wrote for each listed key (and for each cleared one,
+	// see RerenderConfigKeys) before the start, and never writes the list
+	// itself to disk. It is wire-only: it is ignored if a template sets it
+	// (yaml:"-", and config.MergeScionConfig does not carry it). A broker
+	// that ignores it starts the agent exactly as before the field existed.
+	ChangedFields []string `json:"changed_fields,omitempty" yaml:"-"`
 
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
@@ -684,9 +701,11 @@ type AgentInfo struct {
 	// from the project directory. The Docker, Podman, Apple and Kubernetes
 	// List fill it from the container's scion.project_id label, which
 	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
-	// state entry, which records the same value. Cloud Run List leaves it
-	// empty. The two sources can differ; callers that need the Hub project
-	// ID should read the scion.project_id label (ptone/scion#3020).
+	// state entry, which records the same value, and Cloud Run List from
+	// the instance's GCP-sanitized scion_project_id label (a Hub project ID
+	// is unchanged by the sanitizing). The two sources can differ; callers
+	// that need the Hub project ID should read the scion.project_id label
+	// (ptone/scion#3020).
 	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
@@ -699,7 +718,7 @@ type AgentInfo struct {
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
+	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration
@@ -803,6 +822,16 @@ type SkillReference struct {
 	// Scope indicates the injection source of this skill reference.
 	// Valid values: "hub", "user", "project", "template", "platform", "" (empty = lowest precedence).
 	// Used for destination-name collision resolution: higher-scope skills win.
+	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
+}
+
+// AgentPluginReference declares an Agent Plugins bundle to install natively.
+// Phase 1: Path is template-relative only (relative to the directory of the
+// template whose scion-agent.yaml declares it).
+type AgentPluginReference struct {
+	Path     string `json:"path" yaml:"path" koanf:"path"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
+	// Scope is annotated by MergeScionConfig ("template"); informational in Phase 1.
 	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
 }
 
@@ -1442,6 +1471,16 @@ type StartOptions struct {
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
 
+	// ResolvedPlacement is the Kubernetes placement (node selector,
+	// tolerations, runtime class) the agent runtime server resolved for this
+	// start from its settings (ptone/scion#5085), and PlacementResolved
+	// records that the server ran that resolution (ResolvedPlacement may
+	// then be nil: nothing configured, or not a Kubernetes runtime).
+	// Manager.Start applies it over the agent's own kubernetes block with
+	// config.ApplyPlacement. Never persisted: recomputed on every start.
+	ResolvedPlacement *ResolvedPlacement `json:"-"`
+	PlacementResolved bool               `json:"-"`
+
 	// HostCredentialFiles is set by a co-located workstation broker whose
 	// host-credential policy allows it (hub on loopback, dev auth,
 	// use_host_credentials on). In broker mode the agent manager then reads
@@ -1451,11 +1490,26 @@ type StartOptions struct {
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
 
+	// RerenderKeys are the provision-rendered config keys
+	// (RerenderableConfigKeys) whose files this start renders again before
+	// the container starts, from the hub inline config's ChangedFields and
+	// ClearedFields (RerenderConfigKeys). A key whose rendered result is
+	// unchanged since its last render is not written again. Set by the
+	// Runtime Broker; never persisted.
+	RerenderKeys []string
+
 	// TemplateEnvSource is a local template path (hydrated by the broker on a
 	// start or restart of an agent with a Hub template) used only to compute
 	// the template env fallback (ptone/scion#4524). Unlike Template, it never
 	// affects image, harness-config or agent config resolution.
 	TemplateEnvSource string
+
+	// MoveReincarnationID, on the provision of a forced move (the
+	// fresh-agent-dir expectation), is the move's reincarnation ID. The
+	// provision writes it into the agent directory it creates, as the move
+	// marker, before anything else; a rollback delete removes only
+	// directories marked with it.
+	MoveReincarnationID string
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

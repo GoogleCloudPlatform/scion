@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AGENT_CREATE_TRIGGERS,
   ALL_TRIGGERS,
   DEFAULT_TRIGGERS,
   defaultTriggersHint,
@@ -35,6 +36,7 @@ describe('triggerLabel', () => {
       'Limits Exceeded',
       'Stalled',
       'Error',
+      'Halted',
       'Deleted',
     ]);
   });
@@ -49,14 +51,22 @@ describe('triggerLabel', () => {
   });
 
   it('keeps the API trigger values unchanged', () => {
-    expect(DEFAULT_TRIGGERS).toEqual(['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED']);
+    expect(DEFAULT_TRIGGERS).toEqual([
+      'COMPLETED',
+      'WAITING_FOR_INPUT',
+      'LIMITS_EXCEEDED',
+      'STALLED',
+      'ERROR',
+      'HALTED',
+    ]);
+    expect(AGENT_CREATE_TRIGGERS).toEqual(DEFAULT_TRIGGERS);
   });
 });
 
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, or Limits Exceeded.'
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
     );
   });
 

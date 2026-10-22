@@ -68,14 +68,16 @@ type Manager interface {
 	// Start launches a new agent with the given configuration
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
 
-	// Stop terminates an agent, resolving agentID by slug (scoped by
-	// projectPath when given). runID, when non-empty, names the run the stop
+	// Stop terminates an agent, resolving agentID by slug (scoped to the
+	// project when projectPath or projectID is given; projectID, when set,
+	// is the ID entries are compared against, else the ID recorded at
+	// projectPath). runID, when non-empty, names the run the stop
 	// is for (ptone/scion#2550): only an entry labelled with that run (or a
 	// legacy entry with no run label) is stopped, and with no such entry
 	// Stop returns an error satisfying errors.Is(err, ErrStopRunNotFound)
 	// without stopping anything. An empty runID keeps the legacy behaviour,
 	// including the fallback that passes agentID to the runtime as-is.
-	Stop(ctx context.Context, agentID, projectPath, runID string) error
+	Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error
 
 	// StopTarget stops an agent the caller has already resolved to a
 	// specific runtime entry (ref.ID; ref.RunID is that entry's run ID). It
@@ -83,9 +85,9 @@ type Manager interface {
 	StopTarget(ctx context.Context, ref runtime.RunRef) error
 
 	// Delete terminates and removes an agent, resolving agentID by slug
-	// (scoped by projectPath when given). It fails closed when the slug is
+	// (scoped to the project as for Stop). It fails closed when the slug is
 	// ambiguous.
-	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
+	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error)
 
 	// DeleteTarget terminates and removes an agent the caller has already
 	// resolved to a specific runtime entry (ref.ID, may be empty for a
@@ -264,12 +266,21 @@ func NewManager(rt runtime.Runtime) Manager {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
+	mgr.msgBuffer.preDeliver = mgr.runPreDelivery
 	return mgr
 }
 
 func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
 	m.readyMemos.clear()
+}
+
+// projectScope returns the project name and project ID that scope a slug
+// lookup: the name of projectPath's project, and projectID when known, else
+// the ID recorded at projectPath (scopeProjectID). Both are "" when neither
+// is given.
+func projectScope(projectPath, projectID string) (name, id string) {
+	return resolveProjectName(projectPath), scopeProjectID(projectID, projectPath)
 }
 
 // resolveProjectName maps a project path to the project name used to scope a
@@ -284,41 +295,32 @@ func resolveProjectName(projectPath string) string {
 	return ""
 }
 
-// agentHasProjectInfo reports whether a runtime entry carries any project
-// identity (label or field) that can be compared against a requested project.
-func agentHasProjectInfo(a api.AgentInfo) bool {
-	return projectkeys.ProjectIDFromLabels(a.Labels) != "" ||
-		projectkeys.ProjectNameFromLabels(a.Labels) != "" ||
-		a.ProjectID != "" || a.Project != ""
-}
-
 // selectAgentTarget picks the single runtime entry that agentID refers to.
 //
-// When projectName is set, entries that carry project info must match it;
-// entries without any project info are accepted only when no entry with
-// matching project info exists (backward compatibility with pre-label
-// containers). It never falls back to an entry that is labelled for a
-// different project.
+// A request scoped to a project (projectName or projectID set) accepts
+// only entries of projectID (matchAgentProject): entries positively
+// identified as belonging to it win, and an entry with no project identity
+// (no project ID label or field; a project name label alone is not an
+// identity) is accepted only when no identified entry matches, and only if
+// it is a container whose recorded path identifies as projectID
+// (LegacyEntryInProject), the rule every project-scoped operation applies.
+// A scoped request without a projectID accepts nothing.
 //
 // It fails closed with an error when more than one distinct entry remains,
 // instead of silently acting on whichever one the runtime listed first
 // (ptone/scion#1819). found is false when nothing matches.
-func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (target api.AgentInfo, found bool, err error) {
+func selectAgentTarget(agents []api.AgentInfo, agentID, projectName, projectID string) (target api.AgentInfo, found bool, err error) {
 	var scoped, unlabeled []api.AgentInfo
 	for _, a := range agents {
 		if !agentMatchesName(a, agentID) {
 			continue
 		}
-		if projectName == "" {
+		switch {
+		case !matchAgentProject(a, projectName, projectID):
+		case projectName == "" && projectID == "", InProjectStrict(a, projectID):
 			scoped = append(scoped, a)
-			continue
-		}
-		if !agentHasProjectInfo(a) {
+		default:
 			unlabeled = append(unlabeled, a)
-			continue
-		}
-		if matchAgentProject(a, projectName, "") {
-			scoped = append(scoped, a)
 		}
 	}
 	candidates := scoped
@@ -382,7 +384,12 @@ func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 // is stopped (ptone/scion#2550).
 var ErrStopRunNotFound = errors.New("agent not found for the requested run")
 
-func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+// ErrStopTargetNotFound is returned by Stop when it is scoped to a project
+// (a non-empty projectPath or projectID) and no entry of that project holds the agent's
+// name. Nothing is stopped.
+var ErrStopTargetNotFound = errors.New("agent not found in the requested project")
+
+func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	// Resolve the agent name to a container ID so that runtimes which do
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
@@ -394,7 +401,8 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		if err != nil {
 			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
 		}
-		target, found, selErr := selectAgentTarget(filterAgentsByRun(agents, runID), agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath, projectID)
+		target, found, selErr := selectAgentTarget(filterAgentsByRun(agents, runID), agentID, name, id)
 		if selErr != nil {
 			return selErr
 		}
@@ -412,13 +420,24 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		return m.Runtime.Stop(ctx, ref)
 	}
 	if err == nil {
-		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath, projectID)
+		target, found, selErr := selectAgentTarget(agents, agentID, name, id)
 		if selErr != nil {
 			return selErr
 		}
 		if found {
 			return m.Runtime.Stop(ctx, runtime.RunRef{ID: runtime.AgentOperationID(target), RunID: target.RunID})
 		}
+	}
+	// A project-scoped stop that found no entry of its project never passes
+	// the bare name on: a runtime stops by name (a container or pod name
+	// that need not carry the project), so the name could stand for an
+	// entry the scoping above did not accept.
+	if projectPath != "" || projectID != "" {
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		return fmt.Errorf("agent '%s': %w", agentID, ErrStopTargetNotFound)
 	}
 	// Fallback: agentID may already be a container ID, or the list
 	// failed — pass it through directly. An owned manager never passes an
@@ -453,13 +472,44 @@ func filterAgentsByRun(agents []api.AgentInfo, runID string) []api.AgentInfo {
 	return legacy
 }
 
+// filterAgentsByExactRun keeps only the entries labelled with run runID.
+// Unlike filterAgentsByRun it never admits an unlabelled legacy entry: a
+// caller that deletes by run (a restarted broker removing what a dead launch
+// created) must not touch an entry it cannot prove belongs to that run.
+func filterAgentsByExactRun(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" {
+		return nil
+	}
+	var exact []api.AgentInfo
+	for _, a := range agents {
+		if a.RunID == runID {
+			exact = append(exact, a)
+		}
+	}
+	return exact
+}
+
+// SelectExactRunTarget picks the single runtime entry for agentName that is
+// labelled with run runID exactly, scoped to the project (ptone/scion#4668):
+// projectID, the ID the run was dispatched with, else the ID recorded at
+// projectPath (scopeProjectID), as Start scopes its pre-clean. The
+// dispatched ID comes first because the recorded path need not hold it (an
+// external project config dir records none; a checkout linked to an
+// existing hub project keeps its own local ID). Entries with no run label
+// or another run's label are never selected. found is false when none
+// matches; an ambiguous match is an error.
+func SelectExactRunTarget(agents []api.AgentInfo, agentName, projectPath, projectID, runID string) (target api.AgentInfo, found bool, err error) {
+	name, id := projectScope(projectPath, projectID)
+	return selectAgentTarget(filterAgentsByExactRun(agents, runID), agentName, name, id)
+}
+
 // StopTarget stops the runtime entry ref, which the caller has already
 // resolved; unlike Stop it performs no slug re-resolution.
 func (m *AgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return m.Runtime.Stop(ctx, ref)
 }
 
-func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	// 1. Check if container exists
 	// We use name filter if possible, but runtime.List might take map[string]string
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
@@ -471,7 +521,8 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	if err == nil {
 		// Resolve project name from projectPath (if provided) to scope the
 		// container lookup; refuse ambiguous matches rather than picking one.
-		entry, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath, projectID)
+		entry, found, selErr := selectAgentTarget(agents, agentID, name, id)
 		if selErr != nil {
 			return false, selErr
 		}
@@ -521,7 +572,10 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 
 	if deleteFiles {
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
-		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
+		// The Hub project ID in ctx, when the caller set one, is the one
+		// the agent was started with; delete resolves the agent's state
+		// directory with it, as lookup does.
+		branchDeleted, err := DeleteAgentFilesForHubProject(agentName, projectPath, api.HubProjectIDFromContext(ctx), removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
 		if errors.Is(err, ErrAgentProjectUnresolved) {
 			// No project directory: none of the agent's files remain
@@ -574,6 +628,9 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// Ctrl+C immediately to get the agent's attention, and the accompanying
 	// message (if any) should follow without delay.
 	if interrupt {
+		// Work the message needs in the container (its attachments) runs
+		// right before the text, on this immediate path too.
+		message += m.runPreDelivery(ctx, agentID, projectID, PreDeliveryFromContext(ctx))
 		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
 	}
 
@@ -595,7 +652,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// A failure handler on ctx (set by the runtime broker) is invoked if the
 	// buffered delivery later fails, so the hub can mark the message failed
 	// rather than leave it "dispatched" (#1820).
-	m.msgBuffer.SendWithFailureHandler(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx))
+	m.msgBuffer.SendWithHooks(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
 	return nil
 }
 
@@ -632,11 +689,11 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 		return nil
 	}
 	for _, a := range agents {
-		if !matchesAgentID(a, agentID) {
+		if !matchesAgentID(a, agentID) || (projectID != "" && !EntryInProject(a, projectID)) {
 			continue
 		}
 		switch state.Phase(a.Phase) {
-		case state.PhaseStopped, state.PhaseError:
+		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 			// Keep looking: another matching container may be running.
 		default:
 			return nil
@@ -1257,6 +1314,12 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, scope keysScope, a
 
 	var matches []api.AgentInfo
 	for _, a := range agents {
+		// A projectID scope accepts only entries of that project
+		// (EntryInProject), the rule every project-scoped operation
+		// applies, not just what the list filter returned.
+		if scope.projectID != "" && !EntryInProject(a, scope.projectID) {
+			continue
+		}
 		if matchesAgentID(a, agentSlug) {
 			matches = append(matches, a)
 		}
@@ -1560,6 +1623,12 @@ func (m *AgentManager) findMessageTargetCounted(ctx context.Context, agentID, pr
 	var target *api.AgentInfo
 	matches := 0
 	for _, a := range agents {
+		// With a projectID, only entries of that project count
+		// (EntryInProject), the rule every project-scoped operation
+		// applies, not just what the list filter returned.
+		if projectID != "" && !EntryInProject(a, projectID) {
+			continue
+		}
 		if matchesAgentID(a, agentID) {
 			matches++
 			if target == nil {

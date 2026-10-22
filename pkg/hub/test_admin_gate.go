@@ -17,14 +17,15 @@ package hub
 // Test admin tier gate (ptone/scion#4240, admin tier phase A0).
 //
 // The gate decides, once at process start, whether this hub may later issue
-// test identities that hold hub-admin (and, from phase A2, super-admin)
-// authority. Its inputs are deploy-time only:
+// test identities that hold hub-admin (and, with --test-mode=super-admin,
+// super-admin) authority. Its inputs are deploy-time only:
 //
 //	G1  test identities are on (implied by the level) and the hub has a
 //	    user store
 //	G2  --test-mode=admin:<id> with id == the resolved hub id
-//	G3  --test-mode=super-admin (REFUSED in this binary: the super-admin
-//	    kind needs the test-admin policy registry, phase A2)
+//	G3  --test-mode=super-admin, admitted only while the test-admin policy
+//	    classification of this binary is complete (TestAdminPolicyComplete,
+//	    test_admin_policy.go); requires G2
 //	G4  server.hub.class is exactly "test" (never writable through the API)
 //	G5  explicit --production is refused (--hosted is allowed)
 //	G6  the database carries a test_infra_marker row for this hub id
@@ -84,8 +85,12 @@ var (
 		"--test-mode requires a hub with a user store")
 	ErrTestAdminHubIDMismatch = testAdminGateErr("G2", "hub_id_mismatch",
 		"the hub id in --test-mode=<level>:<hub id> must equal this hub's resolved hub id")
+	ErrTestModeHubIDNotPinned = testAdminGateErr("G2", "hub_id_not_pinned",
+		"every --test-mode level but off requires an explicitly configured hub id: set server.hub.hub_id (or SCION_SERVER_HUB_HUBID) on every replica of this hub "+
+			"to the hub's CURRENT resolved id (the hub_id GET /healthz reports, or ~/.scion/hub-id), never a new value, which would re-scope its secrets, signing keys, hub-scoped env vars, storage prefix and test infrastructure marker; "+
+			"a hub id derived from the hostname, the persisted ~/.scion/hub-id file or K_SERVICE is refused")
 	ErrTestSuperAdminRequiresPolicyRegistry = testAdminGateErr("G3", "super_admin_requires_policy_registry",
-		"--test-mode=super-admin is refused: the test super-admin kind needs the test-admin policy registry, which this binary does not include (admin tier phase A2)")
+		"--test-mode=super-admin is refused: the test super-admin kind needs a complete test-admin policy classification in this binary")
 	ErrTestAdminHubClassNotTest = testAdminGateErr("G4", "hub_class_not_test",
 		`server.hub.class must be exactly "test"`)
 	ErrTestAdminProductionFlag = testAdminGateErr("G5", "production_flag",
@@ -128,8 +133,9 @@ const ErrCodeTestAdminRemoteBrokerRefused = "test_admin_tier_remote_broker_refus
 type TestAdminGateConfig struct {
 	// HubAdmin is true when --test-mode=admin passed validation.
 	HubAdmin bool
-	// SuperAdmin is true when --test-mode=super-admin was accepted. This
-	// binary always refuses it (G3); New refuses a config that sets it.
+	// SuperAdmin is true when --test-mode=super-admin was accepted (G3:
+	// only with a complete test-admin policy classification). It requires
+	// HubAdmin.
 	SuperAdmin bool
 	// HubID is the validated flag value; it equals ServerConfig.HubID.
 	HubID string
@@ -157,9 +163,15 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 	if !g.requested() {
 		return nil
 	}
+	if g.SuperAdmin {
+		if !g.HubAdmin {
+			return ErrTestAdminInconsistent
+		}
+		if err := TestAdminPolicyComplete(); err != nil {
+			return fmt.Errorf("%w: %v", ErrTestSuperAdminRequiresPolicyRegistry, err)
+		}
+	}
 	switch {
-	case g.SuperAdmin:
-		return ErrTestSuperAdminRequiresPolicyRegistry
 	case !cfg.EnableTestIdentities:
 		return ErrTestAdminRequiresTestIdentities
 	case !hasStore:
@@ -336,7 +348,8 @@ type testAdminSigningKeyClass struct {
 }
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
-// agent tokens, signed download URLs, artifact view capability URLs, list
+// agent tokens, signed download URLs, artifact view capability URLs,
+// attachment delivery capabilities, list
 // cursors, conduit stream grants and the web session cookie key. The OIDC
 // identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
@@ -345,6 +358,7 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "agent_token", KeyName: SecretKeyAgentSigningKey},
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
+		{Class: "attachment_delivery", KeyName: SecretKeyAttachmentDeliveryKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
 		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},
 		{Class: "web_session", KeyName: webSessionKeyName},
@@ -387,13 +401,15 @@ func (s *Server) emitTestAdminGateStart() error {
 	}
 	if err := s.testAdminAudit.emit(testAdminAuditEventGateStart, map[string]any{
 		"level":               "WARN",
-		"msg":                 "TEST ADMIN TIER ENABLED: this hub can issue test identities with hub-admin authority. Test hubs only.",
+		"msg":                 testAdminGateStartMessage(g.superAdmin),
+		"warning":             testModeSecretsWarning,
 		"kinds":               kinds,
 		"hub_id":              g.hubID,
 		"hub_class":           g.hubClass,
 		"marker_created_at":   markerAt,
 		"signing_key_sources": sources,
 		"federation":          "off",
+		"admin_web_sessions":  s.testAdminWeb.on,
 		"test_mode":           string(s.TestModeLevel()),
 		"preconditions":       s.testModePreconditions(),
 	}); err != nil {
@@ -572,4 +588,12 @@ func (s *Server) VerifyTestAdminFederationOff() error {
 		return fmt.Errorf("%w: a federation authenticator is installed", ErrTestAdminFederationConfigured)
 	}
 	return nil
+}
+
+// testAdminGateStartMessage is the startup banner text.
+func testAdminGateStartMessage(superAdmin bool) string {
+	if superAdmin {
+		return "TEST ADMIN TIER ENABLED: this hub can issue test identities with hub-admin and super-admin authority. Test hubs only."
+	}
+	return "TEST ADMIN TIER ENABLED: this hub can issue test identities with hub-admin authority. Test hubs only."
 }

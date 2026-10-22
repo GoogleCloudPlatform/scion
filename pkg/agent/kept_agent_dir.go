@@ -32,7 +32,7 @@ import (
 
 // Kept stale agent directories (ptone/scion#4742).
 //
-// handleAgentDirWithoutConfig keeps an agent directory that has no config
+// handleAgentDirWithoutConfigGuarded keeps an agent directory that has no config
 // file when its workspace may hold work, or when that cannot be checked.
 // Such a directory is treated like a soft-deleted agent: a marker file in it
 // records when it was first kept and why, and once the soft-delete retention
@@ -41,8 +41,9 @@ import (
 // the window is expected, not a failure.
 //
 // The removal does not inspect the workspace: it never runs git in it and
-// never calls DeleteAgentFiles. It uses removeAgentDirAndPruneWorktrees, as
-// the existing stale-directory removal does.
+// never calls DeleteAgentFiles. Once the agent files guard allows the
+// directory, it uses removeCheckedAgentDir, as the existing stale-directory
+// removal does, so only the agent's own worktree entry is removed from git.
 
 // keptAgentDirMarker is the marker file written into a kept agent directory.
 const keptAgentDirMarker = "kept-agent-dir.json"
@@ -205,7 +206,7 @@ func keptAgentDirExpired(agentDir string, retention time.Duration, now time.Time
 // in-dir home under agentDir and, when it lies outside agentDir, agentHome.
 // A home that cannot be read counts as holding data. A kept directory is
 // only ever recorded with empty homes; one that has home data since is left
-// to handleAgentDirWithoutConfig's home rules.
+// to handleAgentDirWithoutConfigGuarded's home rules.
 func keptAgentHomesEmpty(agentDir, agentHome string) bool {
 	homes := []string{filepath.Join(agentDir, "home")}
 	if agentHome != "" && !pathWithin(agentHome, agentDir) {
@@ -219,24 +220,33 @@ func keptAgentHomesEmpty(agentDir, agentHome string) bool {
 	return true
 }
 
-// purgeExpiredKeptAgentDir removes agentDir when keptAgentDirExpired holds
+// purgeExpiredKeptAgentDirGuarded removes agentDir when keptAgentDirExpired holds
 // for it and its homes are empty, and reports whether it did. agentHome is
 // the agent's home path (it may lie outside agentDir; it is checked, not
 // removed). The directory is first renamed to a unique name in the same
 // parent and checked again there, so a directory that another process
 // re-provisioned under the same name in the meantime (it has no marker) is
 // put back instead of removed.
-func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention time.Duration) bool {
+//
+// The agent files guard g must allow agentDir before it is moved.
+func purgeExpiredKeptAgentDirGuarded(g *agentFilesGuard, agentName, agentDir, agentHome string, retention time.Duration) bool {
 	now := keptAgentDirNow()
 	if _, ok := keptAgentDirExpired(agentDir, retention, now); !ok || !keptAgentHomesEmpty(agentDir, agentHome) {
+		return false
+	}
+	// The guard decides before anything moves; the directory is then moved
+	// and removed at the real location it checked (the tomb is a fresh name
+	// next to it, holding the same directory).
+	checked, err := g.check(agentDir)
+	if err != nil {
 		return false
 	}
 	suffix := make([]byte, 6)
 	if _, err := rand.Read(suffix); err != nil {
 		return false
 	}
-	tomb := filepath.Join(filepath.Dir(agentDir), keptAgentDirPurgePrefix+hex.EncodeToString(suffix))
-	if err := os.Rename(agentDir, tomb); err != nil {
+	tomb := filepath.Join(filepath.Dir(checked), keptAgentDirPurgePrefix+hex.EncodeToString(suffix))
+	if err := os.Rename(checked, tomb); err != nil {
 		// Gone already, or not ours to move: leave it.
 		return false
 	}
@@ -251,27 +261,32 @@ func purgeExpiredKeptAgentDir(agentName, agentDir, agentHome string, retention t
 		ok = keptAgentHomesEmpty(tomb, extHome)
 	}
 	if !ok {
-		if err := os.Rename(tomb, agentDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := os.Rename(tomb, checked); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("GetAgent: could not restore an agent directory moved for a kept-directory check",
 				"agent", agentName, "agent_dir", agentDir, "moved_to", tomb, "error", err)
 		}
 		return false
 	}
-	removeAgentDirAndPruneWorktrees(tomb, filepath.Join(tomb, "workspace"), true)
+	// git registered the worktree under the original path, not the tomb's,
+	// so that is the entry to remove. It is left alone if a directory has
+	// reappeared there (a re-provisioned agent).
+	removeCheckedAgentDir(tomb, filepath.Join(agentDir, "workspace"))
 	slog.Info("GetAgent: removed kept agent directory after the soft-delete retention window",
 		"agent", agentName, "agent_dir", agentDir, "kept_at", rec.KeptAt,
 		"reason", rec.Reason, "retention", retention)
 	return true
 }
 
-// sweepExpiredKeptAgentDirs removes the expired kept directories in
+// sweepExpiredKeptAgentDirsGuarded removes the expired kept directories in
 // agentsRoot other than skipName's (GetAgent handles that one itself).
 // homeOf returns an agent's home path. Only plain directories holding a
 // marker are considered. With no retention window (0 or unset) it returns
 // before reading agentsRoot.
 // Entries named like a directory being removed are skipped: they may belong
 // to another process's removal in progress.
-func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name string) string) {
+//
+// guardFor gives each agent's files guard.
+func sweepExpiredKeptAgentDirsGuarded(agentsRoot, skipName string, homeOf func(name string) string, guardFor func(name string) *agentFilesGuard) {
 	retention := keptAgentDirRetention()
 	if retention <= 0 {
 		return
@@ -290,6 +305,6 @@ func sweepExpiredKeptAgentDirs(agentsRoot, skipName string, homeOf func(name str
 		}
 	}
 	for _, name := range candidates {
-		purgeExpiredKeptAgentDir(name, filepath.Join(agentsRoot, name), homeOf(name), retention)
+		purgeExpiredKeptAgentDirGuarded(guardFor(name), name, filepath.Join(agentsRoot, name), homeOf(name), retention)
 	}
 }

@@ -40,6 +40,7 @@ var validTriggers = map[string]bool{
 	store.LifecycleHookTriggerSuspended: true,
 	store.LifecycleHookTriggerStopped:   true,
 	store.LifecycleHookTriggerError:     true,
+	store.LifecycleHookTriggerHalted:    true,
 }
 
 // validActionTypes is the set of action types supported in v1.
@@ -184,7 +185,7 @@ func ValidateHook(
 	if !validTriggers[hook.Trigger] {
 		errs = append(errs, FieldError{
 			Field:   "trigger",
-			Message: fmt.Sprintf("must be one of: running, suspended, stopped, error; got %q", hook.Trigger),
+			Message: fmt.Sprintf("must be one of: running, suspended, stopped, error, halted; got %q", hook.Trigger),
 		})
 	}
 
@@ -502,6 +503,16 @@ func validateExecutionIdentity(
 				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
 			})
 		}
+	}
+
+	// A broker host service account record is used only through GCP
+	// identity passthrough translation; it is never a direct reference.
+	if store.IsHostSATranslationRecord(sa) {
+		errs = append(errs, FieldError{
+			Field: "executionIdentity",
+			Message: fmt.Sprintf("GCP service account %q is a broker host service account used for GCP identity "+
+				"passthrough on sandbox profiles and cannot be used as a hook execution identity", sa.Email),
+		})
 	}
 
 	// --- caller permission (actAs) ---

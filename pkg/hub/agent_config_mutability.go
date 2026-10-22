@@ -43,7 +43,10 @@ import (
 //     values), so a clear only takes effect at the next reincarnation.
 //   - T2, provision-rendered: rendered into files when the agent is
 //     provisioned, so only a reincarnation (which reprovisions) applies a
-//     change (system prompt, agent instructions, skills, services).
+//     change (system prompt, agent instructions, skills, services) --
+//     unless the agent's broker re-renders the key at start
+//     (brokerStartSupport, the changedFields capability): then an edit of
+//     an agent with no container takes effect at the next start.
 //   - T3, principal: changes the agent's authority or identity; applied only
 //     by an explicit reincarnation, authorized against the requester
 //     (role, GCP identity).
@@ -117,6 +120,7 @@ const (
 	editReasonImmutable      = "Fixed when the agent was created; no transition applies a change."
 	editReasonWorkspace      = "The workspace is provisioned when the agent is created; no transition applies a change."
 	editReasonInternal       = "Managed by Scion; not user-editable."
+	editReasonTemplatePlugin = "Declared by the template; change the template's agent_plugins and reincarnate the agent."
 	editReasonDeleted        = "The agent is deleted."
 	editReasonNotOnResume    = "The task is not sent again when a suspended agent resumes."
 	editReasonRoleCreated    = "The role cannot change before the first start. Delete and recreate the agent, or reincarnate it after it has started."
@@ -157,7 +161,9 @@ var agentEditFields = []agentEditField{
 	{Key: "config.task", Tier: EditTierContainer, NotOnResume: true},
 	{Key: "explicitTimezone", Tier: EditTierContainer, AnyPhase: true},
 
-	// T2: rendered at provision; applied only by a reincarnation.
+	// T2: rendered at provision; applied only by a reincarnation, or at
+	// the next start by a broker that re-renders the key
+	// (brokerStartSupport.appliesAtStart; not secrets).
 	{Key: "config.system_prompt", Tier: EditTierProvision},
 	{Key: "config.agent_instructions", Tier: EditTierProvision},
 	{Key: "config.skills", Tier: EditTierProvision},
@@ -178,6 +184,10 @@ var agentEditFields = []agentEditField{
 	{Key: "config.branch", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.clone_depth", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.explicit_workspace", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
+	// Provisioning resolves only each template's own agent_plugins (inline
+	// entries are ignored with a start warning), so an edit of the agent's
+	// copy would do nothing. T2 once inline or hub-sourced plugins exist.
+	{Key: "config.agent_plugins", Tier: EditTierImmutable, LockedReason: editReasonTemplatePlugin},
 	{Key: "config.empty_per_agent_workspace", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.harness", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "config.harness_config", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
@@ -188,6 +198,9 @@ var agentEditFields = []agentEditField{
 	// cleared_fields is derived by the hub from a PATCH's clears
 	// (nextClearedFields); a request never sets it.
 	{Key: "config.cleared_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// changed_fields is derived by the hub from a PATCH's changes to
+	// provision-rendered keys (nextChangedFields); a request never sets it.
+	{Key: "config.changed_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
 	// A template key: the hub reads it from the template's snapshot at
 	// create (ptone/scion#4222). An agent's mode is the top-level messageMode.
 	{Key: "config.message_mode", Tier: EditTierImmutable, LockedReason: "Set the agent's message mode with messageMode."},
@@ -230,7 +243,7 @@ func editDisposition(f agentEditField, phase string, deleted bool) (EditDisposit
 	}
 	var noContainer, liveOrTransitional bool
 	switch p {
-	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		noContainer = true
 	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
 		liveOrTransitional = true
@@ -286,11 +299,18 @@ type FieldEditState struct {
 	// SessionSensitive is set on a field a resume applies but whose effect
 	// on the continued conversation depends on the harness.
 	SessionSensitive bool `json:"sessionSensitive,omitempty"`
-	// Note is "session" for a session-sensitive field of a suspended agent:
+	// Note is "session" for a session-sensitive field of a suspended agent,
+	// and for a provision-rendered field the broker re-renders at start:
 	// the edit applies at resume and the conversation continues.
 	Note string `json:"note,omitempty"`
-	// ClearNeedsReincarnate is set on a T1 field: clearing or zeroing it
-	// takes effect only at the next reincarnation.
+	// ClearNeedsReincarnate is set on a T1 field, and on a T2 field the
+	// agent's broker re-renders at start: clearing or zeroing it takes
+	// effect only at the next reincarnation. It is not set on a field
+	// whose clear the agent's broker applies at the next start
+	// (brokerStartSupport.clearAppliesAtStart). The count limits keep it
+	// with every broker: their 0 (Unlimited) is never applied at a start
+	// (ptone/scion#5605), although a null clear is; the flag cannot tell
+	// the two apart, so it errs toward the note.
 	ClearNeedsReincarnate bool `json:"clearNeedsReincarnate,omitempty"`
 	// Reason explains a locked field.
 	Reason string `json:"reason,omitempty"`
@@ -306,6 +326,11 @@ type agentEditAccess struct {
 	// reincarnating it: agent.lifecycle on the agent, and authority to
 	// delegate the agent's role.
 	CanChangeRole bool
+	// Broker is what the agent's broker applies at a start
+	// (agentBrokerStartSupport): with changedFields, provision-rendered
+	// keys of an agent with no container are editable "now"; with
+	// clearedFields, clearing a clearable key needs no reincarnation.
+	Broker brokerStartSupport
 }
 
 // buildAgentEditability applies the table to agent for a caller with
@@ -323,6 +348,12 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 	live := phaseHasLiveOrTransitionalContainer(agent.Phase)
 	for _, f := range agentEditFields {
 		d, reason := editDisposition(f, agent.Phase, deleted)
+		// A provision-rendered key the agent's broker re-renders at start
+		// takes effect at the next start when no container is live.
+		rerendered := d == EditReincarnate && !live && access.Broker.appliesAtStart(f.Key)
+		if rerendered {
+			d = EditNow
+		}
 		// Held edits do not exist yet, and a config PATCH of an agent
 		// with a live or transitional container is refused, so every
 		// config key of such an agent is locked, provision-rendered keys
@@ -340,16 +371,24 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 				d, reason = EditLocked, editReasonCannotDelegate
 			}
 		}
+		// A clear needs a reincarnation for a container key the start
+		// merge keeps, and for a re-rendered key whose clear the start
+		// merge keeps too (agent_instructions, skills, services; the
+		// system prompt's clear is applied through cleared_fields).
+		clearHeld := (f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) || rerendered
 		st := FieldEditState{
 			Tier:                  f.Tier,
 			Disposition:           d,
 			SessionSensitive:      f.SessionSensitive,
-			ClearNeedsReincarnate: f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix),
+			ClearNeedsReincarnate: clearHeld && !access.Broker.clearAppliesAtStart(f.Key),
 		}
 		if d == EditLocked {
 			st.Reason = reason
 		}
-		if f.SessionSensitive && d == EditNow && state.Phase(agent.Phase) == state.PhaseSuspended {
+		// A resume continues the harness's conversation: whether a changed
+		// model, or a re-rendered prompt, instructions file, skill or
+		// service reaches the continued session depends on the harness.
+		if (f.SessionSensitive || rerendered) && d == EditNow && state.Phase(agent.Phase) == state.PhaseSuspended {
 			st.Note = "session"
 		}
 		out.Fields[f.Key] = st

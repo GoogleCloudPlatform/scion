@@ -828,17 +828,11 @@ func memberPrincipalAddressMessage(principalType, principalID string) string {
 func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
 	ctx := r.Context()
 
-	// L3 (review r1): the credential-kind gate runs before resource
-	// authorization, mirroring checkMembershipCredential's own position as
-	// the FIRST check in SetMemberRoles — "you need an interactive user
-	// session to mutate membership at all" is independent of, and prior to,
-	// what permissions that credential happens to map to. Without this, an
-	// agent token (which no permission in the registry maps project.manage
-	// to, so it can never pass the authorize() call below anyway) would
-	// still surface as a generic resource-authorization denial rather than
-	// the credential_insufficient code the PUT/DELETE acceptance criteria
-	// (ptone/scion#2529 acceptance 7) ask for uniformly across UAT and agent
-	// credentials.
+	// A caller that is not a user (an agent token, which no permission in
+	// the registry maps project.manage to) is refused with the
+	// credential_insufficient code before resource authorization, as
+	// SetMemberRoles' own actor check (checkMembershipActor) refuses it
+	// first (ptone/scion#2529 acceptance 7).
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)

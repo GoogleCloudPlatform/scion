@@ -94,7 +94,6 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Description:          e.Description,
 		Harness:              e.Harness,
 		DefaultHarnessConfig: e.DefaultHarnessConfig,
-		Image:                e.Image,
 		ContentHash:          e.ContentHash,
 		Scope:                e.Scope,
 		ScopeID:              e.ScopeID,
@@ -112,7 +111,6 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Created:              e.Created,
 		Updated:              e.Updated,
 	}
-	unmarshalJSONString(e.Config, &t.Config)
 	unmarshalJSONString(e.AgentConfig, &t.AgentConfig)
 	unmarshalJSONString(e.Files, &t.Files)
 	return t
@@ -141,8 +139,6 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetDescription(template.Description).
 		SetHarness(template.Harness).
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
-		SetImage(template.Image).
-		SetConfig(marshalJSONString(template.Config)).
 		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
@@ -224,8 +220,6 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetSlug(template.Slug).
 		SetDisplayName(template.DisplayName).
 		SetDescription(template.Description).
-		SetImage(template.Image).
-		SetConfig(marshalJSONString(template.Config)).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
 		SetProjectID(template.ProjectID).
@@ -535,10 +529,12 @@ func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 		StorageURI:           e.StorageURI,
 		StorageBucket:        e.StorageBucket,
 		StoragePath:          e.StoragePath,
+		Layout:               e.Layout,
 		SourceURL:            e.SourceURL,
 		Status:               string(e.Status),
 		ImageStatus:          string(e.ImageStatus),
 		ImageStatusCheckedAt: e.ImageStatusCheckedAt,
+		BuiltImage:           e.BuiltImage,
 		OwnerID:              e.OwnerID,
 		CreatedBy:            e.CreatedBy,
 		UpdatedBy:            e.UpdatedBy,
@@ -582,10 +578,12 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetStorageURI(hc.StorageURI).
 		SetStorageBucket(hc.StorageBucket).
 		SetStoragePath(hc.StoragePath).
+		SetLayout(hc.Layout).
 		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
 		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
+		SetBuiltImage(hc.BuiltImage).
 		SetOwnerID(hc.OwnerID).
 		SetCreatedBy(hc.CreatedBy).
 		SetUpdatedBy(hc.UpdatedBy).
@@ -629,7 +627,10 @@ func (s *TemplateStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope,
 	return entHarnessConfigToStore(e), nil
 }
 
-// UpdateHarnessConfig updates an existing harness config.
+// UpdateHarnessConfig updates an existing harness config's metadata. It
+// leaves the content columns (files, content_hash, harness, config, status)
+// and the storage columns (layout, storage_path, storage_bucket, storage_uri) alone,
+// and never writes built_image; see store.HarnessConfigStore.UpdateHarnessConfig.
 func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.HarnessConfig) error {
 	uid, err := parseUUID(hc.ID)
 	if err != nil {
@@ -646,17 +647,9 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetSlug(hc.Slug).
 		SetDisplayName(hc.DisplayName).
 		SetDescription(hc.Description).
-		SetHarness(hc.Harness).
-		SetConfig(marshalJSONString(hc.Config)).
-		SetContentHash(hc.ContentHash).
 		SetScope(hc.Scope).
 		SetScopeID(hc.ScopeID).
-		SetStorageURI(hc.StorageURI).
-		SetStorageBucket(hc.StorageBucket).
-		SetStoragePath(hc.StoragePath).
-		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
-		SetStatus(entharnessconfig.Status(hc.Status)).
 		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
 		SetOwnerID(hc.OwnerID).
 		SetUpdatedBy(hc.UpdatedBy).
@@ -665,6 +658,93 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 		update.SetImageStatusCheckedAt(*hc.ImageStatusCheckedAt)
 	}
 	_, err = update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateHarnessConfigContent writes the content columns of hc only if the
+// stored row still has the expected content hash, layout and storage path.
+// It is one conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ?
+// AND layout = ? AND storage_path = ?), so two concurrent commits that read
+// the same row cannot both succeed, and a commit that read the row before it
+// moved (a layout migration or a storage migration) cannot write the old
+// location back (ptone/scion#4219).
+func (s *TemplateStore) UpdateHarnessConfigContent(ctx context.Context, hc *store.HarnessConfig, expected store.HarnessConfigContentPrecondition) error {
+	uid, err := parseUUID(hc.ID)
+	if err != nil {
+		return err
+	}
+
+	updated := time.Now()
+
+	hashMatches := entharnessconfig.ContentHashEQ(expected.ContentHash)
+	if expected.ContentHash == "" {
+		hashMatches = entharnessconfig.Or(entharnessconfig.ContentHashEQ(""), entharnessconfig.ContentHashIsNil())
+	}
+	layoutMatches := entharnessconfig.LayoutEQ(expected.Layout)
+	if expected.Layout == "" {
+		layoutMatches = entharnessconfig.Or(entharnessconfig.LayoutEQ(""), entharnessconfig.LayoutIsNil())
+	}
+	pathMatches := entharnessconfig.StoragePathEQ(expected.StoragePath)
+	if expected.StoragePath == "" {
+		pathMatches = entharnessconfig.Or(entharnessconfig.StoragePathEQ(""), entharnessconfig.StoragePathIsNil())
+	}
+
+	// Only the columns a commit owns are written: the files, what is
+	// derived from them, where they are stored, the lifecycle status and the
+	// import provenance. Metadata (name, slug, display name, description,
+	// scope, owner, image status) belongs to UpdateHarnessConfig and
+	// built_image to UpdateHarnessConfigBuiltImage, so a commit computed
+	// from an older read cannot revert either.
+	n, err := s.client.HarnessConfig.Update().
+		Where(entharnessconfig.IDEQ(uid), hashMatches, layoutMatches, pathMatches).
+		SetHarness(hc.Harness).
+		SetConfig(marshalJSONString(hc.Config)).
+		SetContentHash(hc.ContentHash).
+		SetStorageURI(hc.StorageURI).
+		SetStorageBucket(hc.StorageBucket).
+		SetStoragePath(hc.StoragePath).
+		SetLayout(hc.Layout).
+		SetFiles(marshalJSONString(hc.Files)).
+		SetSourceURL(hc.SourceURL).
+		SetStatus(entharnessconfig.Status(hc.Status)).
+		SetUpdatedBy(hc.UpdatedBy).
+		SetUpdated(updated).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		exists, err := s.client.HarnessConfig.Query().Where(entharnessconfig.IDEQ(uid)).Exist(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+		return store.ErrHarnessConfigConflict
+	}
+	hc.Updated = updated
+	return nil
+}
+
+// UpdateHarnessConfigBuiltImage writes only the built_image column of
+// harness-config id and keeps updated at its stored value.
+func (s *TemplateStore) UpdateHarnessConfigBuiltImage(ctx context.Context, id, image string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	existing, err := s.client.HarnessConfig.Get(ctx, uid)
+	if err != nil {
+		return mapError(err)
+	}
+	_, err = s.client.HarnessConfig.UpdateOneID(uid).
+		SetBuiltImage(image).
+		SetUpdated(existing.Updated).
+		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}
@@ -765,6 +845,12 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 			entharnessconfig.NameContainsFold(filter.Search),
 			entharnessconfig.DescriptionContainsFold(filter.Search),
 		))
+	}
+	if filter.StoragePath != "" {
+		query.Where(entharnessconfig.StoragePathEQ(filter.StoragePath))
+	}
+	if filter.StoragePathPrefix != "" {
+		query.Where(entharnessconfig.StoragePathHasPrefix(filter.StoragePathPrefix))
 	}
 
 	totalCount := 0

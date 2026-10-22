@@ -569,9 +569,9 @@ func (s *markCountingStore) SetAgentRuntimeTarget(ctx context.Context, id string
 	return s.Store.SetAgentRuntimeTarget(ctx, id, expectedVersion, target, candidate)
 }
 
-func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string) (*store.Agent, error) {
 	s.marks.Add(1)
-	return s.Store.MarkAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+	return s.Store.MarkAgentContainerMissing(ctx, id, brokerID, cutoff, haltRuntime, message)
 }
 
 // TestReconcileMissing_HubGuardsSkipStoreWrite pins the hub-side last_seen
@@ -817,4 +817,47 @@ func TestHeartbeat_StartingPhase(t *testing.T) {
 
 	send()
 	check("second heartbeat")
+}
+
+// TestHeartbeat_StartingKeepsCreateLaunchActive (ptone/scion#5365): during
+// an async create on Kubernetes the broker heartbeat reports an agent whose
+// pod is still Pending (waiting for a node) as phase starting, container
+// status "Pending" (the runtime's List mapping; see TestList_PendingPodPhase
+// in pkg/runtime). This pins the hub side of that contract: the row moves to
+// starting and the active launch stays open, so the broker's own succeeded
+// or failed report (for example a capacity timeout) still decides how the
+// launch ends, and the CLI keeps waiting. A heartbeat reporting running for a
+// Running pod still ends the launch as running_observed, which shows the
+// heartbeat reached the store. No hub code changed for #5365, so this test
+// passes without the runtime change too.
+func TestHeartbeat_StartingKeepsCreateLaunchActive(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	onKubernetes := func(a *store.Agent) { a.Runtime = "kubernetes" }
+	pending := f.addAgent("pending-pod", string(state.PhaseProvisioning), "", onKubernetes, withRuntimeTarget(k8sTargetA))
+	running := f.addAgent("running-pod", string(state.PhaseProvisioning), "", onKubernetes, withRuntimeTarget(k8sTargetA))
+	for _, a := range []*store.Agent{pending, running} {
+		_, err := f.s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 10*time.Minute)
+		require.NoError(t, err, "begin launch for %s", a.Slug)
+		require.Equal(t, store.LaunchStateActive, f.get(a.ID).LaunchState, "launch of %s is active before the heartbeat", a.Slug)
+	}
+
+	f.send(brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: pending.Slug, Phase: string(state.PhaseStarting), ContainerStatus: "Pending", RuntimeTarget: k8sTargetA},
+			{Slug: running.Slug, Phase: string(state.PhaseRunning), ContainerStatus: "Running", RuntimeTarget: k8sTargetA},
+		}}},
+	})
+
+	gotPending := f.get(pending.ID)
+	assert.Equal(t, string(state.PhaseStarting), gotPending.Phase, "a Pending pod's agent moves to starting, not running")
+	assert.Equal(t, "Pending", gotPending.ContainerStatus)
+	assert.Equal(t, store.LaunchStateActive, gotPending.LaunchState, "a Pending pod's heartbeat must not end the launch")
+	assert.Empty(t, gotPending.LaunchEndReason, "a Pending pod's heartbeat must not record a launch end reason")
+
+	gotRunning := f.get(running.ID)
+	assert.Equal(t, string(state.PhaseRunning), gotRunning.Phase)
+	assert.Equal(t, store.LaunchStateEnded, gotRunning.LaunchState, "a running heartbeat ends the launch")
+	assert.Equal(t, store.LaunchEndReasonRunningObserved, gotRunning.LaunchEndReason)
 }

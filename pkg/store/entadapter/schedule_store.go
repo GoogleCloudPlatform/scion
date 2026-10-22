@@ -71,6 +71,7 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 		EventType:     e.EventType,
 		Payload:       e.Payload,
 		Status:        e.Status,
+		StatusReason:  e.StatusReason,
 		NextRunAt:     e.NextRunAt,
 		LastRunAt:     e.LastRunAt,
 		LastRunStatus: e.LastRunStatus,
@@ -234,6 +235,9 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	if sc.LastRunStatus != "" {
 		create.SetLastRunStatus(sc.LastRunStatus)
 	}
+	if sc.StatusReason != "" {
+		create.SetStatusReason(sc.StatusReason)
+	}
 	if sc.LastRunError != "" {
 		create.SetLastRunError(sc.LastRunError)
 	}
@@ -324,6 +328,13 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	}
 	if filter.Name != "" {
 		query.Where(schedule.NameEQ(filter.Name))
+	}
+	if filter.LastRunStatus != "" {
+		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
+	}
+	if filter.SystemPausedOnly {
+		query.Where(schedule.StatusEQ(store.ScheduleStatusPaused))
+		query.Where(schedule.StatusReasonNotNil(), schedule.StatusReasonNEQ(store.ScheduleStatusReasonNone))
 	}
 
 	// TotalCount covers the whole filtered set, not the rows after the
@@ -501,6 +512,11 @@ func (s *ScheduleStore) UpdateSchedule(
 	}
 	if fields.Status {
 		update = update.SetStatus(sc.Status)
+		if sc.StatusReason != "" {
+			update = update.SetStatusReason(sc.StatusReason)
+		} else {
+			update = update.ClearStatusReason()
+		}
 	}
 	if fields.NextRunAt {
 		if sc.NextRunAt != nil {
@@ -537,6 +553,7 @@ func (s *ScheduleStore) UpdateSchedule(
 	}
 	sc.UpdatedAt = updated.Updated
 	sc.Status = updated.Status
+	sc.StatusReason = updated.StatusReason
 	return nil
 }
 
@@ -605,13 +622,20 @@ func setScheduleAuthorityCeilingUpdate(u *ent.ScheduleUpdate, c store.EffectCeil
 	return u
 }
 
-// UpdateScheduleStatus updates only the status of a schedule.
-func (s *ScheduleStore) UpdateScheduleStatus(ctx context.Context, id string, status string) error {
+// UpdateScheduleStatus updates only the status of a schedule and its status
+// reason; an empty reason clears the column.
+func (s *ScheduleStore) UpdateScheduleStatus(ctx context.Context, id string, status string, reason string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	err = s.client.Schedule.UpdateOneID(uid).SetStatus(status).Exec(ctx)
+	update := s.client.Schedule.UpdateOneID(uid).SetStatus(status)
+	if reason != "" {
+		update = update.SetStatusReason(reason)
+	} else {
+		update = update.ClearStatusReason()
+	}
+	err = update.Exec(ctx)
 	if err != nil {
 		return mapError(err)
 	}
@@ -946,17 +970,29 @@ func (s *ScheduleStore) ClaimScheduledEvent(ctx context.Context, id string, clai
 // CancelScheduledEvent marks a pending event as cancelled. Returns ErrNotFound
 // if the event doesn't exist or is not pending.
 func (s *ScheduleStore) CancelScheduledEvent(ctx context.Context, id string) error {
+	return s.CancelScheduledEventWithReason(ctx, id, "")
+}
+
+// CancelScheduledEventWithReason marks a pending event as cancelled and, when
+// reason is not empty, records it as the event's error. The UPDATE is
+// conditional on status = 'pending', so it cannot overwrite an event that
+// was fired or claimed first. Returns ErrNotFound if the event doesn't exist
+// or is not pending.
+func (s *ScheduleStore) CancelScheduledEventWithReason(ctx context.Context, id string, reason string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	n, err := s.client.ScheduledEvent.Update().
+	update := s.client.ScheduledEvent.Update().
 		Where(
 			scheduledevent.IDEQ(uid),
 			scheduledevent.StatusEQ(store.ScheduledEventPending),
 		).
-		SetStatus(store.ScheduledEventCancelled).
-		Save(ctx)
+		SetStatus(store.ScheduledEventCancelled)
+	if reason != "" {
+		update.SetError(reason)
+	}
+	n, err := update.Save(ctx)
 	if err != nil {
 		return err
 	}

@@ -235,6 +235,9 @@ func TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal(t *tes
 	hostSAEmail := "broker-host@sa-rec-sched-pt.iam.gserviceaccount.com"
 	owner := ptUser(tid("user-sa-rec-sched-pt"), "sa-rec-sched-pt@test.com", store.UserRoleMember)
 	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, "sa-rec-sched-pt")
+	// Translation needs enforce mode and actAs for the revision principal,
+	// who owns the broker.
+	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 	ctx := context.Background()
 	proj, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
@@ -868,18 +871,21 @@ func TestSAParentCeiling_ReincarnateRequestRecordsRequester(t *testing.T) {
 	})
 }
 
-// TestSAParentCeiling_ReincarnateFailedRestoreWithholdsUntilReassigned pins
-// the behaviour when a reincarnation that replaced the assignment fails and
-// the previous configuration is restored: the restored account differs
-// from the active assignment, so its token scope is withheld and the
-// parent ceiling denies until the account is assigned again.
-func TestSAParentCeiling_ReincarnateFailedRestoreWithholdsUntilReassigned(t *testing.T) {
+// TestSAParentCeiling_MismatchedAssignmentWithholdsUntilReassigned pins the
+// evaluator when the active assignment names another account than the
+// agent's applied configuration: its GCP scope is withheld from mints and
+// the parent ceiling denies until the account is assigned again. A failed
+// reincarnation restores the replaced assignment with the previous
+// configuration (restoreReincarnationAssignment), so this state remains
+// only when a later write superseded the replacement, or when no matching
+// row can be restored.
+func TestSAParentCeiling_MismatchedAssignmentWithholdsUntilReassigned(t *testing.T) {
 	f := newSPCFixture(t)
 	f.record(t, nil)
 	assertParentCeilingAllowed(t, f.eval(t))
 
-	// The claim replaced the assignment with the next generation's account;
-	// the agent's applied configuration is the restored previous one.
+	// The active assignment names the next generation's account; the
+	// agent's applied configuration names the previous one.
 	f.record(t, func(a *store.AgentServiceAccountAssignment) {
 		a.ServiceAccountID = "sa-next-generation"
 		a.Origin = store.SAAssignmentOriginReincarnate

@@ -103,7 +103,6 @@ allowed_paths=(
   # Asserts the project cache/sync-status responses no longer emit a groveId
   # key alongside projectId. The literal is the point of the negative tests.
   "^pkg/hub/project_cache_test.go$"
-  "^pkg/hub/project_webdav_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
@@ -170,6 +169,12 @@ allowed_paths=(
   "^pkg/sciontool/telemetry/aggregator_test.go$"
   "^pkg/storage/storage_test.go$"
   "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
+  # Grant shaping censuses (admin tier A3, ptone/scion#4240): each names the
+  # one-time pre-project migration file pkg/ent/entc/migrate_grove_to_project.go
+  # as a classified exemption key. The key must equal the scanned path, so the
+  # literal is required.
+  "^pkg/store/entadapter/grant_shaping_census_test.go$"
+  "^pkg/store/entadapter/grant_shaping_reads_census_test.go$"
   # Seeds scope='grove' rows with raw SQL to prove the data migration in
   # legacy_scope_migration.go rewrites them; the literal is the point of the
   # test.
@@ -190,6 +195,10 @@ allowed_paths=(
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
+  # ExternalConfigShortID's comment names the pre-rename global entry
+  # (~/.scion/grove-configs/<name>) that config.MigrateLegacyGlobalLayout leaves
+  # as a symlink, which is why the path is resolved before it is split.
+  "^pkg/agent/project_identity.go$"
   "^pkg/config/koanf.go$"
   "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
@@ -204,7 +213,6 @@ allowed_paths=(
   # already allowlisted above) so the read-only admin-dir mount narrowing
   # applies to both current and pre-migration hub-native project layouts.
   "^pkg/runtime/common.go$"
-  "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,

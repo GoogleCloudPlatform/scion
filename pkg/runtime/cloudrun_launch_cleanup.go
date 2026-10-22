@@ -33,16 +33,28 @@ import (
 // before CreateInstance; DeleteResource deletes the instance a failed or
 // aborted async launch may have created.
 //
-// UNVERIFIED (the live API check, ptone/scion#4760, has not run), so each
-// is handled conservatively:
-//   - NotFound is gRPC NOT_FOUND at GetInstance, DeleteInstance and the
-//     delete operation's wait;
-//   - a cut-off or accepted create may become visible late (handled by the
-//     in-doubt re-poll);
-//   - InvalidArgument, PermissionDenied or Unauthenticated from the server
-//     means no instance was created;
-//   - a delete refused while the instance reconciles comes back as
-//     FailedPrecondition or Aborted, and Instance.Reconciling clears.
+// What the live API check (ptone/scion#4760) verified:
+//   - NotFound is NOT_FOUND at GetInstance and at DeleteInstance;
+//   - a create cut off mid-request can still materialise, up to about 5 s
+//     after a first NotFound (the in-doubt re-poll covers 30 s); an
+//     accepted create was visible on the first read;
+//   - no instance reappeared after a delete and a NotFound;
+//   - a delete is accepted while the instance reconciles (no refusals
+//     were seen), and a repeated delete is accepted too;
+//   - most deletes are gone within 15 s, but some take 72-76 s, longer
+//     than cloudRunCleanupBudget. The delete runs on the server once
+//     accepted, so DeleteResource counts an accepted delete whose wait the
+//     budget cuts off as done (ptone/scion#5154);
+//   - a made-up etag was accepted, so the etag is not enforced on delete
+//     and the run label check on the read is the only guard;
+//   - a create operation finishes with no error even when the instance
+//     was deleted while it ran, and no instance appeared afterwards (3 of
+//     3, 120 s watch): its success is not proof the instance exists;
+//   - Instance.Reconciling is left out of a response when false.
+// Still unverified, and handled conservatively: InvalidArgument,
+// PermissionDenied or Unauthenticated from the server means no instance
+// was created; a FailedPrecondition or Aborted refusal of a delete waits
+// for Reconciling to clear; NotFound from the delete operation's wait.
 
 // The cleanup's timing. Variables so tests can shorten them; production
 // never changes them.
@@ -50,7 +62,9 @@ var (
 	// cloudRunCleanupBudget bounds one DeleteResource, including the
 	// in-doubt re-poll and the reconciling wait. It is applied to the
 	// calls themselves too, and fits inside the broker's 60 s cleanup
-	// context (AsyncLaunchCleanupBudget).
+	// context (AsyncLaunchCleanupBudget). It bounds the wait for an
+	// accepted delete to finish, not the delete itself: a delete accepted
+	// within it counts as done even if the instance is not yet gone.
 	cloudRunCleanupBudget = 45 * time.Second
 	// cloudRunInDoubtRepoll is how long a create still in doubt is
 	// re-polled, counted from the first NotFound DeleteResource sees.
@@ -80,8 +94,10 @@ type cloudRunInDoubtKey struct {
 // observed, each with the time its mark expires
 // (AsyncCleanupHorizon of the launch ctx's deadline, after which no
 // cleanup looks for it). A mark is added before CreateInstance and
-// removed once the create is observed (its operation succeeded, the
-// cleanup read the instance or had a delete accepted) or the server
+// removed once the create can no longer appear later (its operation
+// finished: no instance has been seen to appear after that, though the
+// instance may already be gone again; or the cleanup read
+// the instance, before or with a delete accepted) or the server
 // definitively rejected it. While a create is marked, DeleteResource
 // does not take a NotFound as gone. The set is process memory: a broker
 // restart loses it.
@@ -154,6 +170,28 @@ func cloudRunServerRejected(ctx context.Context, err error) bool {
 	return false
 }
 
+// cloudRunWaitCutOffByDeadline reports whether err, from the wait on an
+// accepted delete's operation, is the cleanup budget's deadline cutting
+// the wait off: budget ended by its deadline (not a cancellation) and err
+// is that deadline, as the ctx error or as a gRPC DeadlineExceeded. An
+// operation that failed (any other error) is not a cut-off.
+func cloudRunWaitCutOffByDeadline(budget context.Context, err error) bool {
+	if !errors.Is(budget.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded
+}
+
+// cloudRunOperationName returns op's long-running operation name, or ""
+// when op does not expose one. The Cloud Run client's operations have a
+// Name method; the cloudrun.InstanceOperation seam only requires Wait.
+func cloudRunOperationName(op cloudrun.InstanceOperation) string {
+	if n, ok := op.(interface{ Name() string }); ok {
+		return n.Name()
+	}
+	return ""
+}
+
 // cloudRunSleep waits d, or returns ctx's error if ctx ends first.
 func cloudRunSleep(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
@@ -180,7 +218,8 @@ func (r *CloudRunRuntime) parent() string {
 //
 // The delete is run-checked and strict (instanceOp): an instance labelled
 // with another run, or with no run label, is not this launch's and is
-// left untouched (nil). Otherwise:
+// left untouched (nil). The check is on the read; the API does not enforce
+// the etag the delete carries. Otherwise:
 //   - NotFound (at the read, the delete or the delete's wait) is success,
 //     unless the create is still in doubt (cloudRunCreatesInDoubt): then
 //     the read is repeated every cloudRunRepollInterval for
@@ -189,11 +228,17 @@ func (r *CloudRunRuntime) parent() string {
 //   - a FailedPrecondition or Aborted refusal waits, while the instance
 //     reports Reconciling, for it to clear, then retries; a refusal of an
 //     instance that is not reconciling retries after cloudRunRefusalBackoff;
+//   - a delete the API accepted whose operation is still running when
+//     the budget's deadline ends the wait is success (nil), logged as not
+//     confirmed gone with the operation name: the server finishes the
+//     delete on its own (ptone/scion#5154). An operation that reports a
+//     failure stays an error;
 //   - anything else is an error.
 //
 // All of it runs within cloudRunCleanupBudget, which bounds the calls too,
 // on one Instances client opened for the whole cleanup. When the budget
-// runs out the error wraps both the ctx error and the last API error.
+// runs out before a delete is accepted, the error wraps both the ctx error
+// and the last API error.
 // A handle in another namespace, of another kind or with no UID is
 // refused before any call.
 func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHandle) error {
@@ -210,6 +255,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 		return fmt.Errorf("cloudrun: instance %s is in %q, not this runtime's %q; not deleting it", h.Name, h.Namespace, parent)
 	}
 
+	start := time.Now()
 	budget, cancel := context.WithTimeout(ctx, cloudRunCleanupBudget)
 	defer cancel()
 	name := r.instanceResourceName(h.Name)
@@ -224,18 +270,26 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 	overBudget := func(cause, last error) error {
 		return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w (last error: %w)", h.Name, cloudRunCleanupBudget, cause, last)
 	}
-	var seen bool // a read in this attempt found this run's instance
+	var seen bool     // a read in this attempt found this run's instance
+	var accepted bool // the API accepted this attempt's delete; its operation is being waited on
+	var opName string // the accepted delete's operation name, for the log
 	deleteCall := func(dc cloudrun.InstancesAPI, n, etag string) (cloudrun.InstanceOperation, error) {
 		// instanceOpWith issues the call only after its read found the
 		// instance labelled with this run.
 		seen = true
-		return dc.DeleteInstance(budget, &runpb.DeleteInstanceRequest{Name: n, Etag: etag}, defaultCallOpts...)
+		op, err := dc.DeleteInstance(budget, &runpb.DeleteInstanceRequest{Name: n, Etag: etag}, defaultCallOpts...)
+		if err == nil {
+			// instanceOpWith now only waits on op.
+			accepted = true
+			opName = cloudRunOperationName(op)
+		}
+		return op, err
 	}
 
 	var repollUntil time.Time
 	refusals := 0
 	for {
-		seen = false
+		seen, accepted, opName = false, false, ""
 		err := r.instanceOpWith(budget, c, ref, "delete", true, deleteCall)
 		switch {
 		case err == nil:
@@ -254,6 +308,16 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 			return nil
 		}
 		if budget.Err() != nil {
+			if accepted && cloudRunWaitCutOffByDeadline(budget, err) {
+				// The API accepted the delete and the server runs it to
+				// the end whether or not anyone waits (ptone/scion#5154):
+				// only the confirmation was cut off. The read found the
+				// instance, so the create is observed.
+				clearCloudRunCreateInDoubt(name, h.UID)
+				runtimeLog().Warn("Launch cleanup: Cloud Run accepted the delete of an instance, but it was not confirmed gone within the budget",
+					"instance", h.Name, "run_id", h.UID, "operation", opName, "waited", time.Since(start).Round(time.Millisecond))
+				return nil
+			}
 			return overBudget(budget.Err(), err)
 		}
 		switch status.Code(err) {
@@ -302,8 +366,9 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 // reports Reconciling, reads it again every cloudRunReconcilePoll. It reports
 // whether it waited for a reconcile to clear (or saw the instance gone),
 // so the caller retries at once; false means the instance was not
-// reconciling (or could not be read) and the caller backs off. The error
-// is ctx's, when ctx ends first.
+// reconciling (or could not be read) and the caller backs off. The API
+// leaves reconciling out of a response when false, which GetReconciling
+// reads as false. The error is ctx's, when ctx ends first.
 func waitCloudRunReconciled(ctx context.Context, c cloudrun.InstancesAPI, name string) (bool, error) {
 	waited := false
 	for {

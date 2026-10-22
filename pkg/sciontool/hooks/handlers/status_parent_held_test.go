@@ -76,6 +76,27 @@ func parentHeldClaude(t *testing.T, hookEventName, toolName string, agentID inte
 	return event
 }
 
+// parentHeldSessionStart parses a claude SessionStart with source: the
+// parent's when agentID is empty, otherwise that sub-agent's.
+func parentHeldSessionStart(t *testing.T, source, agentID string) *hooks.Event {
+	t.Helper()
+	payload := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      claudeSubagentParentSession,
+		"cwd":             "/workspace",
+		"source":          source,
+	}
+	if agentID != "" {
+		payload["agent_id"] = agentID
+		payload["agent_type"] = "general-purpose"
+	}
+	event, err := dialects.NewClaudeDialect().Parse(payload)
+	require.NoError(t, err)
+	require.Equal(t, source, event.Data.Source)
+	require.Equal(t, agentID, subagentID(event))
+	return event
+}
+
 func parentHeldSub(t *testing.T, hookEventName, toolName, agentID string) *hooks.Event {
 	return parentHeldClaude(t, hookEventName, toolName, agentID)
 }
@@ -154,8 +175,9 @@ func TestParentHeld_ToolStartHubMatchesLocal(t *testing.T) {
 
 // Part B1: while the parent holds a wait it set itself, a sub-agent asks the
 // user (AskUserQuestion, ExitPlanMode or a permission Notification) and the
-// user answers or rejects. The agent-set wait is still there afterwards, and
-// no Hub update replaced it at any step.
+// user answers or rejects. While the sub-agent asks, it is recorded as the
+// wait's owner and the agent's own wait as parentWaitAgent. The agent-set
+// wait is still there afterwards, and no Hub update replaced it at any step.
 func TestParentHeld_AgentSetWaitKeptThroughSubagentQuestion(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -189,13 +211,16 @@ func TestParentHeld_AgentSetWaitKeptThroughSubagentQuestion(t *testing.T) {
 
 			got, info := parentHeldStep(t, sh, hh, sent, tc.ask(t))
 			assert.Equal(t, "waiting_for_input", info["activity"], "after the sub-agent asks")
-			assert.NotContains(t, info, activitySourceKey, "the wait stays agent-set")
-			assert.NotContains(t, info, notificationWaitAgentsKey)
+			assert.Equal(t, activitySourceNotification, info[activitySourceKey], "the sub-agent owns a wait")
+			assert.Equal(t, []string{parentHeldSubA}, waitOwnersOf(info))
+			assert.Equal(t, parentWaitAgent, info[parentWaitKey], "the agent's own wait is recorded")
 			assert.Empty(t, got, "no hub update replaces the agent-set wait")
 
 			got, info = parentHeldStep(t, sh, hh, sent, tc.answer(t))
 			assert.Equal(t, "waiting_for_input", info["activity"], "after the user answers")
-			assert.NotContains(t, info, activitySourceKey)
+			assert.NotContains(t, info, activitySourceKey, "the wait is agent-set again")
+			assert.NotContains(t, info, notificationWaitAgentsKey)
+			assert.NotContains(t, info, parentWaitKey)
 			assert.Empty(t, got)
 		})
 	}

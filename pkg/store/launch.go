@@ -14,16 +14,34 @@
 
 package store
 
-import "time"
+import (
+	"time"
 
-// LaunchKind values for Agent.LaunchKind / BeginLaunch's kind parameter
-// (design t1-async-create-v11.md §3.3). Only LaunchKindCreate is writable by
-// BeginLaunch in P1a; start/restart land in P6 (§3.13).
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
+
+// LaunchKind values for Agent.LaunchKind (design t1-async-create-v11.md
+// §3.3). BeginLaunch writes LaunchKindCreate; BeginStartLaunch writes
+// LaunchKindStart and LaunchKindRestart (ptone/scion#4669).
 const (
 	LaunchKindCreate  = "create"
 	LaunchKindStart   = "start"
 	LaunchKindRestart = "restart"
 )
+
+// BeginLaunchOptions are the start-kind inputs to BeginStartLaunch
+// (ptone/scion#4669).
+type BeginLaunchOptions struct {
+	// PriorPhase is the effective resting phase (EffectiveRestingPhase)
+	// the start was taken from, read before the start dispatch wrote
+	// starting; for a restart, the phase before the restart. A failed
+	// start-kind launch reads it (launch_prior_phase) to choose its end
+	// phase and resume memory.
+	PriorPhase string
+	// RevokeOnFail records whether a failed end of this start revokes the
+	// credential the start issued (launch_revoke_on_fail).
+	RevokeOnFail bool
+}
 
 // LaunchState values for Agent.LaunchState.
 const (
@@ -42,13 +60,25 @@ const (
 	LaunchEndReasonSuperseded      = "superseded"
 )
 
-// Launch error codes for Agent.LaunchError (design §3.3, §3.9).
+// Launch error codes for Agent.LaunchError (design §3.3, §3.9). They are
+// aliases of the shared pkg/api launch codes (design wave 3 E-a,
+// ptone/scion#4670): the store writes these, and the broker reports the rest.
 const (
-	LaunchErrorLaunchTimeout  = "launch_timeout"
-	LaunchErrorBrokerLost     = "broker_lost"
-	LaunchErrorLaunchStopped  = "launch_stopped"
-	LaunchErrorAgentError     = "agent_error"
-	LaunchErrorHubUnreachable = "hub_unreachable"
+	LaunchErrorLaunchTimeout  = api.LaunchCodeLaunchTimeout
+	LaunchErrorBrokerLost     = api.LaunchCodeBrokerLost
+	LaunchErrorLaunchStopped  = api.LaunchCodeLaunchStopped
+	LaunchErrorAgentError     = api.LaunchCodeAgentError
+	LaunchErrorHubUnreachable = api.LaunchCodeHubUnreachable
+	// LaunchErrorBrokerRestarted: the broker process restarted, or shut
+	// down, while the launch was in flight, and reported the launch failed
+	// itself (from its shutdown drain or, after a crash, from its launch
+	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
+	// broker reports it only for a launch it ended.
+	LaunchErrorBrokerRestarted = api.LaunchCodeBrokerRestarted
+	// LaunchErrorDispatchFailed: the hub's send of the launch failed with a
+	// known outcome, or the broker acknowledged a different launch; the
+	// dispatcher ends the launch not_launched with this code.
+	LaunchErrorDispatchFailed = api.LaunchCodeDispatchFailed
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's

@@ -160,6 +160,12 @@ var hubResponds = func(endpoint string, fanOut bool) error {
 	return hubclient.HintProxyError(err)
 }
 
+// printUnreachableHub prints the warning for a hub at endpoint that did not
+// respond to the health check of 'hub add' or 'config set hub.endpoint'.
+func printUnreachableHub(stderr io.Writer, endpoint string, err error) {
+	_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, err)
+}
+
 // hubAuthLabel is the AUTH column of 'hub list' for info, one of the four
 // labels: "oauth (<user>)", "dev", "env token" or "none". A token that is
 // not a login (SCION_HUB_TOKEN, SCION_AUTH_TOKEN or the agent token file)
@@ -281,7 +287,7 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		_, _ = fmt.Fprintf(out, "Now using hub '%s'.\n", name)
 	}
 	if healthErr != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, healthErr)
+		printUnreachableHub(stderr, endpoint, healthErr)
 	}
 	if info.MethodType == "none" {
 		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)
@@ -321,10 +327,6 @@ func hubList(out, stderr io.Writer, check bool) error {
 	var reachable []bool
 	var verified []*bool
 	if check {
-		settings, err := config.LoadSettings(useSettingsPath())
-		if err != nil {
-			settings = &config.Settings{}
-		}
 		reachable = make([]bool, len(names))
 		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
@@ -332,7 +334,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 			endpoint := c.Hubs[name].Endpoint
 			// Every hub but the effective one is checked with only its
 			// own entry's transport.
-			fanOut := !hubGetsFullChain(settings, endpoint, false)
+			fanOut := !hubGetsFullChain(endpoint, false)
 			wg.Add(1)
 			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
@@ -359,7 +361,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 		row := hubListJSON{
 			Current:  name == c.CurrentHub,
 			Name:     name,
-			Endpoint: h.Endpoint,
+			Endpoint: config.RedactURL(h.Endpoint),
 			Auth:     useAuthJSON{Method: info.MethodType, User: useAuthUser(info)},
 		}
 		if check {

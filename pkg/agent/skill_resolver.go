@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -65,12 +66,15 @@ type ResolveResult struct {
 // RetryAfter is a delay in whole seconds, as text, when one is known: for
 // SkillErrCodeRateLimited, the time left on the credential's cooldown; for
 // other causes, the upstream Retry-After header, if any. ProvisionAgent
-// copies it to SkillResolutionError.RetryAfter.
+// copies it to SkillResolutionError.RetryAfter. Status is the HTTP status
+// of the upstream response that failed the resolution, when one is known,
+// else 0; ProvisionAgent copies it to SkillResolutionError.Status.
 type ResolveError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 // Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
@@ -100,6 +104,9 @@ const (
 	// resolved but could not be downloaded, verified or installed into the
 	// agent home. The create path keeps it on the 5xx path.
 	SkillErrCodeInstallFailed = "install_failed"
+	// SkillErrCodeInvalidURI is the code for a skill reference that does
+	// not parse as a URI the resolver accepts.
+	SkillErrCodeInvalidURI = "invalid_uri"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
@@ -111,12 +118,17 @@ const (
 // SkillErrCodeRateLimited, the time left on the credential's cooldown (see
 // GitHubCooldown); for other causes, the upstream Retry-After header, if
 // any. It is empty otherwise. The broker sends it as a Retry-After header
-// only for SkillErrCodeRateLimited.
+// only for SkillErrCodeRateLimited. Status is the HTTP status of the
+// upstream response that failed the resolution, when one is known, else 0.
+//
+// Message is resolver text for the server-side log; it is not shown to the
+// user (the agent runtime stores a fixed reason phrase instead).
 type SkillResolutionError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 func (e *SkillResolutionError) Error() string {
@@ -166,6 +178,31 @@ func publicInstallReason(err error) string {
 		return ie.public
 	}
 	return skillInstallFailedOnBroker
+}
+
+// upstreamStatusError is a resolver error that came from a non-OK upstream
+// HTTP response. Its text is the resolver's full message, for the log.
+type upstreamStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *upstreamStatusError) Error() string           { return e.msg }
+func (e *upstreamStatusError) upstreamHTTPStatus() int { return e.status }
+
+// upstreamStatus returns the HTTP status of the upstream response recorded
+// in err's chain, or 0 when none is known.
+func upstreamStatus(err error) int {
+	var se interface{ upstreamHTTPStatus() int }
+	for err != nil {
+		if errors.As(err, &se) {
+			if st := se.upstreamHTTPStatus(); st != 0 {
+				return st
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return 0
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
@@ -313,18 +350,75 @@ func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredent
 	return context.WithValue(ctx, gitHubCredentialLookupKey{}, lookup)
 }
 
+// Labels naming where a skill download credential came from. They appear in
+// logs and errors in place of the credential itself. The GitHub resolver
+// supplies more specific labels (secret names, never values) through the
+// credential source lookup; gitHubCredSourceResolver is the fallback when it
+// has none.
+const (
+	gitHubCredSourceDefault  = "the GITHUB_TOKEN credential"
+	gitHubCredSourceResolver = "the credential the GitHub skill resolver uses for this skill"
+)
+
+type gitHubCredentialSourceLookupKey struct{}
+
+// gitHubCredentialSourceLookup returns a label naming where the credential
+// GitHubCredentialLookup returns for a gh:// URI comes from, or "".
+type gitHubCredentialSourceLookup func(uri string) string
+
+// contextWithGitHubCredentialSourceLookup returns a context carrying lookup
+// for the install phase, alongside the GitHubCredentialLookup it describes.
+func contextWithGitHubCredentialSourceLookup(ctx context.Context, lookup gitHubCredentialSourceLookup) context.Context {
+	return context.WithValue(ctx, gitHubCredentialSourceLookupKey{}, lookup)
+}
+
+// credentialSourceLabel returns the label for uri's credential from the
+// source lookup carried by ctx, or gitHubCredSourceResolver if there is none.
+func credentialSourceLabel(ctx context.Context, uri string) string {
+	if lookup, ok := ctx.Value(gitHubCredentialSourceLookupKey{}).(gitHubCredentialSourceLookup); ok && lookup != nil {
+		if label := lookup(uri); label != "" {
+			return label
+		}
+	}
+	return gitHubCredSourceResolver
+}
+
+// gitHubCredential is the credential installOneSkill presents for a skill's
+// raw downloads, with a label naming its source. The token is never
+// formatted: every fmt verb prints only the source (see Format).
+type gitHubCredential struct {
+	token  string
+	source string
+}
+
+func (c gitHubCredential) String() string {
+	if c.token == "" {
+		return "gitHubCredential(none)"
+	}
+	return "gitHubCredential(" + c.source + ")"
+}
+
+func (c gitHubCredential) GoString() string { return c.String() }
+
+// Format prints String for every verb, so no verb (%d, %x, ...) falls back
+// to printing the struct fields.
+func (c gitHubCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
+
 // gitHubDownloadToken returns the credential installOneSkill presents for
 // skill's raw downloads: the credential the GitHub resolver uses for the
 // skill's ref, when the skill came from that resolver without content and a
 // lookup is available, and otherwise the context's default GitHub token.
 // downloadSkillFile only ever sends either to GitHub hosts.
-func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) string {
+func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) gitHubCredential {
 	if skill.githubCredentialRef != "" {
 		if tok := credentialLookupFromContext(ctx)(skill.githubCredentialRef); tok != "" {
-			return tok
+			return gitHubCredential{token: tok, source: credentialSourceLabel(ctx, skill.githubCredentialRef)}
 		}
 	}
-	return GitHubTokenFromContext(ctx)
+	if tok := GitHubTokenFromContext(ctx); tok != "" {
+		return gitHubCredential{token: tok, source: gitHubCredSourceDefault}
+	}
+	return gitHubCredential{}
 }
 
 // credentialLookupFromContext returns the GitHub credential lookup carried
@@ -470,21 +564,28 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 			DroppedScope: loser.Scope,
 		})
 
+		// The destination name comes from both references, so it is
+		// withheld when either is redacted (see LoggedSkillName).
+		destForLog := LoggedSkillName(winner.URI, dest)
+		if SkillRefRedacted(loser.URI) {
+			destForLog = SkillNameWithheld
+		}
+
 		// Log at appropriate level: Debug for optional losers, Warn otherwise.
 		if loser.Optional {
 			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		} else {
 			slog.WarnContext(ctx, "skill destination-name collision resolved",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		}
@@ -550,20 +651,22 @@ func installResolvedSkills(
 			reason := publicInstallReason(err)
 			if skill.Optional {
 				slog.WarnContext(ctx, "optional skill could not be installed; skipped",
-					"skill_uri", skill.URI, "skill_name", skill.Name,
-					"reason", reason, "error", err)
+					"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+					"reason", ResolverReasonForLog(skill.URI, reason),
+					"error", ResolverReasonForLog(skill.URI, err.Error()))
 				skipped = append(skipped, SkippedSkill{URI: skill.URI, Reason: reason})
 				continue
 			}
 			slog.WarnContext(ctx, "required skill could not be installed",
-				"skill_uri", skill.URI, "skill_name", skill.Name,
-				"reason", reason, "error", err)
+				"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+				"reason", ResolverReasonForLog(skill.URI, reason),
+				"error", ResolverReasonForLog(skill.URI, err.Error()))
 			return nil, nil, &SkillResolutionError{URI: skill.URI, Code: SkillErrCodeInstallFailed, Message: reason}
 		}
 		record.Skills = append(record.Skills, *entry)
 
 		if skill.Deprecated {
-			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", skill.Name, skill.Version)
+			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 			if skill.DeprecationMessage != "" {
 				msg += ": " + skill.DeprecationMessage
 			}
@@ -617,21 +720,21 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
 					return nil, err
 				}
-				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+				util.Debugf("provision: skill installed from cache: %s@%s", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 				slog.InfoContext(ctx, "skill_content_cache: cache hit",
-					"skill", skill.Name, "version", skill.Version,
+					"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 					"hash", truncHash(skill.Hash), "cache_hit", true)
 				return buildSkillEntry(skill, dest, skillsDest)
 			}
 			// Cache entry unusable (copy or hash verification failed) — re-downloading.
-			util.Debugf("provision: cached skill unusable, falling through to download: %v", copyErr)
+			util.Debugf("provision: cached skill unusable, falling through to download: %s", ResolverReasonForLog(skill.URI, copyErr.Error()))
 			_ = os.RemoveAll(skillStagingDir)
 			slog.InfoContext(ctx, "skill_content_cache: cache error, re-downloading",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		} else {
 			slog.InfoContext(ctx, "skill_content_cache: cache miss, will download",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		}
 	}
@@ -644,7 +747,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	// broker's GitHub resolver served without content, the credential it
 	// uses for that ref; otherwise the default token, used for gh:// skills
 	// the Hub resolved on our behalf. Empty for public repos.
-	ghToken := gitHubDownloadToken(ctx, skill)
+	ghCred := gitHubDownloadToken(ctx, skill)
 
 	var fileEntries []FileEntry
 
@@ -678,7 +781,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
 				return nil, wrapSkillFileError("failed to write", f.Path, err)
 			}
-		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghToken); err != nil {
+		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghCred); err != nil {
 			return nil, wrapSkillFileError("failed to download", f.Path, err)
 		}
 
@@ -798,15 +901,15 @@ func populateSkillCache(cache interface {
 	for _, f := range skill.Files {
 		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
 		if err != nil {
-			util.Debugf("provision: failed to read skill file for caching: %s: %v", f.Path, err)
+			util.Debugf("provision: failed to read skill file for caching: %s: %s", f.Path, ResolverReasonForLog(skill.URI, err.Error()))
 			return
 		}
 		files[f.Path] = content
 	}
 	if _, err := cache.Put(skill.Hash, files); err != nil {
-		util.Debugf("provision: failed to cache skill %s@%s: %v", skill.Name, skill.Version, err)
+		util.Debugf("provision: failed to cache skill %s@%s: %v", LoggedSkillName(skill.URI, skill.Name), skill.Version, err)
 	} else {
-		util.Debugf("provision: cached skill %s@%s (%s)", skill.Name, skill.Version, skill.Hash)
+		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, skill.Hash)
 	}
 }
 
@@ -917,11 +1020,19 @@ func isGitHubHost(host string) bool {
 
 // downloadSkillFile downloads a single file from a URL to a local path.
 //
-// ghToken, when non-empty, is sent as a bearer credential — but only to
+// ghCred's token, when non-empty, is sent as a bearer credential — but only to
 // GitHub hosts. Registry skills are served from signed object-store URLs that
 // have no business seeing a GitHub token, so the host check is what keeps the
 // credential from leaking to an unrelated origin named in a Hub response.
-func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghToken string) error {
+//
+// GitHub answers 404 (or 401/403) for a public file when the credential sent
+// with it is rejected, for example an expired or revoked user token. So when
+// a credential was sent and the answer is one of those, the download is
+// retried exactly once, at the same URL, without credentials: public skills
+// still install, and the caller's hash checks apply to the result as usual.
+// If the retry fails too, the error is a *gitHubCredentialRejectedError. The
+// retry uses the same client, so the cross-host redirect ban applies to it.
+func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghCred gitHubCredential) error {
 	parsed, err := url.Parse(fileURL)
 	if err != nil {
 		// The parse error quotes the URL, which may be signed, so neither
@@ -941,7 +1052,8 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	}
 
 	client := &http.Client{
-		Timeout: downloadTimeout,
+		Transport: skillDownloadTransport,
+		Timeout:   downloadTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// S5: No cross-host redirects
 			if len(via) > 0 && req.URL.Host != via[0].URL.Host {
@@ -954,28 +1066,37 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	sendCred := ghCred.token != "" && isGitHubHost(parsed.Hostname())
+	resp, err := getSkillFile(ctx, client, fileURL, parsed.Host, ghCred.token, sendCred)
 	if err != nil {
-		// Not err: it can quote the URL.
-		return fmt.Errorf("failed to create request for %s", parsed.Host)
-	}
-	if ghToken != "" && isGitHubHost(parsed.Hostname()) {
-		req.Header.Set("Authorization", "Bearer "+ghToken)
+		return err
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		// client.Do returns a *url.Error, whose text quotes the full URL; a
-		// signed URL carries a token in its query. Neither the user text nor
-		// the logged error includes it: only the host and the cause.
-		var ue *url.Error
-		if !errors.As(err, &ue) {
-			return newSkillInstallError("download failed", fmt.Errorf("download from %s failed", parsed.Host))
+	if sendCred && isRejectedCredentialStatus(resp.StatusCode) {
+		// One retry, same URL, no credential (see the doc comment above).
+		authStatus := resp.StatusCode
+		_ = resp.Body.Close()
+		resp, err = getSkillFile(ctx, client, fileURL, parsed.Host, "", false)
+		if err != nil {
+			return err
 		}
-		cause := transportFailureCause(ue)
-		public := "download failed: " + cause
-		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", parsed.Host, cause))
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			// The rejected-credential error names only the file, statuses
+			// and credential source, so users see it verbatim.
+			rej := &gitHubCredentialRejectedError{
+				File:       filepath.Base(destPath),
+				Source:     ghCred.source,
+				AuthStatus: authStatus,
+				AnonStatus: resp.StatusCode,
+			}
+			return newSkillInstallError(rej.Error(), rej)
+		}
+		// S5: no URL in logs, and never the credential.
+		slog.WarnContext(ctx, "skill download: GitHub rejected the configured credential; the download succeeded without credentials",
+			"file", filepath.Base(destPath), "status", authStatus, "credential_source", ghCred.source)
 	}
+	// Deferred only now: resp is not reassigned after this point.
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -983,8 +1104,11 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		return newSkillInstallError(msg, errors.New(msg))
 	}
 
-	// S5: Enforce size limit
-	limitedReader := io.LimitReader(resp.Body, maxSize+1)
+	// S5: Enforce size limit. bodyReader records a read error so a failure
+	// while receiving the body is reported as a download failure, not as a
+	// local write failure (ptone/scion#5033).
+	body := &bodyReader{r: resp.Body}
+	limitedReader := io.LimitReader(body, maxSize+1)
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -993,6 +1117,17 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, limitedReader)
+	if body.err != nil {
+		// The read error names no URL (a *url.Error is reduced to its
+		// cause), but is kept out of the user text all the same.
+		cause := body.err.Error()
+		var ue *url.Error
+		if errors.As(body.err, &ue) {
+			cause = transportFailureCause(ue)
+		}
+		return newSkillInstallError("download failed while reading the response",
+			fmt.Errorf("download from %s failed while reading the response: %s", parsed.Host, cause))
+	}
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
@@ -1009,6 +1144,22 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	return nil
 }
 
+// bodyReader wraps a download response body and records the first read
+// error other than io.EOF, so a failed read can be told apart from a failed
+// write in an io.Copy.
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
+}
+
 // transportFailureCause returns the cause of a client.Do failure as text that
 // names no URL: ue.Err's text (ue itself quotes the URL), with a malformed
 // redirect Location, which net/http quotes and which may be signed too,
@@ -1022,6 +1173,64 @@ func transportFailureCause(ue *url.Error) string {
 		cause = "invalid redirect Location"
 	}
 	return cause
+}
+
+// skillDownloadTransport is the HTTP transport downloadSkillFile uses; nil
+// means http.DefaultTransport. Tests replace it to serve GitHub hosts locally.
+var skillDownloadTransport http.RoundTripper
+
+// getSkillFile sends one GET for fileURL (whose host is host), with token as
+// a bearer credential when withCred is set. Errors never include the URL,
+// which may be signed: only host and the cause.
+func getSkillFile(ctx context.Context, client *http.Client, fileURL, host, token string, withCred bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		// Not err: it can quote the URL.
+		return nil, fmt.Errorf("failed to create request for %s", host)
+	}
+	if withCred {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// client.Do returns a *url.Error, whose text quotes the full URL; a
+		// signed URL carries a token in its query. Neither the user text nor
+		// the logged error includes it: only the host and the cause.
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			return nil, newSkillInstallError("download failed", fmt.Errorf("download from %s failed", host))
+		}
+		cause := transportFailureCause(ue)
+		public := "download failed: " + cause
+		return nil, newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", host, cause))
+	}
+	return resp, nil
+}
+
+// isRejectedCredentialStatus reports whether status is one GitHub returns
+// for a request whose credential it rejects or finds insufficient.
+func isRejectedCredentialStatus(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound
+}
+
+// gitHubCredentialRejectedError reports a skill file download from GitHub
+// that failed with the configured credential and again without one. Source
+// names where the credential came from; the credential itself is never part
+// of the error.
+type gitHubCredentialRejectedError struct {
+	File       string
+	Source     string
+	AuthStatus int
+	AnonStatus int
+}
+
+func (e *gitHubCredentialRejectedError) Error() string {
+	return fmt.Sprintf("download of %s failed: GitHub rejected %s, or it was not enough to read the file (status %d), "+
+		"and a retry without credentials got status %d; the credential may be expired, revoked or rate limited, "+
+		"or the repository is private and the credential cannot read it",
+		e.File, e.Source, e.AuthStatus, e.AnonStatus)
 }
 
 // writeSkillFileContent writes pre-fetched content bytes directly to destPath,
@@ -1089,6 +1298,11 @@ func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		// An Agent Plugins bundle installed in the skills dir (claude) is
+		// not a skill; the harness loads it as a plugin.
+		if fi, err := os.Lstat(filepath.Join(skillsPath, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
+			continue
+		}
 		entry := SkillResolutionEntry{
 			Name:          e.Name(),
 			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
@@ -1108,4 +1322,25 @@ func collectRequiredSkillURIs(skills []api.SkillReference) []string {
 		}
 	}
 	return uris
+}
+
+// platformSkillScheme is the scheme of the display-only entries the Hub
+// seeds for its platform (binary-embedded) skills. NOTE: this must be kept
+// in sync with platformSkillURIPrefix in pkg/hub/platform_skills_seed.go.
+const platformSkillScheme = "scion-platform"
+
+// resolvableSkillRefs returns skills without the optional display-only
+// platform entries (scheme scion-platform). Those entries only list the
+// platform skills; provisioning installs them separately, and no resolver
+// serves the scheme. A required entry is kept, so it still fails closed.
+// skills itself is not modified.
+func resolvableSkillRefs(skills []api.SkillReference) []api.SkillReference {
+	out := make([]api.SkillReference, 0, len(skills))
+	for _, s := range skills {
+		if s.Optional && detectScheme(s.URI) == platformSkillScheme {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }

@@ -90,6 +90,13 @@ var ErrAgentDeletedDuringLaunch = errors.New("agent was deleted while launching"
 // ErrLaunchNotRunning matches *LaunchNotRunningError with errors.Is.
 var ErrLaunchNotRunning = errors.New("agent launch ended without the agent running")
 
+// AgentGetter reads one agent by ID or slug. It is the only method the
+// launch wait helpers use; AgentService satisfies it, and a client with its
+// own transport can implement just this method.
+type AgentGetter interface {
+	Get(ctx context.Context, agentID string) (*Agent, error)
+}
+
 // LaunchOutcome is how a launch wait ended.
 type LaunchOutcome struct {
 	// Agent is the last agent read in the wait; nil when none was read.
@@ -226,10 +233,20 @@ func launchPhase(a *Agent) string {
 }
 
 // failedLaunchEndReason reports whether an ended launch's end reason means
-// it did not bring the agent up, even without an error code.
+// it did not bring the agent up, even without an error code. not_launched
+// is not one of them: the Hub ends a launch not_launched without a code when
+// a broker without async launch answered the start synchronously (the start
+// goes on outside the launch record, and the Hub applies the broker's
+// phase), and when the start waits for env to be submitted. The Hub's
+// not_launched failures carry a code (dispatch_failed), which ends the wait
+// through launchDone's code rule (pkg/hub/launch_dispatch.go,
+// dispatchLaunching). Without a code the wait follows the agent: running,
+// error or stopped, not found, or the budget (ErrLaunchWaitTimeout). The
+// CLI's wait (failedLaunchEndReason in cmd/launch_wait.go) uses the same end
+// reasons.
 func failedLaunchEndReason(reason string) bool {
 	switch reason {
-	case "failed", "timed_out", "lost", "not_launched":
+	case "failed", "timed_out", "lost":
 		return true
 	}
 	return false
@@ -239,8 +256,10 @@ func failedLaunchEndReason(reason string) bool {
 // success. Error and stopped end it with a failure, and so does a launch
 // that has ended with an error code or a failed end reason, whatever the
 // phase (the failure phase differs by launch kind). Everything else keeps
-// waiting. WaitForLaunch holds a failed phase seen while the launch is
-// still active for launchFailureSettle, to report the launch error code.
+// waiting, including a launch ended not_launched without an error code
+// (see failedLaunchEndReason). WaitForLaunch holds a failed phase seen
+// while the launch is still active for launchFailureSettle, to report the
+// launch error code.
 func launchDone(a *Agent) (done, running bool) {
 	switch launchPhase(a) {
 	case string(state.PhaseRunning):
@@ -298,6 +317,13 @@ func launchWaitBudget(a *Agent) time.Duration {
 // from the write that ends the launch; if that does not arrive, the
 // failure is reported with what was read (Code may be "").
 //
+// A launch that ends not_launched without an error code does not end the
+// wait by itself, because the start may go on synchronously on an older
+// broker, or wait for env (see failedLaunchEndReason). The wait follows the
+// agent until it is running, error or stopped, or not found, or the budget
+// runs out. A not_launched launch with a code (dispatch_failed) ends the
+// wait as a failed launch.
+//
 // A nil error means the wait saw the end of the launch: the outcome reports
 // whether the agent is running, or how it failed. Otherwise the error is
 // one of: ErrLaunchWaitTimeout (wrapped) when the budget runs out; the
@@ -309,7 +335,7 @@ func launchWaitBudget(a *Agent) time.Duration {
 // errors, 5xx, 408 and 429 are retried. With an error, the outcome carries
 // the last agent read, if any, and Running is false. It never changes the
 // agent.
-func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start *Agent, opts LaunchWaitOptions) (LaunchOutcome, error) {
+func WaitForLaunch(ctx context.Context, svc AgentGetter, agentID string, start *Agent, opts LaunchWaitOptions) (LaunchOutcome, error) {
 	if svc == nil {
 		return LaunchOutcome{}, errors.New("hubclient: WaitForLaunch: nil agent service")
 	}
@@ -485,7 +511,7 @@ func launchInterruptedError(ctx context.Context, agentID string) error {
 // sending a message to an agent that may still be launching, which the Hub
 // would refuse; it is the form for callers that hold only an ID or slug, or
 // an agent read earlier.
-func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentService, agentID string, opts LaunchWaitOptions) error {
+func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentGetter, agentID string, opts LaunchWaitOptions) error {
 	if svc == nil {
 		return errors.New("hubclient: EnsureRunningBeforeSendByID: nil agent service")
 	}
@@ -511,7 +537,7 @@ func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentService, agentID 
 // read. A stale agent that shows no active launch skips the wait, and the
 // send may then be refused because the agent is still launching. Callers
 // without a fresh agent use EnsureRunningBeforeSendByID.
-func EnsureRunningBeforeSend(ctx context.Context, svc AgentService, a *Agent, opts LaunchWaitOptions) error {
+func EnsureRunningBeforeSend(ctx context.Context, svc AgentGetter, a *Agent, opts LaunchWaitOptions) error {
 	if a == nil {
 		return errors.New("hubclient: EnsureRunningBeforeSend: nil agent")
 	}
@@ -520,7 +546,7 @@ func EnsureRunningBeforeSend(ctx context.Context, svc AgentService, a *Agent, op
 
 // ensureRunning waits for a's launch, reading the agent by id, when a shows
 // one; a.ID is preferred over id when set.
-func ensureRunning(ctx context.Context, svc AgentService, id string, a *Agent, opts LaunchWaitOptions) error {
+func ensureRunning(ctx context.Context, svc AgentGetter, id string, a *Agent, opts LaunchWaitOptions) error {
 	if !LaunchActive(a) {
 		return nil
 	}

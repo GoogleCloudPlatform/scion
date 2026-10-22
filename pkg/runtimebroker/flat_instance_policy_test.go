@@ -131,7 +131,7 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 			Instance: *inst,
 		}
 	}
-	p.srv = New(cfg, p.mgr, rt)
+	p.srv = New(cfg, p.mgr, rt, config.RuntimeBuildRecord{})
 	return p
 }
 

@@ -61,6 +61,13 @@ The selection logic lives in each bundle's `provision.py` via `scion_harness.Aut
 `ctx.select_auth(...)`. The order of methods in that spec — not the `config.yaml` `autodetect`
 map — determines which credential wins when several are present.
 
+When Scion picks the auth type before provisioning (at agent start, and in
+the broker's preflight check, which use the same auto-detect), a file
+credential normally wins over an environment variable. One exception: for harnesses whose
+default auth type is `api-key` (Claude, Gemini CLI, Grok Build, Hermes), an API
+key in the environment wins over a `gcloud-adc` file credential, matching their
+`provision.py` order. Every other file credential still wins.
+
 ### Source precedence
 
 For each credential key, the resolution order is:
@@ -459,8 +466,10 @@ scion reset-auth <agent-name>
 ```
 
 This generates a new token on the Hub, pushes it into the running container, and signals the agent
-to restart its token-refresh loop. It requires Hub connectivity and only works on a **running**
-agent (a stopped agent gets a fresh token on its next start). The same action is available as a
+to restart its token-refresh loop. If the signal does not reach the agent, it still picks up the new
+token: the agent checks its token file every few seconds and adopts a new token the Hub accepts
+through the same reset. It requires Hub connectivity and only works on a **running** agent (a
+stopped agent gets a fresh token on its next start). The same action is available as a
 **Reset Auth** button in the web UI. See [Diagnostics](#diagnostics) to identify when this is
 needed.
 
@@ -470,6 +479,14 @@ Two diagnostic commands help troubleshoot auth and connectivity:
 
 - **`scion doctor`** (host-side): checks host prerequisites — Git, tmux, the active container runtime (Docker/Podman daemon or Kubernetes cluster access), and related diagnostics. Supports `--format json`.
 - **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token validity (a read-only check that leaves the agent's token untouched), the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
+  It also reports the credential held by the long-running `sciontool init` process, which the other checks cannot see, because they read the token file. Doctor shows:
+  - whether init holds the same credential as the token file (compared by credential ID and a short hash, never the value);
+  - init's last heartbeat, refresh and start-up check results, with times;
+  - whether init's credential has expired or is refused.
+
+  The check fails when init's credential has expired or its requests are refused (401/403). When the hub refused them, doctor says how to reload the credential.
+  In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
+  Init publishes this state in a root-owned file. Where init does not run as root, doctor reports the state as unavailable.
 
 ## Agent Progeny & Secret Access
 

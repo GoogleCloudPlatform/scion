@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
@@ -108,6 +109,80 @@ func withUTCTimezone(dsn string) string {
 	return base + "?" + values.Encode()
 }
 
+// withSQLitePragmas returns dsn with each of pragmas (e.g.
+// "foreign_keys(1)") set as a modernc.org/sqlite "_pragma" DSN option.
+// modernc runs every "_pragma" option on each new connection it opens, so the
+// setting holds on every pooled connection, including one the pool opens to
+// replace a discarded connection. A one-time "PRAGMA ..." statement after
+// sql.Open would reach only the connection that ran it.
+//
+// The driver runs the "_pragma" options in its own sorted order, not in DSN
+// order, so appending cannot be relied on to override a caller's value.
+// Instead, any caller "_pragma" option that sets one of the same pragmas, in
+// any value and in the spellings sqlitePragmaName recognizes (case,
+// whitespace, a schema prefix, identifier quotes), is removed, leaving ours
+// as the only one. Other caller options, including other "_pragma" options,
+// are kept. A spelling it does not recognize (for example one with a leading
+// SQL comment) is kept; the post-open check (requireSQLitePragmaOn) then
+// fails the open if that option turned the pragma off.
+//
+// As in withUTCTimezone, a query string that fails to parse is returned
+// unchanged so the driver reports the caller's error at open time.
+func withSQLitePragmas(dsn string, pragmas ...string) string {
+	base, rawQuery, _ := strings.Cut(dsn, "?")
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return dsn
+	}
+	ours := make(map[string]bool, len(pragmas))
+	for _, p := range pragmas {
+		ours[sqlitePragmaName(p)] = true
+	}
+	var kept []string
+	for _, v := range values["_pragma"] {
+		if !ours[sqlitePragmaName(v)] {
+			kept = append(kept, v)
+		}
+	}
+	values["_pragma"] = append(kept, pragmas...)
+	return base + "?" + values.Encode()
+}
+
+// sqlitePragmaName returns the lower-cased pragma name of a "_pragma" DSN
+// value such as "foreign_keys(1)", "FOREIGN_KEYS = off" or
+// "main.foreign_keys=0", without any schema prefix or identifier quotes.
+func sqlitePragmaName(v string) string {
+	name := v
+	if i := strings.IndexAny(name, "(="); i >= 0 {
+		name = name[:i]
+	}
+	name = strings.TrimSpace(name)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = strings.TrimSpace(name[i+1:])
+	}
+	return strings.ToLower(strings.Trim(name, "\"'`[]"))
+}
+
+// sqliteDSNPragmas builds the DSN the SQLite openers pass to sql.Open. It is
+// a variable only so a test can stub it to check that the openers fail
+// closed when a pragma did not take effect.
+var sqliteDSNPragmas = withSQLitePragmas
+
+// requireSQLitePragmaOn returns an error unless PRAGMA name reads 1 on a
+// connection from db. The openers set their pragmas through the DSN
+// (withSQLitePragmas); this makes the open fail rather than return a
+// database whose connections run without them.
+func requireSQLitePragmaOn(db *sql.DB, name string) error {
+	var on int
+	if err := db.QueryRow("PRAGMA " + name).Scan(&on); err != nil {
+		return fmt.Errorf("reading PRAGMA %s: %w", name, err)
+	}
+	if on != 1 {
+		return fmt.Errorf("the connection's %s pragma is %d after opening, want 1", name, on)
+	}
+	return nil
+}
+
 // UTCTimeHook is an Ent mutation hook that converts every time.Time field
 // value set in a mutation (explicit or defaulted — ent fills in defaults
 // before hooks run) to UTC before it is persisted. On SQLite this makes a
@@ -164,20 +239,61 @@ func UTCTimeHook(next ent.Mutator) ent.Mutator {
 	})
 }
 
+// ClearLaunchResumePhaseHook is an Ent mutation hook that ends an agent's
+// resume memory (launch_resume_phase, ptone/scion#4669) at one choke
+// point: an Agent update (UpdateOne or bulk Update) that sets phase to a
+// value other than starting or error, and does not itself set
+// launch_resume_phase, also sets launch_resume_phase to "". A later
+// success, stop, suspend or any create-path write therefore clears the
+// memory whichever writer makes it. starting (a start dispatch) and error
+// (a failed start, or the rollback of a synchronous start taken from a
+// memory row) keep it. An explicit launch_resume_phase in the same mutation
+// wins, which is how a failed start-kind launch writes the memory.
+//
+// Registered next to UTCTimeHook by OpenSQLite, OpenSQLiteReadOnly and
+// openPostgres, and by the launch store's transaction client
+// (entadapter.newTxClient), which every launch writer uses. A new
+// *ent.Client constructor that writes agents must register it too
+// (TestEntClientConstructorsRegisterResumeHook checks this).
+func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
+	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+		am, ok := m.(*ent.AgentMutation)
+		if !ok || (!am.Op().Is(ent.OpUpdate) && !am.Op().Is(ent.OpUpdateOne)) {
+			return next.Mutate(ctx, m)
+		}
+		phase, set := am.Phase()
+		if !set {
+			return next.Mutate(ctx, m)
+		}
+		if _, explicit := am.LaunchResumePhase(); explicit {
+			return next.Mutate(ctx, m)
+		}
+		switch state.Phase(phase) {
+		case state.PhaseStarting, state.PhaseError:
+		default:
+			am.SetLaunchResumePhase("")
+		}
+		return next.Mutate(ctx, m)
+	})
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
-// Foreign keys and WAL journal mode are enabled automatically.
+// Foreign keys and WAL journal mode are enabled automatically. Foreign keys
+// are a per-connection setting, so they are set through the DSN and apply to
+// every connection in the pool.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
 func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
+	db, err := sql.Open("sqlite", sqliteDSNPragmas(withUTCTimezone(dsn), "foreign_keys(1)"))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
-	// Enable foreign keys and WAL mode, matching existing store pattern.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "foreign_keys"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
+	// journal_mode=WAL is stored in the database file, so setting it once
+	// covers every connection.
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
@@ -185,7 +301,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 
@@ -196,29 +312,29 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 // switch the journal to WAL mode (doing so would write to the database header
 // and fail on a query-only connection).
 //
-// MaxOpenConns is forced to 1 because the query_only and foreign_keys pragmas
-// are connection-scoped; with a larger pool, unprimed connections would not
-// inherit them.
+// The query_only and foreign_keys pragmas are connection-scoped, so both are
+// set through the DSN and apply to every connection the pool opens, including
+// a replacement for a discarded one. MaxOpenConns stays 1: a migration reads
+// the source through a single connection.
 func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
+	// Foreign keys on for read consistency; query_only to guarantee the source
+	// is never modified during migration.
+	db, err := sql.Open("sqlite", sqliteDSNPragmas(withUTCTimezone(dsn), "foreign_keys(1)", "query_only(1)"))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
-	// Pin to a single connection so the pragmas below apply to every query.
 	db.SetMaxOpenConns(1)
-	// Foreign keys on for read consistency; query_only to guarantee the source
-	// is never modified during migration.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "foreign_keys"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
-	if _, err := db.Exec("PRAGMA query_only = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "query_only"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling query_only mode: %w", err)
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 
@@ -300,7 +416,7 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 
@@ -327,8 +443,9 @@ func applyKeepalives(params map[string]string) {
 // AutoMigrate runs automatic schema migration on the given client.
 // It is idempotent: running it against a database that already has some or
 // all Ent-managed tables succeeds. The retired decision_audits table and its
-// rows are removed explicitly after schema migration succeeds. Other data is
-// preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
+// rows, and the retired templates.config and templates.image columns
+// (dropTemplateLegacyColumns), are removed explicitly after schema migration
+// succeeds. Other data is preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
 // ("relation already exists") is silently skipped so that new tables are
 // created alongside pre-existing ones. On SQLite, rows orphaned while foreign
 // keys were not enforced first get their key's declared ON DELETE action
@@ -346,7 +463,15 @@ func applyKeepalives(params map[string]string) {
 // of the advisory lock taken by entadapter.CompositeStore.MigrateWithSchemaLock
 // (ptone/scion#1078). Code that calls client.Schema.Create directly bypasses
 // this lock.
-func AutoMigrate(ctx context.Context, client *ent.Client) error {
+//
+// WithBeforeFKReconcile sets a hook that runs, under the lock and after
+// everything the caller ran before AutoMigrate, just before the reconcile
+// changes rows; a hook error aborts before anything is written.
+func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOption) error {
+	var cfg autoMigrateConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	select {
 	case autoMigrateSem <- struct{}{}:
 	case <-ctx.Done():
@@ -369,6 +494,9 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	var fkResult fkReconcileResult
 	if client.Driver().Dialect() == dialect.SQLite {
 		if drv, ok := client.Driver().(*entsql.Driver); ok {
+			if err := runBeforeFKReconcile(ctx, drv.DB(), cfg.beforeFKReconcile); err != nil {
+				return err
+			}
 			var err error
 			if fkResult, err = reconcileSQLiteForeignKeys(ctx, drv.DB()); err != nil {
 				return err
@@ -381,7 +509,24 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		}
 		return err
 	}
-	return dropDecisionAuditTable(ctx, client)
+	if err := dropDecisionAuditTable(ctx, client); err != nil {
+		return err
+	}
+	return dropTemplateLegacyColumns(ctx, client)
+}
+
+// AutoMigrateOption configures AutoMigrate.
+type AutoMigrateOption func(*autoMigrateConfig)
+
+type autoMigrateConfig struct {
+	beforeFKReconcile BeforeFKReconcileFunc
+}
+
+// WithBeforeFKReconcile makes AutoMigrate call fn on SQLite just before the
+// foreign key reconcile changes rows; see BeforeFKReconcileFunc. A nil fn is
+// ignored.
+func WithBeforeFKReconcile(fn BeforeFKReconcileFunc) AutoMigrateOption {
+	return func(c *autoMigrateConfig) { c.beforeFKReconcile = fn }
 }
 
 // autoMigrateSem is a one-slot semaphore that serializes AutoMigrate within

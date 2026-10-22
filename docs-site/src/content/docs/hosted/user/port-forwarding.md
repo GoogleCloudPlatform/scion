@@ -87,6 +87,56 @@ Any subpath or query parameters appended to the proxy path are forwarded faithfu
 `https://hub.scion.local/api/v1/agents/agent-abc-123/ports/8000/proxy/api/v1/metrics?raw=true`
 will forward a local request to `http://127.0.0.1:8000/api/v1/metrics?raw=true`.
 
+Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without it (`.../ports/8000/proxy`) is redirected with `308 Permanent Redirect` to `.../ports/8000/proxy/`, query string included, so that the page's relative links resolve under the proxy path. Other methods on the URL without the slash are forwarded as before. WebSocket upgrades to the URL without the slash are not redirected.
+
+---
+
+## Multi-file apps
+
+A proxy URL opened in a browser serves **one self-contained page** well. The page itself loads, but the requests that page makes back to the app are not served: separate scripts (including module scripts), stylesheets, images, `fetch()` and XHR calls, and WebSockets. Each of those requests gets `401 Unauthorized` with a short plain-text explanation, which you can see in the browser's developer tools (Network tab):
+
+```
+HTTP/1.1 401 Unauthorized
+Content-Type: text/plain; charset=utf-8
+X-Scion-Proxy-Error: no-credentials
+X-Scion-Proxy-Hint: sandboxed-subresource
+```
+
+`X-Scion-Proxy-Hint: sandboxed-subresource` is present when the request came from a page opened through the proxy. Other requests to the link that are not page loads get the same plain-text answer. Opening a proxy URL in a browser tab without being signed in still takes you to the sign-in page.
+
+A request made with your own credential, for example with `curl` and an agent token or a [personal access token](/scion/hosted/user/personal-access-tokens/), is served for any path. That shows the app answers, not that the page works for a person who opens the link; check the page in a browser.
+
+### What works today
+
+| App | Through the proxy URL in a browser |
+| :--- | :--- |
+| One HTML file with its CSS and JavaScript inline and images as `data:` URLs | Works |
+| An HTML page that loads separate `.js`, `.css` or image files | The page loads; those files do not |
+| A page that calls back to its app with `fetch()`, XHR, `EventSource` or a WebSocket | Those calls fail |
+| Dev servers with live reload (`vite dev`, `next dev`) | Do not work |
+| Path-based client-side routing (for example React Router's `BrowserRouter`, Vue Router's `createWebHistory`) | Does not work; use hash routing (`HashRouter`, `createWebHashHistory`) or no router |
+
+### Single-file fallback
+
+To share a working page through the proxy URL, build it as one self-contained HTML file:
+
+- Put the styles in a `<style>` element and the scripts in `<script>` elements, and turn images into `data:` URLs.
+- If the app has a client-side router, use hash routing (URLs like `#/settings`), not path-based routing.
+- With Vite, [`vite-plugin-singlefile`](https://github.com/richardtallent/vite-plugin-singlefile) produces such a file from a normal build.
+- Serve the file from any static server on the agent's loopback address, for example `python3 -m http.server 8000 --bind 127.0.0.1`, and expose the port.
+
+The page cannot load data from the app after it opens, so include everything it needs at build time.
+
+### Full fidelity: `scion tunnel`
+
+For a multi-file app, an app that talks to its own backend, or a dev server with live reload, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel) from your machine. It needs the `scion` CLI and the `hub.conduit` experiment:
+
+```bash
+scion tunnel my-agent --port 5173 --local-port 5173
+```
+
+Then open `http://127.0.0.1:5173/` in your browser. The app behaves as it does on its own machine.
+
 ---
 
 ## Manual Port Management
@@ -177,7 +227,7 @@ scion tunnel my-agent --port 5173 --local-port 8080
 scion tunnel status
 ```
 
-The local listener binds to `127.0.0.1` only. The tunnel stays open until you stop the command (Ctrl-C) or the session to the Hub is lost (exit code 6).
+The local listener binds to `127.0.0.1` only. Each accepted connection gets its own tunnel. The listener runs until you stop the command (Ctrl-C, exit code 130) or the session to the Hub is lost (exit code 6). It also stops when the Hub refuses a new tunnel in a way no later connection can fix: an expired or refused credential (3), an agent that was deleted (4), access that was withdrawn (5), or a Hub without tunnels (11). After such a refusal the listener closes its port, so new connections are refused. Connections that are already open continue until they end, and the command then exits with that code. If the agent is stopped, the listener keeps listening. Each new connection is closed, with the line `tunnel request failed: the agent is not running (agent_not_running)` on stderr, and connections are served again once the agent is started.
 
 **How it works.** The CLI opens one Conduit session to the Hub (`GET /api/v1/conduit`, with your usual Hub credential) and asks for each tunnel over it. The Hub checks each tunnel on its own and connects it to the agent's own Conduit session, so the agent's ports are never opened to the network. A `scion tunnel` process targets one agent; its session carries one tunnel per accepted local connection, up to the session's limit. Closing a tunnel closes only that tunnel.
 
@@ -212,7 +262,7 @@ Administrators can control whether port forwarding and auto-expose are permitted
 ### Which Setting Wins
 `SCION_AUTO_EXPOSE_PORTS` can come from four places. Highest first:
 
-1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
+1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's Edit page. This is recorded as the agent's explicit choice and survives reincarnate.
 2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
 3. **Harness-config env.** A template cannot set `SCION_*` keys.
 4. **The Hub default** `auto_expose_ports.enabled` (see below).
@@ -246,7 +296,7 @@ When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` wi
 
 The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project value, then harness-config env, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
 
-In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
+In the web UI, the agent **Edit** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key). A value set on the agent is shown as the control's value; an inherited one is shown as grey placeholder text, so picking it sets it on the agent. The page saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
 
 ---
 
@@ -289,6 +339,8 @@ Access to the proxy and port registration APIs requires authentication, verified
 ---
 
 ## Browser vs. Non-Browser Error Handling
+
+Requests to a proxy URL that carry no credential and are not a page navigation (a page's scripts, stylesheets, images and `fetch()` calls) get the plain-text `401` described in [Multi-file apps](#multi-file-apps), instead of the HTML page or the JSON error described below.
 
 When an unexposed port is accessed, or when the agent container's WebSocket connection is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
 

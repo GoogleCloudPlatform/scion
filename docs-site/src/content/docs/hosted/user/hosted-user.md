@@ -17,7 +17,7 @@ scion hub auth login --hub team
 scion use --hub team
 ```
 
-`scion hub auth login --hub-url https://hub.example.com` also adds a Hub URL that is not in the list yet, with a nickname derived from its host. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
+`scion --hub https://hub.example.com hub auth login` also adds a Hub URL that is not in the list yet, with a nickname derived from its host; it does not make it the current Hub. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
 
 **Note:** In workstation mode, a background `scion server start` (the default) adds the local Hub as `local` for you. Authentication is not required there: the CLI uses a machine-specific developer token, and the Hub listens only on localhost.
 
@@ -27,11 +27,11 @@ scion use --hub team
 scion hub auth login
 ```
 
-This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. Both flags accept a hub nickname. With none of these, the login goes to the current Hub (or, in a linked directory, to the Hub it is linked to) and your settings are left unchanged. Otherwise, if no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings). A configured endpoint is all the CLI needs to use the Hub; there is no Hub mode to enable.
+This will open your browser to complete the OAuth flow. The hub URL comes from the root `--hub` flag (a URL or a hub nickname), then the `SCION_HUB_ENDPOINT` or `SCION_HUB_URL` environment variable, then, in a linked directory, the Hub it is linked to, then the current Hub — the same order as every other Hub command. (`--hub-url` still works as a deprecated alias of `--hub`.) A login never writes your settings and never changes the current Hub.
 
 ### Working with several Hubs
 
-Instead of pinning one `hub.endpoint`, you can keep a list of Hubs with nicknames and pick a current Hub and project per user:
+The CLI keeps a list of Hubs with nicknames, and you pick a current Hub and project per user (a `hub.endpoint` in settings is no longer read, apart from a one-time import into this list):
 
 ```bash
 scion hub add prod https://scion.yourcompany.com
@@ -41,9 +41,9 @@ scion hub add prod https://scion.yourcompany.com
 scion use my-project
 ```
 
-`scion use <project>` (alias of `scion project use`) checks the known-project list first, then searches the registered Hubs you are logged in to, plus the `hub.endpoint` Hub if it is not in the hub list (or only the Hub given with `--hub`, `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and asks you to pick one when several have the project. `scion use --hub prod` switches the current Hub, and `scion use` on its own shows the effective Hub and project and where each came from. A nickname works anywhere `--hub` takes a URL, including `scion server` and `scion runtime-broker` commands, except inside agents, which need a URL. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it).
+`scion use <project>` (alias of `scion project use`) checks the known-project list first, then searches the registered Hubs you are logged in to (or only the Hub given with `--hub`, `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and asks you to pick one when several have the project. `scion use --hub prod` switches the current Hub, and `scion use` on its own shows the effective Hub and project and where each came from. A nickname works anywhere `--hub` takes a URL, including `scion server` and `scion runtime-broker` commands, except inside agents, which need a URL. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it).
 
-The current project applies only outside a scion project directory. Inside one, the current Hub is used only when the project has no link entry and no `hub.endpoint` (its own or the global one). Flags and `SCION_HUB_ENDPOINT` always take precedence, and while `SCION_HUB_URL` is set, link entries and the current Hub are not used; `scion hub link` records the project's Hub in the hub list, so a linked checkout keeps targeting its own Hub after you switch. The list and the current context are stored in `~/.scion/context.yaml`. See [`scion project use`](/scion/reference/cli/#scion-project) and [`scion hub`](/scion/reference/cli/#scion-hub). See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for details. `--global` still targets the global project, for example for global settings.
+The current project applies only outside a scion project directory. Inside one, the current Hub is used only when the project has no link entry. Flags and `SCION_HUB_ENDPOINT` always take precedence, and while `SCION_HUB_URL` is set, link entries and the current Hub are not used; `scion hub link` records the project's Hub in the hub list, so a linked checkout keeps targeting its own Hub after you switch. The list and the current context are stored in `~/.scion/context.yaml`. See [`scion project use`](/scion/reference/cli/#scion-project) and [`scion hub`](/scion/reference/cli/#scion-hub). See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for details. `--global` still targets the global project, for example for global settings.
 
 To let a coding agent on your machine (for example Claude Code or Gemini CLI) drive the CLI under a scoped token, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 

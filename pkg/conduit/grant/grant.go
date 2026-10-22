@@ -83,6 +83,41 @@ const (
 // stream a user opened ("user:<user id>").
 const SubjectUserPrefix = "user:"
 
+// Origins (the via claim): the request path that admitted a user stream
+// (design v2.21.29 §3.5, Origin claim via). The hub sets it from the endpoint
+// that served the request.
+const (
+	ViaTunnel = "tunnel" // POST /v1/tunnels
+	ViaProxy  = "proxy"  // the hub port proxy
+	ViaPTY    = "pty"    // hub PTY attach
+)
+
+// IsVia reports whether via is one of the origins.
+func IsVia(via string) bool {
+	switch via {
+	case ViaTunnel, ViaProxy, ViaPTY:
+		return true
+	}
+	return false
+}
+
+// ViaAllows reports whether a stream of kind may have origin via: the one
+// table of origin and kind pairs (design v2.21.29 §3.5, Origin claim via).
+// The tunnel path carries tcp, ssh and pty streams, the port proxy tcp, and
+// PTY attach pty. The hub derives a stream's actions only for a pair in this
+// table, and a grant naming any other pair is refused.
+func ViaAllows(via, kind string) bool {
+	switch via {
+	case ViaTunnel:
+		return kind == StreamKindTCP || kind == StreamKindSSH || kind == StreamKindPTY
+	case ViaProxy:
+		return kind == StreamKindTCP
+	case ViaPTY:
+		return kind == StreamKindPTY
+	}
+	return false
+}
+
 // Stream params. A tcp grant names exactly one agent-local target with
 // ParamHost and ParamPort. ParamAgentID is reserved: the hub sets it on every
 // grant for a broker target to the agent the stream was authorized for, and
@@ -136,6 +171,8 @@ var (
 	ErrSubject       = errors.New("grant: wrong subject")
 	ErrStreamBinding = errors.New("grant: renewal is for another stream")
 	ErrAuthzUntil    = errors.New("grant: authz_until missing or out of range")
+	// ErrVia refuses a missing, unknown or mismatched via claim.
+	ErrVia = errors.New("grant: via missing or does not match")
 )
 
 // StreamHeader is the authority-bearing part of a StreamOpen: its kind and
@@ -189,6 +226,14 @@ type Claims struct {
 	// a grant without a deadline encodes exactly as before.
 	AuthzUntil    time.Time
 	AuthzInterval time.Duration
+	// Via is the stream's origin (ViaTunnel, ViaProxy or ViaPTY), set on
+	// user-stream grants to stream_renewal.v2 targets; empty otherwise and
+	// then omitted from the token.
+	Via string
+	// Scope is the credential context of a stream opened with a scoped
+	// token (scope.go), set only alongside Via; nil otherwise and then
+	// omitted from the token.
+	Scope *Scope
 }
 
 // wireClaims is the JSON form of Claims. Times are Unix seconds.
@@ -205,8 +250,10 @@ type wireClaims struct {
 	Expiry    int64        `json:"exp"`
 	// AuthzUntil (Unix seconds) and AuthzInterval (seconds) are omitted
 	// when zero, so a grant without a deadline encodes exactly as before.
-	AuthzUntil    int64 `json:"authz_until,omitempty"`
-	AuthzInterval int64 `json:"authz_interval,omitempty"`
+	AuthzUntil    int64  `json:"authz_until,omitempty"`
+	AuthzInterval int64  `json:"authz_interval,omitempty"`
+	Via           string `json:"via,omitempty"`
+	Scope         *Scope `json:"scope,omitempty"`
 }
 
 type header struct {
@@ -244,6 +291,14 @@ func (c *Claims) validate() error {
 		return fmt.Errorf("%w: authz_until must be after nbf", ErrInvalidClaims)
 	case c.AuthzInterval < 0 || c.AuthzInterval%time.Second != 0:
 		return fmt.Errorf("%w: authz_interval must be whole positive seconds", ErrInvalidClaims)
+	case c.Via != "" && !IsVia(c.Via):
+		return fmt.Errorf("%w: unknown via %q", ErrInvalidClaims, c.Via)
+	case c.Via != "" && !ViaAllows(c.Via, c.Stream.Kind):
+		return fmt.Errorf("%w: via %q does not carry stream kind %q", ErrVia, c.Via, c.Stream.Kind)
+	case c.Scope != nil && c.Via == "":
+		return fmt.Errorf("%w: scope without via", ErrInvalidClaims)
+	case c.Scope != nil:
+		return c.Scope.validate()
 	}
 	return nil
 }
@@ -293,6 +348,7 @@ func Mint(signer *Signer, c Claims) ([]byte, error) {
 		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream,
 		NotBefore: c.NotBefore.Unix(), Expiry: c.Expiry.Unix(),
 		AuthzUntil: unixOrZero(c.AuthzUntil), AuthzInterval: int64(c.AuthzInterval / time.Second),
+		Via: c.Via, Scope: c.Scope,
 	})
 }
 
@@ -308,7 +364,11 @@ func sign(signer *Signer, typ string, payload any) ([]byte, error) {
 	}
 	signingInput := b64.EncodeToString(hdr) + "." + b64.EncodeToString(body)
 	sig := ed25519.Sign(signer.Key, []byte(signingInput))
-	return []byte(signingInput + "." + b64.EncodeToString(sig)), nil
+	tok := []byte(signingInput + "." + b64.EncodeToString(sig))
+	if len(tok) > maxTokenSize {
+		return nil, fmt.Errorf("%w: %d bytes > %d", ErrTooLarge, len(tok), maxTokenSize)
+	}
+	return tok, nil
 }
 
 // unixOrZero returns t in Unix seconds, or 0 for the zero time.
@@ -343,8 +403,9 @@ type Expectation struct {
 	// capped at MaxClockSkew; zero means none.
 	ClockSkew time.Duration
 	// RequireDeadlineFor, when non-empty, is a subject prefix: a grant
-	// whose sub starts with it must carry authz_until, or it is refused
-	// with ErrAuthzUntil (before its jti is consumed).
+	// whose sub starts with it must carry authz_until and a valid via, or
+	// it is refused with ErrAuthzUntil or ErrVia (before its jti is
+	// consumed).
 	RequireDeadlineFor string
 }
 
@@ -380,6 +441,7 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream,
 		NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 		AuthzUntil: timeOrZero(w.AuthzUntil), AuthzInterval: time.Duration(w.AuthzInterval) * time.Second,
+		Via: w.Via, Scope: w.Scope,
 	}
 	if c.KeyID != kid {
 		return nil, fmt.Errorf("%w: payload kid does not match header", ErrMalformed)
@@ -408,8 +470,13 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	if !c.Stream.Equal(expect.Header) {
 		return nil, ErrStream
 	}
-	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) && c.AuthzUntil.IsZero() {
-		return nil, ErrAuthzUntil
+	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) {
+		if c.AuthzUntil.IsZero() {
+			return nil, ErrAuthzUntil
+		}
+		if !IsVia(c.Via) {
+			return nil, ErrVia
+		}
 	}
 
 	// Final step: consume the jti. Exactly one concurrent caller wins.
@@ -429,61 +496,74 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 // now, and the Ed25519 signature. It returns the signed payload bytes and
 // the kid. Nothing past the header is decoded before the signature holds.
 func verifySigned(token []byte, keys KeySet, typ string, now time.Time) ([]byte, string, error) {
+	payload, kid, _, err := verifySignedKey(token, keys, typ, now, false)
+	return payload, kid, err
+}
+
+// verifySignedKey is verifySigned with a choice for a key past its
+// not_after. Without allowExpiredKey (admission) such a key fails with
+// ErrKeyExpired before the signature is checked. With allowExpiredKey (the
+// re-check mode, design v2.21.36 §3.5) the signature is checked as usual and
+// keyExpired reports the key's state, so the caller can let a bad
+// signature, and every other refusal it decides, take priority over the
+// expired key.
+func verifySignedKey(token []byte, keys KeySet, typ string, now time.Time, allowExpiredKey bool) (payload []byte, kid string, keyExpired bool, err error) {
 	if len(token) == 0 || len(token) > maxTokenSize {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	// Only the base64url alphabet and the segment separator are allowed.
 	// The standard decoder silently skips CR and LF even in strict mode, so
 	// this check keeps token bytes canonical.
 	if !tokenCharsetOK(token) {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	parts := strings.Split(string(token), ".")
 	if len(parts) != 3 {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	hdrBytes, err := b64.DecodeString(parts[0])
 	if err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	var hdr header
 	if err := decodeStrict(hdrBytes, &hdr); err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	// encoding/json matches keys case-insensitively and lets a duplicate
 	// key win. Requiring the header bytes to equal the canonical encoding of
 	// the parsed values rejects case variants, duplicates, reordering and
 	// whitespace: the header is exactly {"alg","typ","kid"}.
 	if !canonical(hdrBytes, hdr) {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	if hdr.Alg != Algorithm {
-		return nil, "", ErrAlgorithm
+		return nil, "", false, ErrAlgorithm
 	}
 	if hdr.Typ != typ || hdr.Kid == "" {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
 	pub, ok := keys.Lookup(hdr.Kid)
 	if !ok || len(pub.Key) != ed25519.PublicKeySize {
-		return nil, "", ErrUnknownKey
+		return nil, "", false, ErrUnknownKey
 	}
-	if !pub.NotAfter.IsZero() && !now.Before(pub.NotAfter) {
-		return nil, "", ErrKeyExpired
+	keyExpired = !pub.NotAfter.IsZero() && !now.Before(pub.NotAfter)
+	if keyExpired && !allowExpiredKey {
+		return nil, "", false, ErrKeyExpired
 	}
 	sig, err := b64.DecodeString(parts[2])
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return nil, "", ErrSignature
+		return nil, "", false, ErrSignature
 	}
 	if !ed25519.Verify(pub.Key, []byte(parts[0]+"."+parts[1]), sig) {
-		return nil, "", ErrSignature
+		return nil, "", false, ErrSignature
 	}
 
 	// Only signed bytes are decoded past this point.
-	payload, err := b64.DecodeString(parts[1])
+	payload, err = b64.DecodeString(parts[1])
 	if err != nil {
-		return nil, "", ErrMalformed
+		return nil, "", false, ErrMalformed
 	}
-	return payload, hdr.Kid, nil
+	return payload, hdr.Kid, keyExpired, nil
 }
 
 // tokenCharsetOK reports whether token holds only base64url characters and

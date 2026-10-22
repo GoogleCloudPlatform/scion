@@ -57,7 +57,7 @@ var useConfirm = hubsync.ConfirmAction
 // of its own hub list entry (see fanOutTransport). It is a variable so
 // tests can substitute it.
 var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", endpoint)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", config.RedactURL(endpoint))
 	opts, err := useLoginClientOptions(endpoint)
 	if err != nil {
 		return err
@@ -74,11 +74,7 @@ var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
 // environment applies, as for 'hub auth login'), else only the transport of
 // the hub's own entry.
 func useLoginClientOptions(endpoint string) ([]hubclient.Option, error) {
-	settings, err := config.LoadSettings(useSettingsPath())
-	if err != nil {
-		settings = &config.Settings{}
-	}
-	if hubGetsFullChain(settings, endpoint, false) {
+	if hubGetsFullChain(endpoint, false) {
 		return nil, nil
 	}
 	src, mode, err := fanOutTransport(endpoint)
@@ -166,9 +162,9 @@ type useLookup struct {
 
 // useCandidateHubs returns the hubs to search: only the hub given with
 // --hub, or else SCION_HUB_ENDPOINT/SCION_HUB_URL, when one is set
-// (explicit is then true); else every registered hub, plus the effective
-// hub from the settings when it has no hub entry.
-func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []useHub, explicit bool, err error) {
+// (explicit is then true); else every registered hub (the hub of a link
+// entry or the current context always has an entry).
+func useCandidateHubs(c *config.CLIContext) (hubs []useHub, explicit bool, err error) {
 	chosen := hubFlagEndpoint()
 	if chosen == "" {
 		chosen, _ = envHubEndpoint()
@@ -187,14 +183,6 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []u
 	for _, name := range c.HubNames() {
 		hubs = append(hubs, useHub{Name: name, Endpoint: c.Hubs[name].Endpoint})
 	}
-	if ep := GetHubEndpoint(settings); ep != "" {
-		if _, h := c.HubByEndpoint(ep); h == nil {
-			if err := config.ValidateHubURL(ep); err != nil {
-				return nil, false, err
-			}
-			hubs = append(hubs, useHub{Endpoint: ep})
-		}
-	}
 	if len(hubs) == 0 {
 		return nil, false, errHubNotConfigured
 	}
@@ -204,7 +192,7 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []u
 // fanOut reports whether hub must get only credentials bound to it: unless
 // the user chose it or it is the effective hub (see hubGetsFullChain).
 func (l *useLookup) fanOut(hub useHub) bool {
-	return !hubGetsFullChain(l.settings, hub.Endpoint, l.explicit)
+	return !hubGetsFullChain(hub.Endpoint, l.explicit)
 }
 
 // remember records projects seen on hub for the known-project list.
@@ -259,8 +247,9 @@ const (
 // verify checks the known project m on its hub with one call by ID. It
 // fills in the hub's current slug and name.
 func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
-	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
-	refused := fmt.Sprintf("Hub '%s' refused the login. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
+	login := "scion hub auth login --hub " + config.RedactURL(m.Hub.Endpoint)
+	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s', so the project is unverified. Run: %s", m.Hub.label(), login)
+	refused := fmt.Sprintf("Hub '%s' refused the login, so the project is unverified. Run: %s", m.Hub.label(), login)
 	// The hub comes from the known list, not from the user: the full
 	// credential chain only for the chosen or effective hub.
 	fanOut := l.fanOut(m.Hub)
@@ -492,7 +481,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 		settings = &config.Settings{}
 	}
 	c, _ := config.LoadCLIContext()
-	hubs, explicit, err := useCandidateHubs(c, settings)
+	hubs, explicit, err := useCandidateHubs(c)
 	if err != nil {
 		return err
 	}
@@ -501,6 +490,8 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 	var chosen *useMatch
 	var candidates []useMatch
 	var checkNote string
+	// unverified: the chosen known project could not be checked on its hub.
+	var unverified bool
 	if !useRefresh {
 		named := map[string]bool{}
 		for _, h := range hubs {
@@ -516,6 +507,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 			verdict, note := l.verify(&m)
 			if verdict != useGone {
 				chosen, checkNote = &m, note
+				unverified = verdict == useUnchecked
 			}
 		case len(known) > 1:
 			for _, k := range known {
@@ -566,7 +558,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 			chosen = m
 		}
 	}
-	return saveUseSelection(out, stderr, l, *chosen, checkNote)
+	return saveUseSelection(out, stderr, l, *chosen, checkNote, unverified)
 }
 
 // sortUseCandidates puts candidates in the order every listing of them
@@ -654,7 +646,7 @@ func useAmbiguousError(ref string, candidates []useMatch) error {
 // saveUseSelection saves m as the current project of its hub, which
 // becomes the current hub, together with what the lookup learned, and
 // reports the selection.
-func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote string) error {
+func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote string, unverified bool) error {
 	endpoint := m.Hub.Endpoint
 	var hubName string
 	var registered bool
@@ -664,7 +656,11 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		if hubName == "" || c.Hubs[hubName] == nil {
 			hubName, registered = c.EnsureHub(endpoint, useHubBaseName(endpoint))
 		}
-		return c.SelectProject(hubName, config.KnownProject{ID: m.ID, Slug: m.Slug, Name: m.Name}, time.Now())
+		if err := c.SelectProject(hubName, config.KnownProject{ID: m.ID, Slug: m.Slug, Name: m.Name}, time.Now()); err != nil {
+			return err
+		}
+		c.Hubs[hubName].CurrentProject.Unverified = unverified
+		return nil
 	})
 	if err != nil {
 		return err
@@ -672,18 +668,22 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 
 	if isJSONOutput() {
 		return outputJSON(useSelectJSON{
-			Hub:     useHubJSON{Name: hubName, Endpoint: endpoint, Source: useSourceContext},
-			Project: useProjectJSON{ID: m.ID, Slug: m.Slug, Name: m.Name, Source: useSourceContext},
+			Hub:     useHubJSON{Name: hubName, Endpoint: config.RedactURL(endpoint), Source: useSourceContext},
+			Project: useProjectJSON{ID: m.ID, Slug: m.Slug, Name: m.Name, Source: useSourceContext, Unverified: unverified},
 		})
 	}
 	// Announce a new entry only for a URL given with --hub. An endpoint
-	// from the environment or settings gets its entry silently, as before
-	// there were hub nicknames.
+	// from the environment gets its entry silently, as before there were
+	// hub nicknames.
 	if registered && hubFlagEndpoint() != "" {
 		printRegisteredHub(out, hubName, endpoint)
 	}
 	shown := m.shown()
-	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, hubName, endpoint)
+	mark := ""
+	if unverified {
+		mark = " (unverified)"
+	}
+	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s)%s.\n", shown, hubName, config.RedactURL(endpoint), mark)
 	switch {
 	case strings.HasPrefix(checkNote, "Warning: "):
 		_, _ = fmt.Fprintln(stderr, checkNote)
@@ -694,13 +694,13 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		warnHubTokenForContextHub(stderr, hubName)
 	}
 	if dir, ok := walkedProject(); ok && projectPath == "" && !globalMode {
-		dirHub := mergedHubEndpoint(dir)
+		// The hub of the directory project is that of its link entry; an
+		// unlinked directory project uses the current hub, the one just
+		// selected.
+		dirHub := hubName
 		c, _ := config.LoadCLIContext()
-		if name, _ := c.HubByEndpoint(dirHub); name != "" {
-			dirHub = name
-		}
-		if dirHub == "" {
-			dirHub = "-"
+		if p, _ := c.LinkEntryFor(config.LinkPathForProject(dir)); p != nil {
+			dirHub = p.Hub
 		}
 		_, _ = fmt.Fprintf(out, "Note: in this directory, project '%s' (%s, hub '%s') takes precedence; '%s' applies outside scion project directories.\n",
 			config.GetProjectName(dir), displayProjectDir(dir), dirHub, shown)

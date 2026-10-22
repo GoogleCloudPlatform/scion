@@ -261,6 +261,14 @@ type CreateBrokerRegistrationResponse struct {
 	// JoinTokenTTL is the lifetime the token was issued with. It is
 	// recorded in the audit log and not sent to the client.
 	JoinTokenTTL time.Duration `json:"-"`
+	// KeptSettings lists requested values that were not applied because
+	// the stored value is kept (see KeptSetting). Empty requested values
+	// are never listed.
+	KeptSettings []KeptSetting `json:"keptSettings,omitempty"`
+	// GCPHostSet is true when this registration filled the GCP host pair
+	// of an existing broker. It is recorded in the audit log and not sent
+	// to the client.
+	GCPHostSet bool `json:"-"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -316,12 +324,22 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.Reprovision = true
 		case "asynclaunch", "async_launch":
 			caps.AsyncLaunch = true
+		case "asyncstart", "async_start":
+			caps.AsyncStart = true
 		case "emptyperagentworkspace", "empty_per_agent_workspace":
 			caps.EmptyPerAgentWorkspace = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
+		case "agentmoverecreate", "agent_move_recreate":
+			caps.AgentMoveRecreate = true
+		case "attachmentdelivery", "attachment_delivery":
+			caps.AttachmentDelivery = true
 		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
 			caps.ReprovisionEmptyPerAgent = true
+		case "changedfields", "changed_fields":
+			caps.ChangedFields = true
+		case "clearedfields", "cleared_fields":
+			caps.ClearedFields = true
 		case "startsinflight", "starts_in_flight":
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":
@@ -396,8 +414,16 @@ var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between 
 
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
+//
+// It carries no host service account decision, so a registration through it
+// never writes the broker's host service account email. On a new row a
+// requested one is refused with ErrHostSAClaimNotAuthorized. On an existing
+// row whose pair is unset and not set through the update API
+// (registrationFillsGCPHost) it is refused with ErrHostSAClaimStale, after
+// the record update; on any other existing row the requested pair is kept
+// and reported.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true, hostSAClaimVerdict{})
 }
 
 // CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
@@ -414,11 +440,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 // already on, so the broker re-read here must still have auto-provide on;
 // otherwise the registration is refused with
 // ErrBrokerRegistrationAuthorizationStale.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// hostSA is the caller's actAs decision for the requested host service
+// account (Server.evaluateHostSAClaim). The write stores a changed, non-empty
+// host service account only when hostSA allows exactly that value; otherwise
+// it is refused with ErrHostSAClaimNotAuthorized and nothing is written.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
 	if expectedExistingBrokerID == "" {
 		return nil, errors.New("expectedExistingBrokerID is required")
 	}
-	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized)
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized, hostSA)
 }
 
 // CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
@@ -429,9 +460,9 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx conte
 // authorization and this call — the request is refused
 // (ErrBrokerRegistrationAuthorizationStale) rather than treated as an
 // implicit re-registration of a broker the caller was never authorized
-// against.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true)
+// against. hostSA is as for CreateBrokerRegistrationForAuthorizedMatch.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true, hostSA)
 }
 
 // createBrokerRegistration implements CreateBrokerRegistration,
@@ -453,7 +484,12 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 // always passes true: its caller checks broker.auto_provide whenever
 // req.AutoProvide is set, except for a PreserveSettings request, whose
 // AutoProvide is forced off below and by the HTTP handler.
-func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// hostSA is the caller's host service account decision. Immediately before
+// the row is written, hostSAClaimWriteAllowed compares the stored value of
+// the row re-read here with the value about to be stored; a change to a
+// non-empty value needs hostSA to allow exactly that value.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool, hostSA hostSAClaimVerdict) (*CreateBrokerRegistrationResponse, error) {
 	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
 		return nil, err
 	}
@@ -476,14 +512,6 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	// GCP SA emails are case-insensitive; normalize to lowercase before
 	// storage so that later comparisons (e.g. actAs checks) are reliable.
 	req.GCPHostServiceAccountEmail = strings.ToLower(req.GCPHostServiceAccountEmail)
-
-	// Default broker-type label to "external" if not provided
-	if req.Labels == nil {
-		req.Labels = make(map[string]string)
-	}
-	if _, exists := req.Labels["scion.io/broker-type"]; !exists {
-		req.Labels["scion.io/broker-type"] = "external"
-	}
 
 	// Before generating a new broker ID, check for an existing broker with same name
 	var brokerID string
@@ -521,31 +549,36 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 	}
 
+	var kept []KeptSetting
+	var gcp registrationGCPHostResult
 	if existingBroker != nil && req.PreserveSettings {
 		// Reuse existing broker and leave its record as it is: only a new
 		// join token is issued below.
 		brokerID = existingBroker.ID
 		reregistered = true
 	} else if existingBroker != nil {
-		// Reuse existing broker - update its metadata
+		// Reuse existing broker - update its metadata. Labels are added
+		// when the key is absent; the GCP host pair is filled below only
+		// while unset (see broker_registration_fields.go).
 		brokerID = existingBroker.ID
 		reregistered = true
-		existingBroker.AutoProvide = req.AutoProvide
-		existingBroker.GCPHostServiceAccountEmail = req.GCPHostServiceAccountEmail
-		existingBroker.GCPHostProjectID = req.GCPHostProjectID
-		// Merge request labels into existing labels to preserve any
-		// user-set labels while updating registration-provided ones.
-		if len(req.Labels) > 0 {
-			if existingBroker.Labels == nil {
-				existingBroker.Labels = make(map[string]string, len(req.Labels))
-			}
-			for k, v := range req.Labels {
-				existingBroker.Labels[k] = v
-			}
+		// A refused fill of the host service account refuses the
+		// registration before anything is written.
+		if err := registrationFillDenied(req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
+		priorHostSA := hostSAClaimOf(existingBroker)
+		existingBroker.AutoProvide = req.AutoProvide
+		existingBroker.Labels, kept = mergeRegistrationLabels(existingBroker.Labels, req.Labels)
 		existingBroker.Updated = time.Now()
+		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(existingBroker), hostSA); err != nil {
+			return nil, err
+		}
 		if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
 			return nil, fmt.Errorf("failed to update existing broker: %w", err)
+		}
+		if gcp, err = fillRegistrationGCPHost(ctx, s.store, brokerID, req.GCPHostServiceAccountEmail, req.GCPHostProjectID, hostSA); err != nil {
+			return nil, err
 		}
 	} else {
 		// Create new broker - use client-supplied ID if provided, otherwise generate
@@ -555,26 +588,40 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 			brokerID = uuid.New().String()
 		}
 
+		labels := registrationLabels(req.Labels)
+		labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
 		broker := &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       req.Name,
 			Slug:                       slugify(req.Name),
 			Status:                     store.BrokerStatusOffline,
 			AutoProvide:                req.AutoProvide,
-			Labels:                     req.Labels,
+			Labels:                     labels,
 			GCPHostServiceAccountEmail: req.GCPHostServiceAccountEmail,
 			GCPHostProjectID:           req.GCPHostProjectID,
 			Created:                    time.Now(),
 			Updated:                    time.Now(),
 			CreatedBy:                  createdBy,
 		}
+		if broker.GCPHostServiceAccountEmail != "" || broker.GCPHostProjectID != "" {
+			broker.GCPHostSource = store.GCPHostSourceRegistration
+		}
 
+		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
+			return nil, err
+		}
 		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
 
-	return s.issueJoinToken(ctx, brokerID, createdBy, reregistered, req.JoinTokenTTLSeconds, nil)
+	resp, err := s.issueJoinToken(ctx, brokerID, createdBy, reregistered, req.JoinTokenTTLSeconds, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp.KeptSettings = append(gcp.Kept, kept...)
+	resp.GCPHostSet = gcp.Applied
+	return resp, nil
 }
 
 // issueJoinToken mints and stores a join token for brokerID and builds the
@@ -621,10 +668,12 @@ func (s *BrokerAuthService) issueJoinToken(ctx context.Context, brokerID, create
 		return nil, fmt.Errorf("failed to create join token: %w", err)
 	}
 
+	// The stored expiry: the store bounds a token minted by a test identity
+	// with an admin role by the identity's expiry (admin tier A3).
 	return &CreateBrokerRegistrationResponse{
 		BrokerID:      brokerID,
 		JoinToken:     joinToken,
-		ExpiresAt:     expiresAt,
+		ExpiresAt:     joinTokenRecord.ExpiresAt,
 		Reregistered:  reregistered,
 		Reissued:      reissued,
 		JoinTokenTTL:  ttl,
@@ -876,12 +925,38 @@ const (
 	HeaderOnBehalfOf = "X-Scion-On-Behalf-Of"
 )
 
+// Broker signature validation errors. Each is a mechanical, unexported
+// sentinel so the auth_failure audit event can classify a failure without
+// matching error text (brokerAuthFailureCode). Error() text is
+// byte-identical to the strings these replace, because
+// writeBrokerAuthError sends err.Error() to the client; wrapping sites add
+// the same detail as before, with %w.
+var (
+	errBrokerAuthMissingBrokerID    = errors.New("missing X-Scion-Broker-ID header")
+	errBrokerAuthMissingTimestamp   = errors.New("missing X-Scion-Timestamp header")
+	errBrokerAuthMissingSignature   = errors.New("missing X-Scion-Signature header")
+	errBrokerAuthMissingNonce       = errors.New("missing X-Scion-Nonce header")
+	errBrokerAuthMalformedTimestamp = errors.New("invalid timestamp format")
+	errBrokerAuthClockSkew          = errors.New("timestamp outside acceptable range")
+	errBrokerAuthNonceCheck         = errors.New("nonce cache check failed")
+	errBrokerAuthReplay             = errors.New("nonce already used (possible replay attack)")
+	errBrokerAuthUnknownBroker      = errors.New("unknown broker")
+	errBrokerAuthSecretLookup       = errors.New("failed to get broker secret")
+	errBrokerAuthSecretsLookup      = errors.New("failed to get broker secrets")
+	// errBrokerAuthSecretInactive is a fragment: it is only ever returned
+	// wrapped with the secret status ("%w %s" gives "broker secret is <status>").
+	errBrokerAuthSecretInactive   = errors.New("broker secret is")
+	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
+	errBrokerAuthInvalidSignature = errors.New("invalid signature")
+	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+)
+
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
 	}
 	if err := s.admitBroker(ctx, brokerID); err != nil {
 		return nil, err
@@ -889,23 +964,23 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -914,7 +989,7 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Validate nonce if enabled — use DB-backed store for multi-instance
@@ -925,14 +1000,14 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 			}
 			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		} else if s.nonces != nil {
 			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		}
 	}
@@ -941,19 +1016,19 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	brokerSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("unknown broker: %s", brokerID)
+			return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 		}
-		return nil, fmt.Errorf("failed to get broker secret: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretLookup, err)
 	}
 
 	// Check if secret is active
 	if brokerSecret.Status != store.BrokerSecretStatusActive {
-		return nil, fmt.Errorf("broker secret is %s", brokerSecret.Status)
+		return nil, fmt.Errorf("%w %s", errBrokerAuthSecretInactive, brokerSecret.Status)
 	}
 
 	// Check expiry
 	if !brokerSecret.ExpiresAt.IsZero() && time.Now().After(brokerSecret.ExpiresAt) {
-		return nil, errors.New("broker secret has expired")
+		return nil, errBrokerAuthSecretExpired
 	}
 
 	// Build canonical string and verify signature
@@ -962,7 +1037,7 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
 	}
 
 	return NewBrokerIdentity(brokerID), nil
@@ -1116,7 +1191,7 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	// Extract required headers
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
-		return nil, errors.New("missing X-Scion-Broker-ID header")
+		return nil, errBrokerAuthMissingBrokerID
 	}
 	if err := s.admitBroker(ctx, brokerID); err != nil {
 		return nil, err
@@ -1125,11 +1200,11 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get broker secrets: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthSecretsLookup, err)
 	}
 
 	if len(secrets) == 0 {
-		return nil, fmt.Errorf("unknown broker: %s", brokerID)
+		return nil, fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
 	}
 
 	// Try each secret until one validates
@@ -1150,30 +1225,30 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, errors.New("no valid secrets found")
+	return nil, errBrokerAuthNoValidSecrets
 }
 
 // validateWithSecret validates a request using a specific secret key.
 func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Request, brokerID string, secretKey []byte) (BrokerIdentity, error) {
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
-		return nil, errors.New("missing X-Scion-Timestamp header")
+		return nil, errBrokerAuthMissingTimestamp
 	}
 
 	signature := r.Header.Get(HeaderSignature)
 	if signature == "" {
-		return nil, errors.New("missing X-Scion-Signature header")
+		return nil, errBrokerAuthMissingSignature
 	}
 
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
-		return nil, errors.New("missing X-Scion-Nonce header")
+		return nil, errBrokerAuthMissingNonce
 	}
 
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
 	requestTime := time.Unix(ts, 0)
@@ -1182,7 +1257,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
-		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
 	// Build canonical string and verify signature
@@ -1191,7 +1266,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
-		return nil, errors.New("invalid signature")
+		return nil, errBrokerAuthInvalidSignature
 	}
 
 	// Only add nonce to cache after successful validation — use DB-backed
@@ -1202,14 +1277,14 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
-				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
 			}
 			if !isNew {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		} else if s.nonces != nil {
 			if !s.nonces.Add(nonce) {
-				return nil, errors.New("nonce already used (possible replay attack)")
+				return nil, errBrokerAuthReplay
 			}
 		}
 	}
@@ -1426,16 +1501,30 @@ func registrationLabels(in map[string]string) map[string]string {
 	return out
 }
 
+// reservedBrokerLabels are the Hub-managed label keys: only hub-internal
+// code sets them, and a client-supplied value is dropped on registration
+// and update.
+var reservedBrokerLabels = []string{pluginBrokerLabel, store.BrokerRoleLabel}
+
+// isReservedBrokerLabel reports whether key is Hub-managed.
+func isReservedBrokerLabel(key string) bool {
+	for _, k := range reservedBrokerLabels {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
 // stripReservedBrokerLabels returns labels without the hub-reserved keys
-// (pluginBrokerLabel). Only hub-internal code sets those; a client-supplied
-// value is dropped on registration and update. nil stays nil.
+// (reservedBrokerLabels). nil stays nil.
 func stripReservedBrokerLabels(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		if k == pluginBrokerLabel {
+		if isReservedBrokerLabel(k) {
 			continue
 		}
 		out[k] = v

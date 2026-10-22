@@ -18,18 +18,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -491,8 +488,31 @@ func TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches(t *testing.T) {
 	client, err := hubclient.New(h.srv.URL)
 	require.NoError(t, err)
 
-	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	// Under go test, stdin is empty, so the PTY client's stdin reaches EOF
+	// at once and can end the attach before the mock's data frame is read.
+	// The frame is then written after the test. Give the client a stdin
+	// that stays open, so the attach ends only on the hub's close, which
+	// comes after the frame. The client keeps its own reference to stdin,
+	// so os.Stdin can be restored when the call returns.
+	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = stdinW.Close()
+		_ = stdinR.Close()
+	})
+
+	// The PTY client writes terminal data to os.Stdout. Capture it so the
+	// mock's prompt frame stays out of the shared test output, and check
+	// that the frame is all the attach wrote. os.Stdin is swapped inside
+	// the captured call, so it is restored on every path out of it.
+	stdout, _ := captureStdoutStderr(t, func() {
+		oldStdin := os.Stdin
+		os.Stdin = stdinR
+		defer func() { os.Stdin = oldStdin }()
+		err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "$ ", stdout, "the attach writes the terminal data frame, and nothing else, to stdout")
 	assert.EqualValues(t, 1, h.preflights.Load())
 	assert.EqualValues(t, 1, h.upgrades.Load(), "the attach dials after the preflight")
 	assert.EqualValues(t, 0, h.brokerGets.Load(), "the CLI does not read the broker record")
@@ -593,67 +613,4 @@ func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {
 
 	err := attachHubSession(context.Background(), &HubContext{Endpoint: "http://hub.invalid"}, hubAttachTarget{Name: "a1", ID: "id-1"})
 	assert.NoError(t, err)
-}
-
-// --- #3311: local not-found message ---
-
-// fakeEmptyRuntimeBinary writes a runtime binary that prints out for every
-// call, standing in for a runtime whose container list is empty.
-func fakeEmptyRuntimeBinary(t *testing.T, out string) string {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), "fake-runtime")
-	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' '"+out+"'\n"), 0o700))
-	return bin
-}
-
-// TestLocalAttachError_RealRuntimeErrors feeds each local runtime's own
-// Attach "not found" error (produced by the real runtime code against an
-// empty container list) through localAttachError, so a runtime rewording
-// its error fails this test instead of silently hiding the friendly message.
-func TestLocalAttachError_RealRuntimeErrors(t *testing.T) {
-	const id = "c0ffee"
-	tests := []struct {
-		name string
-		rt   runtime.Runtime
-	}{
-		{"docker", &runtime.DockerRuntime{Command: fakeEmptyRuntimeBinary(t, "")}},
-		{"podman", &runtime.PodmanRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
-		{"apple container", &runtime.AppleContainerRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rtErr := tc.rt.Attach(context.Background(), id)
-			require.Error(t, rtErr)
-			got := localAttachError(rtErr, id, "a1", "proj")
-			assert.Contains(t, got.Error(), "agent 'a1' not found in project 'proj'",
-				"runtime error %q was not recognised as not-found", rtErr)
-		})
-	}
-}
-
-func TestLocalAttachError(t *testing.T) {
-	const id = "c0ffee"
-	tests := []struct {
-		name     string
-		in       error
-		friendly bool
-	}{
-		// Current wording from pkg/runtime docker.go/podman.go/apple_container.go.
-		{"container not found", fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id), true},
-		{"pod not found", fmt.Errorf("agent '%s' pod not found, it may have been deleted", id), true},
-		{"plain not found", fmt.Errorf("agent '%s' not found", id), true},
-		{"other ID", fmt.Errorf("agent '%s' container not found, it may have exited and been removed", "other"), false},
-		{"not running", fmt.Errorf("agent '%s' is not running (status: exited)", id), false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := localAttachError(tc.in, id, "a1", "proj")
-			if tc.friendly {
-				assert.Contains(t, got.Error(), "agent 'a1' not found in project 'proj'")
-			} else {
-				assert.Same(t, tc.in, got)
-			}
-		})
-	}
-	assert.NoError(t, localAttachError(nil, id, "a1", "proj"))
 }

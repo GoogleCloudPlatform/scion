@@ -120,14 +120,12 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 	// subtests below so they reach cobra's flag/Args validation or RunE
 	// instead of failing earlier on an unrelated "no project" or "no
 	// image_registry" error.
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origSilenceUsage := attachCmd.SilenceUsage
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	origAutoHelp := autoHelp
 	t.Cleanup(func() {
-		noHub = origNoHub
 		projectPath = origProjectPath
 		attachCmd.SilenceUsage = origSilenceUsage
 		// PersistentPreRunE mutates these (agent mode / cli.* settings) in
@@ -194,7 +192,6 @@ func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
 // usage and runtime errors (hub or not) do not. A throwaway subcommand is
 // mounted on the real rootCmd so the whole cobra dispatch path is exercised.
 func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
-	origNoHub := noHub
 	origProjectPath := projectPath
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
@@ -222,7 +219,6 @@ func TestExecuteUsageOnError_CentralSilence(t *testing.T) {
 
 	t.Cleanup(func() {
 		rootCmd.RemoveCommand(probe)
-		noHub = origNoHub
 		projectPath = origProjectPath
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
@@ -348,7 +344,7 @@ func resetCommandFlags(t *testing.T, c *cobra.Command) {
 	c.SilenceUsage = false
 	// LocalFlags, not Flags: once cobra has merged root's persistent flags
 	// into c.Flags() (Find and ExecuteC both do), resetting those would also
-	// reset the root package vars a test set up (projectPath, noHub, ...).
+	// reset the root package vars a test set up (projectPath, ...).
 	// The root --project Changed state is reset by resetRootProjectFlag.
 	// Persistent flags inherited from non-root parents (e.g. project
 	// messaging --project, hub allow-list --json) are not reset either; no
@@ -397,12 +393,12 @@ func resetRootProjectFlag(t *testing.T) {
 // validators, which cobra runs before the hook. Each row drives the real
 // rootCmd dispatch and must fail in that validator with usage shown.
 func TestExecuteUsageOnError_ArgsValidatorsKeepUsage(t *testing.T) {
-	origNoHub, origProjectPath := noHub, projectPath
+	origProjectPath := projectPath
 	origScheduleIn, origScheduleAt, origScheduleType := scheduleIn, scheduleAt, scheduleType
 	origScheduleAgent, origScheduleMessage := scheduleAgent, scheduleMessage
 	origDC, origDA, origCP := recoverDisableConstraint, recoverDisableAll, recoverConfirmationPhrase
 	t.Cleanup(func() {
-		noHub, projectPath = origNoHub, origProjectPath
+		projectPath = origProjectPath
 		scheduleIn, scheduleAt, scheduleType = origScheduleIn, origScheduleAt, origScheduleType
 		scheduleAgent, scheduleMessage = origScheduleAgent, origScheduleMessage
 		recoverDisableConstraint, recoverDisableAll, recoverConfirmationPhrase = origDC, origDA, origCP
@@ -493,7 +489,7 @@ func TestUsageError(t *testing.T) {
 // through the real rootCmd dispatch: the check runs after root's hook set
 // SilenceUsage, and must still show usage.
 func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
-	origNoHub, origProjectPath := noHub, projectPath
+	origProjectPath := projectPath
 	origMsgIn, origMsgAt := msgIn, msgAt
 	origScheduleName, origScheduleCron := scheduleName, scheduleCron
 	origSortField := sortField
@@ -503,7 +499,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		if f := rootCmd.PersistentFlags().Lookup("global"); f != nil {
 			f.Changed = false
 		}
-		noHub, projectPath = origNoHub, origProjectPath
+		projectPath = origProjectPath
 		msgIn, msgAt = origMsgIn, origMsgAt
 		scheduleName, scheduleCron = origScheduleName, origScheduleCron
 		sortField = origSortField
@@ -532,7 +528,11 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		{"schedule create-recurring: no --name", []string{"schedule", "create-recurring", "--cron", "0 * * * *"}, "--name is required"},
 		{"skills publish: no --version", []string{"skills", "publish", "./skill"}, "--version is required"},
 		{"sync to: no agent", []string{"sync", "to"}, "agent-level sync requires an agent name"},
-		{"sync push: agent name given", []string{"sync", "push", "x"}, "'push' does not take an agent name"},
+		{"sync: project mode removed", []string{"sync"}, "project-level sync"},
+		{"sync push: project mode removed", []string{"sync", "push"}, "project-level sync"},
+		{"sync pull: project mode removed", []string{"sync", "pull", "x"}, "project-level sync"},
+		{"sync <agent>: no direction", []string{"sync", "a1"}, "agent-level sync requires a direction: scion sync to|from a1"},
+		{"sync: unknown direction", []string{"sync", "up", "a1"}, "invalid direction 'up', must be 'to' or 'from'"},
 		{"start: negative --wait-timeout", []string{"start", "a1", "--wait-timeout=-5s"}, "--wait-timeout must not be negative"},
 		{"service-accounts list: --assignable with --global", []string{"service-accounts", "list", "--global", "--assignable"}, "--assignable asks which accounts"},
 		{"project skills add: skill URI with --from-directory", []string{"project", "skills", "add", "skill://foo", "--from-directory", "https://github.com/org/repo/tree/main/skills"}, "cannot combine a skill URI argument with --from-directory"},
@@ -574,9 +574,9 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 // reach them.
 func TestExecuteUsageOnError_HubPathUsageError(t *testing.T) {
 	saveCLIModeState(t)
-	origProjectPath, origNoHub := projectPath, noHub
+	origProjectPath := projectPath
 	t.Cleanup(func() {
-		projectPath, noHub = origProjectPath, origNoHub
+		projectPath = origProjectPath
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
@@ -619,7 +619,6 @@ func TestExecuteUsageOnError_HubPathUsageError(t *testing.T) {
 			// against the temp env project and never the repository's own
 			// .scion.
 			projectPath = setupEnvProject(t, tmpHome, server.URL)
-			noHub = false
 			var buf bytes.Buffer
 			rootCmd.SetOut(&buf)
 			rootCmd.SetErr(&buf)
@@ -748,7 +747,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
-	origNoHub := noHub
 	origHubEndpoint := hubEndpoint
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
@@ -757,7 +755,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
-		noHub = origNoHub
 		hubEndpoint = origHubEndpoint
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
@@ -775,7 +772,6 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	projectPath = ""
 	profile = ""
 	outputFormat = ""
-	noHub = false
 	hubEndpoint = "http://127.0.0.1:8080"
 	nonInteractive = true
 	autoConfirm = true
@@ -790,7 +786,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
-	origNoHub := noHub
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	defer func() {
@@ -798,7 +793,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
-		noHub = origNoHub
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
 	}()
@@ -816,7 +810,6 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	projectPath = ""
 	profile = ""
 	outputFormat = ""
-	noHub = false
 	nonInteractive = true
 	autoConfirm = true
 
@@ -830,7 +823,7 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 
 // setupNoProjectPreRun prepares package-level command state for tests that
 // exercise rootCmd.PersistentPreRunE outside any scion project. It saves and
-// restores globalMode, projectPath, noHub, nonInteractive, autoConfirm,
+// restores globalMode, projectPath, nonInteractive, autoConfirm,
 // outputFormat, profile and autoHelp (mirroring the fields
 // TestServerStartDoesNotRequireImageRegistry resets, so a stale value from
 // another test — outputFormat in particular, which PersistentPreRunE
@@ -847,7 +840,6 @@ func setupNoProjectPreRun(t *testing.T) {
 
 	origGlobalMode := globalMode
 	origProjectPath := projectPath
-	origNoHub := noHub
 	origNonInteractive := nonInteractive
 	origAutoConfirm := autoConfirm
 	origOutputFormat := outputFormat
@@ -856,7 +848,6 @@ func setupNoProjectPreRun(t *testing.T) {
 	t.Cleanup(func() {
 		globalMode = origGlobalMode
 		projectPath = origProjectPath
-		noHub = origNoHub
 		nonInteractive = origNonInteractive
 		autoConfirm = origAutoConfirm
 		outputFormat = origOutputFormat
@@ -886,7 +877,6 @@ func setupNoProjectPreRun(t *testing.T) {
 
 	globalMode = false
 	projectPath = ""
-	noHub = false
 	nonInteractive = true
 	autoConfirm = true
 	outputFormat = ""
@@ -975,10 +965,8 @@ func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 
 func TestDevAuthWarning(t *testing.T) {
 	// Save and restore original flags
-	origNoHub := noHub
 	origHubEndpoint := hubEndpoint
 	defer func() {
-		noHub = origNoHub
 		hubEndpoint = origHubEndpoint
 	}()
 

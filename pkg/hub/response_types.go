@@ -29,6 +29,13 @@ type AgentWithCapabilities struct {
 	ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 	CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+	// HarnessVendor is the vendor of the agent's harness (harness.Vendor):
+	// the model vendor for a single-vendor harness, the harness name for a
+	// multi-vendor one, and omitted for a custom or unresolved harness.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	// ModelSize is the model size alias the agent was created with
+	// (AppliedConfig.ModelSize), omitted when it has none.
+	ModelSize string `json:"modelSize,omitempty"`
 	// Editability is set on the single-agent GET only.
 	Editability *AgentEditability `json:"editability,omitempty"`
 	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
@@ -46,6 +53,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}{
@@ -55,6 +64,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
+		HarnessVendor:       a.HarnessVendor,
+		ModelSize:           a.ModelSize,
 		Editability:         a.Editability,
 		SSHHostKey:          a.SSHHostKey,
 	})
@@ -71,6 +82,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}
@@ -83,6 +96,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.ResolvedHarness = wrapper.ResolvedHarness
 	a.HarnessCapabilities = wrapper.HarnessCapabilities
 	a.CloudLogging = wrapper.CloudLogging
+	a.HarnessVendor = wrapper.HarnessVendor
+	a.ModelSize = wrapper.ModelSize
 	a.Editability = wrapper.Editability
 	a.SSHHostKey = wrapper.SSHHostKey
 	return nil
@@ -287,6 +302,12 @@ type RuntimeBrokerWithCapabilities struct {
 	// visibly (not tooltip-only), since a limit shown without that context
 	// would look enforced when it is not.
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
+	// HostedByThisServer is true when the broker is an embedded broker of
+	// the process answering the request: its co-located legacy broker or
+	// one of its co-located flat instances. It is per process, so behind a
+	// load balancer with several hub replicas it describes the replica
+	// that answered. Read-only and display-only; omitted when false.
+	HostedByThisServer bool `json:"hostedByThisServer,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.RuntimeBroker.
@@ -294,16 +315,18 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 	type BrokerAlias store.RuntimeBroker
 	return json.Marshal(&struct {
 		BrokerAlias
-		Cap              *Capabilities `json:"_capabilities,omitempty"`
-		AgentLimit       *int64        `json:"agentLimit,omitempty"`
-		AgentCount       *int64        `json:"agentCount,omitempty"`
-		AgentLimitSource string        `json:"agentLimitSource,omitempty"`
+		Cap                *Capabilities `json:"_capabilities,omitempty"`
+		AgentLimit         *int64        `json:"agentLimit,omitempty"`
+		AgentCount         *int64        `json:"agentCount,omitempty"`
+		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
+		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
 	}{
-		BrokerAlias:      BrokerAlias(b.RuntimeBroker),
-		Cap:              b.Cap,
-		AgentLimit:       b.AgentLimit,
-		AgentCount:       b.AgentCount,
-		AgentLimitSource: b.AgentLimitSource,
+		BrokerAlias:        BrokerAlias(b.RuntimeBroker),
+		Cap:                b.Cap,
+		AgentLimit:         b.AgentLimit,
+		AgentCount:         b.AgentCount,
+		AgentLimitSource:   b.AgentLimitSource,
+		HostedByThisServer: b.HostedByThisServer,
 	})
 }
 
@@ -312,10 +335,11 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	type BrokerAlias store.RuntimeBroker
 	aux := &struct {
 		*BrokerAlias
-		Cap              *Capabilities `json:"_capabilities,omitempty"`
-		AgentLimit       *int64        `json:"agentLimit,omitempty"`
-		AgentCount       *int64        `json:"agentCount,omitempty"`
-		AgentLimitSource string        `json:"agentLimitSource,omitempty"`
+		Cap                *Capabilities `json:"_capabilities,omitempty"`
+		AgentLimit         *int64        `json:"agentLimit,omitempty"`
+		AgentCount         *int64        `json:"agentCount,omitempty"`
+		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
+		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
 	}{
 		BrokerAlias: (*BrokerAlias)(&b.RuntimeBroker),
 	}
@@ -326,5 +350,6 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	b.AgentLimit = aux.AgentLimit
 	b.AgentCount = aux.AgentCount
 	b.AgentLimitSource = aux.AgentLimitSource
+	b.HostedByThisServer = aux.HostedByThisServer
 	return nil
 }

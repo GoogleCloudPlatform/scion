@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -64,6 +65,33 @@ type launchRecord struct {
 	ownerHub string // the connection whose answer the sender has pinned to (rule 4)
 
 	cancel context.CancelFunc
+	// shutdown cancels the launch's ctx' with errBrokerShutdown as its
+	// cause, so runLaunch reports broker_restarted instead of treating the
+	// cancel as a local stop (design wave 3 §1 C-e). Nil for records that
+	// are not async launches.
+	shutdown func()
+
+	// cleanupFailure is set to the class of the first clean-up step that
+	// failed for this launch (failCleanup), so runLaunch keeps its journal
+	// record for a retry (ptone/scion#5177).
+	cleanupFailure atomic.Pointer[cleanupFailureClass]
+	// filesCleanupFailed is set when deleting the agent's files failed
+	// (files_lock or files_delete), whatever failed first, so runLaunch
+	// keeps the launch marker the retry needs (ptone/scion#5177).
+	filesCleanupFailed atomic.Bool
+	// resourcesOnlyCleanup is set when the launch's clean-up was only its
+	// recorded resources (a local stop or delete owns the files), so a
+	// retry reruns only that.
+	resourcesOnlyCleanup atomic.Bool
+	// terminalUndelivered is set when the launch's terminal report got no
+	// definitive hub answer within its TTL, so runLaunch keeps the journal
+	// record (and the launch marker) for the next boot to resend it
+	// (ptone/scion#5186).
+	terminalUndelivered atomic.Bool
+
+	// journal is the launch's journal entry (launch_journal.go), or nil
+	// when the launch is not journalled. Its methods are nil-safe.
+	journal *journalEntry
 
 	// ownedRun is the flat instance's ownership key of this launch's run,
 	// set before Manager.Start returns; launch cleanup finishes that run
@@ -156,6 +184,27 @@ func (r *launchRegistry) Begin(key launchKey, rec *launchRecord) (supersededDone
 	return old.done
 }
 
+// TryBegin registers rec under key only if no record holds key, and reports
+// whether it did. Unlike Begin it never replaces or cancels a record: boot
+// recovery uses it for the short slot in which it deletes a dead launch's
+// name-addressed resources, so it can never supersede or delay a newer
+// start of the name that is already registered (design wave 3 §1 C-c step
+// 5). A start that registers with Begin during the slot cancels rec and
+// waits on its done channel as for any other record; release the slot with
+// Finish.
+func (r *launchRegistry) TryBegin(key launchKey, rec *launchRecord) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.records[key] != nil {
+		return false
+	}
+	r.records[key] = rec
+	return true
+}
+
 // Handoff replaces from, the record currently held for key, with to,
 // without cancelling either and without anything to wait on: to continues
 // the same create under the name from has already waited for (an async
@@ -193,26 +242,36 @@ func (r *launchRegistry) Handoff(key launchKey, from, to *launchRecord, fromCanc
 //
 // It reports whether it woke a launch.
 func (r *launchRegistry) CancelLocalFor(key launchKey, agentID, runID string) bool {
+	return r.cancelLocalForExcept(key, agentID, runID, nil) != nil
+}
+
+// cancelLocalForExcept is CancelLocalFor that leaves skip alone (nil skips
+// nothing) and returns the record it woke, or nil. A stop's second cancel,
+// after its start tracker wait, passes the record its first cancel woke, so
+// it reaches only a record registered in between: an async start that
+// registered after the first cancel and handed over to its launch (design
+// wave 3 §2 D-f).
+func (r *launchRegistry) cancelLocalForExcept(key launchKey, agentID, runID string, skip *launchRecord) *launchRecord {
 	if r == nil {
 		// A *Server built directly (e.g. by a test that does not go through
 		// New()) has a nil registry; treat it the same as "no launch held
 		// for this key" rather than panicking.
-		return false
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec := r.records[key]
-	if rec == nil {
-		return false
+	if rec == nil || rec == skip {
+		return nil
 	}
 	if runID != "" && rec.RunID != "" && rec.RunID != runID {
-		return false
+		return nil
 	}
 	if agentID != "" && rec.AgentID != "" && rec.AgentID != agentID {
-		return false
+		return nil
 	}
 	rec.CancelLocal()
-	return true
+	return rec
 }
 
 // OtherRunInFlight reports whether a launch of a run other than runID is

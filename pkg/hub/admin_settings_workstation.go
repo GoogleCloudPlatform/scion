@@ -50,7 +50,7 @@ package hub
 //     If only that write fails, the DB sections are already written and the
 //     response is a 500 naming them in "applied".
 //
-// Lock order (see config.LockSettingsFile): the settings-file lock is taken
+// Lock order (see config.LockSettingsDir): the settings-file lock is taken
 // before the DB writes and held across them; ops.Update then takes s.mu
 // (ApplySnapshot). Nothing may take the settings-file lock while holding
 // s.mu or a DB transaction.
@@ -690,6 +690,7 @@ var startupCheckedFileBlocks = []struct {
 }{
 	{[]string{"server", "hub", "conduit"}, func(gc *config.GlobalConfig) error { return gc.Hub.Conduit.Validate() }},
 	{[]string{"server", "hub", "port_proxy"}, func(gc *config.GlobalConfig) error { return gc.Hub.PortProxy.Validate() }},
+	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 }
 
 // validateStartupCheckedFileBlocks checks each startupCheckedFileBlocks
@@ -865,6 +866,7 @@ func setAtJSONPath(v reflect.Value, path []string, val reflect.Value) bool {
 // settingsFileTxn holds the settings-file lock and a prepared edit between
 // the pre-DB preparation and the post-DB commit of a workstation PUT.
 type settingsFileTxn struct {
+	lock   *config.SettingsLock
 	unlock func()
 	staged *config.StagedSettingsEdit
 }
@@ -881,7 +883,11 @@ func prepareSettingsFileTxn(configPath string, build func(*config.GlobalConfig, 
 	if err != nil {
 		return nil, err
 	}
-	unlock := config.LockSettingsFile()
+	lock, err := config.LockSettingsDir(globalDir)
+	if err != nil {
+		return nil, err
+	}
+	unlock := lock.Unlock
 	var orig []byte
 	if p := config.GetSettingsPath(globalDir); p != "" {
 		if orig, err = os.ReadFile(p); err != nil {
@@ -919,7 +925,7 @@ func prepareSettingsFileTxn(configPath string, build func(*config.GlobalConfig, 
 			}
 		}
 	}
-	return &settingsFileTxn{unlock: unlock, staged: staged}, nil
+	return &settingsFileTxn{lock: lock, unlock: unlock, staged: staged}, nil
 }
 
 // errLegacyServerYAML is returned when a workstation PUT would create the
@@ -939,7 +945,7 @@ func (t *settingsFileTxn) abort() {
 // dotted paths that changed.
 func (t *settingsFileTxn) commit() ([]string, error) {
 	defer t.abort()
-	if err := t.staged.Commit(); err != nil {
+	if err := t.staged.Commit(t.lock); err != nil {
 		return nil, err
 	}
 	return t.staged.Changed, nil

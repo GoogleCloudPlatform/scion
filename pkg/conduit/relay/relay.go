@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -106,6 +109,27 @@ type Principal struct {
 	// RPCHandler, when set, serves the session's inbound RPCs in place of
 	// Config.Session.RPCHandler (the hub sets it for user sessions only).
 	RPCHandler conduit.RPCHandler
+	// SessionID, when set, is the id the session is admitted under in place
+	// of a new one (Config.NewSessionID). A separate relay chooses it before
+	// asking the hub to admit the dialer, so the hub binds its admission to
+	// exactly this session.
+	SessionID string
+	// GrantKeys, when set, are this session's Welcome.grant_keys in place
+	// of Config.GrantKeys (a separate relay gets them from the hub with the
+	// admission).
+	GrantKeys []*conduitv1.GrantKey
+	// LifetimeCap, when above zero, is this session's lifetime cap. It
+	// lowers Config.LifetimeCap and never raises it; with no relay cap
+	// (Config.LifetimeCap 0) it is the session's cap. A separate relay
+	// sets it from the trusted ingress lifetime cap header (design §3.9
+	// "Source of the cap").
+	LifetimeCap time.Duration
+	// IngressInstance is the hub instance whose ingress proxied this
+	// session's dial ("" for a direct dial). A separate relay sets it from
+	// the trusted ingress instance header; it is held in relay memory only
+	// and selects the sessions of a drain(ingress_instance) (design §3.9
+	// "Drain through the proxy").
+	IngressInstance string
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -206,6 +230,15 @@ type Config struct {
 	// session with CloseUnauthenticated. It covers a principal removed
 	// between the caller's pre-admission check and registration.
 	Revalidate func(ctx context.Context, p Principal) error
+	// OnBrokerIncarnationFlap, when set, is called when a broker session
+	// is admitted with an incarnation this relay admitted for the broker
+	// within BrokerIncarnationFlapWindow, after another one
+	// (broker_incarnation.go). Diagnostic only.
+	OnBrokerIncarnationFlap func(brokerID, incarnation string)
+	// OnBrokerSessionsSuperseded, when set, is called with the number of
+	// local sessions of a broker closed with 4409 superseded_incarnation
+	// because a newer incarnation of the broker was admitted here.
+	OnBrokerSessionsSuperseded func(brokerID string, closed int)
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -225,8 +258,19 @@ type Relay struct {
 	log *slog.Logger
 	clk clock.Clock
 
-	mu       sync.Mutex
-	state    relayState
+	// admitMu serializes SetAdmitting so the relay row's draining flag is
+	// written in the order the admission changes were made.
+	admitMu sync.Mutex
+
+	mu    sync.Mutex
+	state relayState
+	// paused refuses new admissions while the relay keeps running
+	// (SetAdmitting).
+	paused bool
+	// drainingStale is set while the relay row's draining flag may not
+	// match paused (its last write failed); SetAdmitting rewrites it.
+	drainingStale bool
+
 	gen      int64
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
@@ -266,12 +310,25 @@ type Relay struct {
 	// visible as ready (registered, readyCh closed), before Serve acts
 	// on the relay state (the lifetime-arming seam).
 	testHookAfterReady func()
+	// testHookAfterDone runs in Serve once the session has ended, before
+	// it leaves r.sessions, with its session id.
+	testHookAfterDone func(sessionID string)
 
 	// shutdownCap and shutdownCapSet hold the drain-deadline cap of a
 	// capped Shutdown (ShutdownWith with ShutdownOptions.CapDrain), set
 	// under mu when the drain begins and read by drainOptions.
 	shutdownCap    time.Duration
 	shutdownCapSet bool
+
+	// brokerIncs remembers the incarnations admitted per broker, for the
+	// flap report (broker_incarnation.go).
+	brokerIncs brokerIncarnations
+	// testHookBeforeIncarnationClose runs in CloseOlderIncarnationSessions
+	// after the sessions were marked and counted, before they are closed
+	// (the close-once seam). testHookAfterBrokerAdmission runs when a
+	// broker session's admission step has finished, with its session id.
+	testHookBeforeIncarnationClose func()
+	testHookAfterBrokerAdmission   func(sessionID string)
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -296,6 +353,10 @@ type entry struct {
 	// closeForbidden records that a user StreamOpen was refused before
 	// sess was set; Serve closes the session with 4403 once it is.
 	closeForbidden atomic.Bool
+	// supersededClosed records that the session was closed because a newer
+	// incarnation of its broker was admitted, so it is closed and counted
+	// once (broker_incarnation.go).
+	supersededClosed atomic.Bool
 	// capAt is when the session reaches the lifetime cap (zero: no cap).
 	// Set before the entry is registered; read-only afterwards.
 	capAt time.Time
@@ -579,6 +640,18 @@ func (r *Relay) lifetimeGoAway(e *entry) {
 	})
 }
 
+// sessionLifetimeCap is a session's lifetime cap: the relay's cap,
+// lowered (never raised) by the principal's; either 0 means none.
+func sessionLifetimeCap(relayCap, principalCap time.Duration) time.Duration {
+	switch {
+	case principalCap <= 0:
+		return relayCap
+	case relayCap <= 0 || principalCap < relayCap:
+		return principalCap
+	}
+	return relayCap
+}
+
 // lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
 // seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
 func (r *Relay) lifetimeHint(e *entry) time.Duration {
@@ -621,8 +694,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		defer r.serves.Done()
 	}
 	e := &entry{principal: p, readyCh: make(chan struct{})}
-	if r.cfg.LifetimeCap > 0 {
-		e.capAt = r.clk.Now().Add(r.cfg.LifetimeCap)
+	if lifetimeCap := sessionLifetimeCap(r.cfg.LifetimeCap, p.LifetimeCap); lifetimeCap > 0 {
+		e.capAt = r.clk.Now().Add(lifetimeCap)
 	}
 	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}
 	// Whatever happens below, a pending entry never outlives Serve's
@@ -668,7 +741,15 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		delete(r.pending, rec.SessionID)
 	}
 	r.sessions[rec.SessionID] = e
-	state, killed := r.state, r.killed
+	// A broker session closes itself when r.sessions holds a live
+	// higher-epoch session of another incarnation of its broker
+	// (broker_incarnation.go). It leaves r.sessions at once, so Local never
+	// returns it.
+	selfClose := r.supersededAtRegistrationLocked(e)
+	if selfClose {
+		delete(r.sessions, rec.SessionID)
+	}
+	state, killed, paused := r.state, r.killed, r.paused
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
 	if h := r.testHookAfterReady; h != nil {
@@ -678,20 +759,27 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	case killed:
 		r.stopLifetime(e)
 		_ = ls.Close()
+	case selfClose:
+		r.stopLifetime(e)
+		r.closeSupersededAtRegistration(e)
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
 		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
-	case state != stateServing:
-		// Drain or supersede began while this session was admitted.
+	case state != stateServing || paused:
+		// Drain, supersede or stopped admission began while this session was admitted.
 		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
 		r.revalidate(ctx, e)
+		r.admittedBroker(e)
 	}
 
 	<-ls.Done()
+	if h := r.testHookAfterDone; h != nil {
+		h(rec.SessionID)
+	}
 	r.stopLifetime(e)
 
 	r.mu.Lock()
@@ -991,6 +1079,12 @@ func (r *Relay) registered(ctx context.Context, sessionID string) (*entry, error
 
 // CloseSessionsOf closes every local session of the principal (agent
 // deletion). Rows are deleted as each session ends.
+//
+// It reaches registered sessions only: a session that is admitted but not
+// yet registered is not closed. A caller must therefore first make that
+// session's post-registration Revalidate fail (for example by deleting the
+// agent row, or by marking the broker session denied) before calling it,
+// so a session registered afterwards closes on its own.
 func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int {
 	r.mu.Lock()
 	var hit []*entry
@@ -1004,6 +1098,35 @@ func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int
 		_ = e.sess.CloseWithCode(code, reason)
 	}
 	return len(hit)
+}
+
+// NotifyGrantKeysChanged sends GrantKeysChanged on every live local session
+// of a target (agent or broker) whose Hello advertised
+// conduit.FeatureStreamRenewal (design v2.21.27 §3.5, Key-set freshness),
+// and returns how many sessions it was queued on. The frame carries no
+// keys. Queuing never waits on a session, so a session with a full outbound
+// buffer (which is skipped and logged) does not delay the others.
+func (r *Relay) NotifyGrantKeysChanged() int {
+	r.mu.Lock()
+	var targets []*entry
+	for _, e := range r.sessions {
+		if e.rec.PrincipalKind == registry.PrincipalAgent || e.rec.PrincipalKind == registry.PrincipalBroker {
+			targets = append(targets, e)
+		}
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, e := range targets {
+		if !slices.Contains(e.sess.Info().Capabilities.GetFeatures(), conduit.FeatureStreamRenewal) {
+			continue
+		}
+		if err := e.sess.NotifyGrantKeysChanged(); err != nil {
+			r.log.Warn("Conduit relay: GrantKeysChanged not queued", "session_id", e.rec.SessionID, "error", err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // Sessions returns the number of live local sessions.
@@ -1209,14 +1332,76 @@ func (r *Relay) serving() bool {
 }
 
 // admissionState returns the generation and the state admission sees (a
-// killed relay reports stateStopped).
+// killed relay reports stateStopped; a paused one stateDraining).
 func (r *Relay) admissionState() (int64, relayState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.killed {
 		return r.gen, stateStopped
 	}
+	if r.paused && r.state == stateServing {
+		return r.gen, stateDraining
+	}
 	return r.gen, r.state
+}
+
+// Admitting reports whether the relay admits new sessions.
+func (r *Relay) Admitting() bool {
+	_, st := r.admissionState()
+	return st == stateServing
+}
+
+// SetAdmitting stops or resumes admission while the relay keeps running
+// (design §3.9: the conduit experiment turned off at run time). Stopping
+// refuses new sessions (4503 draining), marks the relay row draining so no
+// hub picks this relay, and drains every open session with GoAway; the
+// sessions end by their drain deadline. Resuming admits again and clears
+// the row's draining flag. It is a no-op when nothing changes, unless the
+// last draining flag write failed: then the flag is written again.
+func (r *Relay) SetAdmitting(admitting bool) {
+	r.admitMu.Lock()
+	r.mu.Lock()
+	if r.state != stateServing || r.killed {
+		r.mu.Unlock()
+		r.admitMu.Unlock()
+		return
+	}
+	changed := r.paused != !admitting
+	if !changed && !r.drainingStale {
+		r.mu.Unlock()
+		r.admitMu.Unlock()
+		return
+	}
+	r.paused = !admitting
+	gen := r.gen
+	var entries []*entry
+	if changed && !admitting {
+		entries = r.snapshotLocked()
+	}
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
+	err := r.cfg.Registry.SetRelayDraining(ctx, r.cfg.InstanceID, gen, !admitting)
+	cancel()
+	r.mu.Lock()
+	// A failed write is retried by the next call, changed or not.
+	r.drainingStale = err != nil
+	r.mu.Unlock()
+	if err != nil {
+		r.log.Warn("Conduit: updating the relay row's draining flag failed; retried on the next admission update", "admitting", admitting, "error", err)
+	}
+	r.admitMu.Unlock()
+	if !changed {
+		return
+	}
+	if admitting {
+		r.log.Info("Conduit relay admission resumed")
+		return
+	}
+	r.log.Info("Conduit relay admission stopped; draining open sessions", "sessions", len(entries))
+	for _, e := range entries {
+		r.goAway(e, r.drainOptions(e))
+	}
 }
 
 // evictObsoleteLaunchRows deletes the agent's non-draining launch_id rows
@@ -1246,4 +1431,23 @@ func (r *Relay) evictObsoleteLaunchRows(ctx context.Context, p Principal) {
 		r.log.Info("Conduit: evicted a launch session made epoch-obsolete by a refused fallback admission; it will reconnect",
 			"session_id", s.SessionID, "principal_id", p.ID, "relay_instance_id", s.RelayInstanceID)
 	}
+}
+
+// InstanceID returns this process's relay instance id: the configured id,
+// else POD_NAME, else the host name plus a random per-process suffix (a
+// random id when there is no host name). Two live processes must never
+// share an id: a relay start supersedes any relay registered under the
+// same id.
+func InstanceID(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if pod := os.Getenv("POD_NAME"); pod != "" {
+		return pod
+	}
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h + "-" + suffix
+	}
+	return uuid.NewString()
 }

@@ -37,6 +37,7 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message")),
 			Prompt:    getString(data, "prompt"),
 			ToolName:  getString(data, "tool_name"),
+			Source:    getString(data, "source"),
 			SessionID: getString(data, "session_id"),
 			Raw:       data,
 		},
@@ -58,6 +59,7 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 	if val, ok := data["success"]; ok {
 		if b, ok := val.(bool); ok {
 			event.Data.Success = b
+			event.Data.Failed = !b
 		}
 	}
 	if val, ok := data["error"]; ok {

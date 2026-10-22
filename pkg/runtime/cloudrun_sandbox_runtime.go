@@ -546,40 +546,45 @@ func (s *sandboxStateStore) load() {
 // variable so tests can shorten it.
 var sandboxReconcileProbeTimeout = 5 * time.Second
 
-// sandboxGoneOutputs are the output fragments (lower case) that make a
-// failed probe a definitive "this sandbox does not exist" answer.
+// sandboxNotRunningOutputs are the output fragments (lower case) that make
+// a failed liveness probe of a sandbox say "this sandbox is not running".
+// Each fragment names the probed sandbox exactly once: every "%s" is
+// replaced with the name passed to `sandbox exec` (the state key, which is
+// project-qualified), so output about any other name never matches.
 //
-// UNVERIFIED: the sandbox CLI's wording for an unknown sandbox is not
-// documented and these fragments have not been checked against the real
-// binary. They err on the side of keeping entries: a dead sandbox whose
-// output matches none of them keeps its entry, which Delete still removes,
-// whereas a dropped entry of a live sandbox cannot be recovered.
-var sandboxGoneOutputs = []string{"not found", "no such", "does not exist"}
+// Wording observed on a real host (ptone/scion#4776): `sandbox exec <name>
+// -- /bin/true` on a sandbox that never existed and on one already deleted
+// exits 1 on its own, with the output "Error: sandbox <name> is not
+// running". A delete of such a sandbox exits 0 with no output, so the
+// delete path has no gone wording at all (classifySandboxDelete).
+//
+// "Not running" is not "gone". The CLI prints the same wording for a name
+// that was never created while the real sandbox is alive, and a sandbox
+// whose processes were left behind by a failed delete reports "not
+// running" too. So reconcile never drops an entry on this answer: it keeps
+// it, and Delete removes it with `delete --force`. Generic CLI errors
+// ("no such file or directory" for a missing binary or root directory)
+// match no fragment.
+var sandboxNotRunningOutputs = []string{"sandbox %s is not running"}
 
-// sandboxProbeSaysGone reports whether a failed `sandbox exec <name> --
-// /bin/true` probe (out, err, run under probeCtx) shows that the sandbox
-// is gone. Only a CLI that exited non-zero on its own, before the probe's
-// deadline, with not-found output qualifies. A timeout, a cancelled
+// sandboxProbeSaysNotRunning reports whether a failed `sandbox exec <name>
+// -- /bin/true` probe (out, err, run under probeCtx) shows that the
+// sandbox name is not running. Only a CLI that exited non-zero on its own,
+// before the probe's deadline, with output matching
+// sandboxNotRunningOutputs for name qualifies. A timeout, a cancelled
 // context, a CLI killed by a signal or one that could not start, and any
 // other output are ambiguous: a slow but live sandbox can produce them.
-func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool {
+func sandboxProbeSaysNotRunning(probeCtx context.Context, name, out string, err error) bool {
 	if err == nil || probeCtx.Err() != nil {
 		return false
 	}
-	return exitedWithGoneOutput(out, err)
-}
-
-// exitedWithGoneOutput reports whether err is a non-zero exit of a CLI
-// that exited on its own (not killed by a signal) and whose output
-// contains one of sandboxGoneOutputs.
-func exitedWithGoneOutput(out string, err error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || !exitErr.Exited() {
 		return false
 	}
 	lower := strings.ToLower(out)
-	for _, frag := range sandboxGoneOutputs {
-		if strings.Contains(lower, frag) {
+	for _, frag := range sandboxNotRunningOutputs {
+		if strings.Contains(lower, strings.ToLower(strings.ReplaceAll(frag, "%s", name))) {
 			return true
 		}
 	}
@@ -590,13 +595,12 @@ func exitedWithGoneOutput(out string, err error) bool {
 type sandboxDeleteResult int
 
 const (
-	// sandboxDeleteDeleted: the CLI exited zero.
+	// sandboxDeleteDeleted: the CLI exited zero. A delete of a sandbox
+	// that is already gone also exits zero (sandboxNotRunningOutputs).
 	sandboxDeleteDeleted sandboxDeleteResult = iota
-	// sandboxDeleteGone: the CLI exited non-zero on its own with not-found
-	// output (sandboxGoneOutputs): the sandbox was already gone.
-	sandboxDeleteGone
-	// sandboxDeleteFailed: any other non-zero exit, a CLI that could not
-	// start or was killed, and ctx cancellation during the delete.
+	// sandboxDeleteFailed: any non-zero exit, whatever its output, a CLI
+	// that could not start or was killed, and ctx cancellation during the
+	// delete.
 	sandboxDeleteFailed
 	// sandboxDeleteTimedOut: the delete-hang workaround's timeout fired.
 	sandboxDeleteTimedOut
@@ -606,8 +610,6 @@ func (r sandboxDeleteResult) String() string {
 	switch r {
 	case sandboxDeleteDeleted:
 		return "deleted"
-	case sandboxDeleteGone:
-		return "gone"
 	case sandboxDeleteFailed:
 		return "failed"
 	case sandboxDeleteTimedOut:
@@ -616,21 +618,19 @@ func (r sandboxDeleteResult) String() string {
 	return fmt.Sprintf("sandboxDeleteResult(%d)", int(r))
 }
 
-// classifySandboxDelete classifies a `sandbox delete --force` run under
-// ctx. out is the CLI's combined output, err its exec error, and timedOut
-// reports that the delete-hang workaround's timeout fired. A cancelled
-// ctx makes any unsuccessful delete "failed", even with not-found output:
-// a killed CLI's partial output is not a definitive answer.
-func classifySandboxDelete(ctx context.Context, out string, err error, timedOut bool) sandboxDeleteResult {
+// classifySandboxDelete classifies a `sandbox delete --force` run from err,
+// its exec error, and timedOut, which reports that the delete-hang
+// workaround's timeout fired. Any non-zero exit is "failed", whatever the
+// CLI printed: it has no verified "already gone" answer on delete (a
+// delete of a missing sandbox exits zero; see sandboxNotRunningOutputs),
+// and generic errors such as "no such file or directory" must keep the
+// state entry.
+func classifySandboxDelete(err error, timedOut bool) sandboxDeleteResult {
 	switch {
 	case timedOut:
 		return sandboxDeleteTimedOut
 	case err == nil:
 		return sandboxDeleteDeleted
-	case ctx.Err() != nil:
-		return sandboxDeleteFailed
-	case exitedWithGoneOutput(out, err):
-		return sandboxDeleteGone
 	default:
 		return sandboxDeleteFailed
 	}
@@ -709,8 +709,9 @@ func readSandboxCommandOutput(f *os.File) string {
 // would also bound the wait, but it would change every other runtime's
 // commands and kill a holder with SIGPIPE on its next write (see
 // newSandboxCommandOutput). If the file cannot be created, the output is
-// discarded (stdio is /dev/null), so the probe gives no not-found answer
-// (sandboxProbeSaysGone) and reconcile keeps the entry.
+// discarded (stdio is /dev/null), so the probe gives no not-running
+// answer (sandboxProbeSaysNotRunning); reconcile keeps the entry either
+// way.
 func runSandboxProbe(ctx context.Context, bin, name string) (string, error) {
 	args := []string{"exec", name, "--", "/bin/true"}
 	runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
@@ -731,6 +732,83 @@ func runSandboxProbe(ctx context.Context, bin, name string) (string, error) {
 	}
 	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
 	return out, nil
+}
+
+// sandboxExecStdinWaitDelay bounds how long runSandboxExec waits, after
+// the CLI has exited or been killed, for the copy of a caller's stdin
+// into the CLI to finish (exec.Cmd.WaitDelay).
+const sandboxExecStdinWaitDelay = 2 * time.Second
+
+// runSandboxExec runs `sandbox <args>` for the log retrieval and exec
+// paths (GetLogs, Attach's window-size step, Exec, ExecWithStdin) and
+// returns what runSimpleCommandWithStdin would: the same log lines
+// (argument count only, output omitted under WithSensitiveExec), the
+// error wrapped as "<bin> failed: %w", the raw output on error and the
+// trimmed output on success. stdin may be nil.
+//
+// The output is captured in an unlinked temporary file
+// (newSandboxCommandOutput), never a pipe (ptone/scion#5040), as the
+// probe, launch and delete paths do: a process left behind by the
+// command may inherit and hold its stdout and stderr, and with a pipe
+// Wait would block until every holder exits, past ctx's deadline. The
+// output read back is everything written up to Wait's return, with no
+// cap, as CombinedOutput returns. If the file cannot be created, the
+// output is discarded (stdio is /dev/null).
+//
+// A stdin that is not an *os.File is copied into the CLI through a pipe
+// by os/exec, and Wait waits for that copy; a holder that inherited the
+// pipe's read end and never reads it would block the copy. WaitDelay
+// bounds that wait. With stdout and stderr in a file, the only pipe it
+// can close is stdin's write end, which the holder sees as end of input,
+// not as SIGPIPE.
+//
+// Nothing here streams output: these paths return it as a string. The
+// interactive attach (runInteractiveCommand) streams by handing the
+// caller's own stdio files to the CLI, with no pipe or copy, and does
+// not use this helper. The shared runSimpleCommand helpers are left as
+// they are, for the other runtimes.
+func runSandboxExec(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, error) {
+	// Log the command name and argument count only, never the argument
+	// values or the stdin payload (see runSimpleCommand).
+	if stdin != nil {
+		runtimeLog().Debug("Executing command with stdin", "cmd", bin, "argc", len(args))
+	} else {
+		runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
+	}
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+		cmd.WaitDelay = sandboxExecStdinWaitDelay
+	}
+	outFile := newSandboxCommandOutput("exec")
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	elapsed := time.Since(begin)
+	out := readSandboxExecOutput(outFile)
+	if err != nil {
+		logCommandFailure(ctx, bin, len(args), elapsed, []byte(out))
+		return out, fmt.Errorf("%s failed: %w", bin, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(out), nil
+}
+
+// readSandboxExecOutput returns everything written to f up to now. The
+// size is taken once, so a holder still writing cannot extend the read.
+func readSandboxExecOutput(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	return readSandboxCommandOutputRaw(f, fi.Size())
 }
 
 // maxSandboxLaunchOutputRead bounds how much `sandbox run` output is read
@@ -860,20 +938,22 @@ func keepStartingEntry(entry *sandboxStateEntry) bool {
 	return sandboxNow().Before(keepUntil)
 }
 
-// reconcile checks each entry for liveness and removes entries whose
-// sandbox is confirmed gone. Called once at startup. Stopped entries are
-// removed. A running entry is removed only when its probe gives a
-// definitive not-found answer (sandboxProbeSaysGone); on a timeout or any
-// other failure the entry is kept and a warning logged. List reads only
-// the state and the sandbox CLI has no list command, so dropping the entry
-// of a slow but live sandbox would leave it running with no way to stop or
-// delete it through scion (ptone/scion#3738).
+// reconcile checks each entry for liveness. Called once at startup.
+// Stopped entries are removed. A running entry is never removed on a
+// probe: the sandbox CLI has no definitive "gone" answer
+// (sandboxNotRunningOutputs). A failed probe keeps the entry and logs a
+// warning, saying whether the CLI reported the sandbox not running
+// (sandboxProbeSaysNotRunning); the entry stays until Delete removes it
+// with `delete --force`. List reads only the state and the sandbox CLI has
+// no list command, so dropping the entry of a slow, live or merely stopped
+// sandbox would leave it with no way to stop or delete it through scion
+// (ptone/scion#3738).
 //
 // A Starting entry (ptone/scion#4757) is kept without a probe while its
 // start is in flight in this process or before its horizon
 // (keepStartingEntry). After that it is probed like a running entry and
-// removed only on a not-found answer; a passing probe keeps it Starting,
-// never adopting it as running: only its Run promotes it.
+// kept whatever the probe says; a passing probe keeps it Starting, never
+// adopting it as running: only its Run promotes it.
 //
 // The entries and their nonces are snapshotted under mu, which is then
 // released; the probes run with no lock held, and each removal is a
@@ -902,19 +982,18 @@ func (s *sandboxStateStore) reconcile(bin string) {
 			// before the sandbox environment (including PATH) is in effect.
 			ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
 			out, err := runSandboxProbe(ctx, bin, name)
-			gone := sandboxProbeSaysGone(ctx, out, err)
+			notRunning := sandboxProbeSaysNotRunning(ctx, name, out, err)
 			cancel()
 			switch {
 			case err == nil:
-				continue
-			case gone:
-				runtimeLog().Info("sandbox state reconcile: sandbox not found, removing",
+			case notRunning:
+				runtimeLog().Warn("sandbox state reconcile: the sandbox CLI reports the sandbox not running; keeping the entry for Delete to remove",
 					"name", name, "agentID", entry.AgentID)
 			default:
-				runtimeLog().Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
+				runtimeLog().Warn("sandbox state reconcile: liveness probe failed without a not-running answer; keeping the entry",
 					"name", name, "agentID", entry.AgentID, "error", err)
-				continue
 			}
+			continue
 		}
 
 		if sandboxReconcileBeforeRemoveHook != nil {
@@ -1439,6 +1518,20 @@ func NewCloudRunSandboxRuntime(cfg *config.V1CloudRunSandboxConfig) *CloudRunSan
 	}
 }
 
+// NewCloudRunSandboxRuntimeForTest builds a CloudRunSandboxRuntime that runs
+// bin as the sandbox CLI, keeps its state in statePath and lays agents out
+// under rootDir, without the start-up reconcile. Exported so tests in other
+// packages (e.g. pkg/agent, pkg/runtimebroker) can drive the real runtime
+// through a fake CLI, as NewSubstrateRuntimeForTest does for substrate.
+func NewCloudRunSandboxRuntimeForTest(bin, statePath, rootDir string) *CloudRunSandboxRuntime {
+	return &CloudRunSandboxRuntime{
+		bin:          bin,
+		state:        newSandboxStateStore(statePath),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+}
+
 func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
@@ -1804,7 +1897,7 @@ func (r *CloudRunSandboxRuntime) deleteForCleanup(ctx context.Context, name stri
 	r.cancelWatcher(name)
 	result, err := r.classifiedDelete(ctx, name)
 	switch result {
-	case sandboxDeleteDeleted, sandboxDeleteGone, sandboxDeleteTimedOut:
+	case sandboxDeleteDeleted, sandboxDeleteTimedOut:
 		r.removeAfterDelete(name, obs)
 		return nil
 	}
@@ -2524,11 +2617,11 @@ func sameRunMarkedStopped(observed, cur *sandboxStateEntry) bool {
 // deletePlain is the non-workaround path: plain `sandbox delete --force`.
 // Used when SCION_CLOUDRUN_DELETE_WORKAROUND=off.
 //
-// A sandbox that is already gone (sandboxDeleteGone) counts as deleted:
-// the entry is removed and nil returned. Any failure keeps the entry.
+// A delete that exits zero (which includes a sandbox that is already
+// gone) removes the entry and returns nil. Any failure keeps the entry.
 func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string, obs sandboxObserved) error {
 	switch result, err := r.runDeletePlain(ctx, id); result {
-	case sandboxDeleteDeleted, sandboxDeleteGone:
+	case sandboxDeleteDeleted:
 	default:
 		return fmt.Errorf("cloudrun-sandbox: delete --force failed: %w", err)
 	}
@@ -2548,12 +2641,9 @@ func (r *CloudRunSandboxRuntime) runDeletePlain(ctx context.Context, id string) 
 	}
 	err := cmd.Run()
 	out := readSandboxCommandOutput(outFile)
-	result := classifySandboxDelete(ctx, out, err, false)
+	result := classifySandboxDelete(err, false)
 	switch result {
 	case sandboxDeleteDeleted:
-	case sandboxDeleteGone:
-		runtimeLog().Info("cloudrun-sandbox: delete --force found the sandbox already gone",
-			"sandbox", id, "output", sandboxCommandOutputForLog(out))
 	default:
 		runtimeLog().Warn("cloudrun-sandbox: delete --force failed",
 			"sandbox", id, "result", result.String(), "error", err, "output", sandboxCommandOutputForLog(out))
@@ -2614,7 +2704,7 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     entry.SandboxName,
 			RunID:           entry.Labels[api.LabelRunID],
-			Name:            entry.AgentID,
+			Name:            sandboxAgentName(entry),
 			ContainerStatus: statusStr,
 			Phase:           phase,
 			Image:           entry.Image,
@@ -2628,6 +2718,20 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 	}
 
 	return agents, nil
+}
+
+// sandboxAgentName is the agent name List reports for entry: the agent slug
+// (the scion.name label), as DockerRuntime.List and SubstrateRuntime.List
+// report it, not AgentID, which Run records as the project-prefixed
+// container name ("<project>--<agent>"). The broker's delete and stop
+// resolution and AgentManager match the hub-side agent name against Name,
+// so a project-prefixed Name never matches and the sandbox is left behind
+// (ptone/scion#5156). An entry without the label falls back to AgentID.
+func sandboxAgentName(entry *sandboxStateEntry) string {
+	if name := entry.Labels["scion.name"]; name != "" {
+		return name
+	}
+	return entry.AgentID
 }
 
 // listEntries returns this instance's cached entries, with every Starting
@@ -2666,7 +2770,7 @@ func (r *CloudRunSandboxRuntime) listEntries() []*sandboxStateEntry {
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSandboxExec(ctx, r.bin, nil, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
 	if err == nil && strings.TrimSpace(logs) != "" {
 		return logs, nil
 	}
@@ -2750,7 +2854,7 @@ func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("cloudrun-sandbox: sandbox %q not found", id)
 	}
 	// Set tmux window-size to latest for proper resize behavior.
-	_, _ = runSimpleCommand(ctx, r.bin, "exec", id, "--",
+	_, _ = runSandboxExec(ctx, r.bin, nil, "exec", id, "--",
 		"/usr/bin/tmux", "set-option", "-g", "window-size", "latest")
 	// Interactive attach via sandbox exec.
 	// TERM=xterm-256color is load-bearing: without it tmux sees TERM=dumb
@@ -2795,7 +2899,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	// Absolute paths: PATH is empty inside a sandbox, so callers must provide
 	// absolute paths or the command must be on a bind-mounted path.
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommand(ctx, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, nil, args...)
 }
 
 // ExecWithStdin runs cmd inside the sandbox with stdin piped from the given
@@ -2805,7 +2909,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 // #1355.
 func (r *CloudRunSandboxRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommandWithStdin(ctx, stdin, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, stdin, args...)
 }
 
 // GetWorkspacePath returns the HOST-side workspace path from the state

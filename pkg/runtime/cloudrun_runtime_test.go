@@ -297,7 +297,8 @@ func TestCloudRunRuntime_Run_MissingAgentID(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = rt.Run(context.Background(), RunConfig{
-		Labels: map[string]string{},
+		Labels:               map[string]string{},
+		WorkspaceBackendName: "nfs",
 	})
 	if err == nil || !strings.Contains(err.Error(), "agent_id label is required") {
 		t.Errorf("Run() without agent_id: error = %v, want 'agent_id label is required'", err)

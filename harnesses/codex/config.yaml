@@ -26,7 +26,7 @@ provisioner:
   interface_version: 1
   lib: vendored
   command: ["python3", "/home/scion/.scion/harness/provision.py"]
-  timeout: 30s
+  timeout: 60s
   lifecycle_events:
     - pre-start
   required_image_tools:

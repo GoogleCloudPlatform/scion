@@ -80,6 +80,7 @@ const componentTests = [
   'src/components/pages/agent-detail-reincarnate.test.ts',
   'src/components/pages/agent-placement.test.ts',
   'src/components/pages/agent-detail-placement.test.ts',
+  'src/components/pages/admin-maintenance-reissue-scopes.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
@@ -134,7 +135,10 @@ export default defineConfig([
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
       'e2e/test-hub-banner/*.ts',
+      'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
+      'e2e/iap-driver/*.ts',
+      'e2e/iap-journey/*.ts',
       'e2e/harness-selftest/*.ts',
       'e2e/async-create/*.ts',
       'e2e/client-main-stub.ts',

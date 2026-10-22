@@ -53,7 +53,7 @@ func TestConduitRPCHandler_RequestReachesHandlerUnchanged(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write(b)
 	})
-	h := newConduitRPCHandler(handler, "hub-a", 0, nil)
+	h := newGuardedConduitRPCHandler(handler, "hub-a", 0, nil, passAllChecker{})
 	hub := newConduitSessionPair(t, h).hub
 
 	tests := []struct {
@@ -104,7 +104,7 @@ func TestConduitRPCHandler_OverLimitIsAnswered413(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler must not run for an over-limit request")
 	})
-	hub := newConduitSessionPair(t, newConduitRPCHandler(handler, "", 0, nil)).hub
+	hub := newConduitSessionPair(t, newGuardedConduitRPCHandler(handler, "", 0, nil, passAllChecker{})).hub
 	resp, err := hub.Call(context.Background(), &conduitv1.RpcRequest{Method: http.MethodPost, Path: "/api/v1/agents", Body: make([]byte, conduit.MaxRPCBody+1)})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -123,7 +123,7 @@ func TestConduitRPCHandler_NonUTF8StaysUp(t *testing.T) {
 		w.Header().Set("Content-Disposition", "caf\xe9")
 		w.WriteHeader(http.StatusOK)
 	})
-	pair := newConduitSessionPair(t, newConduitRPCHandler(handler, "", 0, nil))
+	pair := newConduitSessionPair(t, newGuardedConduitRPCHandler(handler, "", 0, nil, passAllChecker{}))
 	hub := pair.hub
 
 	resp, err := hub.Call(context.Background(), envelope.RequestToRPC(
@@ -172,7 +172,7 @@ func TestConduitRPCHandler_ServesOnTheDialerSession(t *testing.T) {
 		answered <- resp
 	}})
 	_, _, stop := startTestDialer(t, hub.srv.URL, clock.Real(), maxRand, func(c *ConduitDialConfig) {
-		c.Session.RPCHandler = newConduitRPCHandler(handler, "hub-a", 0, nil)
+		c.Session.RPCHandler = newGuardedConduitRPCHandler(handler, "hub-a", 0, nil, passAllChecker{})
 	})
 	select {
 	case resp := <-answered:

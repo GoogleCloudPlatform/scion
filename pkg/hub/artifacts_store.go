@@ -87,6 +87,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
 	svc.SetReviewNotifier(s.notifyArtifactReview)
+	svc.SetLogger(s.artifactLog)
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
 	trusted := parseTrustedProxies(s.config.TrustedProxies)
@@ -101,6 +102,26 @@ func (s *Server) artifactsHandler() http.Handler {
 // identities derived from request credentials.
 func (s *Server) artifactRefResolver() *artifacts.Service {
 	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
+}
+
+// artifactLog returns the artifact decision logger set with
+// SetArtifactLogger, or nil (entries discarded) when none is set.
+func (s *Server) artifactLog() *slog.Logger {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.artifactDecisionLog
+}
+
+// attachmentService returns the artifact service over this server's
+// artifacts.Host, for the attachment paths. Like artifactRefResolver it
+// asks the server for its store and storage on each call; the chat routes
+// that use it admit only request-authenticated users, so the host sees
+// only identities derived from request credentials.
+func (s *Server) attachmentService() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
 	return svc
 }
@@ -144,8 +165,9 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 // artifacts deleted first, so their files stop counting as references,
 // then one blob sweep pass runs. Between the reap and the expiry sweep,
 // the owner liveness reconciler marks the artifacts of deleted agents and
-// users (and clears the mark of restored ones); a failure there is logged
-// once and does not stop the rest of the pass.
+// users (and clears the mark of restored ones), and unsent uploads and the
+// attachments of messages that are gone are retired; a failure in either is
+// logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
 	st := s.ArtifactStore()
 	if st == nil {
@@ -161,7 +183,9 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
 	}
 	s.reconcileArtifactOwners(ctx, st, now)
-	n, err = st.SweepExpired(ctx, now, artifactReapBatch)
+	s.retireArtifactAttachments(ctx, st, now)
+	s.sweepDeliveryRedemptions(ctx)
+	n, err = artifacts.SweepExpired(ctx, st, now, artifactReapBatch, s.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)
 		return
@@ -192,7 +216,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 // cascade, which run no lifecycle hooks. A checker error is logged once
 // with the number of owners left unprocessed; the next pass retries.
 func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store, now time.Time) {
-	res, err := artifacts.ReconcileOwners(ctx, st, newArtifactHost(s), now)
+	res, err := artifacts.ReconcileOwners(ctx, st, newArtifactHost(s), now, s.artifactLog())
 	var cerr *artifacts.CheckerError
 	switch {
 	case errors.As(err, &cerr):
@@ -204,6 +228,25 @@ func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store
 	if res.Orphaned > 0 || res.Unorphaned > 0 {
 		slog.InfoContext(ctx, "artifacts: owner liveness marks changed",
 			"orphaned", res.Orphaned, "unorphaned", res.Unorphaned, "owners_checked", res.Owners)
+	}
+}
+
+// retireArtifactAttachments runs one attachment maintenance pass
+// (artifacts.AttachmentRetirer) with this server's artifacts.Host as the
+// scope checker: uploads not sent within artifacts.UploadTTL are retired,
+// and so are the attachments of messages that are gone, including those
+// removed without the delete hook, checking a bounded number of messages
+// per pass from where the last pass stopped. A failure is logged once and
+// the rest of the pass goes on; the next pass retries. Only the
+// maintenance loop calls it, one pass at a time.
+func (s *Server) retireArtifactAttachments(ctx context.Context, st artifacts.Store, now time.Time) {
+	res, err := s.artifactAttachmentRetirer.Retire(ctx, st, newArtifactHost(s), now)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment retirement failed", "error", err,
+			"unsent", res.Unsent, "orphaned", res.Orphaned)
+	}
+	if res.Unsent > 0 || res.Orphaned > 0 {
+		slog.InfoContext(ctx, "artifacts: retired attachments", "unsent", res.Unsent, "orphaned", res.Orphaned)
 	}
 }
 

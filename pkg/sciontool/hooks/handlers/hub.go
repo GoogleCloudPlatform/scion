@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -98,7 +99,32 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
-		// Session starting - report running phase with working activity (clears any sticky)
+		// A clear or compact restarts the session inside the running
+		// harness. Working is reported only when the StatusHandler wrote
+		// it, on one of two paths:
+		//   - the parent's restart released a notification-set wait to
+		//     working and marked that write (session-restart); any other
+		//     state it kept, so nothing is sent. A wait that also records
+		//     the parent's own question became that agent-set wait without
+		//     the marker, so nothing is sent for it either. The marker
+		//     stays until the next local write, so a second restart before
+		//     then re-sends working, which is harmless.
+		//   - a sub-agent's restart took the held sub-agent path, which
+		//     writes working unless the local activity stays sticky. The
+		//     guard above returned when it stayed sticky, so local is the
+		//     working just written.
+		// "Session started" is never sent for a restart: the Hub's
+		// harness-ready attribution counts only new sessions.
+		if isInPlaceSessionStart(event) {
+			if !isLocalSessionRestartRelease() && !isHeldSubagentEvent(event) {
+				return nil
+			}
+			source := strings.ToLower(strings.TrimSpace(event.Data.Source))
+			log.Debug("Hub: Reporting running/working (session restarted in place)")
+			err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session restarted ("+source+")")
+			break
+		}
+		// New session - report running phase with working activity (clears any sticky)
 		log.Debug("Hub: Reporting running/working (session start)")
 		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session started")
 
@@ -138,8 +164,9 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
 		if isClaudeUserWaitTool(event) {
 			// A sub-agent's question during a wait the agent set itself
-			// leaves that wait in place locally; sending a new
-			// waiting_for_input would replace the agent's own message.
+			// keeps that wait locally (recorded as parentWaitAgent next
+			// to the sub-agent's entry); sending a new waiting_for_input
+			// would replace the agent's own message.
 			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
 				return nil
@@ -148,6 +175,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			// crashed in place locally; the Hub follows.
 			if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+				return nil
+			}
+			// The parent's own question leaves limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if h.isLocalTerminal() {
+				log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
 				return nil
 			}
 			message := "Waiting on parent"
@@ -296,10 +329,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	} else {
 		log.Debug("Hub status update sent successfully")
 		// SessionStart is the one event currently used for start-time
-		// attribution (see pkg/hub's since_create_ms), so it logs at Info;
-		// every other event logs the same shape at Debug.
+		// attribution (see pkg/hub's since_create_ms), so it logs at Info
+		// with its source; only a new-session source counts there, since a
+		// clear or compact restart can only follow the first start. Every
+		// other event logs the same shape at Debug.
 		if event.Name == hooks.EventSessionStart {
-			slog.Info("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+			slog.Info("hub status update sent", "event", event.Name, "source", event.Data.Source, "elapsed_ms", elapsedMs)
 		} else {
 			slog.Debug("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
 		}
@@ -333,6 +368,16 @@ func isLocalSubagentEndRelease() bool {
 	activity, _ := info["activity"].(string)
 	source, _ := info[activitySourceKey].(string)
 	return activity == string(state.ActivityWorking) && source == activitySourceSubagentEnd
+}
+
+// isLocalSessionRestartRelease reports whether the local agent-info.json
+// holds the working activity that a clear or compact session-start wrote
+// when it released a notification-set wait.
+func isLocalSessionRestartRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSessionRestart
 }
 
 // isLocalHeldNonWaiting reports whether the local agent-info.json holds

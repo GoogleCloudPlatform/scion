@@ -469,8 +469,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	}
 
 	// The keyset cursor and the ORDER BY use the raw created column so the
-	// (conversation_id, channel, created, id) and (thread_id, channel,
-	// created, id) indexes serve both the seek and the order, with no sort.
+	// (conversation_id, channel, created, id), (thread_id, channel,
+	// created, id) and (project_id, created, id) indexes serve both the seek
+	// and the order, with no sort.
 	// On SQLite a legacy row whose stored text still carries a
 	// monotonic-clock suffix can therefore order after a suffix-free row at
 	// the same instant, and a page boundary at such a tie can repeat or skip

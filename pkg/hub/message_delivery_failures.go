@@ -20,10 +20,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -83,7 +86,53 @@ type messageDeliveryFailure struct {
 // messageDeliveryFailuresRequest is the body of a message-failures report.
 type messageDeliveryFailuresRequest struct {
 	Failures []messageDeliveryFailure `json:"failures"`
+	// AttachmentOutcomes are the per-file outcomes of attachment deliveries
+	// (ptone/scion#4596); logged and counted only.
+	AttachmentOutcomes []attachmentDeliveryOutcome `json:"attachmentOutcomes,omitempty"`
 }
+
+// attachmentDeliveryOutcome is one file's delivery outcome reported by a
+// broker.
+type attachmentDeliveryOutcome struct {
+	MessageID    string `json:"messageId"`
+	AgentID      string `json:"agentId,omitempty"`
+	AttachmentID string `json:"attachmentId,omitempty"`
+	Outcome      string `json:"outcome"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// attachmentOutcomeCounter counts the attachment delivery outcomes brokers
+// report, by key (attachmentOutcomeKey).
+type attachmentOutcomeCounter struct {
+	mu     sync.Mutex
+	counts map[string]int64
+}
+
+// Inc adds one to key.
+func (c *attachmentOutcomeCounter) Inc(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.counts[key]++
+}
+
+// Snapshot returns a copy of the counts.
+func (c *attachmentOutcomeCounter) Snapshot() map[string]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int64, len(c.counts))
+	for k, v := range c.counts {
+		out[k] = v
+	}
+	return out
+}
+
+// attachmentDeliveryOutcomes counts the attachment delivery outcomes
+// brokers report, by outcome and reason (ptone/scion#4596). It stays
+// unexported until a metrics collector reads it.
+var attachmentDeliveryOutcomes = &attachmentOutcomeCounter{counts: map[string]int64{}}
+
+// maxAttachmentOutcomesPerReport bounds the outcomes one report logs.
+const maxAttachmentOutcomesPerReport = 100
 
 // messageDeliveryFailuresResponse reports how many rows were updated.
 type messageDeliveryFailuresResponse struct {
@@ -103,7 +152,7 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 
 	brokerIdent := GetBrokerIdentityFromContext(ctx)
 	if brokerIdent == nil || brokerIdent.BrokerID() != brokerID {
-		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "runtime_broker", ID: brokerID}, ActionUpdate,
+		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: permissions.ResourceBroker, ID: brokerID}, ActionUpdate,
 			"message-failures may only be reported by the broker itself")
 		Forbidden(w)
 		return
@@ -117,6 +166,16 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 	if len(req.Failures) > maxMessageFailuresPerReport {
 		BadRequest(w, "too many failures in one report")
 		return
+	}
+	if len(req.AttachmentOutcomes) > maxAttachmentOutcomesPerReport {
+		BadRequest(w, "too many attachment outcomes in one report")
+		return
+	}
+	for _, o := range req.AttachmentOutcomes {
+		key := attachmentOutcomeKey(o)
+		attachmentDeliveryOutcomes.Inc(key)
+		s.messageLog.Info("attachment delivery outcome", "broker_id", brokerID, "message_id", o.MessageID,
+			"agent_id", o.AgentID, "attachment_id", o.AttachmentID, "outcome", o.Outcome, "reason", o.Reason)
 	}
 
 	resp := messageDeliveryFailuresResponse{}
@@ -260,4 +319,17 @@ func sanitizeFailureReason(reason string) string {
 		b.WriteRune(r)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// attachmentOutcomeKey is the counter key of a reported outcome: one of a
+// fixed set, so a report cannot add keys.
+func attachmentOutcomeKey(o attachmentDeliveryOutcome) string {
+	if o.Outcome == "delivered" {
+		return "delivered"
+	}
+	switch o.Reason {
+	case messaging.AttachmentReasonNotDownloaded, messaging.AttachmentReasonVerification, messaging.AttachmentReasonNotWritten:
+		return "not_delivered: " + o.Reason
+	}
+	return "not_delivered: other"
 }

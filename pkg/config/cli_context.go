@@ -24,9 +24,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/internal/settingslockhook"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 	"gopkg.in/yaml.v3"
 )
 
@@ -86,6 +87,15 @@ type CLIContext struct {
 type CLIContextImports struct {
 	// Global is when the global settings' hub configuration was imported.
 	Global time.Time `yaml:"global,omitempty"`
+	// Current is when the current hub was set from the global settings'
+	// hub.endpoint (or found already set). It runs once, so a current hub
+	// the user later removes is not brought back.
+	Current time.Time `yaml:"current,omitempty"`
+	// Projects records, by link path (see LinkPathForProject), when the hub
+	// of a linked project was imported from its settings into a link
+	// entry. Each project is imported once, so a link entry removed later
+	// is not brought back.
+	Projects map[string]time.Time `yaml:"projects,omitempty"`
 }
 
 // HubEntry is a named hub. It holds no credentials: logins stay in
@@ -106,6 +116,11 @@ type ProjectRef struct {
 	ID string `json:"id" yaml:"id"`
 	// Slug is the project slug, for display.
 	Slug string `json:"slug,omitempty" yaml:"slug,omitempty"`
+	// Unverified is set when 'scion use' selected the project while its
+	// hub could not confirm it (no login, a refused login or no answer).
+	// Every selection writes a new ref, so the next confirmed one clears
+	// it.
+	Unverified bool `json:"unverified,omitempty" yaml:"unverified,omitempty"`
 }
 
 // KnownProject is one entry of the known-project list.
@@ -296,20 +311,17 @@ func updateCLIContext(fn func(*CLIContext) error, force bool) error {
 }
 
 // lockCLIContext takes an exclusive advisory lock on path, which works
-// across processes.
+// across processes, waiting at most as long as the settings lock does (see
+// LockSettingsDir). The lock file is never removed.
 func lockCLIContext(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, cliContextFileMode)
+	l, err := filelock.Acquire(path, cliContextFileMode, settingslockhook.Wait(defaultSettingsLockWait))
 	if err != nil {
-		return nil, fmt.Errorf("open context lock: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
+		if errors.Is(err, filelock.ErrTimeout) {
+			return nil, fmt.Errorf("%w: another process may be updating %s; try again", err, filepath.Join(filepath.Dir(path), cliContextFileName))
+		}
 		return nil, fmt.Errorf("lock context file: %w", err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return l.Unlock, nil
 }
 
 // ValidHubName reports whether name is a valid hub nickname.
@@ -318,18 +330,28 @@ func ValidHubName(name string) bool {
 }
 
 // NormalizeEndpoint returns endpoint in the form in which two spellings of
-// one hub URL compare equal: spaces and trailing slashes trimmed, scheme and
-// host lowercased, and the scheme's default port (80 for http, 443 for
-// https) dropped. A value that does not parse as a URL with a host is only
-// trimmed. It is the key of hub entries and of stored logins.
+// one hub URL compare equal: spaces and trailing slashes trimmed, the ASCII
+// letters of the scheme and host lowercased, and the scheme's default port
+// (80 for http, 443 for https) dropped. A value that does not parse as a
+// URL with a host is only trimmed. It is the key of hub entries and of
+// stored logins, so two different hubs must never get the same key:
+//
+//   - only ASCII letters are lowercased; a non-ASCII host is kept as
+//     written, because Unicode case mapping folds some characters into
+//     ASCII ones (U+212A KELVIN SIGN becomes "k");
+//   - an IDN host and its punycode form ("xn--...") are different keys;
+//   - a host with a trailing dot ("hub.example.com.") is a different key
+//     from the one without;
+//   - any non-default port is kept as written ("0443" stays "0443");
+//   - the path keeps its case and its escaping.
 func NormalizeEndpoint(endpoint string) string {
 	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(e)
 	if err != nil || u.Host == "" {
 		return e
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	u.Scheme = asciiLower(u.Scheme)
+	host := asciiLower(u.Hostname())
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""

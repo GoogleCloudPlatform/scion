@@ -86,6 +86,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/runtime-brokers":         "authenticated", // List/create runtime brokers
 	"/api/v1/runtime-brokers/":        "authenticated", // Runtime broker routes
 	"/api/v1/runtime-brokers/connect": "broker-hmac",   // WebSocket control channel — broker HMAC
+	"/api/v1/attachment-deliveries/":  "broker-hmac",   // Attachment delivery capability redemption (broker credential, one 404)
 
 	// ── Templates ──────────────────────────────────────────────────────
 	"/api/v1/templates":  "authenticated", // List/create templates
@@ -138,6 +139,10 @@ var routeAuthzManifest = map[string]string{
 	// ── Principal resolution ───────────────────────────────────────────
 	"/api/v1/users/me/groups": "authenticated", // My groups
 	"/api/v1/principals/":     "authenticated", // Principal routes
+
+	// ── Project visitor's own grants ───────────────────────────────────
+	"/api/v1/users/me/visitor-grants": "authenticated", // Own visitor grants (visitor only; 404 for anyone else)
+	"/api/v1/users/me/visitor-dms":    "authenticated", // Own DMs with agents (visitor only; 404 for anyone else)
 
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
@@ -203,6 +208,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
+	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -239,8 +245,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
-	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
-	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
@@ -257,15 +263,15 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search
-	"/api/v1/chat/attachments":    "authenticated", // Chat attachments
-	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID
+	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
+	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
 
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA
 
 	// ── Conduit (hub.conduit experiment) ───────────────────────────────
 	"/api/v1/conduit/grant-keys": "authenticated", // GET: public grant verification keys only; any signed-in identity; 404 when the experiment is off
-	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
+	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): conduit sessions; agent JWT (own agent row, agent:port:forward) or runtime broker HMAC (the shared /runtime-brokers/connect verifier; carries broker RPCs); 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
 	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
@@ -301,8 +307,11 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/test-identities/{id}/token":          "authenticated", // Re-issue a test identity token
 	"POST /api/v1/test-identities/{id}/web-login-code": "authenticated", // Mint a test identity web-login code
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/cleanup":             "authenticated", // Issuer-scoped cleanup of expired test identities
+	"GET /api/v1/test-identities/provenance":           "authenticated", // Provenance of one resource
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity
 	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
 	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
 	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)

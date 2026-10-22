@@ -20,11 +20,18 @@
  * only the text shown in the web UI comes from here.
  */
 
-/** Triggers a new subscription starts with. */
+/**
+ * Triggers a new subscription starts with, matching the Hub's default when an
+ * agent is created with notify on (newNotifySubscription in
+ * pkg/hub/handlers_agent_create_helpers.go).
+ */
 export const DEFAULT_TRIGGERS: readonly string[] = [
   'COMPLETED',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
+  'STALLED',
+  'ERROR',
+  'HALTED',
 ];
 
 /** Every trigger a subscription can select. */
@@ -34,6 +41,7 @@ export const ALL_TRIGGERS: readonly string[] = [
   'LIMITS_EXCEEDED',
   'STALLED',
   'ERROR',
+  'HALTED',
   'DELETED',
 ];
 
@@ -45,6 +53,8 @@ const TRIGGER_LABELS: Record<string, string> = {
   LIMITS_EXCEEDED: 'Limits Exceeded',
   STALLED: 'Stalled',
   ERROR: 'Error',
+  // The platform ended a run that should still be running (ptone/scion#4853).
+  HALTED: 'Halted',
   DELETED: 'Deleted',
 };
 
@@ -54,7 +64,14 @@ export function triggerLabel(trigger: string): string {
 }
 
 /**
- * Hint listing the default triggers, e.g. on the agent create form.
+ * Triggers the Hub subscribes when an agent is created with notify on
+ * (newNotifySubscription in pkg/hub/handlers_agent_create_helpers.go);
+ * same set as {@link DEFAULT_TRIGGERS}.
+ */
+export const AGENT_CREATE_TRIGGERS: readonly string[] = DEFAULT_TRIGGERS;
+
+/**
+ * Hint listing the default triggers.
  * Returns an empty string when there are no triggers.
  */
 export function defaultTriggersHint(triggers: readonly string[] = DEFAULT_TRIGGERS): string {

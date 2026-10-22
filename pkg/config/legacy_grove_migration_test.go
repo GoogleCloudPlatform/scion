@@ -17,6 +17,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +29,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeReporter records every Reporter call for assertions.
@@ -537,41 +541,76 @@ func TestMigrateLegacyYAMLKeys_ModePreserved(t *testing.T) {
 	}
 }
 
-// TestMigrateLegacyYAMLKeys_ChangeDuringMigrationRetriesOnce injects a hook
-// that rewrites the file, with new content each time, between the temp
-// file's write and the pre-rename compare. The first mismatch triggers one
-// retry; a second mismatch on that retry gives up and reports Skipped.
-func TestMigrateLegacyYAMLKeys_ChangeDuringMigrationRetriesOnce(t *testing.T) {
+// TestMigrateLegacyYAMLKeys_ChangeBeforeLockReplanned injects a hook that
+// rewrites the file between the unlocked read and the settings lock. The
+// migration plans again from the bytes it reads under the lock, so the
+// concurrent value is the one migrated.
+func TestMigrateLegacyYAMLKeys_ChangeBeforeLockReplanned(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.yaml")
 	if err := os.WriteFile(path, []byte("hub:\n  grove_id: \"orig\"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	orig := betweenReadAndRename
-	t.Cleanup(func() { betweenReadAndRename = orig })
+	orig := betweenReadAndLock
+	t.Cleanup(func() { betweenReadAndLock = orig })
 	calls := 0
-	betweenReadAndRename = func() {
+	betweenReadAndLock = func() {
 		calls++
-		content := fmt.Sprintf("hub:\n  grove_id: \"changed-%d\"\n", calls)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(path, []byte("hub:\n  grove_id: \"changed\"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	r := &fakeReporter{}
-	migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+	overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
 
-	if calls != 2 {
-		t.Fatalf("betweenReadAndRename called %d times, want 2 (one initial attempt, one retry)", calls)
+	if calls != 1 {
+		t.Fatalf("betweenReadAndLock called %d times, want 1", calls)
 	}
-	if r.migrated != 0 || r.skipped != 1 {
-		t.Fatalf("migrated=%d skipped=%d, want migrated=0 skipped=1", r.migrated, r.skipped)
+	if r.migrated != 1 || r.skipped != 0 {
+		t.Fatalf("migrated=%d skipped=%d, want migrated=1 skipped=0", r.migrated, r.skipped)
 	}
-	if r.lastReason != "file changed during migration" {
-		t.Errorf("skipped reason = %q", r.lastReason)
+	assertFileContent(t, path, "hub:\n  project_id: \"changed\"")
+	if got := overrides["project_id"]; got != "changed" {
+		t.Errorf("override = %q, want the value read under the lock", got)
 	}
-	assertFileContent(t, path, "hub:\n  grove_id: \"changed-2\"")
+}
+
+// TestMigrateLegacyYAMLKeys_LockBusyDefers: while the settings lock is held
+// (here by this process, as LoadModifySaveVersionedSettings holds it around
+// LoadSingleFileVersioned), the migration neither waits nor writes. It
+// returns the legacy value for use in memory, reports nothing, and a later
+// call with the lock free migrates the file.
+func TestMigrateLegacyYAMLKeys_LockBusyDefers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	orig := "hub:\n  grove_id: \"legacy\"\n"
+	if err := os.WriteFile(path, []byte(orig), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &fakeReporter{}
+	overrides := migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+	lock.Unlock()
+
+	if got := overrides["project_id"]; got != "legacy" {
+		t.Errorf("override = %q, want the legacy value in memory", got)
+	}
+	if r.migrated != 0 || r.skipped != 0 || r.conflicts != 0 {
+		t.Fatalf("migrated=%d skipped=%d conflicts=%d, want nothing reported", r.migrated, r.skipped, r.conflicts)
+	}
+	assertFileContent(t, path, strings.TrimSuffix(orig, "\n"))
+
+	migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+	if r.migrated != 1 {
+		t.Fatalf("migrated=%d after the lock was released, want 1", r.migrated)
+	}
+	assertFileContent(t, path, "hub:\n  project_id: \"legacy\"")
 }
 
 // TestLoadVersionedSettings_HubProjectIDPrecedenceChangeLogged covers the
@@ -972,7 +1011,7 @@ func unsetTestEnv(t *testing.T, names ...string) {
 // precedence invariant directly: the global settings file has a canonical
 // hub.project_id, the project's own settings file has only an unwritable
 // legacy hub.grove_id, and the project's value must still win — through
-// both LoadSettingsKoanf and LoadVersionedSettings, and whether the file is
+// both LoadSettings and LoadVersionedSettings, and whether the file is
 // unwritable via the geteuid seam (not owner) or a real chmod 0555 project
 // directory (skipped when running as root).
 func TestHubProjectIDOverride_UnwritableProjectFileOutranksGlobal(t *testing.T) {
@@ -1004,18 +1043,18 @@ func TestHubProjectIDOverride_UnwritableProjectFileOutranksGlobal(t *testing.T) 
 		return projectDir
 	}
 
-	t.Run("geteuid seam, LoadSettingsKoanf and LoadVersionedSettings", func(t *testing.T) {
+	t.Run("geteuid seam, LoadSettings and LoadVersionedSettings", func(t *testing.T) {
 		projectDir := setUp(t)
 		origEuid := geteuid
 		t.Cleanup(func() { geteuid = origEuid })
 		geteuid = func() int { return -1 }
 
-		s, err := LoadSettingsKoanf(projectDir)
+		s, err := LoadSettings(projectDir)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if s.ProjectID != "proj-ro" {
-			t.Errorf("LoadSettingsKoanf: ProjectID = %q, want proj-ro (the project's own value must outrank the global)", s.ProjectID)
+			t.Errorf("LoadSettings: ProjectID = %q, want proj-ro (the project's own value must outrank the global)", s.ProjectID)
 		}
 
 		vs, err := LoadVersionedSettings(projectDir)
@@ -1037,7 +1076,7 @@ func TestHubProjectIDOverride_UnwritableProjectFileOutranksGlobal(t *testing.T) 
 		}
 		t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
 
-		s, err := LoadSettingsKoanf(projectDir)
+		s, err := LoadSettings(projectDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1048,20 +1087,23 @@ func TestHubProjectIDOverride_UnwritableProjectFileOutranksGlobal(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(data), "grove_id") {
-			t.Errorf("file should be unmigrated on disk (the directory itself is not writable), got %q", data)
+		// The migration writes through the locked settings writer, which
+		// rewrites a writable file in place when its directory refuses
+		// new files (see writeSettingsFileAtomic).
+		if strings.Contains(string(data), "grove_id") || !strings.Contains(string(data), "project_id: \"proj-ro\"") {
+			t.Errorf("file should be migrated in place (the file is writable, its directory is not), got %q", data)
 		}
 	})
 }
 
-// TestLoadSettingsKoanf_PrecedenceChangeLoggedViaCWDProject covers the real
-// CLI load shape: LoadSettingsKoanf("") resolves the project through the
+// TestLoadSettings_PrecedenceChangeLoggedViaCWDProject covers the real
+// CLI load shape: LoadSettings("") resolves the project through the
 // current directory (resolveEffectiveProjectPath -> FindProjectRoot), which
 // only ever reaches step 4 (external/effective path), never step 3
 // (projectPath is empty). Kills a mutation that drops the precedence call
-// in LoadSettingsKoanf specifically — the sibling test through
+// in LoadSettings specifically — the sibling test through
 // LoadVersionedSettings(projectDir) alone does not exercise this call site.
-func TestLoadSettingsKoanf_PrecedenceChangeLoggedViaCWDProject(t *testing.T) {
+func TestLoadSettings_PrecedenceChangeLoggedViaCWDProject(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
@@ -1113,7 +1155,7 @@ func TestLoadSettingsKoanf_PrecedenceChangeLoggedViaCWDProject(t *testing.T) {
 	t.Cleanup(func() { geteuid = origEuid })
 	geteuid = func() int { return -1 }
 
-	s, err := LoadSettingsKoanf("")
+	s, err := LoadSettings("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1127,7 +1169,7 @@ func TestLoadSettingsKoanf_PrecedenceChangeLoggedViaCWDProject(t *testing.T) {
 		t.Errorf("precedence value/other = %q/%q, want proj-legacy/global-canon", fake.lastPrecValue, fake.lastPrecOther)
 	}
 
-	if _, err := LoadSettingsKoanf(""); err != nil {
+	if _, err := LoadSettings(""); err != nil {
 		t.Fatal(err)
 	}
 	if fake.precedence != 1 {
@@ -1248,12 +1290,11 @@ func TestMigrateLegacyYAMLKeys_MultiDocumentRefusesReencode(t *testing.T) {
 	}
 }
 
-// TestMigrateLegacyYAMLKeys_ConflictBackupNotWrittenOnFailedAttempt covers
-// the backup-timing invariant: a backup only ever belongs on disk paired
-// with a completed migration, so an attempt that never commits (every
-// retry exhausted) must leave no backup file behind at all, not a fresh
-// .bak.N per attempt.
-func TestMigrateLegacyYAMLKeys_ConflictBackupNotWrittenOnFailedAttempt(t *testing.T) {
+// TestMigrateLegacyYAMLKeys_ConflictBackupNotWrittenWhenLockBusy covers the
+// backup-timing invariant: a backup only ever belongs on disk paired with a
+// completed migration, so a deferred migration (the settings lock was busy)
+// leaves no backup file behind.
+func TestMigrateLegacyYAMLKeys_ConflictBackupNotWrittenWhenLockBusy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.yaml")
 	orig := "hub:\n  project_id: \"canonical\"\n  grove_id: \"legacy\"\n"
@@ -1261,36 +1302,25 @@ func TestMigrateLegacyYAMLKeys_ConflictBackupNotWrittenOnFailedAttempt(t *testin
 		t.Fatal(err)
 	}
 
-	origHook := betweenReadAndRename
-	t.Cleanup(func() { betweenReadAndRename = origHook })
-	calls := 0
-	betweenReadAndRename = func() {
-		calls++
-		// Perturb the file on every attempt (including the retry), so the
-		// migration never gets past the re-read compare and always ends in
-		// Skipped, never a successful commit.
-		content := fmt.Sprintf("hub:\n  project_id: \"canonical\"\n  grove_id: \"legacy\"\n  extra: %d\n", calls)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-
 	r := &fakeReporter{}
 	migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+	lock.Unlock()
 
-	if calls != 2 {
-		t.Fatalf("betweenReadAndRename called %d times, want 2 (one attempt, one retry)", calls)
+	if r.skipped != 0 || r.conflicts != 0 {
+		t.Fatalf("skipped=%d conflicts=%d, want 0/0", r.skipped, r.conflicts)
 	}
-	if r.skipped != 1 || r.conflicts != 0 {
-		t.Fatalf("skipped=%d conflicts=%d, want 1/0", r.skipped, r.conflicts)
-	}
+	assertFileContent(t, path, strings.TrimSuffix(orig, "\n"))
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
 		if strings.Contains(e.Name(), "grove-migration.bak") {
-			t.Errorf("no backup should exist after every attempt failed, found %s", e.Name())
+			t.Errorf("no backup should exist after a deferred migration, found %s", e.Name())
 		}
 	}
 }
@@ -1307,9 +1337,8 @@ func TestMigrateLegacyYAMLKeys_ConflictBackupRemovedOnRenameFailure(t *testing.T
 		t.Fatal(err)
 	}
 
-	origRename := renameFile
-	t.Cleanup(func() { renameFile = origRename })
-	renameFile = func(oldpath, newpath string) error {
+	t.Cleanup(func() { beforeAtomicRename = nil })
+	beforeAtomicRename = func(tmpName, targetPath string) error {
 		return fmt.Errorf("simulated rename failure")
 	}
 
@@ -1331,7 +1360,7 @@ func TestMigrateLegacyYAMLKeys_ConflictBackupRemovedOnRenameFailure(t *testing.T
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() == filepath.Base(path) {
+		if e.Name() == filepath.Base(path) || e.Name() == settingsLockFileName {
 			continue
 		}
 		t.Errorf("no backup or temp file should remain after a rename failure, found %s", e.Name())
@@ -1381,12 +1410,12 @@ func TestWriteConflictBackup_PartialFileRemovedOnFailure(t *testing.T) {
 	})
 }
 
-// TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns covers the
+// TestLoadSettings_JSONSettingsWithHubGroveIDWarns covers the
 // settings.json case: the legacy hub.grove_id key is not rewritten (only
 // YAML is in scope), but its presence must produce an explicit Skipped
 // warning rather than silently going unread, matching the "no silent
 // unlinking" rule already applied to every other legacy surface.
-func TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
+func TestLoadSettings_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
@@ -1412,7 +1441,7 @@ func TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
 	fake := &fakeReporter{}
 	SetProjectMigrationReporter(fake)
 
-	if _, err := LoadSettingsKoanf(projectDir); err != nil {
+	if _, err := LoadSettings(projectDir); err != nil {
 		t.Fatal(err)
 	}
 	if fake.skipped != 1 {
@@ -1429,7 +1458,7 @@ func TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
 		t.Errorf("json file must never be touched, got %q", data)
 	}
 
-	if _, err := LoadSettingsKoanf(projectDir); err != nil {
+	if _, err := LoadSettings(projectDir); err != nil {
 		t.Fatal(err)
 	}
 	if fake.skipped != 1 {
@@ -1437,7 +1466,7 @@ func TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanf_YAMLMergeKeyHubGroveIDWarns covers a hub.grove_id
+// TestLoadSettings_YAMLMergeKeyHubGroveIDWarns covers a hub.grove_id
 // reachable only through a YAML merge key ("<<: *anchor"): the migrator's
 // own key search walks the raw YAML node tree, which does not resolve a
 // merge key the way koanf's parser does, so this value is invisible to it.
@@ -1445,7 +1474,7 @@ func TestLoadSettingsKoanf_JSONSettingsWithHubGroveIDWarns(t *testing.T) {
 // by other mappings), but the value is still honoured in memory for this
 // call — matching what koanf itself resolves — and a Skipped warning names
 // the gap instead of the project silently losing its link.
-func TestLoadSettingsKoanf_YAMLMergeKeyHubGroveIDWarns(t *testing.T) {
+func TestLoadSettings_YAMLMergeKeyHubGroveIDWarns(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
@@ -1472,7 +1501,7 @@ func TestLoadSettingsKoanf_YAMLMergeKeyHubGroveIDWarns(t *testing.T) {
 	fake := &fakeReporter{}
 	SetProjectMigrationReporter(fake)
 
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1493,7 +1522,7 @@ func TestLoadSettingsKoanf_YAMLMergeKeyHubGroveIDWarns(t *testing.T) {
 		t.Errorf("file must never be touched, got %q", data)
 	}
 
-	if _, err := LoadSettingsKoanf(projectDir); err != nil {
+	if _, err := LoadSettings(projectDir); err != nil {
 		t.Fatal(err)
 	}
 	if fake.skipped != 1 {
@@ -1501,11 +1530,11 @@ func TestLoadSettingsKoanf_YAMLMergeKeyHubGroveIDWarns(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanf_YAMLMergeKeyWithCanonicalPresentNoWarn covers the
+// TestLoadSettings_YAMLMergeKeyWithCanonicalPresentNoWarn covers the
 // canonical-present guard on the merge-key check: when the project file
 // already has its own hub.project_id alongside the merge key, that key
 // already wins normally, so there is nothing unreachable to report.
-func TestLoadSettingsKoanf_YAMLMergeKeyWithCanonicalPresentNoWarn(t *testing.T) {
+func TestLoadSettings_YAMLMergeKeyWithCanonicalPresentNoWarn(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
@@ -1531,7 +1560,7 @@ func TestLoadSettingsKoanf_YAMLMergeKeyWithCanonicalPresentNoWarn(t *testing.T) 
 	fake := &fakeReporter{}
 	SetProjectMigrationReporter(fake)
 
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1550,8 +1579,8 @@ func TestLoadSettingsKoanf_YAMLMergeKeyWithCanonicalPresentNoWarn(t *testing.T) 
 // itself, produce a precedence report.
 func TestPrecedenceNotLoggedWhenGlobalItselfMigrated(t *testing.T) {
 	loaders := map[string]func(projectDir string) (string, error){
-		"LoadSettingsKoanf": func(projectDir string) (string, error) {
-			s, err := LoadSettingsKoanf(projectDir)
+		"LoadSettings": func(projectDir string) (string, error) {
+			s, err := LoadSettings(projectDir)
 			if err != nil {
 				return "", err
 			}
@@ -1610,11 +1639,11 @@ func TestPrecedenceNotLoggedWhenGlobalItselfMigrated(t *testing.T) {
 	}
 }
 
-// TestLoadSettingsKoanf_PrecedenceChangeLoggedExplicitProjectPath covers the
+// TestLoadSettings_PrecedenceChangeLoggedExplicitProjectPath covers the
 // koanf.go step-3 precedence call site (an explicit projectPath, as opposed
-// to the step-4/cwd-resolved shape TestLoadSettingsKoanf_
+// to the step-4/cwd-resolved shape TestLoadSettings_
 // PrecedenceChangeLoggedViaCWDProject already covers).
-func TestLoadSettingsKoanf_PrecedenceChangeLoggedExplicitProjectPath(t *testing.T) {
+func TestLoadSettings_PrecedenceChangeLoggedExplicitProjectPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
@@ -1646,7 +1675,7 @@ func TestLoadSettingsKoanf_PrecedenceChangeLoggedExplicitProjectPath(t *testing.
 
 	// projectDir passed explicitly (not ""): this is step 3
 	// (`projectPath != ""`), not step 4.
-	s, err := LoadSettingsKoanf(projectDir)
+	s, err := LoadSettings(projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3088,5 +3117,132 @@ func TestLoadSettings_GlobalLegacyHubKeyDoesNotLeak(t *testing.T) {
 	}
 	if got := g.GetHubProjectID(); got != scopeGlobalHubID {
 		t.Errorf("global GetHubProjectID() = %q, want %q", got, scopeGlobalHubID)
+	}
+}
+
+// --- The key migration under a settings lock its caller holds
+// (ptone/scion#3919). ---
+
+// runWithin fails the test when f does not return within d (a held-lock
+// migration that tried to take the settings lock again would wait).
+func runWithin(t *testing.T, d time.Duration, f func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatalf("did not return within %s", d)
+		return nil
+	}
+}
+
+func writeLegacyHubKeySettings(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nhub:\n  grove_id: p1\n"), 0o644))
+	return dir
+}
+
+func assertMigratedOnce(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+	require.NoError(t, err)
+	got := string(data)
+	assert.NotContains(t, got, "grove_id")
+	assert.Equal(t, 1, strings.Count(got, "project_id"), "one canonical key:\n%s", got)
+	return got
+}
+
+// LoadModifySaveVersionedSettings holds the settings lock around its load,
+// so the key migration in that load writes under the held lock: no wait,
+// the file migrated, one canonical key.
+func TestLoadModifySaveVersionedSettings_MigratesUnderHeldLock(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		dir := writeLegacyHubKeySettings(t)
+		err := runWithin(t, 5*time.Second, func() error {
+			// Runs on runWithin's goroutine: report with assert and an
+			// error, never require (FailNow would end that goroutine).
+			return LoadModifySaveVersionedSettings(dir, func(vs *VersionedSettings) error {
+				if !assert.NotNil(t, vs.Hub) {
+					return errors.New("no hub settings loaded")
+				}
+				assert.Equal(t, "p1", vs.Hub.ProjectID)
+				vs.ActiveProfile = "dev"
+				return nil
+			})
+		})
+		require.NoError(t, err)
+		got := assertMigratedOnce(t, dir)
+		assert.Contains(t, got, "active_profile: dev")
+	})
+	t.Run("skip save", func(t *testing.T) {
+		dir := writeLegacyHubKeySettings(t)
+		err := runWithin(t, 5*time.Second, func() error {
+			return LoadModifySaveVersionedSettings(dir, func(*VersionedSettings) error { return ErrSkipSave })
+		})
+		require.NoError(t, err)
+		assertMigratedOnce(t, dir)
+	})
+}
+
+// setProjectTypeGit holds the settings lock for its edit, so the key
+// migration it runs writes under that lock.
+func TestSetProjectTypeGit_MigratesUnderHeldLock(t *testing.T) {
+	dir := writeLegacyHubKeySettings(t)
+	err := runWithin(t, 5*time.Second, func() error { return setProjectTypeGit(dir) })
+	require.NoError(t, err)
+	got := assertMigratedOnce(t, dir)
+	assert.Contains(t, got, "project_type: git")
+}
+
+// --- config unset (ptone/scion#3919) and the key migration. ---
+
+// The alias fallback starts from the file as the edit attempt left it, so
+// a legacy hub.grove_id the attempt migrated stays migrated.
+func TestUnsetSetting_AliasFallbackKeepsKeyMigration(t *testing.T) {
+	content := "schema_version: \"1\"\nhub:\n  grove_id: p-legacy\nbase: &b\n  autohelp: false\n  mode: agent\ncli: *b\n"
+	projectDir := setupSettingsViewTest(t, "", content)
+
+	res, err := UnsetSetting(projectDir, "cli.autohelp", false)
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	got := readUnsetSettingsFile(t, projectDir)
+	assert.Contains(t, got, "cli:\n    mode: agent\n")
+	assert.NotContains(t, got, "grove_id")
+	assert.Contains(t, got, "project_id: p-legacy")
+}
+
+// Legacy fixtures for the no-write switch tests (writes_on_read_test.go,
+// ptone/scion#5057): the legacy literals live in this allow-listed
+// compatibility test file.
+
+// legacyHubProjectIDYAMLForTest is a settings-file fragment holding the legacy
+// hub project ID key with value.
+func legacyHubProjectIDYAMLForTest(value string) string {
+	return "hub:\n  grove_id: \"" + value + "\"\n"
+}
+
+// legacyMarkerYAMLForTest is a .scion marker holding the legacy project keys.
+func legacyMarkerYAMLForTest(id, name, slug string) string {
+	return "grove-id: " + id + "\ngrove-name: " + name + "\ngrove-slug: " + slug + "\n"
+}
+
+// migrateLegacyHubProjectIDForTest runs the settings-file key migration of the
+// legacy hub project ID key on path.
+func migrateLegacyHubProjectIDForTest(path string, r Reporter) map[string]string {
+	return migrateLegacyYAMLKeys(path, hubGroveIDRename, r)
+}
+
+// writeLegacyGlobalLayoutForTest gives home a legacy global layout: a real
+// project directory and a leftover dangling back-link of an earlier
+// migration.
+func writeLegacyGlobalLayoutForTest(t *testing.T, home string) {
+	t.Helper()
+	writeFile(t, filepath.Join(home, "groves", "acme", "workspace.txt"), "hello")
+	if err := os.Symlink(filepath.Join("..", "projects", "gone"), filepath.Join(home, "groves", "gone")); err != nil {
+		t.Fatal(err)
 	}
 }
