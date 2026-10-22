@@ -330,10 +330,11 @@ func (e *HealthEvent) Validate() error {
 		}
 		if e.FinalFlushOutcome == FinalFlushDrained {
 			stats := e.AnalyticsStatsFailed != nil && *e.AnalyticsStatsFailed
-			pending := e.AnalyticsPendingBytes != nil && *e.AnalyticsPendingBytes > 0
+			pending := e.AnalyticsPendingBytes != nil && *e.AnalyticsPendingBytes > 0 ||
+				e.AnalyticsHeld != nil && *e.AnalyticsHeld
 			residual := e.FinalResidualRecords != nil && *e.FinalResidualRecords > 0
 			if stats || pending || residual || e.QueueRecords > 0 {
-				errs = append(errs, errors.New("final_flush_outcome drained contradicts stats_failed, pending bytes, residual records or queued records"))
+				errs = append(errs, errors.New("final_flush_outcome drained contradicts stats_failed, pending bytes, a held outbox, residual records or queued records"))
 			}
 		}
 		if e.FinalResidualRecords == nil {

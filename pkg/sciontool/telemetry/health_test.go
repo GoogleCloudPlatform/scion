@@ -316,11 +316,14 @@ func fixedHealthInputs(trigger string) healthInputs {
 		Usage:         enabledUsage(telemetrycontract.UsageSourceNative, "claude"),
 		SourceOrigin:  telemetrycontract.UsageSourceOriginOverlay,
 		DeliveryState: "running",
+		// 6 recognized = 1 ignored + 1 duplicate + 4 derived; 1 of them malformed.
 		UsageDiag: &UsageDiagnostics{Derived: 4, Duplicate: 1, Malformed: 1, LogRecordsReceived: 40, LogRecordsRecognized: 6,
-			Ignored: 1},
+			LogRecordsMalformed: 1, Ignored: 1},
 		AnalyticsEnabled: true,
 		Analytics: telemetrycontract.HealthAnalyticsCounters{
-			Appended: 4, Finalized: 4, Delivered: 3, SendFailures: 2, SendRetries: 2, PendingBytes: 0,
+			// offered = derived 4 + duplicate 1 = appended 4 + certain duplicate 1;
+			// every finalized line delivered; 4 seqs allocated.
+			Appended: 4, CertainDuplicates: 1, Finalized: 4, Delivered: 4, SendFailures: 2, SendRetries: 2,
 			ProducerEpoch: "epoch-1", ProducerSeqLast: 4,
 		},
 		Metrics: DeliverySnapshot{Accepted: 12, Delivered: 12, Attempts: 3, Retries: 1, Failed: 1},
@@ -396,9 +399,14 @@ func TestHealthEventGolden(t *testing.T) {
 
 	final := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
 	final.Seq = 7
+	// 4 finalized = 2 delivered + 1 dead-lettered (100 bytes) + 1 still
+	// pending (512 bytes); retained = pending + dead letter; 4 appended + 1
+	// overflow = 5 seqs; 2 metric points residual at stop = 2 unconfirmed.
+	final.Analytics.Delivered, final.Analytics.DeadLetters, final.Analytics.DeadLettersTotal = 2, 1, 1
 	final.Analytics.PendingBytes, final.Analytics.OldestPendingFileAgeMs = 512, i64(61_000)
-	final.Analytics.RetainedBytes = 512 + 100 // retained includes pending (+ a dead-lettered line)
-	final.Analytics.Overflow, final.Analytics.OverflowTotal = 1, 1
+	final.Analytics.RetainedBytes = 512 + 100
+	final.Analytics.Overflow, final.Analytics.OverflowTotal, final.Analytics.ProducerSeqLast = 1, 1, 5
+	final.Metrics.Delivered, final.Metrics.Unconfirmed, final.Metrics.Canceled = 10, 2, 2
 	final.FinalResidualRecords = 2
 	goldenHealth(t, "final-not-drained", final)
 
@@ -1226,5 +1234,150 @@ func TestHealthInvalidEventCounted(t *testing.T) {
 	h.p.flushHealth(context.Background())
 	if last := h.sentEvents(t)[1]; last.HealthRejected != 1 {
 		t.Fatalf("health_rejected = %d, want 1", last.HealthRejected)
+	}
+}
+
+// Every golden must decode and validate, and must satisfy the cross-field
+// invariants of a real row (R4-4): goldens are mirrored as WP4 fixtures.
+func TestHealthGoldensAreConsistent(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("testdata", "health", "*.json"))
+	if err != nil || len(files) < 5 {
+		t.Fatalf("goldens: %v %v", files, err)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err != nil {
+			t.Fatal(err)
+		}
+		var ev telemetrycontract.HealthEvent
+		if err := telemetrycontract.Unmarshal(compact.Bytes(), &ev); err != nil {
+			t.Errorf("%s: does not validate: %v", f, err)
+			continue
+		}
+		v := func(p *int64) int64 {
+			if p == nil {
+				return 0
+			}
+			return *p
+		}
+		if ev.UsageObservationsDerived != nil {
+			recognized := v(ev.UsageLogRecordsRecognized) + v(ev.UsageMetricIncrements)
+			if recognized != v(ev.UsageObservationsIgnored)+v(ev.UsageObservationsDuplicate)+v(ev.UsageObservationsDerived) {
+				t.Errorf("%s: recognized observations do not split into ignored+duplicate+derived", f)
+			}
+			if v(ev.UsageLogRecordsMalformed) > v(ev.UsageLogRecordsRecognized) || v(ev.UsageLogRecordsRecognized) > v(ev.UsageLogRecordsReceived) {
+				t.Errorf("%s: malformed <= recognized <= received violated", f)
+			}
+		}
+		if ev.AnalyticsPendingBytes != nil { // measured disk state
+			if v(ev.AnalyticsAppended)+v(ev.AnalyticsOverflow) > v(ev.ProducerSeqLast) {
+				t.Errorf("%s: appended+overflow exceed allocated seqs", f)
+			}
+			settled := v(ev.AnalyticsDelivered) + v(ev.AnalyticsDeadLetters) + v(ev.AnalyticsQuarantined)
+			if settled > v(ev.AnalyticsFinalized) || (v(ev.AnalyticsPendingBytes) == 0 && settled != v(ev.AnalyticsFinalized)) {
+				t.Errorf("%s: finalized lines are not accounted for (delivered+dead+quarantined %d, finalized %d, pending %d)",
+					f, settled, v(ev.AnalyticsFinalized), v(ev.AnalyticsPendingBytes))
+			}
+			if v(ev.AnalyticsDeadLetters) > v(ev.AnalyticsDeadLettersTotal) || v(ev.AnalyticsOverflow) > v(ev.AnalyticsOverflowTotal) {
+				t.Errorf("%s: a per-run counter exceeds its persisted total", f)
+			}
+		}
+		if ev.MetricPointsDelivered+ev.MetricPointsUnconfirmed+ev.MetricPointsDropped > ev.MetricPointsAccepted {
+			t.Errorf("%s: metric outcomes exceed accepted", f)
+		}
+		if ev.FinalResidualRecords != nil && *ev.FinalResidualRecords > ev.MetricPointsUnconfirmed {
+			t.Errorf("%s: residual records must also be unconfirmed", f)
+		}
+		if ev.MetricExportFailures > ev.MetricExportAttempts || ev.MetricExportRetries >= ev.MetricExportAttempts && ev.MetricExportAttempts > 0 {
+			t.Errorf("%s: metric export call counts inconsistent", f)
+		}
+	}
+}
+
+// R4-2: a held outbox is never drained, even with zero pending bytes.
+func TestFinalHeldIsNotDrained(t *testing.T) {
+	setTestVersion(t)
+	in := fixedHealthInputs(telemetrycontract.HealthTriggerFinal)
+	in.Analytics.Held = true
+	ev, err := buildHealthEvent(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.FinalFlushOutcome != "not_drained" {
+		t.Fatalf("held outbox reported %q", ev.FinalFlushOutcome)
+	}
+}
+
+// R4-1 drift guard: produce every persisted state through WP2's own write
+// paths (no WP3-written files) and check that the health snapshot reports
+// exactly what WP2's Stats() reports, each non-zero/true.
+func TestOutboxDiskMatchesStats(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	o := testOutbox(t)
+	// append_failed: a failed file sync that can be taken back.
+	failNextFileSync(o)
+	if _, err := o.AppendUsage(requestIDDraft(5)); err == nil {
+		t.Fatal("expected the failed-sync append to fail")
+	}
+	// sync_uncertain: failed sync, write cannot be taken back, recovery commits.
+	calls := 0
+	o.fsyncFile = func(f *os.File) error {
+		calls++
+		if calls == 1 {
+			return errInjectedSync
+		}
+		return f.Sync()
+	}
+	o.truncateHook = func() error { return errInjectedSync }
+	if out, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:s", 1)); err != nil || out != AppendWritten {
+		t.Fatalf("sync-uncertain append: %v %v", out, err)
+	}
+	o.fsyncFile = func(f *os.File) error { return f.Sync() }
+	o.truncateHook = nil
+	// commit_deferred: the line is durable, the commit step fails.
+	o.crashAt = "commit"
+	if out, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:c", 1)); err != nil || out != AppendWritten {
+		t.Fatalf("commit-deferred append: %v %v", out, err)
+	}
+	o.crashAt = ""
+	// dead letter through WP2's deadLetter.
+	if err := o.deadLetter([]byte(`{"rejected":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	// overflow: cap below the next line.
+	o.maxPending = 1
+	if out, _ := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:o", 1)); out != AppendOverflow {
+		t.Fatalf("overflow append outcome %v", out)
+	}
+	o.maxPending = analyticsOutboxMaxPending
+	// held: a producer that stopped right after writing its intent.
+	o.crashAt = "intent"
+	_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:h", 1))
+	o.crashAt = ""
+
+	st := o.Stats()
+	c := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)}.counters()
+	if c.StatsFailed {
+		t.Fatal("stats failed on a readable outbox")
+	}
+	for name, pair := range map[string][2]int64{
+		"append_failed_total":   {c.AppendFailedTotal, st.PersistedAppendFailed},
+		"sync_uncertain_total":  {c.SyncUncertainTotal, st.PersistedSyncUncertain},
+		"commit_deferred_total": {c.CommitDeferredTotal, st.PersistedCommitDeferred},
+		"dead_letters_total":    {c.DeadLettersTotal, st.PersistedDeadLetters},
+		"overflow_total":        {c.OverflowTotal, st.PersistedOverflow},
+		"pending_bytes":         {c.PendingBytes, st.PendingBytes},
+		"retained_bytes":        {c.RetainedBytes, st.RetainedBytes},
+	} {
+		if pair[0] != pair[1] || pair[0] == 0 {
+			t.Errorf("%s: health %d, WP2 Stats %d (want equal and non-zero)", name, pair[0], pair[1])
+		}
+	}
+	if c.Held != st.HeldIntent || !c.Held {
+		t.Errorf("held: health %v, WP2 Stats %v (want both true)", c.Held, st.HeldIntent)
 	}
 }

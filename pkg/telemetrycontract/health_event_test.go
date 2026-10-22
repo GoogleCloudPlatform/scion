@@ -134,6 +134,30 @@ func TestHealthEventValidate(t *testing.T) {
 			e.AnalyticsStatsFailed = &failed
 		}, "must be omitted"},
 		"measured without epoch": {func(e *HealthEvent) { e.ProducerEpoch = "" }, "required unless analytics_stats_failed"},
+		"retained below pending": {func(e *HealthEvent) {
+			*e.AnalyticsRetainedBytes, *e.AnalyticsPendingBytes = 1, 2
+		}, "cannot be smaller"},
+		"drained with stats failed": {func(e *HealthEvent) {
+			drainedFinal(e)
+			e.SetAnalyticsCounters(HealthAnalyticsCounters{StatsFailed: true})
+		}, "drained contradicts"},
+		"drained with pending": {func(e *HealthEvent) {
+			drainedFinal(e)
+			*e.AnalyticsPendingBytes, *e.AnalyticsRetainedBytes = 10, 10
+		}, "drained contradicts"},
+		"drained with held": {func(e *HealthEvent) {
+			drainedFinal(e)
+			held := true
+			e.AnalyticsHeld = &held
+		}, "drained contradicts"},
+		"drained with residual": {func(e *HealthEvent) {
+			drainedFinal(e)
+			*e.FinalResidualRecords = 1
+		}, "drained contradicts"},
+		"drained with queued records": {func(e *HealthEvent) {
+			drainedFinal(e)
+			e.QueueRecords = 3
+		}, "drained contradicts"},
 		"bad origin":             {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
 	}
 	for name, c := range cases {
@@ -212,5 +236,21 @@ func TestHealthStatsFailedOmitsDiskFields(t *testing.T) {
 	}
 	if raw["analytics_appended"] != float64(3) || raw["analytics_stats_failed"] != true {
 		t.Errorf("in-memory counters and the flag stay: %v %v", raw["analytics_appended"], raw["analytics_stats_failed"])
+	}
+}
+
+// drainedFinal turns the valid start event into a consistent drained final
+// (Validate accepts it; TestHealthDrainedFinalIsValid pins that), so each
+// contradiction case above changes exactly one input.
+func drainedFinal(e *HealthEvent) {
+	zero := int64(0)
+	e.Trigger, e.FinalFlushOutcome, e.FinalResidualRecords = HealthTriggerFinal, FinalFlushDrained, &zero
+}
+
+func TestHealthDrainedFinalIsValid(t *testing.T) {
+	ev := validHealth()
+	drainedFinal(ev)
+	if err := ev.Validate(); err != nil {
+		t.Fatalf("baseline drained final rejected: %v", err)
 	}
 }

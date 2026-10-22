@@ -291,7 +291,9 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		residual := in.FinalResidualRecords
 		ev.FinalResidualRecords = &residual
 		ev.FinalFlushOutcome = telemetrycontract.FinalFlushDrained
-		pending := in.AnalyticsEnabled && (in.Analytics.PendingBytes > 0 || in.Analytics.StatsFailed)
+		// A held outbox (an intent on disk) is not drained even with zero
+		// pending bytes: WP2 writes the intent before the staging line.
+		pending := in.AnalyticsEnabled && (in.Analytics.PendingBytes > 0 || in.Analytics.StatsFailed || in.Analytics.Held)
 		if residual > 0 || in.Queue.Records > 0 || pending {
 			ev.FinalFlushOutcome = telemetrycontract.FinalFlushNotDrained
 		}
@@ -434,46 +436,55 @@ func readOutboxDisk(o *AnalyticsOutbox) outboxDisk {
 		d.failed = true
 		return d
 	}
-	var errs [11]error
-	d.epoch, errs[0] = o.readTrimmed("epoch")
-	if errs[0] == nil && d.epoch == "" {
-		errs[0] = errors.New("outbox epoch is missing") // created when the outbox opens
-	}
-	d.seq, errs[1] = o.readInt("seq")
-	d.overflowTotal, errs[2] = o.readInt("overflow")
-	d.oversizeTotal, errs[3] = o.readInt("oversize")
-	d.deadLettersTotal, errs[4] = o.readInt("dead_letters")
-	// WP2 lock-free persisted counters: one byte per event.
-	sizeOf := func(name string) (int64, error) {
+	var errs []error
+	note := func(err error) { errs = append(errs, err) }
+	// WP2's persisted counter files. The names are WP2's; the drift test
+	// TestOutboxDiskMatchesStats produces each one through WP2 code paths
+	// and compares with Stats(), so a rename cannot go unnoticed.
+	sizeOf := func(name string) int64 { // lock-free counters: one byte per event
 		info, err := os.Stat(o.path(name))
 		if err == nil {
-			return info.Size(), nil
+			return info.Size()
 		}
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+		if !errors.Is(err, os.ErrNotExist) {
+			note(err)
 		}
-		return 0, err
+		return 0
 	}
-	d.appendFailedTotal, errs[5] = sizeOf("append_failed")
-	d.syncUncertainTotal, errs[8] = sizeOf("sync_uncertain")
-	d.commitDeferredTotal, errs[9] = sizeOf("commit_deferred")
+	readInt := func(name string) int64 {
+		n, err := o.readInt(name)
+		note(err)
+		return n
+	}
+	var err error
+	d.epoch, err = o.readTrimmed("epoch")
+	note(err)
+	if err == nil && d.epoch == "" {
+		note(errors.New("outbox epoch is missing")) // created when the outbox opens
+	}
+	d.seq = readInt("seq")
+	d.overflowTotal = readInt("overflow")
+	d.oversizeTotal = readInt("oversize")
+	d.deadLettersTotal = readInt("dead_letters")
+	d.appendFailedTotal = sizeOf("append_failed")
+	d.syncUncertainTotal = sizeOf("sync_uncertain")
+	d.commitDeferredTotal = sizeOf("commit_deferred")
 	if _, err := os.Stat(o.path("intent")); err == nil {
 		d.held = true
 	} else if !errors.Is(err, os.ErrNotExist) {
-		errs[10] = err
+		note(err)
 	}
-	d.pending, d.oldest, errs[6] = o.pendingBytes()
+	d.pending, d.oldest, err = o.pendingBytes()
+	note(err)
 	// retained = the SAME pending read + dead-lettered and quarantined
 	// files (WP2 retainedBytes' definition; TestRetainedMatchesOutbox pins
-	// that the two agree), so retained >= pending within one row.
-	var extra int64
-	extra, errs[7] = retainedExtraBytes(o.dir)
+	// that the two agree), so retained >= pending within one row. A file
+	// moved between the two reads can be counted twice (transient
+	// over-count of at most one file).
+	extra, err := retainedExtraBytes(o.dir)
+	note(err)
 	d.retained = d.pending + extra
-	for _, err := range errs {
-		if err != nil {
-			d.failed = true
-		}
-	}
+	d.failed = errors.Join(errs...) != nil
 	return d
 }
 
@@ -483,7 +494,9 @@ func (h analyticsHandles) counters() telemetrycontract.HealthAnalyticsCounters {
 		// A lazily opened outbox that failed: nothing is measurable.
 		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
 	}
-	s := outbox.Stats() // in-memory counters only; disk values come from readOutboxDisk
+	// Stats() also reads the disk (WP2); only its in-memory counters are
+	// used here. Disk values come from readOutboxDisk, read once each.
+	s := outbox.Stats()
 	d := readOutboxDisk(outbox)
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:            s.Appended,
