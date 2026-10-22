@@ -198,9 +198,13 @@ func downloadModes(dl []hubclient.DownloadURLInfo, meta []hubclient.TemplateFile
 			break
 		}
 	}
-	metaByPath := make(map[string]hubclient.TemplateFile, len(meta))
-	for _, f := range meta {
-		metaByPath[f.Path] = f
+	// Only an older hub's response needs the metadata manifest.
+	var metaByPath map[string]hubclient.TemplateFile
+	if !hubSendsModes {
+		metaByPath = make(map[string]hubclient.TemplateFile, len(meta))
+		for _, f := range meta {
+			metaByPath[f.Path] = f
+		}
 	}
 	modes := make(map[string]os.FileMode, len(dl))
 	for _, f := range dl {
