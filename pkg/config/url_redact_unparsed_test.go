@@ -183,7 +183,7 @@ func TestLinkEntryForProject_EndpointWithAtNotLinked(t *testing.T) {
 	cliContextTestHome(t)
 	projectDir, _, linkPath := linkImportProject(t, "hub:\n  endpoint: https://alice:1234/Pw9q@proj.example.com\n  projectId: hub-1\n  linked: true\n")
 	c := newCLIContext()
-	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil || p != nil || h != nil {
 		t.Fatalf("= %+v, %+v, %v; want nothing", p, h, err)
 	}
