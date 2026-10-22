@@ -324,7 +324,7 @@ func TestColocatedShutdown_FlatHostInBrokerWait(t *testing.T) {
 // (DrainLaunches; Draining) and finished its shutdown by the time the hub
 // front's broker wait ends, and the front still accepts connections then.
 // The host's Run joins the broker WaitGroup as startFlatRuntimeBrokerHost
-// does (cmd/server_flat_host.go:494-500; that join itself is pinned by
+// does (cmd/server_flat_host.go:497-503; that join itself is pinned by
 // TestColocatedShutdown_FlatHostInBrokerWait).
 func TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -364,7 +364,7 @@ func TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain(t *testing.T) {
 			cfg.HubEndpoint = "http://127.0.0.1:1"
 			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 		Listener: brokerhost.ListenerConfig{Host: "127.0.0.1", Port: brokerPort},
 	})
@@ -375,7 +375,7 @@ func TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain(t *testing.T) {
 
 	var brokerWG sync.WaitGroup
 	f.brokerStop.markStarted()
-	// Mirrors startFlatRuntimeBrokerHost (cmd/server_flat_host.go:494-500).
+	// Mirrors startFlatRuntimeBrokerHost (cmd/server_flat_host.go:497-503).
 	brokerWG.Add(1)
 	go func() {
 		defer brokerWG.Done()
@@ -415,7 +415,7 @@ func TestColocatedShutdown_FlatServersDrainBeforeHubHTTPDrain(t *testing.T) {
 // co-located Runtime Broker has begun its launch drain (DrainLaunches;
 // Draining) by the time the hub front's broker wait ends, and the front
 // still accepts connections then. Its Start joins the broker WaitGroup
-// as startRuntimeBroker does (cmd/server_foreground.go:4377-4383); that
+// as startRuntimeBroker does (cmd/server_foreground.go:4385-4391); that
 // production join is covered by TestColocatedBrokerStop_BeforeHTTPDrain's
 // wait helper, not here (startRuntimeBroker needs a registered broker and
 // a detected runtime).
@@ -429,7 +429,7 @@ func TestColocatedShutdown_LegacyBrokerDrainsBeforeHubHTTPDrain(t *testing.T) {
 	cfg.Port = brokerPort
 	cfg.BrokerID = "legacy-colocated"
 	cfg.StateDir = t.TempDir()
-	rhSrv := runtimebroker.New(cfg, agent.NewManager(rt), rt)
+	rhSrv := runtimebroker.New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})
 
 	var drainedAtWaitEnd atomic.Bool
 	f := startDrainTestFront(t, nil, func() { drainedAtWaitEnd.Store(rhSrv.Draining()) })
@@ -438,7 +438,7 @@ func TestColocatedShutdown_LegacyBrokerDrainsBeforeHubHTTPDrain(t *testing.T) {
 
 	var brokerWG sync.WaitGroup
 	f.brokerStop.markStarted()
-	// Mirrors startRuntimeBroker (cmd/server_foreground.go:4377-4383).
+	// Mirrors startRuntimeBroker (cmd/server_foreground.go:4385-4391).
 	brokerWG.Add(1)
 	go func() {
 		defer brokerWG.Done()
