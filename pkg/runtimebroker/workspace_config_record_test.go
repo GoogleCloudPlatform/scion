@@ -347,3 +347,32 @@ func TestBrokerWorkspaceConfigChange(t *testing.T) {
 		}
 	}
 }
+
+// An earlier start recorded a broker copy's old identity while alignment
+// was deferred. When a later create's alignment rewrites the identity to
+// the hub project ID, the change is recorded in the same locked section,
+// so that create and the next start are accepted, not refused with 409.
+func TestCreateAgent_IdentityAlignmentIsRecorded(t *testing.T) {
+	identityForms(t, func(t *testing.T, markerForm bool) {
+		srv, _ := newHubDefaultsWiringServer()
+		workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, markerForm)
+		// The record of the old identity, under the hub project ID.
+		if err := recordWorkspaceConfigState(workspace, brokerTestHubID); err != nil {
+			t.Fatal(err)
+		}
+		writeBrokerRecord(t, brokerTestHubID)
+
+		postCreateAgent(t, srv, `{"name": "aligned", "id": "id-aligned", "slug": "aligned", "provisionOnly": true,
+			"projectId": "`+brokerTestHubID+`", "projectSlug": "`+brokerTestSlug+`",
+			"config": {"template": "claude", "sharedWorkspace": true}}`)
+		if want, ok := config.ConfinedProjectConfigRoot(brokerTestSlug, brokerTestHubID); !ok || brokerConfigRoot(t, workspace) != want {
+			t.Fatalf("fixture: the create's alignment did not record the hub project ID")
+		}
+		if err := checkWorkspaceConfigRecord(workspace, brokerTestHubID); err != nil {
+			t.Fatalf("the aligned identity is not the recorded state: %v", err)
+		}
+		postCreateAgent(t, srv, `{"name": "next", "id": "id-next", "slug": "next", "provisionOnly": true,
+			"projectId": "`+brokerTestHubID+`", "projectSlug": "`+brokerTestSlug+`",
+			"config": {"template": "claude", "sharedWorkspace": true}}`)
+	})
+}

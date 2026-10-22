@@ -274,7 +274,8 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 	if templateForChain == "" && req.Config != nil {
 		templateForChain = req.Config.Template
 	}
-	if tier := harnessConfigProjectTier(req.ProjectPath); projectDir != "" {
+	if projectDir != "" {
+		tier := harnessConfigProjectTier(req.ProjectPath)
 		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(templateForChain, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
 			return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
@@ -315,7 +316,10 @@ func policyHarnessConfigName(req CreateAgentRequest, settings *config.VersionedS
 // global directory. If resolution fails the path is returned as given
 // (launch fails on the same error).
 func harnessConfigProjectDir(projectPath string) string {
-	return resolvedHarnessConfigProjectDir(projectPath)
+	if dir, err := config.GetResolvedProjectDir(projectPath); err == nil && dir != "" {
+		return dir
+	}
+	return projectPath
 }
 
 // harnessConfigProjectTier is the project tier directory of a harness-config
@@ -330,13 +334,6 @@ func harnessConfigProjectTier(projectPath string) string {
 		}
 	}
 	return harnessConfigProjectDir(projectPath)
-}
-
-func resolvedHarnessConfigProjectDir(projectPath string) string {
-	if dir, err := config.GetResolvedProjectDir(projectPath); err == nil && dir != "" {
-		return dir
-	}
-	return projectPath
 }
 
 // templateChainPaths returns the on-disk paths of template's chain resolved

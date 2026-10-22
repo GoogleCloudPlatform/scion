@@ -109,6 +109,9 @@ type workspaceConfigChangedError struct {
 
 func (e *workspaceConfigChangedError) Error() string {
 	what := fmt.Sprintf("it was %s and is now %s", e.Recorded.describe(), e.Found.describe())
+	if e.Recorded.Kind == workspaceConfigMarker && e.Found.Kind == workspaceConfigMarker {
+		what = "the project marker file was changed"
+	}
 	if e.Reason != "" {
 		what = e.Reason
 	}
@@ -175,35 +178,54 @@ func workspaceConfigRecordFor(projectPath, hubProjectID string) (canonical, reco
 	return canonical, filepath.Join(globalDir, workspaceConfigRecordsDir, hex.EncodeToString(sum[:16])+".json"), true, nil
 }
 
-// recordHubProjectFilesChecked runs recordHubProjectFiles between a check
-// and a record of the workspace's .scion state, all under the workspace
-// lock the caller holds: the entry must match the record before, and may
-// differ afterwards only by a change the broker itself makes
+// recordHubProjectFilesChecked runs recordHubProjectFiles inside
+// withCheckedWorkspaceConfig. The caller holds the workspace lock.
+func (s *Server) recordHubProjectFilesChecked(ctx context.Context, in startContextInputs) error {
+	return s.withCheckedWorkspaceConfig(in.AgentID, in.ProjectPath, in.ProjectID, in.ProjectSlug, func() {
+		s.recordHubProjectFiles(ctx, in)
+	})
+}
+
+// alignHubManagedProjectIdentityChecked runs alignHubManagedProjectIdentity
+// inside withCheckedWorkspaceConfig, so an identity the alignment rewrites
+// is recorded as the broker's own change. The caller holds the workspace
+// lock.
+func (s *Server) alignHubManagedProjectIdentityChecked(ctx context.Context, agentID, projectPath, slug, projectID string) error {
+	return s.withCheckedWorkspaceConfig(agentID, projectPath, projectID, slug, func() {
+		s.alignHubManagedProjectIdentity(ctx, agentID, projectPath, slug, projectID)
+	})
+}
+
+// withCheckedWorkspaceConfig runs write, which may change a hub-managed
+// workspace's .scion entry, between a check of the entry against the
+// record and a record of the result, all under the workspace lock the
+// caller holds. The entry must match the record before, and may differ
+// afterwards only by a change the broker itself makes
 // (brokerWorkspaceConfigChange). Any other difference, such as a marker
 // replaced while the broker was writing, is refused and not recorded.
-func (s *Server) recordHubProjectFilesChecked(ctx context.Context, in startContextInputs) error {
-	before, applies, err := checkWorkspaceConfigRecordState(in.ProjectPath, in.ProjectID)
+func (s *Server) withCheckedWorkspaceConfig(agentID, projectPath, projectID, slug string, write func()) error {
+	before, applies, err := checkWorkspaceConfigRecordState(projectPath, projectID)
 	if err != nil {
 		return err
 	}
 	if afterWorkspaceConfigCheckHook != nil {
 		afterWorkspaceConfigCheckHook()
 	}
-	s.recordHubProjectFiles(ctx, in)
+	write()
 	if !applies {
 		return nil
 	}
-	canonical, _, _, _ := workspaceConfigRecordFor(in.ProjectPath, in.ProjectID)
+	canonical, _, _, _ := workspaceConfigRecordFor(projectPath, projectID)
 	after, err := observeWorkspaceConfigState(canonical)
 	if err != nil {
 		return &workspaceConfigChangedError{Path: canonical, Reason: "the entry cannot be read"}
 	}
-	if !brokerWorkspaceConfigChange(canonical, before, after, in.ProjectID, in.ProjectSlug) {
+	if !brokerWorkspaceConfigChange(canonical, before, after, projectID, slug) {
 		return &workspaceConfigChangedError{Path: canonical, Recorded: before, Found: after}
 	}
-	if err := recordWorkspaceConfigState(in.ProjectPath, in.ProjectID); err != nil {
-		s.agentLifecycleLog.Warn("Failed to record the hub-managed workspace's .scion state",
-			"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath, "error", err)
+	if err := recordWorkspaceConfigState(projectPath, projectID); err != nil {
+		// Without a record the next start would run unchecked.
+		return &workspaceConfigChangedError{Path: canonical, Reason: "the Runtime Broker could not record it: " + err.Error()}
 	}
 	return nil
 }

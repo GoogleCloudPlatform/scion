@@ -953,13 +953,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// before any project settings are read, under the process-wide
 		// workspace lock on the project.
 		// The workspace's .scion entry is checked against the broker's
-		// record first (checkWorkspaceConfigRecord): nothing, including
-		// the identity alignment, reads it before.
+		// record first, and an identity the alignment rewrites is
+		// recorded in the same locked section
+		// (alignHubManagedProjectIdentityChecked).
 		var checkErr error
 		if lockErr := s.withWorkspaceLock(ctx, func() {
-			if checkErr = checkWorkspaceConfigRecord(req.ProjectPath, req.ProjectID); checkErr == nil {
-				s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
-			}
+			checkErr = s.alignHubManagedProjectIdentityChecked(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
 		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
 			return

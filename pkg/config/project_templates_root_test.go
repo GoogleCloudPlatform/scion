@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,5 +170,55 @@ func TestLoadVersionedSettings_HubWorkspaceWithoutScionSkipsRootSettings(t *test
 	}
 	if vs.DefaultTemplate != "from-plain" {
 		t.Errorf("plain path: default_template = %q, want from-plain", vs.DefaultTemplate)
+	}
+}
+
+// The launch path resolves the project dir of a hub-managed workspace root
+// without .scion to the root itself (GetResolvedProjectDir), then loads
+// settings and harness-configs from it. Neither the root's settings.yaml nor
+// its harness-configs/ is used.
+func TestLaunchLoaders_HubWorkspaceWithoutScion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".scion", "projects", "proj")
+	if err := os.MkdirAll(filepath.Join(root, "harness-configs", "planted"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "harness-configs", "planted", "config.yaml"), []byte("harness: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_template: from-root\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectDir, err := GetResolvedProjectDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs, _, err := LoadEffectiveSettingsFor(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("LoadEffectiveSettingsFor: %v", err)
+	}
+	if vs.DefaultTemplate == "from-root" {
+		t.Error("launch settings read the workspace root's settings.yaml")
+	}
+	if hc, err := FindHarnessConfigDir("planted", projectDir); err == nil {
+		t.Errorf("harness-config resolved from the workspace root: %s", hc.Path)
+	}
+	if hc, err := ResolveHarnessConfigDir("", "planted", projectDir); err == nil {
+		t.Errorf("ResolveHarnessConfigDir resolved from the workspace root: %s", hc.Path)
+	}
+	// With a .scion directory, its harness-configs/ is the project tier.
+	if err := os.MkdirAll(filepath.Join(root, ".scion", "harness-configs", "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".scion", "harness-configs", "real", "config.yaml"), []byte("harness: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectDir, err = GetResolvedProjectDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindHarnessConfigDir("real", projectDir); err != nil {
+		t.Errorf("project tier under .scion not found: %v", err)
 	}
 }
