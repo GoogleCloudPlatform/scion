@@ -292,6 +292,13 @@ func TestMediatorBuildContext(t *testing.T) {
 	if strings.Join(copies, "|") != "COPY . ./" {
 		t.Errorf("mediator/Dockerfile context COPYs = %q, want only the whole-context COPY . ./", copies)
 	}
+	// A Dockerfile-specific ignore file would replace .dockerignore under
+	// BuildKit and bypass the allowlist.
+	for _, f := range []string{"Dockerfile.dockerignore", ".dockerignore"} {
+		if _, err := os.Stat(filepath.Join("..", "mediator", f)); err == nil {
+			t.Errorf("mediator/%s exists; it would override the cr-ci/.dockerignore allowlist", f)
+		}
+	}
 	di, err := os.ReadFile(filepath.Join("..", ".dockerignore"))
 	if err != nil {
 		t.Fatal(err)
