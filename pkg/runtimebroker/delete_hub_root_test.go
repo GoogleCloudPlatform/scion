@@ -145,7 +145,9 @@ func TestCleanupAbortedLaunch_RemovesStateDirOfHubProjectID(t *testing.T) {
 		key:  launchKey{ProjectID: hubRootHubID, Slug: agentName},
 	}
 
-	srv.cleanupAbortedLaunch(mgr, rec, lc)
+	if err := srv.cleanupAbortedLaunch(mgr, rec, lc); err != nil {
+		t.Fatalf("cleanupAbortedLaunch: %v", err)
+	}
 
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Errorf("aborted launch cleanup left the state dir of the Hub project ID (stat err %v)", err)
