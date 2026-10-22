@@ -877,7 +877,8 @@ func TestAgentPendingConfig_PatchRemovesUnappliableKeysAndAudits(t *testing.T) {
 
 // TestAgentPendingConfig_AsyncStartAppliesHeldEdits: an asynchronous start
 // (hub.async_agent_start, accepted as a launch) goes through the same fold:
-// the held edit is applied and persisted before the dispatch, and audited.
+// the agent the dispatcher receives already carries the held edit, which is
+// persisted and audited.
 func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
 	f, d := newAsyncStartFixture(t)
 	var active []experiments.Experiment
@@ -898,11 +899,23 @@ func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
 	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}}
 	require.NoError(t, f.s.UpdateAgent(context.Background(), cur))
 
+	// The agent the dispatcher received: the model it was dispatched with.
+	var dispatchedModel string
+	dispatched := false
+	d.onAccept = func(_ context.Context, ag *store.Agent) {
+		dispatched = true
+		if ag.AppliedConfig != nil {
+			dispatchedModel = ag.AppliedConfig.Model
+		}
+	}
+
 	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
 	require.Equal(t, http.StatusOK, code, body)
 	opts, _, _ := d.calls()
 	require.Len(t, opts, 1)
 	assert.True(t, opts[0].Async, "the start was dispatched asynchronously")
+	require.True(t, dispatched, "the asynchronous dispatch was accepted")
+	assert.Equal(t, "async-held-model", dispatchedModel, "the dispatch carried the held edit: the fold ran before it")
 
 	after := pendingReloadAgent(t, f.s, a.ID)
 	require.NotNil(t, after.AppliedConfig)
