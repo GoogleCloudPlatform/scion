@@ -428,6 +428,9 @@ export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'updated',
   'lastActivityEvent',
   '_capabilities',
+  // Agent badge fields (ptone/scion#5502), omitted when empty.
+  'harnessVendor',
+  'modelSize',
 ]);
 
 /** The keys of a compact row from the hub's agent list, which adds messageability. */

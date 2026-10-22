@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // The hub registry: the named hub entries of context.yaml, managed with
@@ -57,9 +59,21 @@ func ValidateHubName(name string) error {
 }
 
 // ValidateHubURL returns an error when endpoint is not an http or https URL
-// with a host. User info, a query and a fragment are refused too: the hub
-// list holds no credentials, and a hub URL needs neither.
+// with a host. User info, any '@', a query and a fragment are refused too:
+// the hub list holds no credentials, and a hub URL needs none of them.
 func ValidateHubURL(endpoint string) error {
+	// A hub URL never needs an '@'; with one, a password containing '/'
+	// can parse as a port and path, so the URL is not repeated.
+	//
+	// This check must stay BEFORE the parse-and-scheme check below. That
+	// check formats the endpoint with RedactURL and is the one place that
+	// gets non-http(s) URLs (a schemeless "user:pass@host" parses as an
+	// opaque URL that RedactURL leaves unchanged). It is safe only because
+	// every endpoint with an '@' has already returned here; swapping the
+	// two blocks would print such credentials.
+	if strings.Contains(endpoint, "@") {
+		return fmt.Errorf("invalid hub URL %q: a hub URL must not contain '@'", urlredact.MaskWhole(strings.TrimSpace(endpoint), urlredact.Mask))
+	}
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(endpoint, "#") {
@@ -67,12 +81,6 @@ func ValidateHubURL(endpoint string) error {
 	}
 	return nil
 }
-
-// userInfoRe matches the user info of a URL that url.Parse rejects, up to
-// the last '@' before the host.
-// pkg/apiclient keeps a copy of these rules (redactURLCredentials), since it
-// imports no scion package; change both together.
-var userInfoRe = regexp.MustCompile("^(" + urlSchemePrefix + ")?[^/?#]*@")
 
 // textURLRe matches the scheme and authority of each http(s) URL in a
 // text. The authority ends at the path, query or fragment, at white space,
@@ -94,27 +102,22 @@ var textFullURLRe = regexp.MustCompile(textURLRe.String() + "(?:[/?#](?:[^\\s\"<
 // given without a password, which may itself be a token; in its query and
 // fragment, the value of every parameter with a credential-like name (see
 // isURLCredentialParam). A URL that does not parse has its whole user info
-// replaced. A URL with nothing to mask is returned as given.
+// replaced. A URL whose user info cannot be delimited (see
+// urlredact.Undelimited) shows only its scheme and a mask. A URL with
+// nothing to mask is returned as given.
 func RedactURL(raw string) string {
-	s := raw
-	if u, err := url.Parse(raw); err == nil {
-		if u.User != nil {
-			if _, hasPassword := u.User.Password(); hasPassword {
-				s = u.Redacted()
-			} else {
-				u.User = url.User("xxxxx")
-				s = u.String()
-			}
-		}
-	} else {
-		s = userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
+	if urlredact.Undelimited(raw) {
+		return urlredact.MaskWhole(raw, urlredact.Mask)
 	}
-	return redactURLParams(s)
+	return redactURLParams(urlredact.RedactUserInfo(raw))
 }
 
 // RedactURLsIn returns text (for example an error message) with every
 // http(s) URL in it redacted as RedactURL does: its user info, and the
-// credential parameters of its query and fragment.
+// credential parameters of its query and fragment. A URL whose user info
+// cannot be delimited (see urlredact.Undelimited) shows only its scheme and
+// a mask. A URL inside another one's path, query or fragment has its user
+// info masked whole (urlredact.RedactUserInfoIn).
 func RedactURLsIn(text string) string {
 	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
 		authority := textURLRe.FindString(m)
@@ -122,10 +125,18 @@ func RedactURLsIn(text string) string {
 		// Punctuation that ends a sentence is not part of the URL.
 		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
 		tail := rest[len(trimmed):]
+		// The whole URL, not its authority cut at the first '/', '?' or
+		// '#': user info containing one of those ends the authority early.
+		if full := authority + trimmed; urlredact.Undelimited(full) {
+			return urlredact.MaskWhole(full, urlredact.Mask) + tail
+		}
 		if strings.Contains(authority, "@") {
 			authority = RedactURL(authority)
 		}
-		return authority + redactURLParams(trimmed) + tail
+		// A URL inside this one (a redirect parameter, or a second URL
+		// with no space before it) has its user info masked by the shared
+		// rule as well.
+		return authority + urlredact.RedactUserInfoIn(redactURLParams(trimmed), urlredact.Mask) + tail
 	})
 }
 

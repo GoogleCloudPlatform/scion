@@ -363,6 +363,7 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 			URL:  signedURL.URL,
 			Size: file.Size,
 			Hash: file.Hash,
+			Mode: transfer.NormalizedModeString(file.Mode),
 		})
 	}
 

@@ -1079,6 +1079,8 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       lastActivityEvent: '2026-01-01T00:00:02Z',
       _capabilities: { actions: ['read'] },
       _messageability: { canMessage: true },
+      harnessVendor: 'anthropic',
+      modelSize: 'large',
       appliedConfig: { creatorName: 'Ada' },
     } as unknown as Partial<Agent>);
 

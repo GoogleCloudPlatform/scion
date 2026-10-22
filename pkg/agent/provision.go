@@ -47,8 +47,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrAgentProjectUnresolved is returned by DeleteAgentFiles when the
-// project path resolves to no existing project directory.
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles and
+// DeleteAgentFilesForHubProject when the project path resolves to no
+// existing project directory.
 var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
 
 // DeleteAgentFiles removes agentName's files in the project projectPath
@@ -56,7 +57,27 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // removeBranch, branch, and its external per-agent state). It never touches
 // another project's directories; the global project's agents are deleted
 // only when the global project is the target.
+//
+// It resolves the external per-agent state from the project-id marker only.
+// A caller that knows the Hub project ID the agent was started with uses
+// DeleteAgentFilesForHubProject, so delete resolves the agent's state
+// directory with the same Hub project ID lookup uses.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, "", removeBranch)
+}
+
+// DeleteAgentFilesForHubProject is DeleteAgentFiles for an agent started
+// with the Hub project ID hubProjectID. Besides everything DeleteAgentFiles
+// removes, it removes the agent's state directory as GetAgent and
+// ProvisionAgent resolve it from that ID (config.AgentDirForProject with
+// the shared-workspace root), when that is a different directory from the
+// ones DeleteAgentFiles already removes. An empty hubProjectID is exactly
+// DeleteAgentFiles.
+func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
+	return deleteAgentFiles(agentName, projectPath, hubProjectID, removeBranch)
+}
+
+func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
 	// Every path built below joins agentName onto some directory -- the
 	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
@@ -85,6 +106,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	branchDeleted := false
 	var repoRoot string
 	var externalAgentDir string
+	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -139,12 +161,18 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if layout.externalAgentsRoot != "" {
 			externalAgentDir = filepath.Join(layout.externalAgentsRoot, agentName)
 		}
+
+		hubAgentDir = hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir)
 	}
 
 	// Every removal below passes the guard (projectAgentFilesGuard): only
 	// the agent's own directories may be removed, never a project
 	// workspace. Each removal acts on the path the guard returns.
-	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName)
+	// hubAgentDir (when set) is one of the agent's own directories, the
+	// state dir ProvisionAgent's guard also trusts; it is verified like an
+	// extra root (anchored at its parent, not trusted when it resolves
+	// elsewhere). An empty hubAgentDir is ignored.
+	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName, hubAgentDir)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -448,13 +476,21 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// owned by a mapped subuid on the host, making them inaccessible to the
 	// normal user. If standard removal fails, try `podman unshare rm -rf`
 	// which enters the user namespace where the mapped UIDs are accessible.
-	if externalAgentDir != "" {
-		if _, err := os.Stat(externalAgentDir); err == nil {
-			extRemove, err := guard.check(externalAgentDir)
+	//
+	// The state dir resolved from the Hub project ID (hubAgentDir) is
+	// removed the same way: it holds a shared-workspace agent's state and
+	// no worktree. The guard trusts it as one of the agent's own
+	// directories (it is passed to the guard above).
+	for _, extDir := range []string{externalAgentDir, hubAgentDir} {
+		if extDir == "" {
+			continue
+		}
+		if _, err := os.Stat(extDir); err == nil {
+			extRemove, err := guard.check(extDir)
 			if err != nil {
 				return branchDeleted, fmt.Errorf("delete: %w", err)
 			}
-			util.Debugf("delete: removing external agent state dir: %s", externalAgentDir)
+			util.Debugf("delete: removing external agent state dir: %s", extDir)
 			if err := util.RemoveAllSafe(extRemove); err != nil {
 				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
 				unshareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -467,6 +503,30 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	}
 
 	return branchDeleted, nil
+}
+
+// hubStateDirToRemove returns the agent's state directory as lookup
+// resolves it from hubProjectID (agentStateDir: config.AgentDirForProject
+// with the shared-workspace root), for deleteAgentFiles to remove besides
+// the directories it removes anyway. The external dir from the project-id
+// marker (externalAgentDir) and <projectDir>/agents/<agentName> are
+// removed anyway, so when the directory is one of them it returns "", as
+// it does for an empty hubProjectID or a directory that cannot be resolved.
+func hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir string) string {
+	if hubProjectID == "" {
+		return ""
+	}
+	dir, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
+	if err != nil {
+		return ""
+	}
+	if externalAgentDir != "" && sameDir(dir, externalAgentDir) {
+		return ""
+	}
+	if sameDir(dir, filepath.Join(projectDir, "agents", agentName)) {
+		return ""
+	}
+	return dir
 }
 
 // persistedEmptyPerAgent reports whether the agent's persisted
@@ -2164,142 +2224,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Step 3b: Resolve and install referenced skills from skill bank
-	var resolvedSkillsRecord *SkillResolutionRecord
-	// Optional scion-platform:// entries are display-only: Step 3a2 installs
-	// those skills, so they are left out of resolution rather than logged as
-	// skipped on every start (ptone/scion#5431).
-	skillRefs := resolvableSkillRefs(finalScionCfg.Skills)
-	if len(skillRefs) > 0 {
-		resolver := SkillResolverFromContext(ctx)
-		if resolver == nil {
-			// S1: Fail closed for required skills
-			requiredURIs := collectRequiredSkillURIs(skillRefs)
-			if len(requiredURIs) > 0 {
-				return "", "", nil, fmt.Errorf(
-					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
-						"  skills: %s\n"+
-						"  hint: connect to a Hub or mark skills as optional",
-					len(requiredURIs), strings.Join(requiredURIs, ", "))
-			}
-			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skillRefs))
-		} else {
-			projectID := ResolveProjectIDFromContext(ctx)
-			if projectID == "" {
-				projectID, _ = config.ReadProjectID(projectDir)
-			}
-			resolveOpts := ResolveOpts{
-				ProjectID: projectID,
-				UserID:    ResolveUserIDFromContext(ctx),
-			}
-
-			skillFetchStart := time.Now()
-			result, err := resolver.Resolve(ctx, skillRefs, resolveOpts)
-			slog.Info("provision: skill fetch complete", "agent", agentName,
-				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
-				"requested", len(skillRefs), "ok", err == nil)
-			if err != nil {
-				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
-			}
-
-			// S1 completeness: build requested URI set
-			requestedURIs := make(map[string]*api.SkillReference, len(skillRefs))
-			for i := range skillRefs {
-				requestedURIs[skillRefs[i].URI] = &skillRefs[i]
-			}
-
-			resolvedURIs := make(map[string]bool)
-			errorURIs := make(map[string]bool)
-
-			for _, rs := range result.Resolved {
-				if _, ok := requestedURIs[rs.URI]; !ok {
-					return "", "", nil, fmt.Errorf(
-						"resolver returned unrequested skill %q — possible resolver bug or injection", rs.URI)
-				}
-				if resolvedURIs[rs.URI] {
-					return "", "", nil, fmt.Errorf(
-						"resolver returned duplicate resolved skill %q", rs.URI)
-				}
-				resolvedURIs[rs.URI] = true
-			}
-
-			for _, re := range result.Errors {
-				errorURIs[re.URI] = true
-				ref := requestedURIs[re.URI]
-				if ref == nil || !ref.Optional {
-					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
-				}
-				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
-					"skill_uri", LoggedSkillRef(re.URI), "code", re.Code,
-					"reason", ResolverReasonForLog(re.URI, re.Message))
-			}
-
-			// S1: verify every requested URI has an outcome
-			for uri, ref := range requestedURIs {
-				if !resolvedURIs[uri] && !errorURIs[uri] {
-					if ref.Optional {
-						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
-							"skill_uri", LoggedSkillRef(uri), "reason", "missing from resolver response")
-					} else {
-						return "", "", nil, fmt.Errorf(
-							"required skill %q missing from resolver response — S1 fail-closed", LoggedSkillRef(uri))
-					}
-				}
-			}
-
-			// Capture local skills before installing registry skills (M2: avoid duplication)
-			var localSkills []SkillResolutionEntry
-			if skillsDir != "" {
-				localSkills = enumerateLocalSkills(agentHome, skillsDir)
-			}
-
-			if len(result.Resolved) > 0 {
-				if skillsDir == "" {
-					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
-				}
-				skillsDest := filepath.Join(agentHome, skillsDir)
-				// The requested ref is authoritative for Optional: a resolver
-				// that does not copy it must not make an optional skill's
-				// install failure fail the create (#5020).
-				for i := range result.Resolved {
-					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
-				}
-				// Skipped optional skills are logged as warnings by
-				// installResolvedSkills.
-				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
-				if err != nil {
-					// A required skill's install failure is already a
-					// *SkillResolutionError naming the skill; return it as
-					// is so the broker reports it as a skill resolution
-					// failure rather than a generic runtime error.
-					var skillErr *SkillResolutionError
-					if errors.As(err, &skillErr) {
-						return "", "", nil, skillErr
-					}
-					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
-				}
-				record.Resolver = resolverName(resolver)
-				record.Skills = append(localSkills, record.Skills...)
-				resolvedSkillsRecord = record
-			}
-		}
-	}
-
-	// Write resolution record (S4)
-	if resolvedSkillsRecord != nil {
-		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
-		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
-			util.Debugf("provision: failed to write resolution record: %v", err)
-		}
-
-		// Stage resolved-skills.json for container-script harnesses
-		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
-			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
-			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
-				_ = os.WriteFile(inputPath, recordData, 0644)
-			}
-		}
+	// Step 3b: Resolve and install referenced skills from skill bank, and
+	// write the resolution record (S4).
+	resolvedSkillsRecord, err := resolveAndInstallSkills(ctx, agentName, projectDir, h, agentHome, finalScionCfg.Skills)
+	if err != nil {
+		return "", "", nil, err
 	}
 
 	// Step 3c: Stage agent plugins (hub.agent_plugins). Bundles are staged
@@ -2342,120 +2271,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Step 4: Inject agent instructions
-
-	// Load mandatory preamble — prepended to all agent instructions.
-	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	// Steps 4 and 5: inject the agent instructions and the system prompt.
+	systemPromptRendered, err := injectPromptFiles(h, agentHome, chain, finalScionCfg, inlineCfg)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
-	}
-
-	// Determine whether inline config provided content directly (already resolved).
-	// If so, we skip template-based file resolution for that field.
-	inlineProvidedAgentInstructions := inlineCfg != nil && inlineCfg.AgentInstructions != ""
-	inlineProvidedSystemPrompt := inlineCfg != nil && inlineCfg.SystemPrompt != ""
-
-	if len(chain) > 0 {
-		lastTpl := chain[len(chain)-1]
-
-		// Convention-based auto-detection: if agent_instructions is not set in
-		// the template config but an agents.md file exists in the template
-		// directory, use it automatically. This prevents a common oversight
-		// where a template author creates the file but forgets to reference it
-		// in scion-agent.yaml.
-		if finalScionCfg.AgentInstructions == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
-			if _, err := os.Stat(conventionPath); err == nil {
-				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
-				finalScionCfg.AgentInstructions = "agents.md"
-			}
-		}
-
-		if finalScionCfg.AgentInstructions != "" {
-			var content []byte
-			if inlineProvidedAgentInstructions {
-				// Inline config already has resolved content — use it directly
-				content = []byte(finalScionCfg.AgentInstructions)
-				util.Debugf("ProvisionAgent: using inline agent_instructions (%d bytes)", len(content))
-			} else {
-				util.Debugf("ProvisionAgent: resolving agent_instructions=%q across template chain (%d templates)", finalScionCfg.AgentInstructions, len(chain))
-				var err error
-				content, err = config.ResolveContentInChain(chain, finalScionCfg.AgentInstructions)
-				if err != nil {
-					return "", "", nil, fmt.Errorf("failed to resolve agent_instructions: %w", err)
-				}
-			}
-			composed := composeInstructions(mandatoryPreamble, content)
-			if composed != nil {
-				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
-				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-					return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-				}
-			} else {
-				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
-			}
-		} else if len(mandatoryPreamble) > 0 {
-			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
-			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		} else {
-			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
-		}
-
-		// Step 5: Inject system prompt
-		// Convention-based auto-detection for system prompt as well.
-		if finalScionCfg.SystemPrompt == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
-			if _, err := os.Stat(conventionPath); err == nil {
-				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
-				finalScionCfg.SystemPrompt = "system-prompt.md"
-			}
-		}
-
-		if finalScionCfg.SystemPrompt != "" {
-			var content []byte
-			if inlineProvidedSystemPrompt {
-				// Inline config already has resolved content — use it directly
-				content = []byte(finalScionCfg.SystemPrompt)
-				util.Debugf("ProvisionAgent: using inline system_prompt (%d bytes)", len(content))
-			} else {
-				util.Debugf("ProvisionAgent: resolving system_prompt=%q across template chain (%d templates)", finalScionCfg.SystemPrompt, len(chain))
-				var err error
-				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
-				if err != nil {
-					return "", "", nil, fmt.Errorf("failed to resolve system_prompt: %w", err)
-				}
-			}
-			if content != nil {
-				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
-				if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-					return "", "", nil, fmt.Errorf("failed to inject system prompt: %w", err)
-				}
-			}
-		}
-	} else if inlineCfg != nil {
-		// No template chain, but inline config may have content fields
-		if finalScionCfg.AgentInstructions != "" {
-			content := []byte(finalScionCfg.AgentInstructions)
-			composed := composeInstructions(mandatoryPreamble, content)
-			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
-			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		} else if len(mandatoryPreamble) > 0 {
-			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
-			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		}
-		if finalScionCfg.SystemPrompt != "" {
-			content := []byte(finalScionCfg.SystemPrompt)
-			util.Debugf("ProvisionAgent: injecting inline system_prompt (%d bytes, no template)", len(content))
-			if err := h.InjectSystemPrompt(agentHome, content); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject system prompt: %w", err)
-			}
-		}
+		return "", "", nil, err
 	}
 
 	// 2e. Merge settings env, volumes and auth if available. The volumes,
@@ -2707,16 +2526,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Write scion-services.yaml for sciontool to consume at container startup
 	if len(finalScionCfg.Services) > 0 {
-		scionDir := filepath.Join(agentHome, ".scion")
-		if err := os.MkdirAll(scionDir, 0755); err != nil {
-			return "", "", nil, fmt.Errorf("failed to create agent .scion directory: %w", err)
-		}
-		servicesData, err := yaml.Marshal(finalScionCfg.Services)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to marshal services config: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(scionDir, "scion-services.yaml"), servicesData, 0644); err != nil {
-			return "", "", nil, fmt.Errorf("failed to write scion-services.yaml: %w", err)
+		if err := writeServicesFile(agentHome, finalScionCfg.Services); err != nil {
+			return "", "", nil, err
 		}
 	}
 
@@ -2759,6 +2570,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// re-render does not stage secrets, which are recorded on start.
 	if err := ensureSecretsRecord(agentDir); err != nil {
 		return "", "", nil, fmt.Errorf("record harness secrets: %w", err)
+	}
+	// The files rendered above are the new baseline for the start-time
+	// re-render of provision-rendered keys (rerender.go): drop the
+	// fingerprints of the previous generation's renders, and record where
+	// the system prompt was rendered for a harness that reads it from the
+	// agent home.
+	var systemPromptPaths []string
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && systemPromptRendered {
+		if systemPromptPaths, err = systemPromptTargets(h); err != nil {
+			return "", "", nil, fmt.Errorf("reset rerender record: %w", err)
+		}
+	}
+	if err := resetRerenderRecord(agentDir, systemPromptPaths); err != nil {
+		return "", "", nil, fmt.Errorf("reset rerender record: %w", err)
 	}
 
 	// 3. Harness provisioning
@@ -3030,7 +2855,7 @@ const (
 // SavedProfileOnDisk returns the saved profile of the agent agentName in
 // projectPath on this host, as the start path would see it, for the hub's
 // built-in profile reference count (ptone/scion#5113). It reads
-// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// agent-info.json via readSavedAgentInfo (GetResolvedProjectDir,
 // then GetAgentHomePath). When that file exists but cannot be used, the
 // start path's runtime selection would use the provisioned profile from the
 // image provenance record (ProvisionedProfile), so that is returned instead.
@@ -3059,7 +2884,7 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 }
 
 // readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
-// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// the one reader behind GetSavedPhase and SavedProfileOnDisk, so they always
 // look at the same file. info is non-nil only when state is
 // SavedProfileFound.
 func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
@@ -3067,11 +2892,13 @@ func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, S
 	if err != nil {
 		return nil, SavedProfileMissing
 	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err != nil {
+	// Read confined to the agent home (readHomeAgentInfo): a link, a
+	// non-regular file or a second hard link at agent-info.json is
+	// unreadable, never read through.
+	data, err := readHomeAgentInfo(config.GetAgentHomePath(projectDir, agentName))
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, SavedProfileMissing
 	}
-	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
 		return nil, SavedProfileUnreadable
 	}
@@ -3115,28 +2942,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
 
-func GetSavedProfile(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Profile
-	}
-	return ""
-}
-
-// GetSavedRuntime returns the runtime name agent-info.json records the
-// agent last ran on, or "" if none is recorded.
-func GetSavedRuntime(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Runtime
-	}
-	return ""
-}
-
-func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.HarnessConfig
-	}
-	return ""
-}
+// There is deliberately no getter for the profile, runtime or harness
+// config recorded in agent-info.json: the agent home is writable by the
+// agent, so those copies are display-only. The broker reads them from its
+// own records instead (ProvisionedProfile, PersistedHarnessConfig).
 
 func GetSavedPhase(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -3157,7 +2966,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	// This might happen if provisioning failed or hasn't finished.
 	// Checked before the lock too, so no lock file is left in a home
 	// that has no agent-info.json.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	if _, err := os.Lstat(agentInfoPath); os.IsNotExist(err) {
 		return nil
 	}
 
@@ -3189,23 +2998,14 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
-	// process cannot lose this update or have its own lost (#4681).
-	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
-		mode := os.FileMode(0o644)
-		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-			return nil
-		} else if err == nil {
-			mode = fi.Mode().Perm()
-		}
-
-		data, err := os.ReadFile(agentInfoPath)
-		if err != nil {
-			return err
-		}
-
+	// process cannot lose this update or have its own lost (#4681). They
+	// are confined to the agent home (updateHomeAgentInfo): a link at
+	// agent-info.json or at a directory component is refused, never read
+	// through or written through.
+	return updateHomeAgentInfo(agentHome, true, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		update(&info)
@@ -3216,12 +3016,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 			info.RunID = ""
 		}
 
-		newData, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(agentInfoPath, newData, mode)
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }
 
@@ -4198,7 +3993,7 @@ func dirHasEntries(path string) (bool, error) {
 // GetAgent reads it from) if it parses and names a template or
 // harness-config, or nil otherwise.
 func readStoredAgentRecord(agentHome string) *api.AgentInfo {
-	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	data, err := readHomeAgentInfo(agentHome)
 	if err != nil {
 		return nil
 	}
@@ -4387,10 +4182,36 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 	}
 
-	// Try to load agent-info.json first to get the template
-	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	// Load agent-info.json (read confined to the agent home; a link there is
+	// refused, never read through). Its template is used only as described
+	// below.
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
+	if infoData, err := readHomeAgentInfo(agentHome); err == nil {
+		if err := json.Unmarshal(infoData, &agentInfo); err != nil {
+			agentInfo = nil
+		}
+	}
+
+	// The template chain comes from the template recorded in the agent's
+	// broker-side image provenance (provisioning writes the same template
+	// there and in agent-info.json), never from agent-info.json in the agent
+	// home, which also replaces Info's template fields below. An agent
+	// provisioned before that record existed keeps agent-info.json's
+	// template. With a record that exists but cannot be used, no recorded
+	// template applies (the settings default chain); Start then fails on
+	// the same record.
+	provenance, provErr := readImageProvenance(agentDir)
+	if provErr != nil {
+		logImageProvenanceError(agentName, provErr)
+	}
+	var templateRecord *api.AgentInfo
+	switch {
+	case provenance != nil:
+		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
+	case provErr == nil:
+		templateRecord = agentInfo
+	}
 
 	// A template recorded as loaded from a content-addressed cache (a
 	// TemplateHash, or a content hash stored as the name by older versions)
@@ -4398,12 +4219,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// name: the agent loads from its persisted config alone, as it did when
 	// the stored name was the cache directory's hash.
 	hydratedTemplate := false
-	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
-		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
-			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
-			if agentInfo.Template != "" {
-				effectiveTemplate = agentInfo.Template
-			}
+	if templateRecord != nil {
+		hydratedTemplate = normalizeHydratedTemplateInfo(templateRecord, api.TemplateNameFromContext(ctx))
+		if templateRecord.Template != "" {
+			effectiveTemplate = templateRecord.Template
+		}
+	}
+	if agentInfo != nil && templateRecord != agentInfo {
+		if templateRecord != nil {
+			agentInfo.Template, agentInfo.TemplateHash = templateRecord.Template, templateRecord.TemplateHash
+		} else {
+			agentInfo.Template, agentInfo.TemplateHash = "", ""
 		}
 	}
 
@@ -4417,7 +4243,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	var chain []*config.Template
 	if hydratedTemplate {
-		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, agentInfo.TemplateHash))
+		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
 		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
 	}
@@ -4641,4 +4467,300 @@ func worktreeInPlace(path string) bool {
 	}
 	_, err := os.Lstat(filepath.Join(path, ".git"))
 	return err == nil
+}
+
+// injectPromptFiles renders the agent instructions (with the mandatory
+// preamble) and the system prompt into agentHome through h: Steps 4 and 5
+// of ProvisionAgent, shared with the start-time re-render
+// (rerenderProvisionedFiles). cfg is the agent's resolved config; a value
+// inlineCfg sets is content, any other value is a file resolved in chain.
+// When cfg names no file, the template's agents.md and system-prompt.md are
+// picked up by convention and recorded in cfg. Instructions are rendered
+// before the system prompt, which a harness may prepend to them. It reports
+// whether a system prompt was rendered.
+func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template, finalScionCfg, inlineCfg *api.ScionConfig) (systemPromptRendered bool, err error) {
+	// Load mandatory preamble — prepended to all agent instructions.
+	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	if err != nil {
+		return false, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
+	}
+
+	// Determine whether inline config provided content directly (already resolved).
+	// If so, we skip template-based file resolution for that field.
+	inlineProvidedAgentInstructions := inlineCfg != nil && inlineCfg.AgentInstructions != ""
+	inlineProvidedSystemPrompt := inlineCfg != nil && inlineCfg.SystemPrompt != ""
+
+	if len(chain) > 0 {
+		lastTpl := chain[len(chain)-1]
+
+		// Convention-based auto-detection: if agent_instructions is not set in
+		// the template config but an agents.md file exists in the template
+		// directory, use it automatically. This prevents a common oversight
+		// where a template author creates the file but forgets to reference it
+		// in scion-agent.yaml.
+		if finalScionCfg.AgentInstructions == "" {
+			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
+			if _, err := os.Stat(conventionPath); err == nil {
+				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
+				finalScionCfg.AgentInstructions = "agents.md"
+			}
+		}
+
+		if finalScionCfg.AgentInstructions != "" {
+			var content []byte
+			if inlineProvidedAgentInstructions {
+				// Inline config already has resolved content — use it directly
+				content = []byte(finalScionCfg.AgentInstructions)
+				util.Debugf("ProvisionAgent: using inline agent_instructions (%d bytes)", len(content))
+			} else {
+				util.Debugf("ProvisionAgent: resolving agent_instructions=%q across template chain (%d templates)", finalScionCfg.AgentInstructions, len(chain))
+				var err error
+				content, err = config.ResolveContentInChain(chain, finalScionCfg.AgentInstructions)
+				if err != nil {
+					return false, fmt.Errorf("failed to resolve agent_instructions: %w", err)
+				}
+			}
+			composed := composeInstructions(mandatoryPreamble, content)
+			if composed != nil {
+				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
+				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
+					return false, fmt.Errorf("failed to inject agent instructions: %w", err)
+				}
+			} else {
+				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else {
+			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
+		}
+
+		// Step 5: Inject system prompt
+		// Convention-based auto-detection for system prompt as well.
+		if finalScionCfg.SystemPrompt == "" {
+			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
+			if _, err := os.Stat(conventionPath); err == nil {
+				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
+				finalScionCfg.SystemPrompt = "system-prompt.md"
+			}
+		}
+
+		if finalScionCfg.SystemPrompt != "" {
+			var content []byte
+			if inlineProvidedSystemPrompt {
+				// Inline config already has resolved content — use it directly
+				content = []byte(finalScionCfg.SystemPrompt)
+				util.Debugf("ProvisionAgent: using inline system_prompt (%d bytes)", len(content))
+			} else {
+				util.Debugf("ProvisionAgent: resolving system_prompt=%q across template chain (%d templates)", finalScionCfg.SystemPrompt, len(chain))
+				var err error
+				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
+				if err != nil {
+					return false, fmt.Errorf("failed to resolve system_prompt: %w", err)
+				}
+			}
+			if content != nil {
+				util.Debugf("ProvisionAgent: injecting system prompt (%d bytes) into %s", len(content), agentHome)
+				if err := h.InjectSystemPrompt(agentHome, content); err != nil {
+					return false, fmt.Errorf("failed to inject system prompt: %w", err)
+				}
+				systemPromptRendered = true
+			}
+		}
+	} else if inlineCfg != nil {
+		// No template chain, but inline config may have content fields
+		if finalScionCfg.AgentInstructions != "" {
+			content := []byte(finalScionCfg.AgentInstructions)
+			composed := composeInstructions(mandatoryPreamble, content)
+			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
+			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
+				return false, fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		}
+		if finalScionCfg.SystemPrompt != "" {
+			content := []byte(finalScionCfg.SystemPrompt)
+			util.Debugf("ProvisionAgent: injecting inline system_prompt (%d bytes, no template)", len(content))
+			if err := h.InjectSystemPrompt(agentHome, content); err != nil {
+				return false, fmt.Errorf("failed to inject system prompt: %w", err)
+			}
+			systemPromptRendered = true
+		}
+	}
+	return systemPromptRendered, nil
+}
+
+// resolveAndInstallSkills resolves the skill references skills with the
+// context's skill resolver, installs them into agentHome's skills directory
+// for h, and writes the resolution record (S4), staging it for a
+// container-script harness: Step 3b of ProvisionAgent, shared with the
+// start-time re-render (rerenderProvisionedFiles). Required skills fail
+// closed. It returns the record, nil when nothing was installed.
+func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
+	skillsDir := h.SkillsDir()
+	// Optional scion-platform:// entries are display-only: Step 3a2 installs
+	// those skills, so they are left out of resolution rather than logged as
+	// skipped on every start (ptone/scion#5431).
+	skills = resolvableSkillRefs(skills)
+	var resolvedSkillsRecord *SkillResolutionRecord
+	if len(skills) > 0 {
+		resolver := SkillResolverFromContext(ctx)
+		if resolver == nil {
+			// S1: Fail closed for required skills
+			requiredURIs := collectRequiredSkillURIs(skills)
+			if len(requiredURIs) > 0 {
+				return nil, fmt.Errorf(
+					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
+						"  skills: %s\n"+
+						"  hint: connect to a Hub or mark skills as optional",
+					len(requiredURIs), strings.Join(requiredURIs, ", "))
+			}
+			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skills))
+		} else {
+			projectID := ResolveProjectIDFromContext(ctx)
+			if projectID == "" {
+				projectID, _ = config.ReadProjectID(projectDir)
+			}
+			resolveOpts := ResolveOpts{
+				ProjectID: projectID,
+				UserID:    ResolveUserIDFromContext(ctx),
+			}
+
+			skillFetchStart := time.Now()
+			result, err := resolver.Resolve(ctx, skills, resolveOpts)
+			slog.Info("provision: skill fetch complete", "agent", agentName,
+				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
+				"requested", len(skills), "ok", err == nil)
+			if err != nil {
+				return nil, fmt.Errorf("skill resolution failed: %w", err)
+			}
+
+			// S1 completeness: build requested URI set
+			requestedURIs := make(map[string]*api.SkillReference, len(skills))
+			for i := range skills {
+				requestedURIs[skills[i].URI] = &skills[i]
+			}
+
+			resolvedURIs := make(map[string]bool)
+			errorURIs := make(map[string]bool)
+
+			for _, rs := range result.Resolved {
+				if _, ok := requestedURIs[rs.URI]; !ok {
+					return nil, fmt.Errorf(
+						"resolver returned unrequested skill %q — possible resolver bug or injection", rs.URI)
+				}
+				if resolvedURIs[rs.URI] {
+					return nil, fmt.Errorf(
+						"resolver returned duplicate resolved skill %q", rs.URI)
+				}
+				resolvedURIs[rs.URI] = true
+			}
+
+			for _, re := range result.Errors {
+				errorURIs[re.URI] = true
+				ref := requestedURIs[re.URI]
+				if ref == nil || !ref.Optional {
+					return nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
+				}
+				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
+					"skill_uri", LoggedSkillRef(re.URI), "code", re.Code,
+					"reason", ResolverReasonForLog(re.URI, re.Message))
+			}
+
+			// S1: verify every requested URI has an outcome
+			for uri, ref := range requestedURIs {
+				if !resolvedURIs[uri] && !errorURIs[uri] {
+					if ref.Optional {
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", LoggedSkillRef(uri), "reason", "missing from resolver response")
+					} else {
+						return nil, fmt.Errorf(
+							"required skill %q missing from resolver response — S1 fail-closed", LoggedSkillRef(uri))
+					}
+				}
+			}
+
+			// Capture local skills before installing registry skills (M2: avoid duplication)
+			var localSkills []SkillResolutionEntry
+			if skillsDir != "" {
+				localSkills = enumerateLocalSkills(agentHome, skillsDir)
+			}
+
+			if len(result.Resolved) > 0 {
+				if skillsDir == "" {
+					return nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
+				}
+				skillsDest := filepath.Join(agentHome, skillsDir)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return nil, skillErr
+					}
+					return nil, fmt.Errorf("skill installation failed: %w", err)
+				}
+				record.Resolver = resolverName(resolver)
+				record.Skills = append(localSkills, record.Skills...)
+				resolvedSkillsRecord = record
+			}
+		}
+	}
+
+	// Write resolution record (S4)
+	if resolvedSkillsRecord != nil {
+		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
+		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
+			util.Debugf("provision: failed to write resolution record: %v", err)
+		}
+
+		// Stage resolved-skills.json for container-script harnesses
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
+			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
+			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
+				_ = os.WriteFile(inputPath, recordData, 0644)
+			}
+		}
+	}
+	return resolvedSkillsRecord, nil
+}
+
+// servicesFileName is the file, in the agent home's .scion directory, that
+// sciontool reads the agent's services from at container startup.
+const servicesFileName = "scion-services.yaml"
+
+// writeServicesFile writes services to the agent home's scion-services.yaml
+// for sciontool to consume at container startup. Shared by ProvisionAgent
+// and the start-time re-render (rerenderProvisionedFiles).
+//
+// The write is confined to the agent home (writeHomeFile): an existing home
+// is one the agent's container could change.
+func writeServicesFile(agentHome string, services []api.ServiceSpec) error {
+	servicesData, err := yaml.Marshal(services)
+	if err != nil {
+		return fmt.Errorf("failed to marshal services config: %w", err)
+	}
+	if err := writeHomeFile(agentHome, filepath.Join(".scion", servicesFileName), servicesData, 0o644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", servicesFileName, err)
+	}
+	return nil
 }
