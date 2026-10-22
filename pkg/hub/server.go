@@ -1789,7 +1789,7 @@ type Server struct {
 	// replaces conduitRouteCanRenew's decision.
 	conduitRouteCanRenewTest conduitRouteRenewFunc
 	conduitBrokerRevoke      atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
-	// portProxyMetrics counts agent port proxy upstream header timeouts
+	// portProxyMetrics counts agent port proxy events
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
@@ -3244,6 +3244,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Proxy driver principals (test identities phase WS2): a
 		// verified assertion for one of them is refused at Step 3a.
 		DriverPrincipals: srv.proxyDrivers,
+
+		// Plain-text no-credentials 401s on port proxy routes.
+		RecordPortProxyNoCredentials: srv.recordPortProxyNoCredentials,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {

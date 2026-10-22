@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -110,8 +109,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			terminalPhase := terminalRuntimePhase(agents[i])
 
 			// Try agent-info.json first for latest status from container
+			// (read confined to the agent home; a link there is refused).
 			var parsedInfo *api.AgentInfo
-			if data, err := os.ReadFile(agentInfoJSON); err == nil {
+			if data, err := readHomeAgentInfo(agentHome); err == nil {
 				var info api.AgentInfo
 				if err := json.Unmarshal(data, &info); err == nil {
 					parsedInfo = &info
@@ -186,7 +186,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
-			if fi, err := os.Stat(agentInfoJSON); err == nil {
+			if fi, err := os.Lstat(agentInfoJSON); err == nil {
 				agents[i].LastSeen = fi.ModTime()
 			}
 
@@ -301,8 +301,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 
 				var info *api.AgentInfo
 
-				// Try agent-info.json first
-				if data, err := os.ReadFile(agentInfoJSON); err == nil {
+				// Try agent-info.json first (read confined to the agent home)
+				if data, err := readHomeAgentInfo(agentHome); err == nil {
 					var ai api.AgentInfo
 					if err := json.Unmarshal(data, &ai); err == nil {
 						info = &ai
@@ -384,7 +384,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents
-				if fi, err := os.Stat(agentInfoJSON); err == nil {
+				if fi, err := os.Lstat(agentInfoJSON); err == nil {
 					agentEntry.LastSeen = fi.ModTime()
 				}
 
@@ -470,35 +470,26 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 	return string(state.PhaseStopped)
 }
 
+// persistAgentInfoState records phase and activity in the agent-info.json at
+// path (in the agent home, its directory). Locked read-modify-write (see
+// updateSavedAgentInfo, #4681), confined to the home (updateHomeAgentInfo).
 func persistAgentInfoState(path, phase, activity string) error {
-	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
-	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		fi, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-
+	if filepath.Base(path) != agentInfoFileName {
+		return fmt.Errorf("persistAgentInfoState: %s is not an %s", path, agentInfoFileName)
+	}
+	return updateHomeAgentInfo(filepath.Dir(path), false, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		if info.Phase == phase && info.Activity == activity {
-			return nil
+			return nil, nil
 		}
 
 		info.Phase = phase
 		info.Activity = activity
 
-		updated, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }

@@ -1,0 +1,150 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { describe, it, expect, afterEach } from 'vitest';
+import { render } from 'lit';
+import { agentBadges, type ScionAgentBadges } from './agent-badges.js';
+import type { Agent } from '../../shared/types.js';
+
+async function mount(
+  props: Partial<Pick<ScionAgentBadges, 'vendor' | 'size' | 'harness'>>
+): Promise<ScionAgentBadges> {
+  const el = document.createElement('scion-agent-badges');
+  Object.assign(el, props);
+  document.body.appendChild(el);
+  await el.updateComplete;
+  return el;
+}
+
+const mark = (el: HTMLElement): HTMLImageElement | null =>
+  el.shadowRoot!.querySelector<HTMLImageElement>('img.mark');
+/** The vendor file a mark shows (its src names the vendor-marks file). */
+const markFile = (el: HTMLElement): string =>
+  /vendor-marks\/([a-z]+)\.png/.exec(mark(el)?.getAttribute('src') ?? '')?.[1] ?? '';
+const chip = (el: HTMLElement): HTMLElement | null =>
+  el.shadowRoot!.querySelector<HTMLElement>('.size');
+const label = (el: HTMLElement): string =>
+  el.shadowRoot!.querySelector('.badges')?.getAttribute('title') ?? '';
+
+describe('scion-agent-badges', () => {
+  afterEach(() => {
+    document.body.querySelectorAll('scion-agent-badges').forEach((n) => n.remove());
+    document.body.querySelectorAll('div[data-host]').forEach((n) => n.remove());
+    delete window.__SCION_FEATURES__;
+  });
+
+  it('renders nothing while the experiment is off', async () => {
+    window.__SCION_FEATURES__ = { 'web.agent_badges': false };
+    const el = await mount({ vendor: 'anthropic', size: 'large' });
+    expect(el.shadowRoot!.querySelector('.badges')).toBeNull();
+    expect(el.shadowRoot!.textContent?.trim()).toBe('');
+  });
+
+  it('renders nothing when the experiment is unset (default off)', async () => {
+    const el = await mount({ vendor: 'anthropic', size: 'large' });
+    expect(el.shadowRoot!.querySelector('.badges')).toBeNull();
+  });
+
+  describe('experiment on', () => {
+    afterEach(() => delete window.__SCION_FEATURES__);
+    const on = (): void => {
+      window.__SCION_FEATURES__ = { 'web.agent_badges': true };
+    };
+
+    it('shows the vendor mark image and the size chip, with both in the tooltip', async () => {
+      on();
+      const el = await mount({ vendor: 'anthropic', size: 'extra-large' });
+      expect(markFile(el)).toBe('anthropic');
+      expect(mark(el)?.getAttribute('alt')).toBe('Anthropic');
+      expect(mark(el)?.getAttribute('width')).toBe('16');
+      expect(mark(el)?.getAttribute('height')).toBe('16');
+      expect(chip(el)?.textContent).toBe('XL');
+      expect(label(el)).toBe('Harness vendor: Anthropic\nConfigured model size: Extra large');
+      // One accessible name: role=img makes the img alt and chip presentational.
+      const group = el.shadowRoot!.querySelector('.badges');
+      expect(group?.getAttribute('role')).toBe('img');
+      expect(group?.getAttribute('aria-label')).toBe(label(el));
+    });
+
+    it('omits the size chip when the size is empty', async () => {
+      on();
+      const el = await mount({ vendor: 'openai', size: '' });
+      expect(markFile(el)).toBe('openai');
+      expect(chip(el)).toBeNull();
+      expect(label(el)).toBe('Harness vendor: OpenAI');
+    });
+
+    it('shows only the harness mark for a multi-vendor harness, even with a size', async () => {
+      on();
+      const el = await mount({ vendor: 'opencode', size: 'large' });
+      expect(markFile(el)).toBe('opencode');
+      expect(mark(el)?.getAttribute('alt')).toBe('OpenCode');
+      expect(chip(el)).toBeNull();
+      expect(label(el)).toBe('Harness: OpenCode');
+    });
+
+    it('shows the neutral unknown mark, named by the raw vendor, for a vendor the map lacks', async () => {
+      on();
+      const unmapped = await mount({ vendor: 'acme', size: 'small' });
+      expect(markFile(unmapped)).toBe('unknown');
+      expect(mark(unmapped)?.getAttribute('alt')).toBe('acme');
+      expect(chip(unmapped)?.textContent).toBe('S');
+      expect(label(unmapped)).toBe('Harness vendor: acme\nConfigured model size: Small');
+    });
+
+    it('shows the neutral unknown mark for a missing vendor (custom harness)', async () => {
+      on();
+      const missing = await mount({});
+      expect(markFile(missing)).toBe('unknown');
+      expect(mark(missing)?.getAttribute('alt')).toBe('Unknown');
+      expect(label(missing)).toBe('Harness: unknown');
+      expect(chip(missing)).toBeNull();
+    });
+
+    it('names the harness in the tooltip when the row carries it', async () => {
+      on();
+      const el = await mount({ vendor: 'google', size: 'medium', harness: 'gemini-cli' });
+      expect(label(el)).toBe('Harness: Gemini CLI (Google)\nConfigured model size: Medium');
+    });
+
+    it('agentBadges() binds the row fields, treating absent and cleared values as empty', async () => {
+      on();
+      const host = document.createElement('div');
+      host.dataset.host = '';
+      document.body.appendChild(host);
+      const row = {
+        id: 'a1',
+        harnessVendor: 'xai',
+        modelSize: '',
+        appliedConfig: { harness: 'grok-build' },
+      } as unknown as Agent;
+      render(agentBadges(row), host);
+      const el = host.querySelector('scion-agent-badges')!;
+      await el.updateComplete;
+      expect(el.vendor).toBe('xai');
+      expect(el.size).toBe('');
+      expect(el.harness).toBe('grok-build');
+      expect(markFile(el)).toBe('xai');
+      expect(chip(el)).toBeNull();
+
+      render(agentBadges({ id: 'a2' } as Agent), host);
+      await el.updateComplete;
+      expect(el.vendor).toBe('');
+      expect(el.harness).toBe('');
+      expect(markFile(el)).toBe('unknown');
+    });
+  });
+});

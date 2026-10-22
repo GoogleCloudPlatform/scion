@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -401,6 +402,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		config.HomeDir = resolvedHomeDir
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
+	// Mount points created below in the agent home go through one handle
+	// opened on the home (pkg/agenthome), so a linked directory component
+	// in the home is refused, not traversed. Those mkdirs are best effort,
+	// as before: without a handle they are skipped.
+	var agentHome *agenthome.Home
+	if config.HomeDir != "" {
+		if h, err := agenthome.OpenCreate(config.HomeDir, 0755); err == nil {
+			agentHome = h
+			defer func() { _ = agentHome.Close() }()
+		}
+	}
 	// Reject a workspace source that is not an allowed workspace path before
 	// any of the branches below turn it into a bind mount, and act on the
 	// resolved, symlink-free path it returns rather than the original value.
@@ -603,10 +615,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Pre-create the mount-point directory inside the agent home so that
 			// Docker does not create it as root (which would make the agent
 			// directory undeletable by a non-root broker process).
-			if config.HomeDir != "" {
-				mountPoint := filepath.Join(config.HomeDir, ".config", "gcloud")
-				_ = os.MkdirAll(mountPoint, 0755)
-			}
+			mkdirUnderHome(agentHome, ".config/gcloud")
 			registerMount(gcloudConfigDir, fmt.Sprintf("/home/%s/.config/gcloud", config.UnixUsername), true, false)
 		}
 	}
@@ -664,13 +673,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// bind mount, the container runtime (crun/runc) will try to mkdir the
 	// mount-point inside that mount.  On rootless Podman with VirtioFS (macOS)
 	// this fails with "Permission denied" unless the directory already exists.
-	if config.HomeDir != "" {
+	if agentHome != nil {
 		containerHome := util.GetHomeDir(config.UnixUsername)
 		for _, tgt := range volumeOrder {
 			if strings.HasPrefix(tgt, containerHome+"/") {
-				rel := strings.TrimPrefix(tgt, containerHome+"/")
-				hostDir := filepath.Join(config.HomeDir, rel)
-				_ = os.MkdirAll(hostDir, 0755)
+				mkdirUnderHome(agentHome, strings.TrimPrefix(tgt, containerHome+"/"))
 			}
 		}
 	}
@@ -966,6 +973,17 @@ func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), 
 // a literal because that constant is unexported (an internal name for
 // pkg/provision's own registry-path helper, not part of its public API).
 const sharerRegistryDirName = "scion-sharers"
+
+// mkdirUnderHome creates the directory rel (relative to the agent home) and
+// its missing parents through home, best effort: a nil home, an invalid rel
+// (an absolute path or one with a ".." component) or a linked directory
+// component is skipped.
+func mkdirUnderHome(home *agenthome.Home, rel string) {
+	if home == nil {
+		return
+	}
+	_ = home.MkdirAll(rel, 0755)
+}
 
 // fileExists reports whether path exists (file or directory).
 func fileExists(path string) bool {
@@ -1515,6 +1533,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 
 	// Inject files
 	containerHome := util.GetHomeDir(config.UnixUsername)
+	var home *agenthome.Home
+	defer func() {
+		if home != nil {
+			_ = home.Close()
+		}
+	}()
 	for _, f := range ra.Files {
 		if f.SourcePath == "" {
 			// In broker mode, file content is projected from staged secrets
@@ -1534,10 +1558,14 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 				relPath = strings.TrimPrefix(containerPath, "/")
 			}
 			dst := filepath.Join(config.HomeDir, relPath)
-			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-				return fmt.Errorf("failed to create directory for auth file %s: %w", dst, err)
+			if home == nil {
+				h, err := agenthome.OpenCreate(config.HomeDir, 0755)
+				if err != nil {
+					return fmt.Errorf("failed to open the agent home for auth file %s: %w", dst, err)
+				}
+				home = h
 			}
-			if err := util.CopyFile(f.SourcePath, dst); err != nil {
+			if err := copyFileIntoHome(f.SourcePath, home, relPath); err != nil {
 				return fmt.Errorf("failed to copy auth file %s → %s: %w", f.SourcePath, dst, err)
 			}
 		} else {
@@ -1547,6 +1575,31 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	}
 
 	return nil
+}
+
+// copyFileIntoHome copies the host file src to rel in the agent home with
+// src's permission bits less group and other write, creating missing parent directories (0755). Every
+// write is confined to the home (pkg/agenthome): a link at rel is replaced,
+// never written through, and a linked directory component is refused.
+func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(filepath.Clean(rel)); dir != "." {
+		if err := home.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory for auth file: %w", err)
+		}
+	}
+	// Home.WriteFile sets the mode exactly (no umask). The old copy
+	// (os.WriteFile) had the process umask applied to a new file, so strip
+	// group and other write as the default umask (022) did: a group- or
+	// other-writable source must not give a writable copy in the home.
+	return home.WriteFile(rel, data, info.Mode().Perm()&^0o022)
 }
 
 // stagedSecretWarnThreshold is the size (in bytes) above which a warning is
