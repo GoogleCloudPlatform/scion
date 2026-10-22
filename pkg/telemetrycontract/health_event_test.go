@@ -158,7 +158,7 @@ func TestHealthEventValidate(t *testing.T) {
 			drainedFinal(e)
 			e.QueueRecords = 3
 		}, "drained contradicts"},
-		"bad origin":             {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
+		"bad origin": {func(e *HealthEvent) { e.UsageSourceOrigin = "" }, "usage_source_origin"},
 	}
 	for name, c := range cases {
 		ev := validHealth()
