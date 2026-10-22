@@ -70,6 +70,13 @@ func Undelimited(raw string) bool {
 		return false
 	}
 	u, err := url.Parse(raw)
+	return undelimitedParsed(raw, u, err)
+}
+
+// undelimitedParsed is Undelimited for a raw that holds an '@', given the
+// result of url.Parse(raw), so a caller that needs the parsed URL as well
+// parses it once.
+func undelimitedParsed(raw string, u *url.URL, err error) bool {
 	if err != nil {
 		m := userInfoRe.FindStringIndex(raw)
 		return m == nil || strings.Contains(raw[m[1]:], "@")
@@ -94,10 +101,13 @@ func MaskWhole(raw, mask string) string {
 // delimited (see Undelimited) shows only its scheme and Mask. A URL
 // without user info is returned as given.
 func RedactUserInfo(raw string) string {
-	if Undelimited(raw) {
-		return MaskWhole(raw, Mask)
+	if !strings.Contains(raw, "@") {
+		return raw
 	}
 	u, err := url.Parse(raw)
+	if undelimitedParsed(raw, u, err) {
+		return MaskWhole(raw, Mask)
+	}
 	if err != nil {
 		return userInfoRe.ReplaceAllString(raw, "${1}"+Mask+"@")
 	}
@@ -111,62 +121,140 @@ func RedactUserInfo(raw string) string {
 	return u.String()
 }
 
-// ReplaceUserInfo returns raw with its whole user info, the user name
-// too, replaced by mask, and every other byte kept. A URL whose user info
-// cannot be delimited (see Undelimited) shows only its scheme and mask. A
-// URL without user info is returned as given.
-func ReplaceUserInfo(raw, mask string) string {
+// The kinds of user info locateUserInfo reports.
+const (
+	noUserInfo   = iota // nothing to mask
+	wholeURL            // the user info cannot be delimited: mask all but the scheme
+	userInfoSpan        // the user info is raw[start:end]
+)
+
+// locateUserInfo reports where the user info of raw is, by the rule of
+// Undelimited, parsing raw once: noUserInfo, wholeURL, or
+// userInfoSpan with raw[start:end] the whole user info (the user name
+// too), which ends at the last '@' of the authority.
+func locateUserInfo(raw string) (kind, start, end int) {
 	if !strings.Contains(raw, "@") {
-		return raw
+		return noUserInfo, 0, 0
 	}
-	if Undelimited(raw) {
-		return MaskWhole(raw, mask)
+	u, err := url.Parse(raw)
+	if undelimitedParsed(raw, u, err) {
+		return wholeURL, 0, 0
 	}
-	if u, err := url.Parse(raw); err == nil && u.User == nil {
-		return raw
+	if err == nil && u.User == nil {
+		return noUserInfo, 0, 0
 	}
-	// Delimited user info: it ends at the last '@' of the authority.
 	if authority, rest, ok := cutRawAuthority(raw); ok {
-		if at := strings.LastIndex(authority, "@"); at >= 0 {
-			prefix := raw[:len(raw)-len(rest)-len(authority)]
-			return prefix + mask + authority[at:] + rest
+		at := strings.LastIndex(authority, "@")
+		if at < 0 {
+			return noUserInfo, 0, 0
 		}
-		return raw
+		start = len(raw) - len(rest) - len(authority)
+		return userInfoSpan, start, start + at
 	}
-	return userInfoRe.ReplaceAllString(raw, "${1}"+mask+"@")
+	// No scheme and no "//": the user info rule from the start of raw.
+	m := userInfoRe.FindStringIndex(raw)
+	if m == nil {
+		return noUserInfo, 0, 0
+	}
+	return userInfoSpan, 0, m[1] - 1
 }
 
 // textURLTrailing is the punctuation that ends a sentence, a quotation or
 // an escape around a URL in a text, rather than ending the URL itself.
 const textURLTrailing = ".,;:!?)]}>'\"`\\"
 
-// RedactUserInfoIn returns text with the user info of every URL in it
-// replaced by mask as ReplaceUserInfo does. A URL starts at a scheme and
+// The limits that keep RedactUserInfoIn linear in the length of its text.
+// Past either one, the rest of the run is masked whole: that fails closed.
+const (
+	// MaxTextURLLen is the longest URL, from its scheme to the end of its
+	// run, whose user info RedactUserInfoIn locates when an '@' follows;
+	// a longer one is masked whole.
+	MaxTextURLLen = 4096
+	// MaxTextURLsPerRun is the most URLs RedactUserInfoIn checks in one
+	// run of text without white space (a URL inside another one counts);
+	// past it, the rest of the run is masked whole when an '@' follows.
+	MaxTextURLsPerRun = 16
+)
+
+// RedactUserInfoIn returns text with the whole user info of every URL in
+// it, the user name too, replaced by mask, and every other byte kept; a URL
+// whose user info cannot be delimited (see Undelimited) shows only its
+// scheme and mask, with the rest of its run. A URL starts at a scheme and
 // "://" and runs to the next white space, less the punctuation that ends
 // it (textURLTrailing); white space is the only boundary, so a quote or
 // bracket inside a password cannot end the URL early. A URL inside another
 // one (a redirect parameter, or two URLs with no space between them) is
 // checked on its own as well, unless the outer URL was masked whole.
+//
+// It takes time linear in the length of text: each run is cut once, a run
+// with no '@' after a scheme is skipped, and a URL longer than
+// MaxTextURLLen, or past the first MaxTextURLsPerRun URLs of its run, is
+// masked whole with the rest of the run when an '@' follows it.
 func RedactUserInfoIn(text, mask string) string {
-	s := text
+	var b strings.Builder
+	written := 0 // text[written:] is not in b yet
 	pos := 0
-	for pos < len(s) {
-		loc := textSchemeRe.FindStringIndex(s[pos:])
+	for pos < len(text) {
+		loc := textSchemeRe.FindStringIndex(text[pos:])
 		if loc == nil {
 			break
 		}
-		start, schemeEnd := pos+loc[0], pos+loc[1]
-		end := len(s)
-		if i := strings.IndexFunc(s[start:], unicode.IsSpace); i >= 0 {
+		start := pos + loc[0]
+		end := len(text)
+		if i := strings.IndexFunc(text[start:], unicode.IsSpace); i >= 0 {
 			end = start + i
 		}
-		raw := strings.TrimRight(s[start:end], textURLTrailing)
-		if r := ReplaceUserInfo(raw, mask); r != raw {
-			s = s[:start] + r + s[start+len(raw):]
+		if strings.IndexByte(text[start:end], '@') >= 0 {
+			b.WriteString(text[written:start])
+			redactRunUserInfo(&b, text[start:end], mask)
+			written = end
 		}
-		pos = schemeEnd
+		pos = end
 	}
-	return s
+	if written == 0 {
+		return text
+	}
+	b.WriteString(text[written:])
+	return b.String()
+}
+
+// redactRunUserInfo writes to b the run (text from a scheme to the next
+// white space, holding an '@') with the user info of every URL in it
+// replaced by mask (see RedactUserInfoIn).
+func redactRunUserInfo(b *strings.Builder, run, mask string) {
+	lastAt := strings.LastIndexByte(run, '@')
+	written := 0 // run[written:] is not in b yet
+	p := 0       // the start of the URL being checked; run starts with a scheme
+	for n := 1; p < lastAt; n++ {
+		raw := strings.TrimRight(run[p:], textURLTrailing)
+		if n > MaxTextURLsPerRun || len(raw) > MaxTextURLLen {
+			b.WriteString(run[written:p])
+			b.WriteString(MaskWhole(raw, mask))
+			b.WriteString(run[p+len(raw):])
+			return
+		}
+		kind, start, end := locateUserInfo(raw)
+		next := p + len(schemePrefixRe.FindString(raw))
+		switch kind {
+		case wholeURL:
+			b.WriteString(run[written:p])
+			b.WriteString(MaskWhole(raw, mask))
+			b.WriteString(run[p+len(raw):])
+			return
+		case userInfoSpan:
+			b.WriteString(run[written : p+start])
+			b.WriteString(mask)
+			written = p + end
+			// A URL inside the user info is masked with it.
+			next = max(next, written)
+		}
+		loc := textSchemeRe.FindStringIndex(run[next:])
+		if loc == nil {
+			break
+		}
+		p = next + loc[0]
+	}
+	b.WriteString(run[written:])
 }
 
 // cutRawAuthority cuts raw, after its scheme and "://" (or a leading

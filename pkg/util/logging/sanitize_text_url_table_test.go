@@ -15,7 +15,9 @@
 package logging
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
@@ -26,4 +28,20 @@ func TestURLRedactorTable_SanitizeText(t *testing.T) {
 	urlredacttest.Check(t, urlredacttest.LoggingSanitizeText, func(in string) string {
 		return SanitizeText(urlredacttest.Text(in))
 	})
+}
+
+// SanitizeText takes time linear in its input for URL-heavy text: 1 MiB of
+// dense scheme starts with no white space, ending in an '@', finishes well
+// within a bound that a quadratic scan cannot meet, and no part of the text
+// before the '@' is left as a URL with user info.
+func TestSanitizeText_URLScanLinearTime(t *testing.T) {
+	in := strings.Repeat("a://", 1<<18) + "@h.example"
+	start := time.Now()
+	got := SanitizeText(in)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("SanitizeText on %d bytes took %v", len(in), d)
+	}
+	if want := "a://" + RedactedMarker; got != want {
+		t.Errorf("SanitizeText on %d bytes = %q, want %q", len(in), got, want)
+	}
 }

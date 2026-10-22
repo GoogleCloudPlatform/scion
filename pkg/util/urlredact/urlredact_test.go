@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
@@ -113,10 +114,11 @@ func TestMaskWhole(t *testing.T) {
 	}
 }
 
-func TestReplaceUserInfo(t *testing.T) {
+// The user info located in a single URL: the whole of it, user name too,
+// is replaced and every other byte kept.
+func TestRedactUserInfoIn_SingleURL(t *testing.T) {
 	for in, want := range map[string]string{
 		"https://alice:s3cretPw@hub.example.com/a?b=c": "https://[M]@hub.example.com/a?b=c",
-		"//alice:s3cretPw@hub.example.com/a":           "//[M]@hub.example.com/a",
 		"https://t%40k@hub.example.com":                "https://[M]@hub.example.com",
 		"http://user:s3@cret@127.0.0.1:99999x/x":       "http://[M]@127.0.0.1:99999x/x",
 		"https://alice:fake/Pw9q@hub.example.com/api":  "https://[M]",
@@ -124,8 +126,20 @@ func TestReplaceUserInfo(t *testing.T) {
 		"https://hub.example.com/api":                  "https://hub.example.com/api",
 		"":                                             "",
 	} {
-		if got := ReplaceUserInfo(in, "[M]"); got != want {
-			t.Errorf("ReplaceUserInfo(%q) = %q, want %q", in, got, want)
+		if got := RedactUserInfoIn(in, "[M]"); got != want {
+			t.Errorf("RedactUserInfoIn(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Without a scheme the span starts after "//". A schemeless
+	// "user:pass@host" parses as an opaque URL with no user info (a known
+	// residual of the rule, recorded with D215).
+	for in, want := range map[string][3]int{
+		"//alice:s3cretPw@hub.example.com/a": {userInfoSpan, 2, 16},
+		"//hub.example.com/a@b":              {noUserInfo, 0, 0},
+		"alice:s3cretPw@hub.example.com":     {noUserInfo, 0, 0},
+	} {
+		if k, s, e := locateUserInfo(in); [3]int{k, s, e} != want {
+			t.Errorf("locateUserInfo(%q) = %d %d %d, want %v", in, k, s, e, want)
 		}
 	}
 }
@@ -181,7 +195,6 @@ func TestRedact_PropertyPasswordJunk(t *testing.T) {
 		for name, got := range map[string]string{
 			"RedactUserInfo":   RedactUserInfo(in),
 			"RedactUserInfoIn": RedactUserInfoIn(urlredacttest.Text(in), Mask),
-			"ReplaceUserInfo":  ReplaceUserInfo(in, Mask),
 		} {
 			for k := 0; k+4 <= len(secret); k++ {
 				if strings.Contains(got, secret[k:k+4]) {
@@ -189,5 +202,80 @@ func TestRedact_PropertyPasswordJunk(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// adversarialText returns n bytes of "a://" repeated (a scheme start every
+// 4 bytes, no white space), followed by tail.
+func adversarialText(n int, tail string) string {
+	return strings.Repeat("a://", n/4) + tail
+}
+
+// RedactUserInfoIn takes time linear in its input: 1 MiB of dense scheme
+// starts with no white space, with and without an '@' at the end, finishes
+// well within a bound that a quadratic scan (minutes at this size) cannot
+// meet, and the run with an '@' is masked whole (the URL is longer than
+// MaxTextURLLen).
+func TestRedactUserInfoIn_LinearTime(t *testing.T) {
+	const size = 1 << 20
+	for _, tc := range []struct{ name, in, want string }{
+		{"no '@'", adversarialText(size, ""), adversarialText(size, "")},
+		{"'@' at the end", adversarialText(size, "@h.example"), "a://[M]"},
+		{"'@' at the end, then text", adversarialText(size, "@h.example") + " done", "a://[M] done"},
+		{"many runs", strings.Repeat("a://b@c ", size/8), strings.Repeat("a://[M]@c ", size/8)},
+	} {
+		start := time.Now()
+		got := RedactUserInfoIn(tc.in, "[M]")
+		if d := time.Since(start); d > 5*time.Second {
+			t.Errorf("%s: RedactUserInfoIn on %d bytes took %v", tc.name, len(tc.in), d)
+		}
+		if got != tc.want {
+			t.Errorf("%s: RedactUserInfoIn on %d bytes = %d bytes starting %q, want %d bytes starting %q", tc.name, len(tc.in), len(got), prefix(got), len(tc.want), prefix(tc.want))
+		}
+	}
+}
+
+func prefix(s string) string {
+	if len(s) > 40 {
+		return s[:40]
+	}
+	return s
+}
+
+// Past MaxTextURLLen, or past MaxTextURLsPerRun URLs in one run, the rest of
+// the run is masked whole when an '@' follows; text after the run is kept.
+func TestRedactUserInfoIn_Limits(t *testing.T) {
+	long := "https://alice:s3cretPw@hub.example.com/" + strings.Repeat("x", MaxTextURLLen)
+	if got, want := RedactUserInfoIn("see "+long+" now", "[M]"), "see https://[M] now"; got != want {
+		t.Errorf("long URL: got %q, want %q", prefix(got), want)
+	}
+	atMax := "https://alice:s3cretPw@hub.example.com/" + strings.Repeat("x", MaxTextURLLen-len("https://alice:s3cretPw@hub.example.com/"))
+	if got, want := RedactUserInfoIn(atMax, "[M]"), "https://[M]@hub.example.com/"+strings.Repeat("x", MaxTextURLLen-len("https://alice:s3cretPw@hub.example.com/")); got != want {
+		t.Errorf("URL of MaxTextURLLen bytes: got %q, want its user info masked", prefix(got))
+	}
+	var nested, want strings.Builder
+	for i := 0; i < MaxTextURLsPerRun; i++ {
+		nested.WriteString("https://h.example/r?next=")
+		want.WriteString("https://h.example/r?next=")
+	}
+	nested.WriteString("https://alice:s3cretPw@last.example/x")
+	want.WriteString("https://[M]")
+	if got := RedactUserInfoIn(nested.String()+" end", "[M]"); got != want.String()+" end" {
+		t.Errorf("more than MaxTextURLsPerRun URLs: got %q, want %q", got, want.String()+" end")
+	}
+	// At the limit, the last nested URL is still checked on its own.
+	inner := strings.Repeat("https://h.example/r?next=", MaxTextURLsPerRun-1) + "https://alice:s3cretPw@last.example/x"
+	if got, want := RedactUserInfoIn(inner, "[M]"), strings.Repeat("https://h.example/r?next=", MaxTextURLsPerRun-1)+"https://[M]@last.example/x"; got != want {
+		t.Errorf("MaxTextURLsPerRun URLs: got %q, want %q", got, want)
+	}
+}
+
+// BenchmarkRedactUserInfoIn measures the scanner on 64 KiB of dense scheme
+// starts ending in an '@'.
+func BenchmarkRedactUserInfoIn(b *testing.B) {
+	in := adversarialText(64<<10, "@h.example")
+	b.SetBytes(int64(len(in)))
+	for i := 0; i < b.N; i++ {
+		RedactUserInfoIn(in, Mask)
 	}
 }
