@@ -429,3 +429,52 @@ func TestNewFileMode(t *testing.T) {
 		}
 	}
 }
+
+// TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates is the harness-config
+// variant of TestTemplateFileMode_ChmodOnlyCommitRehydrates: a finalize
+// that only sets an executable bit (same content and content hash, no
+// upload) is persisted by commitHarnessConfigFiles and not served from
+// the earlier version's cache entry.
+func TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
+	ctx := context.Background()
+	stor, rt := modeBackends()[0].new(t)
+	srv, s := newCommitTestServer(t, stor)
+	client := startModeHub(t, srv, rt)
+	cache, err := templatecache.New(t.TempDir(), templatecache.DefaultMaxSize)
+	require.NoError(t, err)
+
+	dir := writeModeDir(t, map[string]modeFile{"config.yaml": {hcCfgA, 0o644}, "provision.py": {"#!/usr/bin/env python3\n", 0o644}})
+	files, err := hubclient.CollectFiles(dir, nil)
+	require.NoError(t, err)
+	created, err := client.HarnessConfigs().Create(ctx, &hubclient.CreateHarnessConfigRequest{Name: "hc-chmod-only", Harness: "claude", Scope: store.HarnessConfigScopeGlobal})
+	require.NoError(t, err)
+	id := created.HarnessConfig.ID
+	up, err := client.HarnessConfigs().RequestUploadURLs(ctx, id, uploadRequests(files))
+	require.NoError(t, err)
+	modeUploadFiles(t, ctx, up.UploadURLs, files, client.HarnessConfigs().UploadFile)
+	v1, err := client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: modeManifestFiles(files)}, "", up.UploadID)
+	require.NoError(t, err)
+
+	resolver := templatecache.NewHarnessConfigResolver(cache, client)
+	first, err := resolver.Resolve(ctx, id)
+	require.NoError(t, err)
+	assertModes(t, first, map[string]os.FileMode{"provision.py": 0o644})
+
+	// chmod +x and finalize again with no upload, as harness-config sync does.
+	require.NoError(t, os.Chmod(filepath.Join(dir, "provision.py"), 0o755))
+	files, err = hubclient.CollectFiles(dir, nil)
+	require.NoError(t, err)
+	v2, err := client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: modeManifestFiles(files)}, "", "")
+	require.NoError(t, err)
+	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: a mode-only commit keeps the content hash")
+	for _, f := range getHC(t, s, id).Files {
+		if f.Path == "provision.py" {
+			require.Equal(t, "0755", f.Mode, "mode-only finalize was not persisted")
+		}
+	}
+
+	second, err := resolver.Resolve(ctx, id)
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "the 0644 cache entry was reused")
+	assertModes(t, second, map[string]os.FileMode{"provision.py": 0o755})
+}
