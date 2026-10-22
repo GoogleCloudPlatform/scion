@@ -111,6 +111,8 @@ func TestRedactURLIn_Rejected(t *testing.T) {
 		{"https://alice:fake#Pw9q@hub.example.com/api", "fake#Pw9q"},
 		{"https://alice:p@ss/w0rd@hub.example.com/api", "p@ss/w0rd"},
 		{"https://alice:p@ss?w0rd@hub.example.com/api", "p@ss?w0rd"},
+		{"https://alice:Zq@7m/Wx@git.example.com/acme/repo.git", "Zq@7m/Wx"},
+		{"https://alice:Zq@7m?Wx@git.example.com/acme/repo.git", "Zq@7m?Wx"},
 		{"https://u:1234/x@h.example", "1234/x"},
 		{"https://u:12?34@h.example/r", "12?34"},
 		{"https://tok9/x@h.example", "tok9/x"},
@@ -130,11 +132,18 @@ func TestRedactURLIn_Rejected(t *testing.T) {
 			// git prints a URL with its user info removed up to the first '@'.
 			texts = append(texts, "fatal: unable to access 'https://"+after[i+1:]+"/': 403")
 		}
+		// Reformatted echoes: git's cut at the first '@', a path added where a
+		// tool reads the end of the authority, the query and fragment cut off.
+		for _, echo := range urlredacttest.Echoes(tc.raw) {
+			texts = append(texts, "fatal: unable to access '"+echo+"': 403")
+		}
 		if b, err := json.Marshal(tc.raw); err == nil {
 			texts = append(texts, `{"url":`+string(b)+`}`)
 		}
 		for _, text := range texts {
-			got := RedactURLIn(text, tc.raw, "[SHOWN]", "[M]")
+			// Mask, as the clone sanitizers use: it reads as a host, so the
+			// last step (RedactUserInfoIn) does not hide what is left.
+			got := RedactURLIn(text, tc.raw, "[SHOWN]", Mask)
 			if f := urlredacttest.SecretFragment(got, tc.secret); f != "" {
 				t.Errorf("RedactURLIn(%q, %q) = %q shows %q", text, tc.raw, got, f)
 			}

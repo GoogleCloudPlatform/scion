@@ -191,6 +191,8 @@ var Shapes = []Shape{
 	{"second '@' in password", "https://alice:Zq@7mWx2@git.example.com/acme/repo.git", "Zq@7mWx2"},
 	{"'@' then '/' in password", "https://alice:Zq@7m/Wx2@git.example.com/acme/repo.git", "Zq@7m/Wx2"},
 	{"'@' then '?' in password", "https://alice:Zq@7m?Wx2@git.example.com/acme/repo.git", "Zq@7m?Wx2"},
+	{"'@' then a short '/' piece", "https://alice:Zq@7m/Wx@git.example.com/acme/repo.git", "Zq@7m/Wx"},
+	{"'@' then a short '?' piece", "https://alice:Zq@7m?Wx@git.example.com/acme/repo.git", "Zq@7m?Wx"},
 	{"password read as a port and a path", "https://u:8461/Wx2@git.example.com/acme/repo.git", "8461/Wx2"},
 	{"password read as a port, then '?'", "https://u:8461?Wx2@git.example.com/acme/repo.git", "8461?Wx2"},
 	{"token read as a host", "https://tKn7Qz/x@git.example.com/acme/repo.git", "tKn7Qz/x"},

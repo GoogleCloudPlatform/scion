@@ -154,17 +154,24 @@ func removeQueryAndFragment(text string, u *url.URL) string {
 }
 
 // rawUserInfoParts returns the parts of raw that may hold user info, read
-// from raw itself, longest first, for a raw whose user info cannot be
-// placed: the span from after its scheme and "://" (or a leading "//") up
-// to its last '@', path included; each part of that span between two of
-// '@', '/', '?' and '#' (a URL printed with its user info removed up to its
-// first '@', as git prints one, still holds the rest, and a tool that reads
-// a '/', '?' or '#' in a password as the end of the authority may add a
-// path or drop the rest there); and the authority as raw itself ends it, at
-// its first '/', '?' or '#' (a URL built from raw with its query cleared
-// still holds it). Splitting replaces more than the user info, which is
-// safe for a URL whose user info cannot be placed. It returns nil when raw holds no '@' or has
-// neither prefix.
+// from raw itself, longest first and without duplicates, for a raw whose
+// user info cannot be placed. It returns nil when raw holds no '@' or has
+// neither prefix. The parts are:
+//   - the span from after its scheme and "://" (or a leading "//") up to
+//     its last '@', path included;
+//   - the '@' split: each part of the span between two '@' (a URL printed
+//     with its user info removed up to its first '@', as git prints one,
+//     still holds the rest);
+//   - the delimiter split: each part of the span between two of '@', '/',
+//     '?' and '#' (a tool that reads a '/', '?' or '#' in a password as the
+//     end of the authority may add a path or drop the rest there);
+//   - the authority as raw itself ends it, at its first '/', '?' or '#' (a
+//     URL built from raw with its query cleared still holds it).
+//
+// Both splits are needed: the delimiter split alone can break an '@' part
+// into pieces shorter than minSecretLen, which are not replaced. The parts
+// replace more than the user info, which is safe for a URL whose user info
+// cannot be placed.
 func rawUserInfoParts(raw string) []string {
 	authority, rest, ok := cutRawAuthority(raw)
 	if !ok || !strings.Contains(raw, "@") {
@@ -176,11 +183,24 @@ func rawUserInfoParts(raw string) []string {
 		return []string{authority}
 	}
 	span := after[:at]
-	parts := append([]string{span}, strings.FieldsFunc(span, func(r rune) bool { return strings.ContainsRune("@/?#", r) })...)
-	parts = append(parts, authority)
+	candidates := append([]string{span}, strings.Split(span, "@")...)
+	candidates = append(candidates, strings.FieldsFunc(span, isUserInfoDelim)...)
+	candidates = append(candidates, authority)
+	var parts []string
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		if !seen[p] {
+			seen[p] = true
+			parts = append(parts, p)
+		}
+	}
 	sort.SliceStable(parts, func(i, j int) bool { return len(parts[i]) > len(parts[j]) })
 	return parts
 }
+
+// isUserInfoDelim reports whether r is one of the characters at which
+// rawUserInfoParts splits the span for its delimiter split.
+func isUserInfoDelim(r rune) bool { return strings.ContainsRune("@/?#", r) }
 
 // replaceForms replaces secret everywhere in text with mask: as given, and
 // as strconv.Quote, JSON, url.PathEscape and url.QueryEscape write it. A
