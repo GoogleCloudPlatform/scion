@@ -128,9 +128,9 @@ const ephemeralPathReasonVolumeEmpty = "volume_empty"
 // content for it yet.
 //
 // Once per slug rather than once per call: hubManagedProjectPath is on the
-// WebDAV, clone and cache request paths, so a deployment sitting in this state
-// would otherwise emit a line per request for as long as it runs. The
-// condition is a property of the deployment, not of the request.
+// workspace file, clone and cache request paths, so a deployment sitting in
+// this state would otherwise emit a line per request for as long as it runs.
+// The condition is a property of the deployment, not of the request.
 //
 // The log line carries the backend and a fixed reason token. No project ID is
 // in scope (callers resolve by slug), and the slug and both paths are left

@@ -379,10 +379,11 @@ Sends a message to a running agent or user.
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message. Requires the permission to start the agent (`agent.lifecycle`); without it the send fails with `403` and the agent stays suspended. If the agent is still starting (activity `initializing`) when the wake wait ends, the message is delivered and held until its harness is ready, and `--interrupt` is delivered as an ordinary message instead of interrupting.
     - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
-    - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
+    - `--attach <path>`: Attach a file as part of this message (repeatable, at most 10). Use `--artifact` instead for work product to review, version or find later. The CLI first asks the Hub where uploads go (`GET /api/v1/chat/attachments`):
+        - **Stored as artifacts** (the `hub.attachment_artifacts` experiment on): the files are checked before anything is uploaded. Each must be a readable regular file at any path, no two may have the same file name (compared case-insensitively), and with an agent recipient their total must fit the Hub's delivery limit (`messaging.attachment_delivery_max_bytes`). An `.html`, `.htm` or `.svg` file, or one whose first bytes contain `<html` or `<svg`, fails with exit code `2`: publish it with `scion artifact publish` and send it with `--artifact`. A Markdown file over 64 KiB prints a hint to publish it as an artifact and is still sent. The files are uploaded in one request, once per recipient for a group send, and the send names them by id. If any file is not stored, nothing is sent. An agent recipient gets the files in `~/.scion/inbox/<message-id>/` before the message text (see [Messaging](/scion/hosted/user/messaging/#attachments-for-agents)).
+        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
-        - **Requirements:** If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-        - **Undelivered attachments:** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
+        - **Undelivered attachments (staged files):** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
         - **Constraints:** Cannot be combined with `--in` or `--at`, or used with `group[...]` recipients.
         - **Requirements:** Requires the `hub.artifacts` experiment on.
@@ -672,7 +673,9 @@ The Hub may answer `202` when teardown is still running (see [`DELETE /agents/:i
 
 Synchronizes the agent workspace between the host and the container.
 
-**Usage:** `scion sync to|from <agent-name> [flags]` (agent workspace; the direction is required), or `scion sync [push|pull]` (project workspace on the Hub)
+**Usage:** `scion sync to|from <agent-name> [flags]` (the direction is required)
+
+The project-level forms (bare `scion sync`, `scion sync push` and `scion sync pull`) and their `--force` flag were removed with the Hub's WebDAV endpoint. They exit with an error. To move project files, use git, or the project's Files tab in the web UI.
 
 - **Flags:**
     - `--dry-run`: Preview changes without syncing.
@@ -800,7 +803,10 @@ needs the `agent:update` scope for them; otherwise sign in with `scion hub auth 
 patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
 the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags combine
 with `--broker`: the move's checks judge the patched configuration, for example the patched service
-account.
+account. When a reincarnation that changed the service account fails and the agent returns to its
+previous configuration, the agent's previous service-account assignment returns with it, with the
+source recorded for that assignment. If the assignment was changed again while the reincarnation
+was in progress, the later assignment stays.
 
 To reincarnate another principal's agent you must be able to delegate the agent's role. The agent
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
@@ -1005,8 +1011,8 @@ View and modify configuration settings.
 (`hub.transport.mode`, `hub.transport.audience`) and each hub connection's endpoint
 (`hub_connections.<name>.endpoint`), with the effective value and its source: `default`
 (the embedded defaults), `global <file>`, `project <file>`, `env <VARIABLE>` or
-`project-id file <file>`. A setting with no value shows `<unset>`. `config get <key>`
-reads the same settings and gives the same value and source. The value of a
+`project-id file <file>` (for `hub.endpoint`, see below). A setting with no value shows
+`<unset>`. `config get <key>` reads the same settings and gives the same value and source. The value of a
 credential-like key (for example `hub.brokerToken`) is masked in both. With
 `--format json`, `config list` prints an object keyed by setting
 (`{"<key>": {"value": "...", "source": "..."}}`) and `config get` prints
@@ -1050,6 +1056,39 @@ in-repo `.scion/settings.yaml` of a project whose settings are kept in its exter
 settings directory), the command names that file, and `--format json` adds it as
 `still_set_in`. `config unset` is available in human mode
 only, like `config set`.
+
+`hub.endpoint` is a front end to the hub list (`~/.scion/context.yaml`): `config set`
+never writes it into a settings file, and the CLI does not read it from one. (A
+`hub.endpoint` left in the global settings is still read once by the import into the
+hub list, and by the server and the Runtime Broker as a deprecated fallback for
+`server.hub.public_url` and `server.broker.hub_endpoint`.)
+
+- `scion config set --global hub.endpoint <url>` works like
+  [`scion hub add`](#scion-hub) followed by `scion use --hub`: the URL must pass the same
+  check, an existing entry with the same URL is reused, a new one is named after the
+  host (`-2`, `-3`, ... when the name is taken), the Hub's health is checked with the
+  same warning, and the Hub becomes the current Hub
+  (`Hub '<name>' (<url>) is now the current hub.`).
+- In a project, `scion config set hub.endpoint <url>` links the project directory to
+  that Hub instead (its link entry, as `scion hub link` records it), without changing
+  the current Hub.
+- When the Hub just set is not the one that applies (`SCION_HUB_ENDPOINT` or
+  `SCION_HUB_URL` is set, `--hub` is given, or, for `--global`, the current directory is
+  linked to another Hub), `config set` says so on stderr; stdout keeps its one line.
+- With `--format json`, `config set` adds `hub`, `endpoint`, `scope` (`global` or
+  `local`), `created` (a new hub entry was added), `reachable`, and the effective `value`
+  and `source` to `details`; `config unset` adds `hub` (the Hub it cleared or unlinked),
+  `removed`, `legacy_setting_removed`, `scope`, and the effective `value` and `source`.
+- `scion config get hub.endpoint` and `scion config list` show the Hub the command uses,
+  as `scion hub status` reports it, with its source: `flag --hub`, `env <VARIABLE>`,
+  `link hub '<name>'` or `current hub '<name>'`.
+- `scion config unset --global hub.endpoint` makes no Hub current; the Hub stays in the
+  hub list with its stored login, so selecting it again needs no new login. It also
+  removes a `hub.endpoint` left in the global settings file, and says so on stderr, so
+  a server or Runtime Broker started from those settings no longer falls back to it.
+  In a project, `scion config unset hub.endpoint` removes the project's link entry
+  (and the project's settings are then never imported into a link), and the current
+  Hub applies there again.
 
 ### `scion cd-config`
 

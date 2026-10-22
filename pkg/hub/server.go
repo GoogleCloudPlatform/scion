@@ -808,8 +808,8 @@ type StartExtras struct {
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// are a start's asynchronous launch fields (ptone/scion#4669), sent
 	// under the same wire keys as a create's (RemoteCreateAgentRequest).
-	// Zero values send nothing; this release never sets them, so every
-	// start is sent synchronously.
+	// Zero values send nothing: the start is sent synchronously. Set by
+	// dispatchAgentStart for an asynchronous start.
 	AsyncLaunch            bool
 	LaunchID               string
 	LaunchTimeoutSeconds   int
@@ -1126,6 +1126,19 @@ func withRunIDURL(endpoint, runID string) string {
 		return endpoint + "&runId=" + url.QueryEscape(runID)
 	}
 	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withDispatchAgentIDURL appends the api.AgentIDQueryParam query
+// parameter to a start request URL (or path) when an agent ID was attached
+// with withDispatchAgentID (ptone/scion#4669): the broker's asynchronous
+// start needs the hub's agent ID before it reads the body. An older broker
+// ignores it.
+func withDispatchAgentIDURL(ctx context.Context, endpoint string) string {
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + dispatchAgentIDQuery(ctx, sep)
 }
 
 // withRunIDQuery is withRunIDURL for a bare query string.
@@ -1664,6 +1677,10 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// uploadFormMemoryForTest, when positive, replaces maxUploadTotalSize as
+	// the in-memory multipart limit (uploadFormMaxMemory). Set by tests only.
+	uploadFormMemoryForTest int64
+
 	// generalTopicWarned records project IDs whose #general ensure already
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.
@@ -1711,6 +1728,9 @@ type Server struct {
 	userTokenService   *UserTokenService    // User JWT token service
 	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
 	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
+	// attachmentDeliveryKey signs attachment delivery capabilities
+	// (ptone/scion#4596, attachment_delivery.go).
+	attachmentDeliveryKey []byte
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1859,16 +1879,12 @@ type Server struct {
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
-	runtimeReloadFunc       func() bool // Callback to reload the co-located broker runtime; returns true if swapped
-	workstation             bool        // True when running in workstation (non-production) mode
-	// webdavLocks stores per-project WebDAV lock systems keyed by project ID.
-	// This replaces the per-request webdav.NewMemLS() so that locks survive
-	// across HTTP requests within a single instance.
-	webdavLocks sync.Map           // map[string]webdav.LockSystem
-	scheduler   *Scheduler         // Unified scheduler for recurring tasks
-	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
-	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
-	ctxCancel   context.CancelFunc // Cancels ctx
+	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
+	workstation             bool               // True when running in workstation (non-production) mode
+	scheduler               *Scheduler         // Unified scheduler for recurring tasks
+	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
+	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown
+	ctxCancel               context.CancelFunc // Cancels ctx
 
 	// shutdownMark is the "shutting down" mark (BeginShutdown,
 	// ptone/scion#5054): /readyz fails, new requests are refused and
@@ -1906,6 +1922,10 @@ type Server struct {
 	// in New and never replaced.
 	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
 	decisionAuditLogger *decisionAuditLogger
+	// auditWriterHandler is the async slog handler over auditWriter. The
+	// converted broker audit events (P4 slice 1) emit through a SlogSink
+	// over it (wireBrokerAuditEnvelopes). Set in New, never replaced.
+	auditWriterHandler slog.Handler
 
 	// cloudLoggingHealth reports the direct Cloud Logging path for the
 	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
@@ -2211,6 +2231,9 @@ type Server struct {
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map
+	// asyncStartGate caches whether every live hub instance advertises
+	// async_start_v1 (async_start_gate.go). The zero value reads false.
+	asyncStartGate asyncStartGate
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -2678,6 +2701,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 
+	// Initialize the attachment delivery capability key (ptone/scion#4596).
+	if err := srv.initAttachmentDeliveryKey(ctx); err != nil {
+		return nil, err
+	}
+
 	// Initialize the dedicated authorized-list cursor sealing key
 	// (ptone/scion#2124).
 	if err := srv.initListCursorSealer(ctx); err != nil {
@@ -2939,6 +2967,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditLogger, cfg.PerfTrace))
+	// Converted broker audit events (remaining-audit P4 slice 1) share the
+	// same async writer. They are always on: never gated on the decision
+	// experiment.
+	if err := srv.wireBrokerAuditEnvelopes(); err != nil {
+		return nil, err
+	}
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3789,6 +3823,7 @@ func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
 		hd.SetShutdownGate(s.dispatchShutdownGate)
+		hd.SetAttachmentIssuer(s.attachmentDelivery())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -7263,9 +7298,12 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
+
+	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
+	s.mux.HandleFunc("/api/v1/attachment-deliveries/", s.guarded("/api/v1/attachment-deliveries/", s.handleAttachmentDelivery))
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.guarded("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect))
@@ -7427,6 +7465,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// The audit operation context (remaining-audit P4-1) sits directly
+	// inside the request logger, which mints the request ID it adopts, and
+	// outside every auth middleware, so broker auth audit events carry it.
+	// See auditOperationMiddleware for the re-entry and no-ID rules.
+	h = auditOperationMiddleware(h)
 
 	// The request logger wraps UnifiedAuthMiddleware, so it is the request
 	// logger's own next.ServeHTTP call that invokes auth: every request is

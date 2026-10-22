@@ -46,7 +46,7 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat']);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.agent_edit']);
 
 /**
  * Snapshot of `window.__SCION_FEATURES__` taken the first time
@@ -161,8 +161,9 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 }
 
 /**
- * Edit agent page (ptone/scion#3952): the Edit button on the agent page and
- * the /agents/{id}/edit route. Default OFF.
+ * Edit agent page (ptone/scion#3952): the by-tier grouping of its fields
+ * and the tier summary strip. The page and its by-function view are always
+ * available. Default ON.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
 

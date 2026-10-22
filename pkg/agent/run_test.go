@@ -619,6 +619,7 @@ func TestStartReturnsRunningStatus(t *testing.T) {
 				{
 					ContainerID:     "abc123",
 					Name:            "test-agent",
+					ProjectID:       identityProjB,
 					ContainerStatus: "Up 2 hours",
 					Phase:           string(state.PhaseRunning),
 				},
@@ -630,6 +631,7 @@ func TestStartReturnsRunningStatus(t *testing.T) {
 
 	result, err := mgr.Start(context.Background(), api.StartOptions{
 		Name: "test-agent",
+		Env:  map[string]string{"SCION_PROJECT_ID": identityProjB},
 		// No Task — triggers the early return for already-running containers
 	})
 	if err != nil {

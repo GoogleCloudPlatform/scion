@@ -65,6 +65,13 @@ type RenderDeliveryInput struct {
 	// When non-empty, the envelope's "type" is "reply" and "reply_to"
 	// carries this value.
 	ReplyToID string
+
+	// Plan is this recipient's attachment plan (ptone/scion#4596): each
+	// deliverable entry's inbox path is listed in the envelope's
+	// attachments (or, for a plain message, as an "Attachment:" line), and
+	// each entry the recipient's runtime cannot receive gets a
+	// not-delivered line in the body. Withheld entries are not mentioned.
+	Plan []messages.AttachmentPlanEntry
 }
 
 // RenderDeliveryText is the single shared rendering entry point for all hub
@@ -87,7 +94,7 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 
 	// Transport flag: plain messages deliver body text only.
 	if in.Msg.Plain {
-		return AppendArtifactFetchHints(in.Msg.Msg, in.Msg.Metadata)
+		return appendPlanLines(AppendArtifactFetchHints(in.Msg.Msg, in.Msg.Metadata), in.Plan, true)
 	}
 
 	// Pass the real persisted identity into MapLegacyEnvelope so the
@@ -106,6 +113,12 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	// Artifact fetch hints (ptone/scion#3223) go in the delivered body only;
 	// in.Msg and the persisted row keep the body as sent.
 	msg.Body = AppendArtifactFetchHints(msg.Body, in.Msg.Metadata)
+	msg.Body = appendPlanLines(msg.Body, in.Plan, false)
+	for _, e := range in.Plan {
+		if e.State == messages.AttachmentDeliverable {
+			msg.Attachments = append(msg.Attachments, AttachmentRef{Path: e.InboxPath, Name: e.Name})
+		}
+	}
 
 	// Override timestamp if we have a real one from the persisted row.
 	if !in.CreatedAt.IsZero() {
@@ -227,4 +240,73 @@ func RenderDeliveryTextWithLookup(
 		DisplayName:    conv.DisplayName,
 	}
 	return RenderDeliveryText(in)
+}
+
+// appendPlanLines appends to body, after a blank line, one line per
+// attachment of plan the recipient's runtime cannot receive and, with
+// paths, one "Attachment: <path>" line per deliverable attachment (the
+// plain form, which has no envelope to list them in). Withheld entries are
+// not mentioned. body is returned unchanged when there is nothing to add.
+func appendPlanLines(body string, plan []messages.AttachmentPlanEntry, paths bool) string {
+	var lines []string
+	for _, e := range plan {
+		switch e.State {
+		case messages.AttachmentDeliverable:
+			if paths {
+				lines = append(lines, "Attachment: "+e.InboxPath)
+			}
+		case messages.AttachmentUndeliverableRuntime:
+			lines = append(lines, AttachmentNotDeliveredLine(e.Name, e.Delivery.Size,
+				"the recipient's runtime cannot receive attachments"))
+		}
+	}
+	if len(lines) == 0 {
+		return body
+	}
+	return body + "\n\n" + strings.Join(lines, "\n")
+}
+
+// Reasons a broker gives for an attachment that did not land in the
+// recipient's home (ptone/scion#4596): in the not-delivered line the agent
+// reads, and in the per-file outcomes the hub counts.
+const (
+	AttachmentReasonNotDownloaded = "could not be downloaded"
+	AttachmentReasonVerification  = "failed verification"
+	AttachmentReasonNotWritten    = "could not be written to your home"
+)
+
+// AttachmentNotDeliveredLine is the line a recipient reads for an
+// attachment that did not reach its home (ptone/scion#4596): what it is
+// (its name or inbox path, and size), why, and what to do. It names no
+// command and no id.
+func AttachmentNotDeliveredLine(what string, size int64, reason string) string {
+	return "Attachment not delivered: " + what + " (" + FormatAttachmentSize(size) + "): " + reason + ". Ask the sender to resend it."
+}
+
+// FormatAttachmentSize renders a file size for a delivery line.
+func FormatAttachmentSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
+	case n >= 1<<10:
+		return strconv.FormatFloat(float64(n)/(1<<10), 'f', 1, 64) + " KiB"
+	default:
+		return strconv.FormatInt(n, 10) + " bytes"
+	}
+}
+
+// ApplyAttachmentPlanLegacy applies plan to msg for the legacy envelope,
+// which the broker formats itself when the hub renders no delivery text:
+// deliverable inbox paths are appended to msg.Attachments and not-delivered
+// lines to msg.Msg. msg must be the per-recipient message being dispatched.
+func ApplyAttachmentPlanLegacy(msg *messages.StructuredMessage, plan []messages.AttachmentPlanEntry) {
+	if msg == nil {
+		return
+	}
+	for _, e := range plan {
+		if e.State == messages.AttachmentDeliverable {
+			msg.Attachments = append(msg.Attachments, e.InboxPath)
+		}
+	}
+	msg.Msg = appendPlanLines(msg.Msg, plan, false)
 }

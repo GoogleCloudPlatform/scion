@@ -145,7 +145,7 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L2", ContainerID: "c-run", RunID: "run-L2"})
+			mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L2", ContainerID: "c-run", RunID: "run-L2", ProjectID: "proj"})
 			srv, rtb := newAsyncTestServer(t, mgr)
 			srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 			srv.launchRecoveryTTL = 300 * time.Millisecond
@@ -198,7 +198,7 @@ func TestRecoverLaunches_LaunchingReportsBrokerRestarted(t *testing.T) {
 // TestRecoverLaunches_TerminalPendingSucceededResent is C-T3: a journalled
 // succeeded is resent unchanged and nothing is deleted.
 func TestRecoverLaunches_TerminalPendingSucceededResent(t *testing.T) {
-	mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L3", ContainerID: "c-run", RunID: "run-L3"})
+	mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L3", ContainerID: "c-run", RunID: "run-L3", ProjectID: "proj"})
 	srv, rtb := newAsyncTestServer(t, mgr)
 	rtb.launchReportFunc = appliedReports
 	jr := launchingRecord("L3")
@@ -231,8 +231,10 @@ func TestRecoverLaunches_TerminalPendingSucceededResent(t *testing.T) {
 func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 	entries := func(id string) []api.AgentInfo {
 		return []api.AgentInfo{
-			{Name: "agent-" + id, ContainerID: "c-legacy"},
-			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other"},
+			// Both carry the record's project ID, so only the exact-run
+			// filter keeps them from being deleted.
+			{Name: "agent-" + id, ContainerID: "c-legacy", ProjectID: "proj"},
+			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other", ProjectID: "proj"},
 		}
 	}
 	for _, rtName := range []string{"mock", "kubernetes"} {
@@ -250,7 +252,7 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 			}
 		})
 		t.Run(rtName+" exact run entry", func(t *testing.T) {
-			mgr := newRecFakeManager(append(entries("L5"), api.AgentInfo{Name: "agent-L5", ContainerID: "c-run", RunID: "run-L5"})...)
+			mgr := newRecFakeManager(append(entries("L5"), api.AgentInfo{Name: "agent-L5", ContainerID: "c-run", RunID: "run-L5", ProjectID: "proj"})...)
 			srv, rtb := newAsyncTestServer(t, newAsyncManager())
 			installRecoveryManager(srv, rtName, mgr)
 			rtb.launchReportFunc = appliedReports
@@ -319,7 +321,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 	})
 
 	t.Run("synchronous start of the name in flight", func(t *testing.T) {
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		_, finish := srv.startsInFlight.begin(context.Background(), key)
@@ -343,7 +345,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		cancelled := make(chan struct{})
@@ -384,7 +386,7 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		mgr.deleteBlock = make(chan struct{})
 		mgr.deleteStarted = make(chan struct{})
 		srv, rtb := newAsyncTestServer(t, mgr)
@@ -502,7 +504,7 @@ func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
 		t.Fatal("test setup: the two runtimes must differ in identity")
 	}
 	setup := func(t *testing.T) (*Server, *mockRuntimeBrokerService, *recFakeManager, *recFakeManager) {
-		entry := api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"}
+		entry := api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK", ProjectID: "proj"}
 		mgrA, mgrB := newRecFakeManager(entry), newRecFakeManager(entry)
 		srv, rtb := newAsyncTestServer(t, newAsyncManager())
 		srv.auxiliaryRuntimesMu.Lock()
@@ -533,7 +535,7 @@ func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
 	// cleaned up anywhere.
 	t.Run("profile resolves to another runtime", func(t *testing.T) {
 		srv, rtb, mgrA, mgrB := setup(t)
-		def := newRecFakeManager(api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"})
+		def := newRecFakeManager(api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK", ProjectID: "proj"})
 		installRecoveryManager(srv, "mock", def)
 		rtC := &runtime.KubernetesRuntime{DefaultNamespace: "ns-c"}
 		jr := launchingRecord("LK")
