@@ -478,6 +478,39 @@ func TestDoctorHubEndpoint_PlainEndpointKeepsErrorText(t *testing.T) {
 	assert.NotContains(t, text.String(), doctorHubErrorHidden)
 }
 
+func TestDoctorHubConnectivity_NoClientPathsHideSecrets(t *testing.T) {
+	// Without a Hub client, D1 builds its own /healthz request: it fails
+	// to build it ("Invalid Hub endpoint") or to send it ("Cannot reach
+	// Hub"). Neither may quote the endpoint. No request reaches the network.
+	orig := http.DefaultTransport
+	http.DefaultTransport = refusingTransport{}
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	tests := []struct {
+		name, ep, want string
+	}{
+		{"invalid, user info", "https://alice:pa55word@hub.example.com:80a/p?k=s3cr3t-tok#frag", "Invalid Hub endpoint: " + doctorHubErrorHidden},
+		{"invalid, query", "https://hub.example.com:80a/p?token=s3cr3t-tok#frag", "Invalid Hub endpoint: " + doctorHubErrorHidden},
+		{"unreachable, user info", "https://alice:pa55word@hub.example.com/p?k=s3cr3t-tok#frag", "Cannot reach Hub at " + doctorEndpointRedacted + ": " + doctorHubErrorHidden},
+		{"unreachable, query", "https://hub.example.com/p?token=s3cr3t-tok#frag", "Cannot reach Hub at https://hub.example.com/p: " + doctorHubErrorHidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var text bytes.Buffer
+			r := &doctorReport{stdout: &text}
+			r.platformHealthSection(r.hubChecks(tt.ep, nil, ""))
+			assert.Equal(t, tt.want, findCheck(t, r.HubChecks, "hub-connectivity").Message)
+			assertNoEndpointCredentials(t, text.String())
+
+			js, doc := runDoctorJSON(t, tt.ep, nil, "")
+			assertNoEndpointCredentials(t, string(js))
+			var hh doctorJSONSection
+			require.NoError(t, json.Unmarshal(doc["hubHealth"], &hh))
+			assert.Equal(t, tt.want, findCheck(t, hh.Checks, "hub-connectivity").Message)
+		})
+	}
+}
+
 func TestDoctorPlatformHealth_ErrorTextHiddenForQueryEndpoint(t *testing.T) {
 	srv := (&fakeDoctorHub{summaryStatus: http.StatusInternalServerError, summaryBody: `{"error":{"code":"internal","message":"boom s3cr3t-tok"}}`, brokersBody: `{"brokers":[]}`, agentsBody: `{"agents":[]}`}).serve(t)
 	ep := srv.URL + "?token=s3cr3t-tok"

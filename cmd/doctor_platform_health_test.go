@@ -81,6 +81,9 @@ func (f *fakeDoctorHub) serve(t *testing.T) *httptest.Server {
 
 func newDoctorTestClient(t *testing.T, url string) hubclient.Client {
 	t.Helper()
+	// hubclient.New probes for transport auth; keep it off the metadata
+	// server.
+	stubNotOnGCE(t)
 	c, err := hubclient.New(url, hubclient.WithBearerToken("test-user-token"))
 	require.NoError(t, err)
 	return c

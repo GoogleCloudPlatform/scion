@@ -1715,7 +1715,7 @@ them:
 | `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
 | `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
 | `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
-| `transport` | No Hub credential was found, and only the transport (proxy) credential configured in the environment, for example for IAP, is sent. |
+| `transport` | No Hub credential was found; only the transport (proxy) credential configured in the environment, for example for IAP, is attached, when its token can be obtained. If fetching that token fails at request time, the request is sent without it. |
 | `none` | No credential was found; requests are sent without one. |
 
 The text output shows the same source as the `hub-credential` line of Hub Health.

@@ -56,13 +56,16 @@ func (h *headerRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 // token) with its localhost exception, and the source reported for each
 // case. Reporting the source must not change which credential is sent.
 func TestHubClientAuthSource(t *testing.T) {
+	stubNotOnGCE(t)
 	const remote = "https://hub.example.test"
 	const local = "http://localhost:8080"
 
 	type setup struct {
 		storedLogin, tokenFile, envAuth, envHub, dev, agentID bool
-		// transport sets an IAP transport token in the environment.
-		transport bool
+		// transport sets a transport token in the environment, with
+		// SCION_TRANSPORT_MODE set to this value ("" means none; "default"
+		// leaves the mode unset, so the token goes in Authorization).
+		transport string
 	}
 	all := setup{storedLogin: true, tokenFile: true, envAuth: true, envHub: true, dev: true}
 	tests := []struct {
@@ -80,9 +83,14 @@ func TestHubClientAuthSource(t *testing.T) {
 		{"SCION_HUB_TOKEN next", remote, setup{envHub: true, dev: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
 		{"development token last", remote, setup{dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
 		{"no credential", remote, setup{}, hubAuthSourceNone, "", ""},
-		{"transport credential only", remote, setup{transport: true}, hubAuthSourceTransport, "", ""},
-		{"a development token wins over the transport credential", remote, setup{transport: true, dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
-		{"SCION_HUB_TOKEN with a transport credential", remote, setup{transport: true, envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
+		{"transport credential only (iap)", remote, setup{transport: "iap"}, hubAuthSourceTransport, "", ""},
+		{"a development token wins over the transport credential (iap)", remote, setup{transport: "iap", dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		{"SCION_HUB_TOKEN with a transport credential (iap)", remote, setup{transport: "iap", envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
+		// Default header mode: the transport token goes in Authorization
+		// unless a Hub credential is already there.
+		{"transport credential only (default mode)", remote, setup{transport: "default"}, hubAuthSourceTransport, "Bearer transport-tok", ""},
+		{"SCION_HUB_TOKEN with a transport credential (default mode)", remote, setup{transport: "default", envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
+		{"agent token file with a transport credential (default mode)", remote, setup{transport: "default", tokenFile: true}, hubAuthSourceAgentTokenFile, "Bearer transport-tok", "file-tok"},
 		{"localhost prefers the development token over the agent token file", local, setup{tokenFile: true, dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
 		{"localhost without a development token keeps the agent token file", local, setup{tokenFile: true}, hubAuthSourceAgentTokenFile, "", "file-tok"},
 		{"localhost hub-managed agent keeps the agent token file", local, setup{tokenFile: true, dev: true, agentID: true}, hubAuthSourceAgentTokenFile, "", "file-tok"},
@@ -121,10 +129,13 @@ func TestHubClientAuthSource(t *testing.T) {
 				t.Setenv("SCION_AGENT_ID", "agent-1")
 			}
 			wantProxy := ""
-			if tt.setup.transport {
+			switch tt.setup.transport {
+			case "iap":
 				t.Setenv(transportauth.EnvTransportMode, "iap")
 				t.Setenv(transportauth.EnvTransportToken, "transport-tok")
 				wantProxy = "Bearer transport-tok"
+			case "default":
+				t.Setenv(transportauth.EnvTransportToken, "transport-tok")
 			}
 
 			rec := &headerRecorder{}
@@ -177,6 +188,15 @@ func TestHubClientAuthSource(t *testing.T) {
 			assert.Equal(t, wantProxy, rec.proxy, "transport header (getHubClient)")
 		})
 	}
+}
+
+// stubNotOnGCE makes transport auth detection skip the GCE metadata probe,
+// so tests never reach the network or the metadata server.
+func stubNotOnGCE(t *testing.T) {
+	t.Helper()
+	orig := transportauth.IsOnGCEFunc
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	t.Cleanup(func() { transportauth.IsOnGCEFunc = orig })
 }
 
 func TestDoctorHubCredentialCheck_NamesOnlyTheSource(t *testing.T) {
