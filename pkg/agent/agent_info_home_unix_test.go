@@ -227,8 +227,8 @@ func TestReadSavedAgentInfo_LinkAndFIFOUnreadable(t *testing.T) {
 	if info != nil || st != SavedProfileUnreadable {
 		t.Fatalf("link: readSavedAgentInfo = %+v, %v; want nil, SavedProfileUnreadable", info, st)
 	}
-	if GetSavedProfile(f.agentName, f.projectDir) == outsideInfoMarker {
-		t.Fatal("GetSavedProfile returned the profile of the file outside the home")
+	if savedInfoProfile(f.agentName, f.projectDir) == outsideInfoMarker {
+		t.Fatal("savedInfoProfile returned the profile of the file outside the home")
 	}
 	f.requireLink(t)
 	f.checkConfined(t)

@@ -657,7 +657,7 @@ func TestStart_InlineValuesRecordedBrokerSide(t *testing.T) {
 // recorded broker-side. Rewriting agent-info.json's profile to another
 // configured profile whose override sets a different image changes nothing,
 // whether the restart passes no profile (local) or the saved profile read
-// from agent-info.json (as the broker's restart does via GetSavedProfile).
+// from agent-info.json.
 func TestStart_AgentInfoProfileDoesNotChangeProfileOverride(t *testing.T) {
 	const twoProfiles = `schema_version: "1"
 active_profile: staging
@@ -791,7 +791,7 @@ harness_configs:
 	}
 	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["profile"] = "reg" })
 
-	saved := GetSavedProfile("test-agent", projectScionDir)
+	saved := savedInfoProfile("test-agent", projectScionDir)
 	if saved != "reg" {
 		t.Fatalf("precondition: saved profile = %q, want reg", saved)
 	}

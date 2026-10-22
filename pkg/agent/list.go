@@ -108,6 +108,15 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			agentInfoJSON := filepath.Join(agentHome, "agent-info.json")
 			terminalPhase := terminalRuntimePhase(agents[i])
 
+			// Profile and harness config come from the broker-side agent
+			// dir (brokerRecordedSettings), never from agent-info.json in
+			// the agent home; the runtime comes from the runtime entry.
+			recordedProfile, recordedHarnessConfig := brokerRecordedSettings(agentDir)
+			agents[i].Profile = recordedProfile
+			if agents[i].HarnessConfig == "" {
+				agents[i].HarnessConfig = recordedHarnessConfig
+			}
+
 			// Try agent-info.json first for latest status from container
 			// (read confined to the agent home; a link there is refused).
 			var parsedInfo *api.AgentInfo
@@ -119,15 +128,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						agents[i].Phase = info.Phase
 						agents[i].Activity = info.Activity
 					}
-					if agents[i].Runtime == "" {
-						agents[i].Runtime = info.Runtime
-					}
-					agents[i].Profile = info.Profile
 					if agents[i].Template == "" {
 						agents[i].Template = info.Template
-					}
-					if agents[i].HarnessConfig == "" {
-						agents[i].HarnessConfig = info.HarnessConfig
 					}
 					if info.Detail != nil {
 						agents[i].Detail = info.Detail
@@ -335,6 +337,16 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					}
 				}
 
+				// Profile and harness config come from the broker-side agent
+				// dir, never from agent-info.json in the agent home, which
+				// records no runtime either for an agent without a runtime
+				// entry (brokerRecordedSettings). info is a copy, so the
+				// file's values are not used below.
+				recorded := *info
+				recorded.Profile, recorded.HarnessConfig = brokerRecordedSettings(agentDir)
+				recorded.Runtime = ""
+				info = &recorded
+
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
 					continue
 				}
@@ -400,6 +412,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	return agents, nil
+}
+
+// brokerRecordedSettings returns the settings profile recorded in agentDir's
+// image provenance and the harness-config recorded in its scion-agent config
+// (harnessConfigInAgentDir), each "" when there is none or it cannot be read. Both files are in the
+// broker-side agent dir, outside every container mount, so List reports
+// them rather than the copies in agent-info.json in the agent home. An agent
+// provisioned before image provenance was recorded reports no profile.
+func brokerRecordedSettings(agentDir string) (profile, harnessConfig string) {
+	if p, err := readImageProvenance(agentDir); err == nil && p != nil {
+		profile = p.Profile
+	}
+	return profile, harnessConfigInAgentDir(agentDir)
 }
 
 // createdAgentLabels approximates the label set a created agent's

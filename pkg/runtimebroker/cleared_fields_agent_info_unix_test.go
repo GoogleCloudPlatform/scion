@@ -36,6 +36,9 @@ func TestClearedFieldsInheritance_AgentInfoLinkAndFIFONotRead(t *testing.T) {
 	projectDir := filepath.Join(base, "proj", config.DotScion)
 	agentName := "cf-agent"
 	home := config.GetAgentHomePath(projectDir, agentName)
+	// No image provenance record in the agent dir: the agent-info.json
+	// template path is the one exercised.
+	agentDir := config.GetAgentDir(projectDir, agentName, false)
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +56,7 @@ func TestClearedFieldsInheritance_AgentInfoLinkAndFIFONotRead(t *testing.T) {
 	if err := os.WriteFile(infoPath, before, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentName); err == nil || !strings.Contains(err.Error(), "template cache") {
+	if _, err := s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentDir, agentName); err == nil || !strings.Contains(err.Error(), "template cache") {
 		t.Fatalf("control: err = %v, want the record's template hash used", err)
 	}
 
@@ -61,7 +64,7 @@ func TestClearedFieldsInheritance_AgentInfoLinkAndFIFONotRead(t *testing.T) {
 	if err := os.Symlink(outside, infoPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentName); err != nil && strings.Contains(err.Error(), "template cache") {
+	if _, err := s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentDir, agentName); err != nil && strings.Contains(err.Error(), "template cache") {
 		t.Fatalf("link: err = %v; the record outside the home was read", err)
 	}
 
@@ -71,7 +74,7 @@ func TestClearedFieldsInheritance_AgentInfoLinkAndFIFONotRead(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		_, _ = s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentName)
+		_, _ = s.clearedFieldsInheritance(context.Background(), filepath.Dir(projectDir), projectDir, agentDir, agentName)
 		close(done)
 	}()
 	select {

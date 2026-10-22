@@ -794,6 +794,13 @@ type StartExtras struct {
 	// state survived the stop is started from that state as before.
 	TemplateID   string
 	TemplateHash string
+	// Profile is the agent's settings profile as the hub records it
+	// (AppliedConfig.Profile), sent on every start and restart (wire key
+	// profile), even when empty, so the broker can tell "no profile" from
+	// an older hub that sends none. The broker uses its own provisioning
+	// record of the profile when it has one, and this value otherwise.
+	// Nil sends nothing.
+	Profile *string
 	// The fields below are set on a restart only (see the type comment).
 	ProjectPath       string
 	ProjectSlug       string
@@ -872,6 +879,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateHash != "" {
 		payload["templateHash"] = extras.TemplateHash
+	}
+	if extras.Profile != nil {
+		payload["profile"] = *extras.Profile
 	}
 	if extras.ProjectPath != "" {
 		payload["projectPath"] = extras.ProjectPath

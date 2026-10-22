@@ -1451,6 +1451,17 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	return info, nil
 }
 
+// dispatchProfile is the profile a start or restart sends: the agent's
+// recorded AppliedConfig.Profile, or "" when it has none. It is never nil,
+// so the broker always receives the hub's value.
+func dispatchProfile(agent *store.Agent) *string {
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return &profile
+}
+
 // applyBrokerResponse updates agent fields from the broker's response and
 // relays the broker's hub-only env warnings to the dispatch warnings
 // collector on ctx, if the caller attached one.
@@ -3720,6 +3731,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
@@ -3994,6 +4006,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ResolvedSecrets:      startEnv.secrets,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	if agent.AppliedConfig != nil {
 		extras.HarnessConfig = agent.AppliedConfig.HarnessConfig
 		extras.HarnessConfigID = agent.AppliedConfig.HarnessConfigID
