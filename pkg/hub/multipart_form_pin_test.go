@@ -178,12 +178,12 @@ func (p *multipartPin) scanFile(f *ast.File) {
 				p.report(x.Pos(), "parseMultipartUpload must be called in the handler's own body as \"cleanup, err := parseMultipartUpload(...)\" followed by \"defer cleanup()\"")
 			}
 		case *ast.SelectorExpr:
-			switch name := x.Sel.Name; {
-			case name == "ParseMultipartForm":
-				if !(fnName == "parseMultipartUpload" && enclosingFuncDeclIsPlain(stack)) && !parseMultipartFormExceptions[fileName(p, x)][fnName] {
+			switch name := x.Sel.Name; name {
+			case "ParseMultipartForm":
+				if (fnName != "parseMultipartUpload" || !enclosingFuncDeclIsPlain(stack)) && !parseMultipartFormExceptions[fileName(p, x)][fnName] {
 					p.report(x.Pos(), "ParseMultipartForm called directly in %s; use parseMultipartUpload", where)
 				}
-			case name == "uploadFormMemoryForTest":
+			case "uploadFormMemoryForTest":
 				if fnName != "uploadFormMaxMemory" {
 					p.report(x.Pos(), "uploadFormMemoryForTest is referenced outside uploadFormMaxMemory")
 				}
