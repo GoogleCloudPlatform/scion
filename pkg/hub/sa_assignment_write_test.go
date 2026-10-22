@@ -873,8 +873,8 @@ func TestSAParentCeiling_ReincarnateRequestRecordsRequester(t *testing.T) {
 
 // TestSAParentCeiling_MismatchedAssignmentWithholdsUntilReassigned pins the
 // evaluator when the active assignment names another account than the
-// agent's applied configuration: its token scope is withheld and the parent
-// ceiling denies until the account is assigned again. A failed
+// agent's applied configuration: its GCP scope is withheld from mints and
+// the parent ceiling denies until the account is assigned again. A failed
 // reincarnation restores the replaced assignment with the previous
 // configuration (restoreReincarnationAssignment), so this state remains
 // only when a later write superseded the replacement, or when no matching

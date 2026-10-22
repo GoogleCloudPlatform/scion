@@ -145,7 +145,7 @@ func (f *replacedAssignmentFixture) evalFor(saID string) ParentCeilingDecision {
 	return f.srv.authzService.EvaluateServiceAccountParentCeiling(context.Background(), f.agent.ID, saID)
 }
 
-// agentScopes returns the agent-token scopes a mint would issue.
+// agentScopes returns the scopes a mint for the agent would issue.
 func (f *replacedAssignmentFixture) agentScopes(t *testing.T) []AgentTokenScope {
 	t.Helper()
 	agent := mustGetAgent(t, f.s, f.agent.ID)
@@ -155,15 +155,15 @@ func (f *replacedAssignmentFixture) agentScopes(t *testing.T) []AgentTokenScope 
 }
 
 // assertPriorAssignmentAuthorizes checks that the applied account passes
-// the parent ceiling and is in the agent's token scopes, and next is
+// the parent ceiling and is in the agent's mint scopes, and next is
 // neither.
 func (f *replacedAssignmentFixture) assertPriorAssignmentAuthorizes(t *testing.T) {
 	t.Helper()
 	assertParentCeilingAllowed(t, f.evalFor(f.sa.ID))
 	assertParentCeilingDenied(t, f.evalFor(f.next.ID), DenyCauseCeilingProvenanceStale)
 	scopes := f.agentScopes(t)
-	assert.Contains(t, scopes, GCPTokenScopeForSA(f.sa.ID), "token scope for the applied account")
-	assert.NotContains(t, scopes, GCPTokenScopeForSA(f.next.ID), "no token scope for the replaced account")
+	assert.Contains(t, scopes, GCPTokenScopeForSA(f.sa.ID), "mint scope for the applied account")
+	assert.NotContains(t, scopes, GCPTokenScopeForSA(f.next.ID), "no mint scope for the replaced account")
 }
 
 // assertReplacedRowAuthorizesNothing checks that neither account passes the
