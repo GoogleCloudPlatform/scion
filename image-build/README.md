@@ -110,6 +110,8 @@ Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `la
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
 
+**Move `scion-base:latest` together with the harness tags.** Agents that use the `generic` harness run `scion-base:latest` itself (under your `image_registry`, if set): the built-in generic harness-config (`pkg/config/harness_config.go`) names no harness-specific image. If a deployment repoints only the harness `:latest` tags (`scion-claude:latest`, ...) after a rebuild, generic agents stay on the old base, and with it the old `sciontool`. Repoint `scion-base:latest` in the same step, or give a `generic` harness-config its own `image`.
+
 ### Build provenance and stale sciontool
 
 `scion-base` is where the `sciontool` binary is compiled; every harness image and `scion-hub` just `FROM` it without rebuilding Go code. That means **a fix that lands in `sciontool` (or `pkg/version`) does not reach a running agent until `scion-base` is rebuilt, and then the harness/hub images on top of it are rebuilt too.** A harness-only build (`--target harnesses`, `--target hub`, or an individual harness step) reuses whatever `scion-base:<tag>` already exists and will silently keep an old `sciontool` if you skip the base rebuild.
