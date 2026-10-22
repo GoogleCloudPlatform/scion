@@ -143,8 +143,8 @@ var entRunIDSetters = map[string]bool{
 // code that calls an ent run_id setter: the two agent run writes behind
 // the store's run methods, the delete engine's soft finish
 // (applyAgentDeletionFields, which writes the run only for a
-// DeletionFields.RunID that FinalizeAgentDeletion's soft mode alone
-// accepts, ptone/scion#5016), the agent credential insert and the
+// DeletionFields.SoftFinishRunID, which FinalizeAgentDeletion's soft mode
+// alone accepts, ptone/scion#5016), the agent credential insert and the
 // broker-reported run upsert (each its own run_id column).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_deletion_store.go applyAgentDeletionFields",

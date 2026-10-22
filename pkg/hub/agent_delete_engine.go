@@ -1010,9 +1010,9 @@ func retriedRunMismatchMessage(first, second *DeleteRunMismatchError) string {
 // one, and the run the row records joins the previous runs
 // (retryPreviousRunIDs), so deletePreviousRuns then deletes the recorded
 // run's files, which the broker keeps with the reported run's container
-// when its run-owner record names the recorded run. The context is the first dispatch's,
-// with the same fence and budget; a cross-node dispatch pins the runs
-// (DeleteDispatchArgs).
+// when its run-owner record names the recorded run. The context is the
+// first dispatch's, with the same fence and budget; a cross-node dispatch
+// pins the runs (DeleteDispatchArgs).
 //
 //   - nil: the engine finalizes. A soft finish records the reported run on
 //     the row (see finish).

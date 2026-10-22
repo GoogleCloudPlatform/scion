@@ -152,13 +152,16 @@ func (s *Server) finalizeInDoubtDelete(ctx context.Context, agentID string, args
 	if plan == nil {
 		return
 	}
-	if args.RunID != "" && args.RunID != plan.snapshot.RunID {
-		// The intent deleted another run than the row records, as the
-		// engine's delete of the run the broker reported holding does
-		// (retryReportedRunDelete, ptone/scion#5016). The soft finish
-		// records the runs the intent named, as the engine that wrote it
-		// would have, so the retained-files purge names the run that was
-		// deleted first.
+	if row := plan.snapshot.RunID; args.RunID != "" && args.RunID != row && slices.Contains(args.PreviousRunIDs, row) {
+		// The intent deleted another run than the row records and lists
+		// the recorded run among its previous runs: the engine's delete
+		// of the run the broker reported holding (retryReportedRunDelete,
+		// ptone/scion#5016, whose previous runs always end with the
+		// recorded run; no other intent lists its row's run there). The
+		// soft finish records the runs the intent named, as the engine
+		// that wrote it would have, so the retained-files purge names the
+		// run that was deleted first. Any other run difference (the row's
+		// run moved while it read failed/in_doubt) keeps the row's runs.
 		plan.retriedRun = &retriedRunIDs{runID: args.RunID, previous: slices.Clone(args.PreviousRunIDs)}
 		s.agentLifecycleLog.Info("in_doubt delete: the intent deleted the run the broker held",
 			"agent_id", agentID, "claim", plan.claim, "hub_run_id", plan.snapshot.RunID, "broker_run_id", args.RunID)
