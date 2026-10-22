@@ -180,7 +180,7 @@ jobs:
           : >"$samples"
           (
             # On TERM, stop the pending sleep too, so no sleep outlives the step.
-            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
             while :; do
               mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
               ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)

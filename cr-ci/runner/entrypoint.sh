@@ -489,10 +489,12 @@ watch_runner_output() {
   printf 'done\n' >&"$done_fd"
 }
 
+# Last checkpoint before anything is started: an early signal must not leave the
+# watcher behind, blocked on the FIFO.
+exit_if_signalled
 watch_runner_output &
 watcher_pid=$!
 
-exit_if_signalled
 log "starting run.sh (ephemeral JIT runner)"
 set -m
 # {done_fd}>&-: the watcher's done FIFO is not passed on to run.sh or the job steps.
