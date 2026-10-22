@@ -425,6 +425,9 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// final increment entirely. This also runs ahead of every early-return
 	// branch further down in Stop, so a slow or incomplete pipeline shutdown
 	// never skips it.
+	// Stop periodic health snapshots first, so none observes the deriver
+	// between its release and captureFinalUsage below.
+	p.stopHealthLoop()
 	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
 		deriverCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
 		if err := deriver.Shutdown(deriverCtx); err != nil {
@@ -433,7 +436,6 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		cancel()
 		p.captureFinalUsage(deriver)
 	}
-	p.stopHealthLoop()
 
 	var errs []error
 	intakeDone := p.closeIntake()
