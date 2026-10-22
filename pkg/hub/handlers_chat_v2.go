@@ -3917,16 +3917,17 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
 		return
 	}
-	// Promotion moves the DM's messages into a new thread of the project,
-	// so the caller's account must be able to post there (chatMayPost).
-	if decision := s.chatMayPost(ctx, user, project); !decision.Allowed {
-		logAuthzDenial(r, user, projectResource(project), chatPostAction, decision.Reason)
-		chatSendPostDenied().write(w)
-		return
-	}
 	// A token also needs inbox:write under the DM rule: the agent's project
 	// inside its boundary and agent:read on the agent.
 	if !s.authorizeChatTokenConversation(w, r, token, permInboxWrite, key, "", chatRefuseForbidden) {
+		return
+	}
+	// Promotion moves the DM's messages into a new thread of the project,
+	// so the caller's account must be able to post there (chatMayPost).
+	// Checked after the token's own checks, so a token refusal comes first.
+	if decision := s.chatMayPost(ctx, user, project); !decision.Allowed {
+		logAuthzDenial(r, user, projectResource(project), chatPostAction, decision.Reason)
+		chatSendPostDenied().write(w)
 		return
 	}
 

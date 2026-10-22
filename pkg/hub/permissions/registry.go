@@ -233,6 +233,11 @@ var Registry = []Permission{
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Reserved: "no route checks project.register; project register checks project.create"},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (project owner/admin, hub admin)", Enforcement: []string{"pkg/hub/handlers_project_visitors.go"}},
+	// project.chat_post covers chat thread sends, scheduled sends and DM
+	// promotion (ptone/scion#5518). It does not yet gate thread creation,
+	// thread rename and delete, attachment upload to a project, message
+	// edit, or thread posts sent through the agent message endpoint's
+	// thread key; these are tracked in ptone/scion#5519.
 	{ID: "project.chat_post", Resource: ResourceProject, Action: "chat_post", CapabilityKind: CapabilityResource, Description: "Post messages into the project's chat threads (project owner/admin/member, hub admin). Checked on the account; a user access token also needs inbox:write", Enforcement: []string{"pkg/hub/handlers_chat_send.go:func (s *Server) chatMayPost"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},

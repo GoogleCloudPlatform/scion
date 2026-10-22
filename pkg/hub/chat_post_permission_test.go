@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -135,6 +136,109 @@ func TestChatPromote_RequiresChatPost(t *testing.T) {
 	rec := f.session(t, reader, http.MethodPost, chatConversationPath(dm, "promote"), map[string]string{"name": "promoted"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeChatPostDenied, errorCode(t, rec))
+
+	// A token's own refusal comes before the post check: the reader's
+	// token with inbox:write but without agent:read fails the DM rule, and
+	// is not told about project.chat_post.
+	readerToken := f.mint(t, reader, projectBoundary(f.projA), "project:read", "inbox:write")
+	rec = f.call(t, readerToken, http.MethodPost, chatConversationPath(dm, "promote"), map[string]string{"name": "promoted"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotEqual(t, ErrCodeChatPostDenied, errorCode(t, rec), "the token refusal comes first")
+
+	// The built-in project-member role promotes its own agent DM. Its
+	// message is already dispatched, so no reply is in flight (a pending
+	// one would be refused with 409 IN_FLIGHT_MESSAGES).
+	memberDM := f.dm(t, f.member, "agent", f.agentA.ID)
+	require.NoError(t, f.s.CreateMessage(context.Background(), &store.Message{
+		ID: uuid.NewString(), ProjectID: f.projA, Sender: "user:" + f.member, SenderID: f.member, Recipient: "chat",
+		Msg: "promote me too", Type: "chat", Channel: "web", ThreadID: memberDM, CreatedAt: time.Now().UTC().Add(-time.Minute),
+		DispatchState: store.MessageDispatchDispatched,
+	}))
+	rec = f.session(t, f.member, http.MethodPost, chatConversationPath(memberDM, "promote"), map[string]string{"name": "member promoted"})
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// makeChatReader turns user, an ordinary project member of the fixture,
+// into a reader: it leaves the project's members group, loses its role
+// bindings (the project-member binding addProjectMemberWithRole created)
+// and gets a custom project role holding only project.read and
+// project.list, so it still reads the topic but holds no project.chat_post.
+func (f *scheduledSendFixture) makeChatReader(t *testing.T, user *store.User) {
+	t.Helper()
+	ctx := context.Background()
+	membersGroup, err := f.store.GetGroupBySlug(ctx, "project:"+f.project.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, f.store.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, user.ID))
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	rd, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "sched-reader-" + uuid.NewString()[:8], ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.list"},
+	})
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
+// TestScheduledSend_RequiresChatPost: scheduling a message into a thread,
+// and asking again for a missed one (send-now), need project.chat_post as
+// a live send does. A reader gets 403 chat_post_denied and nothing
+// changes; it still lists its own rows (read access is enough).
+func TestScheduledSend_RequiresChatPost(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	now := time.Now().UTC()
+	missed := f.insertScheduled(t, f.bob, "cp-missed", now.Add(-2*time.Hour))
+	failRow(t, f.sms, missed.ID, ScheduledFailureMissed, now)
+	f.insertScheduled(t, f.bob, "cp-pending", now.Add(time.Hour))
+	f.makeChatReader(t, f.bob)
+
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.scheduledPath(), map[string]interface{}{
+		"content":         "reader schedules",
+		"fire_at":         now.Add(time.Hour).Format(time.RFC3339),
+		"idempotency_key": "idem-reader-schedules",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeChatPostDenied, errorCode(t, rec))
+
+	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.rowPath(missed.ID, "/send-now"), nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeChatPostDenied, errorCode(t, rec))
+	row := f.row(t, f.bob, missed.ID)
+	assert.Equal(t, ScheduledMessageFailed, row.Status, "send-now refused: the row is unchanged")
+	assert.Equal(t, ScheduledFailureMissed, row.FailureReason)
+
+	// The list answers 200 with the reader's own two rows, and no row was added.
+	assert.Len(t, f.list(t, f.bob), 2)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Empty(t, f.dispatcher.getMessages())
+}
+
+// TestScheduledSend_SenderLosesChatPost_FailsNoAccess: a message a member
+// scheduled fails as no_access at fire time when the sender has become a
+// reader meanwhile. The sender still reads the thread, so this is the
+// post check, not the read check.
+func TestScheduledSend_SenderLosesChatPost_FailsNoAccess(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	ctx := context.Background()
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "after losing chat_post", fireAt)
+
+	f.makeChatReader(t, f.bob)
+	require.Len(t, f.list(t, f.bob), 1, "the sender still reads the thread")
+
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
+	row := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessageFailed, row.Status)
+	assert.Equal(t, ScheduledFailureNoAccess, row.FailureReason)
+	assert.Empty(t, f.topicMessages(t), "nothing posted")
+	assert.Empty(t, f.dispatcher.getMessages())
 }
 
 // TestBuiltInRoles_ChatPost pins who holds project.chat_post among the
