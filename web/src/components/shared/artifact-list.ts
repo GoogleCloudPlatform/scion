@@ -19,7 +19,9 @@
  * the project, and those other projects shared with it, that the caller can
  * read, newest first, with search, a "Shared with this project" filter,
  * paging and a New artifact button. A shared row is badged and names the
- * project it comes from. A row opens the artifact's page.
+ * project it comes from; a row whose owner was deleted has the Owner
+ * deleted badge and its owner struck through. A row opens the artifact's
+ * page.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -31,6 +33,7 @@ import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
 import { principalLabel, principalName, projectName } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
 import './artifact-publish-dialog.js';
 
 /** Delay before a search runs, so typing does not send a request per key. */
@@ -62,134 +65,137 @@ export class ScionArtifactList extends LitElement {
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
-    .toolbar {
-      display: flex;
-      gap: 0.75rem;
-      align-items: center;
-      margin-bottom: 0.75rem;
-    }
-    .toolbar sl-input {
-      flex: 1;
-      max-width: 22rem;
-    }
-    .toolbar .spacer {
-      flex: 1;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.875rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-    th {
-      text-align: left;
-      font-weight: 600;
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      color: var(--sl-color-neutral-600);
-      padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-    td {
-      padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      vertical-align: middle;
-    }
-    tbody tr {
-      cursor: pointer;
-    }
-    tbody tr:hover {
-      background: var(--scion-bg-subtle, #f8fafc);
-    }
-    .title {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      color: inherit;
-      text-decoration: none;
-      font-weight: 500;
-    }
-    .key {
-      display: block;
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-      color: var(--sl-color-neutral-500);
-      margin-left: 1.4rem;
-    }
-    .muted {
-      color: var(--sl-color-neutral-600);
-    }
-    sl-badge.shared {
-      margin-left: 0.375rem;
-    }
-    sl-badge.shared sl-icon {
-      vertical-align: -0.125em;
-    }
-    .from {
-      margin-left: 0.25rem;
-      font-size: 0.75rem;
-      color: var(--sl-color-neutral-500);
-    }
-    .more {
-      text-align: center;
-      margin-top: 0.75rem;
-    }
-    .empty {
-      text-align: center;
-      padding: 2.5rem 1rem;
-      color: var(--sl-color-neutral-600);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      background: var(--scion-surface, #ffffff);
-    }
-    .empty > sl-icon {
-      font-size: 2.5rem;
-      color: var(--sl-color-neutral-400);
-    }
-    .empty h3 {
-      margin: 0.5rem 0 0.25rem;
-      color: var(--scion-text, #1e293b);
-    }
-    .empty p {
-      margin: 0 0 1rem;
-    }
-    .help {
-      margin-top: 0.75rem;
-      font-size: 0.8125rem;
-    }
-    .help-panel {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      box-shadow: var(--sl-shadow-large);
-      padding: 0.75rem 1rem;
-      max-width: 26rem;
-      text-align: left;
-      font-size: 0.8125rem;
-    }
-    .help-panel pre {
-      margin: 0.4rem 0 0;
-      white-space: pre-wrap;
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-      background: var(--scion-bg-subtle, #f8fafc);
-      padding: 0.5rem;
-      border-radius: 0.25rem;
-    }
-    .error-state,
-    .loading-state {
-      text-align: center;
-      padding: 2rem;
-      color: var(--sl-color-neutral-500);
-    }
-  `;
+  static override styles = [
+    ownerDeletedStyles,
+    css`
+      :host {
+        display: block;
+      }
+      .toolbar {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        margin-bottom: 0.75rem;
+      }
+      .toolbar sl-input {
+        flex: 1;
+        max-width: 22rem;
+      }
+      .toolbar .spacer {
+        flex: 1;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+      }
+      th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--sl-color-neutral-600);
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+      td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        vertical-align: middle;
+      }
+      tbody tr {
+        cursor: pointer;
+      }
+      tbody tr:hover {
+        background: var(--scion-bg-subtle, #f8fafc);
+      }
+      .title {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: inherit;
+        text-decoration: none;
+        font-weight: 500;
+      }
+      .key {
+        display: block;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        color: var(--sl-color-neutral-500);
+        margin-left: 1.4rem;
+      }
+      .muted {
+        color: var(--sl-color-neutral-600);
+      }
+      sl-badge.shared {
+        margin-left: 0.375rem;
+      }
+      sl-badge.shared sl-icon {
+        vertical-align: -0.125em;
+      }
+      .from {
+        margin-left: 0.25rem;
+        font-size: 0.75rem;
+        color: var(--sl-color-neutral-500);
+      }
+      .more {
+        text-align: center;
+        margin-top: 0.75rem;
+      }
+      .empty {
+        text-align: center;
+        padding: 2.5rem 1rem;
+        color: var(--sl-color-neutral-600);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        background: var(--scion-surface, #ffffff);
+      }
+      .empty > sl-icon {
+        font-size: 2.5rem;
+        color: var(--sl-color-neutral-400);
+      }
+      .empty h3 {
+        margin: 0.5rem 0 0.25rem;
+        color: var(--scion-text, #1e293b);
+      }
+      .empty p {
+        margin: 0 0 1rem;
+      }
+      .help {
+        margin-top: 0.75rem;
+        font-size: 0.8125rem;
+      }
+      .help-panel {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        box-shadow: var(--sl-shadow-large);
+        padding: 0.75rem 1rem;
+        max-width: 26rem;
+        text-align: left;
+        font-size: 0.8125rem;
+      }
+      .help-panel pre {
+        margin: 0.4rem 0 0;
+        white-space: pre-wrap;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        padding: 0.5rem;
+        border-radius: 0.25rem;
+      }
+      .error-state,
+      .loading-state {
+        text-align: center;
+        padding: 2rem;
+        color: var(--sl-color-neutral-500);
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -363,7 +369,7 @@ export class ScionArtifactList extends LitElement {
             <th>Owner</th>
             <th>Version</th>
             <th>Updated</th>
-            <th>Review</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
@@ -397,10 +403,15 @@ export class ScionArtifactList extends LitElement {
                     : nothing}
                   ${item.key ? html`<span class="key">${item.key}</span>` : nothing}
                 </td>
-                <td>${this.owner(item)}</td>
+                <td>
+                  ${item.ownerDeleted
+                    ? html`<span class="owner-gone">${this.owner(item)}</span>`
+                    : this.owner(item)}
+                </td>
                 <td>v${item.currentSeq}</td>
                 <td class="muted">${formatInstant(item.updatedAt)}</td>
                 <td>
+                  ${item.ownerDeleted ? ownerDeletedBadge(item.ownerKind) : nothing}
                   ${item.reviewPending
                     ? html`<sl-badge pill variant="warning">Review pending</sl-badge>`
                     : nothing}

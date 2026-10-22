@@ -188,6 +188,47 @@ describe('artifacts list page', () => {
     expect(m.urls.filter((u) => u === '/api/v1/projects/proj-1')).toHaveLength(1);
   });
 
+  it('S1: marks rows whose owner was deleted, with the owner struck through', async () => {
+    const goneAgent = '9d0e1f2a-3b4c-4d5e-8f6a-7b8c9d0e1f2a';
+    mockFetch(
+      {
+        '': {
+          artifacts: [
+            item(1, { ownerRef: goneAgent, ownerDeleted: true }),
+            item(2, { ownerRef: 'agent-named', ownerDeleted: true, reviewPending: true }),
+            item(3),
+          ],
+        },
+      },
+      { '/api/v1/agents/agent-named': 'summary-agent' }
+    );
+    const el = await mount(true);
+    const [r1, r2, r3] = rows(el);
+    const cells = (r: HTMLTableRowElement): HTMLTableCellElement[] => Array.from(r.cells);
+    // Status column: the badge, beside Review pending.
+    expect(cells(r1!)[5]!.querySelector('sl-badge.owner-deleted')!.textContent).toContain(
+      'Owner deleted'
+    );
+    expect(cells(r1!)[5]!.textContent).not.toContain('—');
+    expect(cells(r2!)[5]!.textContent).toContain('Owner deleted');
+    expect(cells(r2!)[5]!.textContent).toContain('Review pending');
+    // A name that can no longer be looked up falls back to the short id.
+    expect(cells(r1!)[2]!.querySelector('.owner-gone')!.textContent).toBe('9d0e1f2a…');
+    expect(cells(r2!)[2]!.querySelector('.owner-gone')!.textContent).toBe('summary-agent');
+    expect(cells(r3!)[2]!.querySelector('.owner-gone')).toBeNull();
+    expect(cells(r3!)[5]!.querySelector('sl-badge.owner-deleted')).toBeNull();
+    expect(cells(r3!)[5]!.textContent).toContain('—');
+  });
+
+  it('offers no Owner deleted status filter (deferred until the list API can filter)', async () => {
+    mockFetch({ '': { artifacts: [item(1, { ownerDeleted: true })] } });
+    const el = await mount(true);
+    const options = Array.from(el.shadowRoot!.querySelectorAll('sl-option')).map((o) =>
+      o.textContent!.trim()
+    );
+    expect(options).not.toContain('Owner deleted');
+  });
+
   it('shows ids when a name lookup is not allowed', async () => {
     mockFetch({ '': { artifacts: [item(1, { ownerKind: 'user', ownerRef: 'user-other' })] } });
     const el = await mount(true);
