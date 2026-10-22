@@ -1281,7 +1281,10 @@ func TestEntrypointForwardsSignals(t *testing.T) {
 			if code != tc.code {
 				t.Errorf("exit code = %d, want run.sh's %d; stderr:\n%s", code, tc.code, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "received SIG"+tc.name+"; forwarding it to run.sh") {
+			// Normally logged on receipt; in the narrow window before runner_pid is set,
+			// logged when the recorded signal is forwarded right after the start.
+			if !strings.Contains(stderr.String(), "received SIG"+tc.name+"; forwarding it to run.sh") &&
+				!strings.Contains(stderr.String(), "forwarding SIG"+tc.name+", which arrived while run.sh was starting") {
 				t.Errorf("stderr does not log the forwarded signal:\n%s", stderr.String())
 			}
 			for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit, "ID token": h.idToken} {
@@ -1410,6 +1413,10 @@ func TestEntrypointSignalDuringClaim(t *testing.T) {
 	}
 	if n := len(cs.recorded()); n > 2 {
 		t.Errorf("%d claim attempts after the signal, want the retries to stop", n)
+	}
+	// The FIFO directory created before the claim is removed on that exit too.
+	if left, _ := filepath.Glob(filepath.Join(h.home, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the signalled exit: %v", left)
 	}
 }
 

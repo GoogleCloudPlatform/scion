@@ -105,6 +105,7 @@ trap 'on_signal INT' INT
 # exit_if_signalled: a checkpoint before run.sh starts.
 exit_if_signalled() {
   if [[ -n $pending_signal ]]; then
+    [[ -n ${fifo_dir:-} ]] && rm -rf -- "$fifo_dir"
     exit $((128 + $(kill -l "$pending_signal")))
   fi
 }
