@@ -568,6 +568,9 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// Catch-up of deferred messages (ptone/scion#4596, D15).
+	s.noteDeferredAttachments(ctx, result.Items)
+
 	writeJSON(w, http.StatusOK, result)
 }
 

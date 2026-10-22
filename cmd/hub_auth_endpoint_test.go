@@ -233,6 +233,7 @@ func TestHubSettingsFilesUnchangedByResolution(t *testing.T) {
 	home := setupContextTest(t)
 	enableGlobalHubImport(t)
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global.example.com\n")
+	listTestHub(t, "project", "https://project.example.com")
 	dotScion := makeLinkedDirProject(t, "https://project.example.com")
 	globalFile := filepath.Join(home, ".scion", "settings.yaml")
 	projectFile := filepath.Join(dotScion, "settings.yaml")
