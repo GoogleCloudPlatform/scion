@@ -214,6 +214,32 @@ describe('the two groupings partition the field table', () => {
   });
 });
 
+describe('every field shows a mutability indicator in every phase', () => {
+  for (const phase of EDIT_PHASES) {
+    it(`${phase}: each rendered field has a non-empty status`, async () => {
+      const el = await mount(phase);
+      const fields = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.field[data-key]')
+      ).filter(
+        // The service-account picker is part of the GCP identity field.
+        (f) => f.dataset.key !== 'gcp_identity.service_account'
+      );
+      expect(fields.map((f) => f.dataset.key).sort()).toEqual(el.fields.map((f) => f.key).sort());
+      const missing = fields
+        .filter((f) => !(f.querySelector('.status')?.textContent ?? '').trim())
+        .map((f) => f.dataset.key);
+      expect(missing).toEqual([]);
+    });
+  }
+
+  it("a created agent's GCP identity says when it applies", async () => {
+    const el = await mount('created');
+    expect(field(el, 'gcp_identity').querySelector('.status')!.textContent).toContain(
+      'Applies at first start'
+    );
+  });
+});
+
 describe('held and reincarnate-only edits stay disabled (one switch)', () => {
   it('only now and immediate can be saved', () => {
     expect([...mod.SAVEABLE_DISPOSITIONS].sort()).toEqual(['immediate', 'now']);

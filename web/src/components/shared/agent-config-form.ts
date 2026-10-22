@@ -1997,9 +1997,7 @@ export class ScionAgentConfigForm extends LitElement {
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">${g.hint}</div>
-        ${this.mode === 'edit' && !this.fieldSaveable(f)
-          ? this.renderStatus(f, st, undefined)
-          : nothing}
+        ${this.mode === 'edit' ? this.renderStatus(f, st, undefined) : nothing}
       </div>
       ${g.gcpMetadataMode === 'assign' && !g.noIdentityModeChosen
         ? html`
