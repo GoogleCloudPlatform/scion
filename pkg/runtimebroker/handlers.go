@@ -3711,7 +3711,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	// MergeScionConfig itself stays non-zero-wins: provisioning and
 	// template layering depend on it. The list is never written to disk.
 	if inlineConfig != nil {
-		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
+		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentDir, agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
 
