@@ -3836,6 +3836,12 @@ type AgentServiceAccountAssignmentStore interface {
 	// ValidAssignmentDeactivationCause and d.OpID must be set.
 	DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d Deactivation) (int, error)
 
+	// DeactivateAgentServiceAccountAssignment deactivates the agent's row
+	// rowID when it is active and records d. It returns 0 when that row is
+	// not the agent's or is inactive. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	DeactivateAgentServiceAccountAssignment(ctx context.Context, agentID, rowID string, d Deactivation) (int, error)
+
 	// ReactivateAgentServiceAccountAssignments reactivates exactly the
 	// agent's rows deactivated with cause under opID and clears their
 	// deactivation record. A conflict with an active row surfaces as

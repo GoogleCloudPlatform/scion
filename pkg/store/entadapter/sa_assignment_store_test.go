@@ -369,3 +369,47 @@ func TestAgentSAAssignmentStore_RemarkSelectsOnlyMatchingInactiveRows(t *testing
 		to)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
+
+func TestAgentSAAssignmentStore_DeactivateByRowID(t *testing.T) {
+	ctx := context.Background()
+	s := NewSAAssignmentStore(enttest.NewClient(t))
+	first := saAssignmentFixture("agent-a", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, first))
+	second := saAssignmentFixture("agent-a", "sa-2")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, second))
+	other := saAssignmentFixture("agent-b", "sa-1")
+	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(ctx, other))
+	d := store.Deactivation{Cause: store.EdgeDeactivationReincarnateFailed, OpID: "op-rec"}
+
+	// An inactive row, another agent's row and an unknown row are not
+	// selected.
+	for _, tc := range []struct{ agentID, rowID string }{
+		{"agent-a", first.ID},
+		{"agent-a", other.ID},
+		{"agent-a", "6f1c1d0e-8a54-4d8c-9a2e-0c3c5e1b2a02"},
+	} {
+		n, err := s.DeactivateAgentServiceAccountAssignment(ctx, tc.agentID, tc.rowID, d)
+		require.NoError(t, err)
+		assert.Equal(t, 0, n, "row %s", tc.rowID)
+	}
+	active, err := s.GetActiveAgentServiceAccountAssignments(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+	assert.Equal(t, second.ID, active[0].ID)
+
+	n, err := s.DeactivateAgentServiceAccountAssignment(ctx, "agent-a", second.ID, d)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	got := allSAAssignmentsFor(t, s, "agent-a")[second.ID]
+	assert.False(t, got.Active)
+	assert.Equal(t, store.EdgeDeactivationReincarnateFailed, got.Cause)
+	assert.Equal(t, "op-rec", got.OpID)
+	b, err := s.GetActiveAgentServiceAccountAssignments(ctx, "agent-b")
+	require.NoError(t, err)
+	assert.Len(t, b, 1, "another agent's row is untouched")
+
+	_, err = s.DeactivateAgentServiceAccountAssignment(ctx, "agent-a", "not-a-uuid", d)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = s.DeactivateAgentServiceAccountAssignment(ctx, "agent-b", other.ID, store.Deactivation{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: "x"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}

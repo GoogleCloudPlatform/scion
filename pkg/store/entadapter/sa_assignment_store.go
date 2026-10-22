@@ -104,6 +104,14 @@ func validateAssignmentDeactivation(cause store.EdgeDeactivationCause, opID stri
 
 // deactivateActive deactivates the agent's active rows and records d.
 func (s *SAAssignmentStore) deactivateActive(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
+	return s.deactivateWhere(ctx, d,
+		agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
+		agentserviceaccountassignment.ActiveEQ(true),
+	)
+}
+
+// deactivateWhere deactivates the rows matching where and records d.
+func (s *SAAssignmentStore) deactivateWhere(ctx context.Context, d store.Deactivation, where ...predicate.AgentServiceAccountAssignment) (int, error) {
 	if err := validateAssignmentDeactivation(d.Cause, d.OpID); err != nil {
 		return 0, err
 	}
@@ -113,10 +121,7 @@ func (s *SAAssignmentStore) deactivateActive(ctx context.Context, agentID string
 		at = *d.At
 	}
 	n, err := s.client.AgentServiceAccountAssignment.Update().
-		Where(
-			agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
-			agentserviceaccountassignment.ActiveEQ(true),
-		).
+		Where(where...).
 		SetActive(false).
 		SetDeactivationCause(string(d.Cause)).
 		SetDeactivatedAt(at).
@@ -234,6 +239,20 @@ func (s *SAAssignmentStore) GetActiveAgentServiceAccountAssignments(ctx context.
 // the agent and records d on each.
 func (s *SAAssignmentStore) DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
 	return s.deactivateActive(ctx, agentID, d)
+}
+
+// DeactivateAgentServiceAccountAssignment deactivates the agent's row rowID
+// when it is active and records d.
+func (s *SAAssignmentStore) DeactivateAgentServiceAccountAssignment(ctx context.Context, agentID, rowID string, d store.Deactivation) (int, error) {
+	uid, err := parseUUID(rowID)
+	if err != nil {
+		return 0, err
+	}
+	return s.deactivateWhere(ctx, d,
+		agentserviceaccountassignment.IDEQ(uid),
+		agentserviceaccountassignment.AgentIDEQ(canonicalPrincipalID(agentID)),
+		agentserviceaccountassignment.ActiveEQ(true),
+	)
 }
 
 // deactivatedAssignmentsOf selects the agent's inactive rows deactivated with
