@@ -205,7 +205,7 @@ func TestCreateAgentRejectsWorkspaceDirOutsideRootViaSymlink(t *testing.T) {
 	// stage (storage bucket not configured, GCS sync failure, and so on)
 	// would also leave it untouched, so status code alone does not prove
 	// the validation gate is what stopped this request before MkdirAll or
-	// SyncFromGCS ran.
+	// SyncWorkspaceFromGCS ran.
 	entries, err := os.ReadDir(outsideTarget)
 	if err != nil {
 		t.Fatalf("ReadDir(outsideTarget): %v", err)

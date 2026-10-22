@@ -2098,6 +2098,18 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, attemptMsg, httpMessage, err
 	}
 
+	// The download carries a repository's history but never its
+	// configuration: give a first-time checkout a minimal one, with the
+	// shared workspace's clone URL as origin.
+	var cloneURL string
+	if req.Config != nil && req.Config.SharedWorkspace && req.Config.SharedWorkspaceClone != nil {
+		cloneURL = req.Config.SharedWorkspaceClone.URL
+	}
+	if wrote, cfgErr := ensureMinimalGitConfig(workspaceDir, cloneURL); cfgErr != nil {
+		s.agentLifecycleLog.Warn("Workspace repository configuration incomplete",
+			"agent_id", req.ID, "project_id", req.ProjectID, "wrote", wrote, "error", cfgErr)
+	}
+
 	if req.ProjectSlug != "" {
 		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write broker workspace record",

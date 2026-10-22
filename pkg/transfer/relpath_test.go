@@ -16,6 +16,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -314,5 +315,42 @@ func TestClient_DownloadFiles_WritesOnlyInsideDestThroughSymlinkedFile(t *testin
 	entries, err := os.ReadDir(sibling)
 	if err != nil || len(entries) != 1 {
 		t.Errorf("sibling directory should hold only the original file, has %d entries (%v)", len(entries), err)
+	}
+}
+
+// TestClient_DownloadFiles_RefusesNonContent checks that a download list
+// naming repository metadata or project configuration (git data included)
+// is refused before anything is written.
+func TestClient_DownloadFiles_RefusesNonContent(t *testing.T) {
+	server := newContentServer(t)
+	client := NewClient(server.Client())
+	for _, entry := range []string{
+		".git/hooks/pre-commit",
+		".git/config",
+		".git/refs/heads/main",
+		".git/objects/ab/cdef",
+		".git",
+		"sub/.git/config",
+		"sub/.git",
+		".scion/settings.yaml",
+		".scion",
+		"proj/.scion/templates/t/scion-agent.yaml",
+		".DS_Store",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			base, dest, sibling := newRootTestLayout(t)
+			urls := []DownloadURLInfo{
+				{Path: "ok.txt", URL: server.URL + "/ok"},
+				{Path: entry, URL: server.URL + "/x"},
+			}
+			err := client.DownloadFiles(context.Background(), urls, dest, nil)
+			if !errors.Is(err, ErrNotWorkspaceContent) {
+				t.Fatalf("err = %v, want ErrNotWorkspaceContent", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(dest, "ok.txt")); !os.IsNotExist(statErr) {
+				t.Errorf("no file should be written when an entry is refused")
+			}
+			assertOnlyDestAndSibling(t, base, sibling)
+		})
 	}
 }

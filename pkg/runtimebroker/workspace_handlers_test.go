@@ -303,7 +303,7 @@ func TestWorkspaceApplyAgentNotFound(t *testing.T) {
 // TestWorkspaceUploadRejectsUnsafeWorkspacePath is the fail-closed regression
 // test for getAgentWorkspacePath's primary branch (the runtime-reported
 // path): the handler must refuse to sync a workspace path that is not an
-// allowed workspace path, and must never reach gcp.SyncToGCS -- the handler
+// allowed workspace path, and must never reach gcp.SyncWorkspaceToGCS -- the handler
 // returns as soon as getAgentWorkspacePath errors (workspace_handlers.go,
 // handleWorkspaceUpload), before the sync call is ever constructed, so the
 // specific validation error message asserted here proves rejection happened
@@ -360,7 +360,7 @@ func TestWorkspaceUploadRejectsUnsafeWorkspacePath(t *testing.T) {
 // ~/.scion allow list to still admit a real, runtime-reported workspace.
 // This tests getAgentWorkspacePath directly rather than through the HTTP
 // handlers: going through handleWorkspaceUpload would reach a real
-// gcp.SyncToGCS network call, which unit tests must not make. Calling
+// gcp.SyncWorkspaceToGCS network call, which unit tests must not make. Calling
 // getAgentWorkspacePath directly proves acceptance without it.
 func TestGetAgentWorkspacePath_PrimaryBranchAcceptsLegitimateScionHomeWorkspace(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -1389,7 +1389,7 @@ func TestProjectWorkspaceUpload_RejectsUnsafeRelativeWorkspacePath(t *testing.T)
 
 // The positive acceptance-set case for a legitimate ~/.scion workspace path
 // is not exercised through the full HTTP handler here: once validation
-// passes, handleProjectWorkspaceUpload proceeds to a real gcp.SyncToGCS
+// passes, handleProjectWorkspaceUpload proceeds to a real gcp.SyncWorkspaceToGCS
 // network call, and there is no mockable seam for it at this handler's
 // level (unlike getAgentWorkspacePath, which is a plain function this test
 // file calls directly elsewhere). Making that call would violate the
@@ -1448,9 +1448,11 @@ func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUplo
 	return rec
 }
 
-// TestBuildWorkspaceManifestExcludesIdentityEntry checks that the root .scion
-// identity entry, as a marker file or a directory, stays out of the
-// manifest (gcp.SyncToGCS never uploads it), while a nested .scion is kept.
+// TestBuildWorkspaceManifestExcludesIdentityEntry checks that the manifest
+// lists only workspace content, the list gcp.SyncWorkspaceToGCS syncs: the
+// root .scion identity entry (marker file or directory), a project's .scion
+// in a subdirectory, and every .git entry (repository metadata at the root,
+// a submodule's gitdir file, a nested repository) stay out.
 func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
 	cfg := DefaultServerConfig()
 	mgr := &mockAgentManager{}
@@ -1467,9 +1469,16 @@ func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			files := map[string]string{
-				"file1.txt":         "content1",
-				"sub/.scion/keep":   "nested",
-				".scionignore-like": "kept",
+				"file1.txt":              "content1",
+				"sub/.scion/keep":        "nested project config",
+				".scionignore-like":      "kept",
+				".gitignore":             "kept",
+				".git/HEAD":              "ref: refs/heads/main\n",
+				".git/config":            "[core]\n",
+				".git/hooks/pre-commit":  "#!/bin/sh\n",
+				".git/refs/heads/main":   "abc\n",
+				"mod/.git":               "gitdir: ../.git/modules/mod\n",
+				"vendor/lib/.git/config": "[core]\n",
 			}
 			for k, v := range tc.files {
 				files[k] = v
@@ -1492,7 +1501,7 @@ func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
 			for _, f := range manifest.Files {
 				got[f.Path] = true
 			}
-			want := map[string]bool{"file1.txt": true, "sub/.scion/keep": true, ".scionignore-like": true}
+			want := map[string]bool{"file1.txt": true, ".scionignore-like": true, ".gitignore": true}
 			if len(got) != len(want) {
 				t.Errorf("manifest files = %v, want %v", got, want)
 			}

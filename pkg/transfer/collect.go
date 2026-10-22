@@ -46,6 +46,10 @@ type ManifestBuilder struct {
 	// ExcludePatterns are glob patterns to exclude.
 	// Supports simple globs and ** patterns.
 	ExcludePatterns []string
+
+	// Exclude, when set, also excludes every path for which it returns
+	// true (relPath is slash-separated and relative to BasePath).
+	Exclude func(relPath string, isDir bool) bool
 }
 
 // NewManifestBuilder creates a new manifest builder with default exclude patterns.
@@ -155,6 +159,9 @@ func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 
 // shouldExclude checks if a path should be excluded.
 func (b *ManifestBuilder) shouldExclude(relPath string, isDir bool) bool {
+	if b.Exclude != nil && b.Exclude(relPath, isDir) {
+		return true
+	}
 	for _, pattern := range b.ExcludePatterns {
 		// Handle ** patterns
 		if strings.Contains(pattern, "**") {

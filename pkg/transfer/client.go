@@ -17,6 +17,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,15 +210,27 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 	return nil
 }
 
-// DownloadFiles downloads multiple files from signed URLs to a destination directory.
-// Every entry path must be a canonical relative path (see ValidateRelPath), and
-// files are written through an os.Root opened on destDir, so downloaded files
-// are only ever written inside destDir.
+// ErrNotWorkspaceContent marks a download entry whose path workspace sync
+// never writes: anything under a .git or .scion entry, or .DS_Store (see
+// ClassifyWorkspaceSyncPath).
+var ErrNotWorkspaceContent = errors.New("path is not workspace content")
+
+// DownloadFiles downloads workspace files from signed URLs to a destination
+// directory. Every entry path must be a canonical relative path (see
+// ValidateRelPath) and workspace content (IsWorkspaceSyncContent): repository
+// metadata (.git at any depth) and project configuration (.scion at any
+// depth) are refused, so a download never writes into the destination's own
+// repository or project settings. All entries are checked before anything is
+// downloaded. Files are written through an os.Root opened on destDir, so
+// downloaded files are only ever written inside destDir.
 // If progress is not nil, it is called after each file is downloaded.
 func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, destDir string, progress ProgressCallback) error {
 	for i, url := range urls {
 		if err := ValidateRelPath(url.Path); err != nil {
 			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
+		}
+		if !IsWorkspaceSyncContent(url.Path, false) {
+			return fmt.Errorf("download entry %d (%s): %w", i, url.Path, ErrNotWorkspaceContent)
 		}
 	}
 	if len(urls) == 0 {

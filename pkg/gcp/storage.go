@@ -17,9 +17,12 @@ package gcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	_ "github.com/rclone/rclone/backend/googlecloudstorage"
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
@@ -28,36 +31,57 @@ import (
 	"github.com/rclone/rclone/fs/sync"
 )
 
-// workspaceIdentityExcludes are the rclone exclude rules for a workspace's
+// workspaceIdentityExcludes are the rclone exclude rules for a directory's
 // project identity entry, config.DotScion: a marker file (non-git projects)
 // or a directory holding the project-id file and project settings (git
-// projects). syncFiltered applies them in both directions. They are
-// anchored to the sync root, so only the root entry is excluded, with
-// everything under it: "/.scion" matches it as a file and "/.scion/**" as
-// a directory. A .scion entry further down the tree is synced as ordinary
-// content.
+// projects). SyncToGCS and SyncFromGCS, which GCS volumes use, apply them
+// in both directions. They are anchored to the sync root, so only the root
+// entry is excluded, with everything under it. Workspace transfers use the
+// workspace sync rules from pkg/transfer instead (see SyncWorkspaceToGCS).
 var workspaceIdentityExcludes = []string{
 	"/" + config.DotScion,
 	"/" + config.DotScion + "/**",
 }
 
-// identityFilteredContext returns ctx carrying an rclone filter that
-// excludes the workspace identity entry. Project identity is node-local:
-// each host writes its own .scion entry, so SyncToGCS and SyncFromGCS
-// never carry it into or out of the bucket. (This covers only these rclone
-// syncs; transfers that do not go through them, such as signed-URL
-// uploads, are not filtered here.) Excluded entries already on the
-// destination are left alone (delete_excluded stays off), so a host's own
-// .scion entry survives a sync and a stray .scion/ prefix already in the
-// bucket is neither downloaded nor deleted. Symlinks are not followed (no
-// copy_links), which remains rclone's default.
-func identityFilteredContext(ctx context.Context) (context.Context, error) {
-	// Only the exclude rules are set; age and size limits are explicitly
-	// off (their zero values are not "off" in rclone). Built from scratch
+// syncFilter names the rclone filter a sync runs with.
+type syncFilter int
+
+const (
+	// filterIdentity excludes only the root identity entry (GCS volumes).
+	filterIdentity syncFilter = iota
+	// filterWorkspaceContent passes only workspace content
+	// (transfer.WorkspaceSyncContentRcloneRules): no .git, no .scion at
+	// any depth, no .DS_Store.
+	filterWorkspaceContent
+	// filterWorkspaceGitData passes only workspace git data
+	// (transfer.WorkspaceSyncGitDataRcloneRules).
+	filterWorkspaceGitData
+)
+
+// filteredContext returns ctx carrying the rclone filter f. Excluded
+// entries already on the destination are left alone (delete_excluded stays
+// off), so a host's own .scion entry and its own .git survive a sync, and
+// stray excluded entries already in the bucket are neither downloaded nor
+// deleted. Symlinks are not followed (no copy_links), which remains
+// rclone's default.
+func filteredContext(ctx context.Context, f syncFilter) (context.Context, error) {
+	var rules filter.RulesOpt
+	switch f {
+	case filterIdentity:
+		rules.ExcludeRule = workspaceIdentityExcludes
+	case filterWorkspaceContent:
+		rules.FilterRule = transfer.WorkspaceSyncContentRcloneRules
+	case filterWorkspaceGitData:
+		rules.FilterRule = transfer.WorkspaceSyncGitDataRcloneRules
+	default:
+		return nil, fmt.Errorf("unknown workspace sync filter %d", f)
+	}
+	// Only the rules are set; age and size limits are explicitly off
+	// (their zero values are not "off" in rclone). Built from scratch
 	// rather than from rclone's global filter options, so nothing set
 	// globally can widen or replace these rules.
 	fi, err := filter.NewFilter(&filter.Options{
-		RulesOpt: filter.RulesOpt{ExcludeRule: workspaceIdentityExcludes},
+		RulesOpt: rules,
 		MinAge:   fs.DurationOff,
 		MaxAge:   fs.DurationOff,
 		MinSize:  fs.SizeSuffix(-1),
@@ -87,16 +111,34 @@ func withSyncStatsGroup(ctx context.Context) context.Context {
 	return accounting.WithStatsGroup(ctx, fmt.Sprintf("scion-workspace-sync-%d", syncStatsSeq.Add(1)))
 }
 
-// syncFiltered makes dst match src, excluding the workspace identity entry.
-// It is the only place in this package that calls sync.Sync; a guard test
-// fails if another call appears.
-func syncFiltered(ctx context.Context, dst, src fs.Fs) error {
-	fctx, err := identityFilteredContext(withSyncStatsGroup(ctx))
+// syncFiltered makes dst match src under the filter f (content or
+// identity; never git data, which is only ever copied). It is the only
+// place in this package that calls sync.Sync; a guard test fails if
+// another call appears.
+func syncFiltered(ctx context.Context, dst, src fs.Fs, f syncFilter) error {
+	if f == filterWorkspaceGitData {
+		return fmt.Errorf("git data is copied, never synced")
+	}
+	fctx, err := filteredContext(withSyncStatsGroup(ctx), f)
 	if err != nil {
 		return err
 	}
 	if err := sync.Sync(fctx, dst, src, false); err != nil {
 		return fmt.Errorf("rclone sync failed: %w", err)
+	}
+	return nil
+}
+
+// copyGitData copies the workspace git data from src to dst. It never
+// deletes anything on dst. It is the only place in this package that calls
+// sync.CopyDir; a guard test fails if another call appears.
+func copyGitData(ctx context.Context, dst, src fs.Fs) error {
+	fctx, err := filteredContext(withSyncStatsGroup(ctx), filterWorkspaceGitData)
+	if err != nil {
+		return err
+	}
+	if err := sync.CopyDir(fctx, dst, src, false); err != nil {
+		return fmt.Errorf("rclone git data copy failed: %w", err)
 	}
 	return nil
 }
@@ -109,54 +151,134 @@ func gcsRemote(bucketName, prefix string) string {
 	return fmt.Sprintf(":gcs,bucket_policy_only=true:%s", bucketName)
 }
 
-// syncLocalToRemote makes remote match the local directory localPath. The
-// local side is opened as a plain path, with rclone's default of skipping
-// symlinks.
+// openPair opens the rclone source and destination. A local side is opened
+// as a plain path, with rclone's default of skipping symlinks.
+func openPair(ctx context.Context, src, dst string) (fs.Fs, fs.Fs, error) {
+	srcFs, err := fs.NewFs(ctx, src)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create source fs for %s: %w", src, err)
+	}
+	dstFs, err := fs.NewFs(ctx, dst)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create destination fs for %s: %w", dst, err)
+	}
+	return srcFs, dstFs, nil
+}
+
+// syncLocalToRemote makes remote match the local directory localPath,
+// excluding only the root identity entry (GCS volumes).
 func syncLocalToRemote(ctx context.Context, localPath, remote string) error {
-	srcFs, err := fs.NewFs(ctx, localPath)
+	srcFs, dstFs, err := openPair(ctx, localPath, remote)
 	if err != nil {
-		return fmt.Errorf("failed to create source fs for %s: %w", localPath, err)
+		return err
 	}
-
-	dstFs, err := fs.NewFs(ctx, remote)
-	if err != nil {
-		return fmt.Errorf("failed to create destination fs for %s: %w", remote, err)
-	}
-
 	fmt.Printf("Syncing %s to %s via rclone\n", localPath, remote)
-
-	return syncFiltered(ctx, dstFs, srcFs)
+	return syncFiltered(ctx, dstFs, srcFs, filterIdentity)
 }
 
-// syncRemoteToLocal makes the local directory localPath match remote.
+// syncRemoteToLocal makes the local directory localPath match remote,
+// excluding only the root identity entry (GCS volumes).
 func syncRemoteToLocal(ctx context.Context, remote, localPath string) error {
-	srcFs, err := fs.NewFs(ctx, remote)
+	srcFs, dstFs, err := openPair(ctx, remote, localPath)
 	if err != nil {
-		return fmt.Errorf("failed to create source fs for %s: %w", remote, err)
+		return err
 	}
-
-	dstFs, err := fs.NewFs(ctx, localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination fs for %s: %w", localPath, err)
-	}
-
 	fmt.Printf("Syncing %s to %s via rclone\n", remote, localPath)
-
-	return syncFiltered(ctx, dstFs, srcFs)
+	return syncFiltered(ctx, dstFs, srcFs, filterIdentity)
 }
 
-// SyncToGCS uploads a local directory to a GCS bucket prefix.
-// It uses rclone to sync the local path to the GCS destination. The root
-// .scion identity entry is never uploaded by it (see
-// identityFilteredContext). We rely on on-the-fly backends and ADC, so no
-// rclone config file is needed.
+// uploadWorkspace makes remote's content match the workspace at localPath
+// (filterWorkspaceContent) and copies the workspace's git data next to it.
+// Excluded entries already at remote are left alone.
+func uploadWorkspace(ctx context.Context, localPath, remote string) error {
+	srcFs, dstFs, err := openPair(ctx, localPath, remote)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Syncing workspace %s to %s via rclone\n", localPath, remote)
+	if err := syncFiltered(ctx, dstFs, srcFs, filterWorkspaceContent); err != nil {
+		return err
+	}
+	return copyGitData(ctx, dstFs, srcFs)
+}
+
+// downloadWorkspace makes the workspace at localPath match remote's
+// content, and with gitData also applies remote's git data. It never
+// writes into localPath with rclone: the download goes to a private
+// staging directory first, and transfer.ApplyStagedWorkspace applies it
+// without following symlinks in the workspace (rclone's local backend
+// writes through a symlinked directory it finds on the destination). The
+// staging directory receives only what the workspace sync rules pass, and
+// the apply refuses anything else again, so entries an earlier upload
+// left in the bucket (repository config, hooks, project configuration)
+// never reach the workspace.
+func downloadWorkspace(ctx context.Context, remote, localPath string, gitData bool) error {
+	staging, err := os.MkdirTemp("", "scion-workspace-")
+	if err != nil {
+		return fmt.Errorf("failed to create staging directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+
+	srcFs, dstFs, err := openPair(ctx, remote, staging)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Syncing %s to workspace %s via rclone\n", remote, localPath)
+	if err := syncFiltered(ctx, dstFs, srcFs, filterWorkspaceContent); err != nil {
+		return err
+	}
+	if gitData {
+		if err := copyGitData(ctx, dstFs, srcFs); err != nil {
+			return err
+		}
+	}
+	stats, err := transfer.ApplyStagedWorkspace(staging, localPath, transfer.StagedApplyOptions{GitData: gitData})
+	if err != nil {
+		return fmt.Errorf("failed to apply workspace download: %w", err)
+	}
+	if stats.Refused > 0 {
+		slog.Warn("Workspace download refused entries that are never synced", "count", stats.Refused)
+	}
+	if stats.GitDataSkipped {
+		slog.Warn("Workspace download skipped git data: the workspace .git is not a directory")
+	}
+	return nil
+}
+
+// SyncToGCS uploads a local directory to a GCS bucket prefix (GCS
+// volumes). The root .scion identity entry is never uploaded by it. We rely
+// on on-the-fly backends and ADC, so no rclone config file is needed.
 func SyncToGCS(ctx context.Context, localPath, bucketName, prefix string) error {
 	return syncLocalToRemote(ctx, localPath, gcsRemote(bucketName, prefix))
 }
 
-// SyncFromGCS downloads a GCS bucket prefix to a local directory. The root
-// .scion identity entry is never downloaded by it, and the local one is
-// kept (see identityFilteredContext).
+// SyncFromGCS downloads a GCS bucket prefix to a local directory (GCS
+// volumes). The root .scion identity entry is never downloaded by it, and
+// the local one is kept.
 func SyncFromGCS(ctx context.Context, bucketName, prefix, localPath string) error {
 	return syncRemoteToLocal(ctx, gcsRemote(bucketName, prefix), localPath)
+}
+
+// SyncWorkspaceToGCS uploads a workspace to a GCS bucket prefix: its
+// content, and its git data (see transfer.ClassifyWorkspaceSyncPath).
+// Repository configuration, hooks and every .scion entry are never
+// uploaded.
+func SyncWorkspaceToGCS(ctx context.Context, localPath, bucketName, prefix string) error {
+	return uploadWorkspace(ctx, localPath, gcsRemote(bucketName, prefix))
+}
+
+// SyncWorkspaceFromGCS downloads a workspace upload into a workspace: its
+// content, and its git data, which is applied only into a real .git
+// directory and never deleted. Used where a whole repository moves between
+// hosts: a broker's create-time workspace download and the hub's
+// workspace sync-back.
+func SyncWorkspaceFromGCS(ctx context.Context, bucketName, prefix, localPath string) error {
+	return downloadWorkspace(ctx, gcsRemote(bucketName, prefix), localPath, true)
+}
+
+// SyncWorkspaceContentFromGCS downloads only a workspace upload's content
+// into a workspace, leaving its .git untouched. Used by a broker's
+// workspace apply (sync-to), whose uploads never carry git data.
+func SyncWorkspaceContentFromGCS(ctx context.Context, bucketName, prefix, localPath string) error {
+	return downloadWorkspace(ctx, gcsRemote(bucketName, prefix), localPath, false)
 }

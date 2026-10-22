@@ -291,8 +291,9 @@ type Server struct {
 	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
 	nfsCleanupWG sync.WaitGroup
 
-	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
-	// bootstrap (create-time and handleWorkspaceApply) when set (see
+	// workspaceDownload replaces the GCS workspace downloads (the
+	// create-time bootstrap, gcp.SyncWorkspaceFromGCS, and
+	// handleWorkspaceApply, gcp.SyncWorkspaceContentFromGCS) when set (see
 	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 	version           string
@@ -1319,14 +1320,26 @@ func (s *Server) SetWorkspaceDownloader(fn func(ctx context.Context, bucket, pre
 	s.workspaceDownload = fn
 }
 
-// workspaceDownloader returns the GCS workspace bootstrap download.
+// workspaceDownloader returns the GCS workspace bootstrap download, which
+// carries the workspace content and its git data.
 func (s *Server) workspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.workspaceDownload != nil {
 		return s.workspaceDownload
 	}
-	return gcp.SyncFromGCS
+	return gcp.SyncWorkspaceFromGCS
+}
+
+// workspaceApplyDownloader returns the GCS download of a workspace apply
+// (sync-to), which carries only workspace content.
+func (s *Server) workspaceApplyDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.workspaceDownload != nil {
+		return s.workspaceDownload
+	}
+	return gcp.SyncWorkspaceContentFromGCS
 }
 
 // SetRequestLogger sets the dedicated request logger.

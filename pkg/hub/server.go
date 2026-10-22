@@ -2235,7 +2235,7 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
+	// hubWorkspaceDownload replaces gcp.SyncWorkspaceFromGCS for downloads of a
 	// workspace upload into a hub workspace when set (tests only). Guarded
 	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
 	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error

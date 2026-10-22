@@ -338,3 +338,102 @@ func TestRunSync_ProjectModeRemoved(t *testing.T) {
 		t.Error("--force only served project bisync and should be gone")
 	}
 }
+
+// TestSyncFromViaHub_NeverWritesRepositoryOrProjectConfig drives sync-from
+// against a hub whose manifest (as an older broker or a tampered bucket
+// could produce) lists repository metadata and project configuration next
+// to ordinary files. Only the ordinary files may land in the local
+// checkout; its own .git and .scion stay as they were.
+func TestSyncFromViaHub_NeverWritesRepositoryOrProjectConfig(t *testing.T) {
+	ws := t.TempDir()
+	writeTree := func(rel, content string, mode os.FileMode) {
+		p := filepath.Join(ws, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTree(".git/config", "mine\n", 0o644)
+	writeTree(".scion/settings.yaml", "mine\n", 0o644)
+
+	remote := []string{
+		"main.go",
+		".git/hooks/pre-commit",
+		".git/config",
+		".git/refs/heads/main",
+		"sub/.git/config",
+		".scion/settings.yaml",
+		"proj/.scion/settings.yaml",
+	}
+	var server *httptest.Server
+	var downloaded []string
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/agent-1/workspace/sync-from":
+			resp := hubclient.SyncFromResponse{Manifest: &transfer.Manifest{}}
+			for _, p := range remote {
+				resp.Manifest.Files = append(resp.Manifest.Files, transfer.FileInfo{Path: p, Size: 5, Hash: "h-" + p})
+				resp.DownloadURLs = append(resp.DownloadURLs, transfer.DownloadURLInfo{Path: p, URL: server.URL + "/dl/" + p, Size: 5, Hash: "h-" + p})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/dl/"):
+			downloaded = append(downloaded, strings.TrimPrefix(r.URL.Path, "/dl/"))
+			_, _ = w.Write([]byte("agent"))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedExclude, savedDryRun := syncExclude, syncDryRun
+	t.Cleanup(func() { syncExclude, syncDryRun = savedExclude, savedDryRun })
+	syncExclude, syncDryRun = nil, false
+
+	if err := syncFromViaHub(&HubContext{Client: client, Endpoint: server.URL}, "agent-1", "agent-1", ws); err != nil {
+		t.Fatalf("syncFromViaHub: %v", err)
+	}
+	if !slices.Equal(downloaded, []string{"main.go"}) {
+		t.Errorf("downloaded %v, want only main.go", downloaded)
+	}
+	if b, _ := os.ReadFile(filepath.Join(ws, "main.go")); string(b) != "agent" {
+		t.Errorf("main.go = %q", b)
+	}
+	for rel, want := range map[string]string{".git/config": "mine\n", ".scion/settings.yaml": "mine\n"} {
+		if b, _ := os.ReadFile(filepath.Join(ws, rel)); string(b) != want {
+			t.Errorf("%s = %q, want %q", rel, b, want)
+		}
+	}
+	for _, rel := range []string{".git/hooks/pre-commit", ".git/refs/heads/main", "sub/.git/config", "proj/.scion/settings.yaml"} {
+		if _, err := os.Lstat(filepath.Join(ws, rel)); !os.IsNotExist(err) {
+			t.Errorf("%s was written (err=%v)", rel, err)
+		}
+	}
+}
+
+func TestSplitSyncFromDownloads(t *testing.T) {
+	urls := []transfer.DownloadURLInfo{{Path: "a.go"}, {Path: ".git/config"}, {Path: "x/.scion/s"}, {Path: "b/c.go"}, {Path: ".git/refs/heads/main"}}
+	keep, dropped := splitSyncFromDownloads(urls)
+	var got []string
+	for _, u := range keep {
+		got = append(got, u.Path)
+	}
+	if !slices.Equal(got, []string{"a.go", "b/c.go"}) || dropped != 3 {
+		t.Errorf("keep=%v dropped=%d, want [a.go b/c.go] and 3", got, dropped)
+	}
+}
+
+func TestOverwrittenExecutables(t *testing.T) {
+	local := []transfer.FileInfo{{Path: "run.sh", Mode: "0755"}, {Path: "a.go", Mode: "0644"}, {Path: "bin/tool", Mode: "0700"}, {Path: "odd", Mode: "x"}}
+	toDownload := []transfer.DownloadURLInfo{{Path: "a.go"}, {Path: "run.sh"}, {Path: "new.sh"}, {Path: "bin/tool"}, {Path: "odd"}}
+	if got := overwrittenExecutables(toDownload, local); !slices.Equal(got, []string{"run.sh", "bin/tool"}) {
+		t.Errorf("overwrittenExecutables = %v", got)
+	}
+}

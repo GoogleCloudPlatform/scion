@@ -692,13 +692,13 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	}
 }
 
-// syncToGCSForWorkspaceUpload is gcp.SyncToGCS by default; a test replaces
+// syncToGCSForWorkspaceUpload is gcp.SyncWorkspaceToGCS by default; a test replaces
 // it with a recording stub so the upload-guard wiring below can be verified
 // without a real GCS bucket or network access, and so a test can tell "the
 // guard refused this and the upload never ran" apart from "the upload itself
 // failed" -- the two are indistinguishable from the HTTP response alone,
 // since both are logged as warnings rather than surfaced as request errors.
-var syncToGCSForWorkspaceUpload = gcp.SyncToGCS
+var syncToGCSForWorkspaceUpload = gcp.SyncWorkspaceToGCS
 
 // resolveHubManagedWorkspaceForUpload validates workspace -- normally
 // agent.AppliedConfig.Workspace, which starts as the caller-supplied
@@ -2587,7 +2587,7 @@ func (s *Server) createAgentInProject(
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", workspaceErr)
 				} else if stor.Provider() != storage.ProviderGCS && project.GitRemote != "" {
-					// The upload below is always a GCS sync (gcp.SyncToGCS),
+					// The upload below is always a GCS sync (gcp.SyncWorkspaceToGCS),
 					// so a hub on any other storage provider cannot run it
 					// (ptone/scion#3765). A shared-workspace project with a
 					// git remote needs no upload: the broker builds the
@@ -2632,7 +2632,7 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						// The upload above is a GCS sync (gcp.SyncToGCS), and
+						// The upload above is a GCS sync (gcp.SyncWorkspaceToGCS), and
 						// the provider check before it means stor is GCS, so
 						// stor.Bucket() names the bucket uploaded to.
 						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()

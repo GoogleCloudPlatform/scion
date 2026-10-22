@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -179,18 +180,37 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 		localHashes[f.Path] = f.Hash
 	}
 
+	// Repository metadata and project configuration are never synced. A
+	// current broker leaves them out of the manifest; an older one may
+	// still list them.
+	downloadURLs, notSynced := splitSyncFromDownloads(resp.DownloadURLs)
+	if notSynced > 0 {
+		statusf("Warning: skipped %d entries under .git or .scion: repository metadata and project configuration are never synced (commits reach other machines by git push)\n", notSynced)
+	}
+
 	// Identify files to download (incremental)
 	var toDownload []transfer.DownloadURLInfo
 	var skipCount int
 	var downloadSize int64
 
-	for _, url := range resp.DownloadURLs {
+	for _, url := range downloadURLs {
 		if localHash, exists := localHashes[url.Path]; exists && localHash == url.Hash {
 			skipCount++
 			continue
 		}
 		toDownload = append(toDownload, url)
 		downloadSize += url.Size
+	}
+
+	// The agent chooses the content of every downloaded file. Replacing an
+	// executable keeps its mode, so name each one.
+	executables := overwrittenExecutables(toDownload, localFiles)
+	for _, p := range executables {
+		if syncDryRun {
+			statusf("Warning: would overwrite executable file %s with the agent's version\n", p)
+		} else {
+			statusf("Warning: overwriting executable file %s with the agent's version\n", p)
+		}
 	}
 
 	// Report what will be synced
@@ -235,13 +255,15 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
-			"status":           "success",
-			"command":          "sync",
-			"direction":        "from",
-			"agent":            agentName,
-			"filesDownloaded":  downloadedCount,
-			"bytesTransferred": downloadedBytes,
-			"filesSkipped":     skipCount,
+			"status":                 "success",
+			"command":                "sync",
+			"direction":              "from",
+			"agent":                  agentName,
+			"filesDownloaded":        downloadedCount,
+			"bytesTransferred":       downloadedBytes,
+			"filesSkipped":           skipCount,
+			"entriesNotSynced":       notSynced,
+			"overwrittenExecutables": executables,
 		})
 	}
 
@@ -251,6 +273,41 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 	}
 
 	return nil
+}
+
+// splitSyncFromDownloads drops the download entries workspace sync never
+// writes (repository metadata, project configuration; see
+// transfer.IsWorkspaceSyncContent) and returns the rest with the number
+// dropped.
+func splitSyncFromDownloads(urls []transfer.DownloadURLInfo) ([]transfer.DownloadURLInfo, int) {
+	keep := make([]transfer.DownloadURLInfo, 0, len(urls))
+	dropped := 0
+	for _, u := range urls {
+		if !transfer.IsWorkspaceSyncContent(u.Path, false) {
+			dropped++
+			continue
+		}
+		keep = append(keep, u)
+	}
+	return keep, dropped
+}
+
+// overwrittenExecutables returns the paths in toDownload whose existing
+// local file is executable, in download order.
+func overwrittenExecutables(toDownload []transfer.DownloadURLInfo, localFiles []transfer.FileInfo) []string {
+	executable := make(map[string]bool, len(localFiles))
+	for _, f := range localFiles {
+		if mode, err := strconv.ParseUint(f.Mode, 8, 32); err == nil && mode&0o111 != 0 {
+			executable[f.Path] = true
+		}
+	}
+	var out []string
+	for _, u := range toDownload {
+		if executable[u.Path] {
+			out = append(out, u.Path)
+		}
+	}
+	return out
 }
 
 // syncToViaHub uploads workspace from local directory to agent.

@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -261,9 +260,11 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlockWorkspace()
 
-	// Sync workspace from GCS to local using rclone
+	// Apply the uploaded content to the workspace. Only content is
+	// applied: the workspace's own .git is left as it is (a sync-to
+	// upload never carries it).
 	filesPath := req.StoragePath + "/files"
-	if err := s.workspaceDownloader()(ctx, bucket, filesPath, workspacePath); err != nil {
+	if err := s.workspaceApplyDownloader()(ctx, bucket, filesPath, workspacePath); err != nil {
 		s.writeRuntimeOpError(w, ctx, opDownloadWorkspace, err, "agent_slug", req.Slug)
 		return
 	}
@@ -403,19 +404,16 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	return "", fmt.Errorf("could not resolve workspace path for agent %s", agentID)
 }
 
-// workspaceIdentityManifestExclude keeps the root .scion identity entry out
-// of workspace manifests, matching what gcp.SyncToGCS uploads.
-const workspaceIdentityManifestExclude = config.DotScion + "/**"
-
 // buildWorkspaceManifest builds a manifest from the workspace directory.
+// It lists only workspace content (transfer.IsWorkspaceSyncContent), the
+// same list gcp.SyncWorkspaceToGCS syncs: no .git, no .scion entry at any
+// depth. Git data travels next to the content in the bucket but is not
+// listed, so the CLI never downloads it into a user's checkout.
 func (s *Server) buildWorkspaceManifest(workspacePath string, excludePatterns []string) (*transfer.Manifest, error) {
 	builder := transfer.NewManifestBuilder(workspacePath)
-
-	// gcp.SyncToGCS never uploads the root .scion identity entry (marker
-	// file or directory), so leave it out of the manifest too. In
-	// transfer's matcher this pattern is anchored to the root and matches
-	// both forms.
-	builder.WithExcludePatterns([]string{workspaceIdentityManifestExclude})
+	builder.Exclude = func(rel string, isDir bool) bool {
+		return !transfer.IsWorkspaceSyncContent(rel, isDir)
+	}
 
 	// Add custom exclude patterns
 	if len(excludePatterns) > 0 {
@@ -689,7 +687,7 @@ func (s *Server) workspaceUploader() func(ctx context.Context, localPath, bucket
 	if s.workspaceUpload != nil {
 		return s.workspaceUpload
 	}
-	return gcp.SyncToGCS
+	return gcp.SyncWorkspaceToGCS
 }
 
 // setManifestUploader replaces the upload of a workspace manifest.
