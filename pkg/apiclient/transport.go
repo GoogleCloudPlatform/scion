@@ -127,6 +127,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var resp *http.Response
 	var err error
 
+	client := t.hubScopedClient()
 	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
@@ -154,7 +155,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			attempt.Body = body
 		}
 
-		resp, err = t.HTTPClient.Do(attempt)
+		resp, err = client.Do(attempt)
 		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
@@ -179,6 +180,85 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	}
 
 	return resp, nil
+}
+
+// hubScopedClient returns the client Do sends with: a shallow copy of
+// HTTPClient (sharing its RoundTripper and connection pool) whose redirect
+// policy applies the hub origin rule. A redirect hop to another origin than
+// BaseURL's has the credential headers and the X-Scion-* headers removed,
+// then HTTPClient.CheckRedirect (or the 10-hop limit) applies; same-origin
+// hops are unchanged. When HTTPClient.Transport is a HubOnlyRoundTripper
+// (transportauth.Wrap), such a hop is also sent below that layer, so the
+// transport credential is not added to it again. The first request of each
+// attempt is sent exactly as before.
+func (t *Transport) hubScopedClient() *http.Client {
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	hub := parseOrigin(t.BaseURL)
+	c := *base
+	c.CheckRedirect = hubRedirectPolicy(hub, base.CheckRedirect)
+	if _, ok := base.Transport.(HubOnlyRoundTripper); ok {
+		c.Transport = &redirectHopRoundTripper{
+			base:  base.Transport,
+			other: withoutHubOnlyLayers(base.Transport),
+			hub:   hub,
+		}
+	}
+	return &c
+}
+
+// hubRedirectPolicy returns a CheckRedirect function that removes the
+// cross-origin headers from a hop to another origin than hub, then defers to
+// baseCheck, or to the net/http default limit of 10 hops when baseCheck is
+// nil.
+func hubRedirectPolicy(hub origin, baseCheck func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if !sameOrigin(req.URL, hub) {
+			dropCrossOriginHeaders(req.Header)
+		}
+		if baseCheck != nil {
+			return baseCheck(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		return nil
+	}
+}
+
+// dropCrossOriginHeaders removes crossOriginDroppedHeaders and every header
+// named with crossOriginDroppedPrefix from h.
+func dropCrossOriginHeaders(h http.Header) {
+	for _, name := range crossOriginDroppedHeaders {
+		h.Del(name)
+	}
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), crossOriginDroppedPrefix) {
+			delete(h, name)
+		}
+	}
+}
+
+// redirectHopRoundTripper sends a redirect hop (a request with Response set)
+// to another origin than hub through other, the transport below the
+// hub-only layers; every other request goes through base.
+type redirectHopRoundTripper struct {
+	base  http.RoundTripper
+	other http.RoundTripper
+	hub   origin
+}
+
+func (rt *redirectHopRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Response != nil && !sameOrigin(req.URL, rt.hub) {
+		other := rt.other
+		if other == nil {
+			other = http.DefaultTransport
+		}
+		return other.RoundTrip(req)
+	}
+	return rt.base.RoundTrip(req)
 }
 
 // bodyRewindable reports whether req can be re-sent with its full body: it
@@ -254,9 +334,9 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 //
 // Redirects follow HTTPClient.CheckRedirect when it is set, and otherwise the
 // net/http default limit of 10 hops. Before either, a hop to another origin
-// has its Authorization, Proxy-Authorization and X-Serverless-Authorization
-// headers removed; same-origin hops keep the credential. The base client's
-// cookie jar, timeout and other settings are preserved.
+// has its Authorization, Proxy-Authorization, X-Serverless-Authorization and
+// X-Scion-* headers removed; same-origin hops keep the credential. The base
+// client's cookie jar, timeout and other settings are preserved.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
@@ -272,20 +352,7 @@ func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 		ua:    t.UserAgent,
 		hub:   hub,
 	}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOrigin(req.URL, hub) {
-			for _, h := range crossOriginDroppedHeaders {
-				req.Header.Del(h)
-			}
-		}
-		if baseCheck != nil {
-			return baseCheck(req, via)
-		}
-		if len(via) >= maxRedirects {
-			return fmt.Errorf("stopped after %d redirects", maxRedirects)
-		}
-		return nil
-	}
+	client.CheckRedirect = hubRedirectPolicy(hub, baseCheck)
 	return &client
 }
 
@@ -317,6 +384,11 @@ func withoutHubOnlyLayers(rt http.RoundTripper) http.RoundTripper {
 // crossOriginDroppedHeaders are removed from a redirect hop to another
 // origin: the headers that carry the hub or transport credential.
 var crossOriginDroppedHeaders = []string{"Authorization", "Proxy-Authorization", "X-Serverless-Authorization"}
+
+// crossOriginDroppedPrefix names the client's own request headers (the
+// X-Scion-* agent, broker and HMAC headers), which are removed from a
+// redirect hop to another origin as well.
+const crossOriginDroppedPrefix = "X-Scion-"
 
 // maxRedirects matches the hop limit of net/http's default redirect policy.
 const maxRedirects = 10
