@@ -381,7 +381,10 @@ func Marshal(ev Event) ([]byte, error) {
 // additively extended event. Like encoding/json it matches keys
 // case-insensitively, keeps the last duplicate key, and decodes JSON null
 // on a non-pointer field as its zero value, so it is a decoder for
-// producer output, not a strict validator of third-party input.
+// producer output, not a strict validator of third-party input. Likewise an
+// absent or null non-pointer list decodes as nil and is accepted here,
+// although Marshal would reject re-emitting it (a nil list is written as
+// null); a consumer that re-emits must set such lists to empty first.
 func Unmarshal(data []byte, ev Event) error {
 	if ev == nil || isNilPointer(ev) {
 		return errors.New("telemetrycontract: nil event")
@@ -443,7 +446,9 @@ type structureResult struct{ err error }
 //
 //   - the embedded, untagged Envelope (root struct only), or
 //   - exported, non-embedded fields with an explicit json tag name of
-//     [a-z0-9_] and no option other than omitempty -- never on a list
+//     lower-case [a-z0-9_], starting with a letter or underscore, with no
+//     BigQuery-reserved prefix, and no option other than omitempty --
+//     never on a list
 //     (Labels included) or a non-pointer integer or bool (a known zero or
 //     empty would read as unknown), always on a pointer (unknown is
 //     omitted, never null) --
@@ -518,7 +523,7 @@ func checkStructType(t reflect.Type, root bool, ancestors map[reflect.Type]bool)
 		case !hasTag || name == "" || name == "-":
 			return fmt.Errorf("telemetrycontract: field %s.%s needs an explicit json tag name", t.Name(), f.Name)
 		case !isWireName(name):
-			return fmt.Errorf("telemetrycontract: field %s.%s has json tag name %q; wire names are [a-z0-9_] (BigQuery-safe)", t.Name(), f.Name, name)
+			return fmt.Errorf("telemetrycontract: field %s.%s has json tag name %q; wire names are lower-case [a-z0-9_], starting with a letter or underscore, with no BigQuery-reserved prefix", t.Name(), f.Name, name)
 		case opts != "" && opts != "omitempty":
 			return fmt.Errorf("telemetrycontract: field %s.%s: only the omitempty tag option is allowed, got %q", t.Name(), f.Name, opts)
 		case opts == "omitempty" && f.Type.Kind() == reflect.Slice:
