@@ -45,9 +45,13 @@ type GovernanceService struct {
 	logger    *slog.Logger
 	auditSink auditevent.Sink
 
-	// auditWriter is the legacy delete audit path. CREATE and UPDATE persist
-	// a typed history row in the mutation's transaction instead.
-	auditWriter *BoundaryAuditWriter
+	// deleteAuditSink receives the access_boundary/delete structured-log
+	// event after a delete commits. initBoundaryServices sets it to a sink
+	// over the server's shared asynchronous audit writer (async,
+	// loss-counted, best-effort; not a persisted record). When nil (test
+	// constructions), DELETE falls back to auditSink. CREATE always uses
+	// auditSink; UPDATE and recovery write history only and emit nothing.
+	deleteAuditSink auditevent.Sink
 
 	// eventBus publishes invalidation events after successful mutations.
 	// If nil, no events are published.
@@ -67,13 +71,12 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 		panic(fmt.Sprintf("initialize access-boundary audit sink: %v", err))
 	}
 	return &GovernanceService{
-		store:       s,
-		preview:     preview,
-		authz:       authz,
-		logger:      logger,
-		auditSink:   auditSink,
-		auditWriter: NewBoundaryAuditWriter(logger),
-		nowFunc:     time.Now,
+		store:     s,
+		preview:   preview,
+		authz:     authz,
+		logger:    logger,
+		auditSink: auditSink,
+		nowFunc:   time.Now,
 	}
 }
 
@@ -181,9 +184,13 @@ type CommitResult struct {
 	// Classification is the server-determined mutation direction.
 	Classification string
 
-	// AuditID is the ID of the durable audit entry for this mutation.
-	// Always non-empty on success — no authority change returns without
-	// a persisted audit ID.
+	// AuditID identifies the audit record of this mutation (a UUID).
+	// For create and update it is the event ID of the
+	// access_constraint_history row committed with the mutation. For delete
+	// it is the event ID of the post-commit structured-log event: not a
+	// persisted record and not retrievable through any API, because the
+	// constraint's history is deleted with it. It is empty for a delete only
+	// if that event could not be built.
 	AuditID string
 }
 
@@ -209,10 +216,12 @@ func (e *GovernanceError) Error() string {
 //
 //	a. Validate the preview token (PreviewService.ValidateToken)
 //	b. Re-read the boundary (if update/delete) and verify revision matches
-//	c. Re-read relevant state: role bindings, group memberships, principal
-//	   status, permission registry — scoped to the subject/scope under change
-//	d. Compare state fingerprint to the preview's fingerprint
-//	e. If state changed: reject with stale_authorization_preview
+//	c. Re-read the constraint state the preview was bound to: the total
+//	   constraint count and the (id, revision, updated_at) of every
+//	   constraint in the draft's scope. Role bindings, group memberships and
+//	   principal status are NOT part of this fingerprint.
+//	d. Compare that constraint-state fingerprint to the preview's
+//	e. If it changed: reject with preview_state_mismatch
 //	f. Re-authorize the actor: verify they still hold access_constraint.admin
 //	g. For relaxations: verify the actor holds sufficient authority over the
 //	   permissions being restored (server classification chooses the path)
@@ -283,8 +292,9 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 
 	// Steps b, i, j: apply the mutation. CREATE and UPDATE persist their
 	// purpose-specific history row from one typed envelope in the same
-	// transaction as the mutation. Delete remains on its existing path.
-	var beforeState *store.AccessConstraint
+	// transaction as the mutation. DELETE cascades the constraint's history,
+	// so it writes no row; it emits one structured-log event after commit.
+	var deletedState *store.AccessConstraint
 	var result *CommitResult
 	var committedAuditEvent *auditevent.EnvelopeV1
 	switch req.Operation {
@@ -310,7 +320,8 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		result = updateResult
 
 	case "delete":
-		// Re-read to verify revision and capture before-state for rollback.
+		// Re-read to verify the revision and capture the deleted state for
+		// the post-commit log event.
 		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load constraint for delete: %w", err)
@@ -321,7 +332,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 				Message: fmt.Sprintf("constraint revision %d does not match expected %d", existing.Revision, req.BaseRevision),
 			}
 		}
-		beforeState = existing
+		deletedState = existing
 		if err := gs.store.DeleteAccessConstraint(ctx, req.ConstraintID); err != nil {
 			return nil, fmt.Errorf("delete failed: %w", err)
 		}
@@ -337,49 +348,6 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		}
 	}
 
-	// Write the durable audit entry. If this fails the mutation is considered
-	// unsuccessful — no authority change returns without a persisted audit ID.
-	//
-	// Compensating actions on audit failure:
-	//   - create: delete the newly-created constraint
-	//   - update: restore the before-state
-	//   - delete: re-create from the before-state
-	//
-	// TODO: Replace compensating actions with true atomic commit when
-	// Store.RunInTx is added — compensating actions have a second failure
-	// window (the compensating write itself can fail).
-	if req.Operation == "delete" && gs.auditWriter != nil {
-		constraintID := req.ConstraintID
-		if result.Constraint != nil && constraintID == "" {
-			constraintID = result.Constraint.ID
-		}
-
-		var afterRevision int64
-		if result.Constraint != nil {
-			afterRevision = result.Constraint.Revision
-		}
-
-		auditID, auditErr := gs.auditWriter.WriteAuditEntry(ctx, AuditRequest{
-			ConstraintID:   constraintID,
-			Operation:      req.Operation,
-			ActorID:        req.Actor.ID,
-			CorrelationID:  correlationIDFromContext(ctx),
-			BeforeRevision: req.BaseRevision,
-			AfterRevision:  afterRevision,
-			Classification: classification,
-			PreviewID:      req.PreviewID,
-			DraftHash:      req.DraftHash,
-			ImpactCounts:   computeImpactCounts(req, beforeState),
-		})
-		if auditErr != nil {
-			// Audit write failed — execute compensating action to undo the
-			// mutation so no unaudited authority change persists.
-			gs.compensateAuditFailure(ctx, req, result, beforeState)
-			return nil, fmt.Errorf("audit write failed: %w", auditErr)
-		}
-		result.AuditID = auditID
-	}
-
 	// The create event crosses the configured structured-log boundary only
 	// after the live row and history transaction commits. Dispatch failure is
 	// observable but cannot make the committed command untrue.
@@ -391,6 +359,16 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 				"failure_code", accessBoundaryAuditSinkFailureCode,
 			)
 		}
+	}
+
+	// The delete event is a structured-log record only. It is built and
+	// dispatched after the delete commits, so neither a build nor a dispatch
+	// failure can undo or compensate the delete; both are logged with the
+	// sink failure code. Its event ID is returned as the delete's AuditID:
+	// it identifies a log event, is not retrievable through any API, and is
+	// not backed by history (the constraint's history cascaded with it).
+	if req.Operation == "delete" && deletedState != nil {
+		gs.emitAccessConstraintDeleteEvent(ctx, req, deletedState, result)
 	}
 
 	// Publish invalidation event after successful commit (outside transaction).
@@ -425,69 +403,32 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	return result, nil
 }
 
-// ---------------------------------------------------------------------------
-// Compensating actions for audit failure
-// ---------------------------------------------------------------------------
-
-// compensateAuditFailure undoes the store mutation when the subsequent audit
-// write fails, so that no unaudited authority change persists. Each operation
-// has a specific compensating action:
-//   - create: delete the newly-created constraint
-//   - update: restore the previous revision from beforeState
-//   - delete: re-create the constraint from beforeState
-//
-// Compensating actions are best-effort: if the compensating write itself fails
-// the inconsistency is logged. This is acceptable because the alternative
-// (leaving unaudited mutations) is worse, and the window is narrow.
-//
-// TODO: This entire method becomes unnecessary when Store.RunInTx is added,
-// because the audit write and data mutation will share a single transaction.
-func (gs *GovernanceService) compensateAuditFailure(ctx context.Context, req CommitRequest, result *CommitResult, beforeState *store.AccessConstraint) {
-	switch req.Operation {
-	case "create":
-		// Compensating action: delete the newly-created constraint.
-		if result.Constraint != nil {
-			if err := gs.store.DeleteAccessConstraint(ctx, result.Constraint.ID); err != nil {
-				gs.logger.Error("compensating delete failed after audit failure — unaudited create persists",
-					"constraint_id", result.Constraint.ID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating delete succeeded — rolled back unaudited create",
-					"constraint_id", result.Constraint.ID,
-				)
-			}
-		}
-
-	case "update":
-		// Compensating action: restore the before-state.
-		if beforeState != nil {
-			if _, err := gs.store.UpdateAccessConstraint(ctx, beforeState, 0); err != nil {
-				gs.logger.Error("compensating update failed after audit failure — unaudited update persists",
-					"constraint_id", req.ConstraintID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating update succeeded — restored previous revision",
-					"constraint_id", req.ConstraintID,
-				)
-			}
-		}
-
-	case "delete":
-		// Compensating action: re-create the constraint from before-state.
-		if beforeState != nil {
-			if _, err := gs.store.CreateAccessConstraint(ctx, beforeState); err != nil {
-				gs.logger.Error("compensating re-create failed after audit failure — unaudited delete persists",
-					"constraint_id", req.ConstraintID,
-					"error", err,
-				)
-			} else {
-				gs.logger.Info("compensating re-create succeeded — restored deleted constraint",
-					"constraint_id", req.ConstraintID,
-				)
-			}
-		}
+// emitAccessConstraintDeleteEvent builds and dispatches the
+// access_boundary/delete event for a committed delete and sets
+// result.AuditID to its event ID. Failures are logged and never returned.
+func (gs *GovernanceService) emitAccessConstraintDeleteEvent(ctx context.Context, req CommitRequest, deleted *store.AccessConstraint, result *CommitResult) {
+	sink := gs.deleteAuditSink
+	if sink == nil {
+		sink = gs.auditSink
+	}
+	if sink == nil {
+		return
+	}
+	event, err := buildAccessConstraintDeleteEvent(ctx, req, deleted, result.Classification)
+	if err != nil {
+		gs.logger.ErrorContext(ctx, "failed to build committed access boundary delete audit event",
+			"constraint_id", deleted.ID,
+			"failure_code", accessBoundaryAuditSinkFailureCode,
+		)
+		return
+	}
+	result.AuditID = event.EventID
+	if err := sink.Emit(ctx, event); err != nil {
+		gs.logger.ErrorContext(ctx, "failed to dispatch committed access boundary audit event",
+			"event_id", event.EventID,
+			"constraint_id", deleted.ID,
+			"failure_code", accessBoundaryAuditSinkFailureCode,
+		)
 	}
 }
 
@@ -1439,47 +1380,3 @@ func correlationIDFromContext(ctx context.Context) string {
 type contextKey string
 
 const correlationIDKey contextKey = "correlation_id"
-
-// computeImpactCounts derives impact counts from the commit request and the
-// before-state of the constraint. beforeState may be nil for creates.
-func computeImpactCounts(req CommitRequest, beforeState *store.AccessConstraint) ImpactCounts {
-	counts := ImpactCounts{}
-
-	// Build sets for before and after permissions.
-	beforePerms := make(map[string]struct{})
-	if beforeState != nil {
-		for _, p := range beforeState.MaximumPermissions {
-			beforePerms[p] = struct{}{}
-		}
-	}
-
-	afterPerms := make(map[string]struct{})
-	if req.Draft != nil {
-		for _, p := range req.Draft.MaximumPermissions {
-			afterPerms[p] = struct{}{}
-		}
-	}
-
-	// PermissionsAdded: permissions in after that are not in before.
-	for p := range afterPerms {
-		if _, ok := beforePerms[p]; !ok {
-			counts.PermissionsAdded++
-		}
-	}
-
-	// PermissionsRemoved: permissions in before that are not in after.
-	// For delete (Draft is nil, afterPerms is empty), all before-state
-	// permissions are removed.
-	for p := range beforePerms {
-		if _, ok := afterPerms[p]; !ok {
-			counts.PermissionsRemoved++
-		}
-	}
-
-	// TODO: Populate AffectedPrincipals from the preview result when the
-	// preview engine exposes a principal count in its response. The preview
-	// result's Impact.TotalAffected field contains this data but is not yet
-	// threaded through to the commit path.
-
-	return counts
-}

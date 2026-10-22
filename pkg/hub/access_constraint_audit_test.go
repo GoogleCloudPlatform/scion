@@ -34,21 +34,19 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// auditTestSetup creates a GovernanceService with audit writer for testing.
-func auditTestSetup(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *BoundaryAuditWriter) {
+// auditTestSetup creates a GovernanceService for testing.
+func auditTestSetup(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store) {
 	t.Helper()
-	gs, ps, authz, s := govTestSetup(t)
-	// GovernanceService already has an auditWriter from NewGovernanceService.
-	return gs, ps, authz, s, gs.auditWriter
+	return govTestSetup(t)
 }
 
 // auditTestSetupWithEvents creates a full setup including event bus.
-func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *BoundaryAuditWriter, *InvalidationEventBus) {
+func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store, *InvalidationEventBus) {
 	t.Helper()
-	gs, ps, authz, s, aw := auditTestSetup(t)
+	gs, ps, authz, s := auditTestSetup(t)
 	eventBus := NewInvalidationEventBus(slog.Default())
 	gs.eventBus = eventBus
-	return gs, ps, authz, s, aw, eventBus
+	return gs, ps, authz, s, eventBus
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +54,7 @@ func auditTestSetupWithEvents(t *testing.T) (*GovernanceService, *PreviewService
 // ---------------------------------------------------------------------------
 
 func TestAudit_CommitProducesAuditID(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
+	gs, ps, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	// Seed an admin user.
@@ -109,121 +107,11 @@ func TestAudit_CommitProducesAuditID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Audit write failure rolls back the mutation conceptually
-// ---------------------------------------------------------------------------
-
-func TestAudit_LegacyWriterFailureDoesNotAffectTransactionalCreate(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "audit-fail-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	pType := "user"
-	pvSeedUser(t, s, "audit-fail-target")
-	draft := &store.AccessConstraint{
-		Name:                 "audit-fail-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("audit-fail-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test audit failure",
-		CreatedBy:            adminID,
-	}
-
-	result, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-
-	// Inject a failure into the audit writer.
-	aw.failFunc = func() error {
-		return assert.AnError
-	}
-
-	// Commit should fail because audit write fails.
-	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: result.PreviewToken,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, commitResult.Constraint)
-	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.Equal(t, commitResult.AuditID, entries[0].EventID)
-}
-
-// ---------------------------------------------------------------------------
-// 2b. Audit failure compensating action: create is rolled back
-// ---------------------------------------------------------------------------
-
-func TestAudit_LegacyWriterFailureDoesNotCompensateCommittedCreate(t *testing.T) {
-	gs, ps, _, s, aw := auditTestSetup(t)
-	ctx := context.Background()
-
-	adminID := govSeedAdminUser(t, s, "comp-create-admin")
-	actor := PrincipalContext{Kind: "user", ID: adminID}
-
-	pType := "user"
-	pvSeedUser(t, s, "comp-create-target")
-	draft := &store.AccessConstraint{
-		Name:                 "comp-create-boundary",
-		SubjectKind:          store.ConstraintSubjectPrincipal,
-		SubjectPrincipalType: &pType,
-		SubjectPrincipalID:   strPtr(tid("comp-create-target")),
-		ScopeType:            "system",
-		MaximumPermissions:   []string{"agent.read"},
-		Purpose:              "test compensating action on create",
-		CreatedBy:            adminID,
-	}
-
-	result, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-
-	// Inject audit failure.
-	aw.failFunc = func() error { return assert.AnError }
-
-	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: result.PreviewToken,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, commitResult.Constraint)
-
-	// CREATE no longer uses the legacy compensating writer. Its live row and
-	// history commit atomically before the structured sink is dispatched.
-	constraints, listErr := s.ListAccessConstraints(ctx, 100, 0)
-	require.NoError(t, listErr)
-	found := false
-	for _, c := range constraints {
-		if c.Name == "comp-create-boundary" {
-			found = true
-		}
-	}
-	assert.True(t, found)
-	entries, err := s.ListConstraintHistory(ctx, commitResult.Constraint.ID)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-}
-
-// ---------------------------------------------------------------------------
 // 3. Audit entry contains no sensitive principal data (redaction test)
 // ---------------------------------------------------------------------------
 
 func TestAudit_RedactionNoSensitiveData(t *testing.T) {
-	gs, ps, _, s, _ := auditTestSetup(t)
+	gs, ps, _, s := auditTestSetup(t)
 	ctx := context.Background()
 	capture := auditevent.NewCaptureSink()
 	gs.auditSink = capture
@@ -269,7 +157,7 @@ func TestAudit_RedactionNoSensitiveData(t *testing.T) {
 
 	// ---------------------------------------------------------------------------
 	// Field-level sensitive data assertions (R2): verify that every field in
-	// BoundaryAuditEntry that could theoretically carry PII is safe.
+	// the CREATE history row that could theoretically carry PII is safe.
 	// ---------------------------------------------------------------------------
 
 	// Common PII patterns: email addresses, typical principal/group names.
@@ -360,7 +248,7 @@ func TestRecovery_ConcurrentExclusion(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecovery_SQLiteExclusiveLock(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
+	_, _, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	adminID := govSeedAdminUser(t, s, "sqlite-lock-admin")
@@ -531,7 +419,7 @@ func TestEvents_UnsubscribeWorks(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEvents_PublishedOnCommit(t *testing.T) {
-	gs, ps, _, s, _, eventBus := auditTestSetupWithEvents(t)
+	gs, ps, _, s, eventBus := auditTestSetupWithEvents(t)
 	ctx := context.Background()
 
 	var received []InvalidationEvent
@@ -694,111 +582,11 @@ func TestMetrics_RecordLockoutCheck(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. Audit writer: validation
-// ---------------------------------------------------------------------------
-
-func TestAudit_ValidateEntry(t *testing.T) {
-	tests := []struct {
-		name    string
-		entry   BoundaryAuditEntry
-		wantErr bool
-	}{
-		{
-			name: "valid entry",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing ID",
-			entry: BoundaryAuditEntry{
-				Operation: "create",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing operation",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid operation",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "invalid",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing actor",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				Timestamp: time.Now(),
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing timestamp",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "create",
-				ActorID:   "user-1",
-			},
-			wantErr: true,
-		},
-		{
-			name: "disable_all is valid",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "disable_all",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "recovery is valid",
-			entry: BoundaryAuditEntry{
-				ID:        "aud_test",
-				Operation: "recovery",
-				ActorID:   "user-1",
-				Timestamp: time.Now(),
-			},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateAuditEntry(&tt.entry)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // 13. Recovery: list recovery-disabled boundaries
 // ---------------------------------------------------------------------------
 
 func TestRecovery_ListRecoveryDisabled(t *testing.T) {
-	_, _, _, s, _ := auditTestSetup(t)
+	_, _, _, s := auditTestSetup(t)
 	ctx := context.Background()
 
 	adminID := govSeedAdminUser(t, s, "list-disabled-admin")
@@ -839,43 +627,4 @@ func TestCorrelationIDFromContext(t *testing.T) {
 
 	ctx = context.WithValue(ctx, correlationIDKey, "req-123")
 	assert.Equal(t, "req-123", correlationIDFromContext(ctx))
-}
-
-// ---------------------------------------------------------------------------
-// 15. Audit entries for specific constraint
-// ---------------------------------------------------------------------------
-
-func TestAudit_GetEntriesForConstraint(t *testing.T) {
-	aw := NewBoundaryAuditWriter(slog.Default())
-	ctx := context.Background()
-
-	_, err := aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c1",
-		Operation:    "create",
-		ActorID:      "user-1",
-	})
-	require.NoError(t, err)
-
-	_, err = aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c2",
-		Operation:    "update",
-		ActorID:      "user-1",
-	})
-	require.NoError(t, err)
-
-	_, err = aw.WriteAuditEntry(ctx, AuditRequest{
-		ConstraintID: "c1",
-		Operation:    "delete",
-		ActorID:      "user-2",
-	})
-	require.NoError(t, err)
-
-	c1Entries := aw.GetEntriesForConstraint("c1")
-	assert.Len(t, c1Entries, 2)
-
-	c2Entries := aw.GetEntriesForConstraint("c2")
-	assert.Len(t, c2Entries, 1)
-
-	c3Entries := aw.GetEntriesForConstraint("c3")
-	assert.Len(t, c3Entries, 0)
 }

@@ -393,11 +393,20 @@ type affectedPrincipalsResponse struct {
 // mutationResponse is the response for create/update mutations.
 type mutationResponse struct {
 	accessBoundaryDetail
+	// AuditID is the event ID (a UUID) of the access_constraint_history row
+	// written in the same transaction as the create or update. It is listed
+	// by the constraint's audit endpoint while the constraint exists and its
+	// row is within the per-constraint retention cap.
 	AuditID string `json:"auditId"`
 }
 
 // deleteResponse is the response for delete mutations.
 type deleteResponse struct {
+	// AuditID is the event ID (a UUID) of the access_boundary/delete
+	// structured-log event dispatched after the delete committed. It
+	// identifies a best-effort log event only: it is not retrievable through
+	// any API and is not backed by history, because the constraint's history
+	// is deleted with it. Empty if the event could not be built.
 	AuditID string `json:"auditId"`
 }
 
@@ -2060,6 +2069,19 @@ func parseIntOr(s string, defaultVal int) int {
 // capabilitiesService provides access to the capabilities service.
 // Set via initBoundaryServices().
 
+// sharedAuditLogSink returns the structured-log audit sink over the server's
+// shared asynchronous audit writer (s.auditWriter, built by
+// initDecisionAuditLog). Records through it are async, loss-counted and
+// best-effort: they are not persisted records. It is not gated by the
+// decision-audit experiment, which applies only to decision records. Nil
+// when the writer was not initialized.
+func (s *Server) sharedAuditLogSink() auditevent.Sink {
+	if s.auditWriter == nil || s.decisionAuditLogger == nil || s.decisionAuditLogger.sink == nil {
+		return nil
+	}
+	return s.decisionAuditLogger.sink
+}
+
 // initBoundaryServices initializes the preview, governance and
 // capabilities services on the Server.
 // Called during server startup after authzService is available.
@@ -2072,12 +2094,10 @@ func (s *Server) initBoundaryServices() {
 	s.previewService = NewPreviewService(s.store, s.authzService, logger)
 	s.capabilitiesService = NewCapabilitiesService(s.store, s.authzService, logger)
 
-	// Create audit writer and event bus.
-	auditWriter := NewBoundaryAuditWriter(logger)
 	eventBus := NewInvalidationEventBus(logger)
 
 	gs := NewGovernanceService(s.store, s.previewService, s.authzService, logger)
-	gs.auditWriter = auditWriter
+	gs.deleteAuditSink = s.sharedAuditLogSink()
 	gs.eventBus = eventBus
 	s.governanceService = gs
 
