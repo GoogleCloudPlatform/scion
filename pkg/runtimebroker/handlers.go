@@ -3196,7 +3196,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	)
 
 	// id is joined onto a project directory as a single path segment by
-	// every file operation below (applyInlineConfigUpdate, GetSavedProfile,
+	// every file operation below (applyInlineConfigUpdate, ProvisionedProfile,
 	// GetSavedPhase, and ultimately GetAgentDir via mgr.Start), so it must be
 	// exactly that: reject anything that would join as more than one
 	// segment, or as ".." / ".", before any of those joins happens.
@@ -3248,6 +3248,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// Profile is the agent's settings profile as the Hub records it,
+		// sent on every start (even when empty); nil from an older Hub. It
+		// is used only for an agent without an image provenance record
+		// (hubSentProfile).
+		Profile *string `json:"profile,omitempty"`
 		// GitClone, Branch, and WorkspaceMode carry the workspace-recreation
 		// inputs the Hub sends on start (GoogleCloudPlatform/scion#1931), so
 		// an agent's workspace can be recreated on a runtime that does not
@@ -3478,6 +3483,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		TelemetryPolicy:          startReq.TelemetryPolicy,
 		TemplateID:               startReq.TemplateID,
 		TemplateHash:             startReq.TemplateHash,
+		HubProfile:               startReq.Profile,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -3493,7 +3499,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Once ProjectPath is resolved, confirm id's agent directory actually
 	// resolves under this project's agents root before applyInlineConfigUpdate,
-	// GetSavedProfile, or GetSavedPhase touch it below -- the same
+	// ProvisionedProfile, or GetSavedPhase touch it below -- the same
 	// defense-in-depth pairing checkAgentDirContained already provides
 	// against isSingleCleanPathElement inside ProvisionAgent and GetAgent.
 	if opts.ProjectPath != "" {
@@ -3519,12 +3525,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// This runs before any side effect below (applyInlineConfigUpdate's
 	// scion-agent.json write), so a rejection here does not leave a partial
 	// update applied.
-	// A flat instance has no saved profile (profiles are refused there): only
-	// that read is skipped, never the consistency checks below.
-	if opts.ProjectPath != "" && !s.isFlat() {
-		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
-	}
-	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false)
+	// The profile is the agent's provisioned one (broker-side image
+	// provenance), else the Hub-sent one (runtimeClassificationProfile);
+	// it is both the runtime-selection profile and the profile the start
+	// runs with. A flat instance has no profiles (they are refused there)
+	// and keeps opts.Profile; the consistency checks below still run.
+	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false, s.startProfileSource(opts, opts.Name, startReq.Profile))
 	if provErr != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
 			return
@@ -3532,11 +3538,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeImageProvenanceError(w, provErr, "start agent", id)
 		return
 	}
+	if !s.isFlat() {
+		opts.Profile = runtimeOpts.Profile
+	}
 	// A saved profile names the runtime this existing agent was created
 	// on; if settings cannot resolve it, fail rather than start the agent
-	// on the default runtime (ptone/scion#2709). buildStartContext already
-	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
-	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	// on the default runtime (ptone/scion#2709).
+	res, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned))
 	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
@@ -3830,7 +3838,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	// changed list (read by the start, StartOptions.RerenderKeys) is
 	// written to disk.
 	if inlineConfig != nil {
-		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
+		s.applyClearedFields(ctx, merged, projectPath, projectDir, filepath.Dir(cfgPath), agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
 	merged.ChangedFields = nil
@@ -4521,6 +4529,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID string `json:"runId,omitempty"`
 		// TemplateName mirrors the same field on the start path.
 		TemplateName string `json:"templateName,omitempty"`
+		// Profile mirrors the same field on the start path.
+		Profile *string `json:"profile,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 		// TelemetryPolicy mirrors the same field on the start path.
@@ -4703,6 +4713,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedSecrets:          restartReq.ResolvedSecrets,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
+		HubProfile:               restartReq.Profile,
 		TemplateName:             restartReq.TemplateName,
 		TelemetryPolicy:          restartReq.TelemetryPolicy,
 		TemplateID:               restartReq.TemplateID,
@@ -4728,28 +4739,25 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		opts.Image = restartReq.Image
 	}
 
-	if opts.ProjectPath != "" && !s.isFlat() {
-		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
-	}
-
-	// Re-resolve manager after the profile update above, and re-run the
-	// hub-default-passthrough downgrade and the Kubernetes/block rejection
-	// against this later, authoritative resolution — before the stop below,
-	// a real side effect. A rejection here must leave the agent exactly as
-	// it was; running this after the stop would return 400 with the agent
-	// already stopped. See the identical re-check and comment in startAgent.
-	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, agentName, true)
+	// Resolve the profile as on start (provisioned, else Hub-sent; see
+	// runtimeClassificationProfile), re-resolve the manager against it, and
+	// re-run the hub-default-passthrough downgrade and the Kubernetes/block
+	// rejection against this later, authoritative resolution — before the
+	// stop below, a real side effect. A rejection here must leave the agent
+	// exactly as it was; running this after the stop would return 400 with
+	// the agent already stopped. See the identical re-check and comment in
+	// startAgent.
+	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, agentName, true, s.startProfileSource(opts, agentName, restartReq.Profile))
 	if provErr != nil {
 		s.writeImageProvenanceError(w, provErr, "restart agent", id)
 		return
 	}
+	if !s.isFlat() {
+		opts.Profile = runtimeOpts.Profile
+	}
 	// As in startAgent, an unresolvable saved profile fails before the
 	// stop below instead of falling back to the default runtime.
-	// The profile is read by id but the recorded-runtime fallback reads
-	// agent-info.json by opts.Name (the container's name). If they differ
-	// the fallback cannot fire and the 503 is returned, which fails safe.
-	// buildStartContext already logged any fallback at Warn; Debug here.
-	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
+	res, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), pin)
 	res = res.forExistingAgent(id)
 	mgr, resolvedRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
@@ -4780,7 +4788,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// Harness-config policy gate: runs on create, start and restart against
 	// the single hydrated harness-config launch will use (opts, as built by
 	// buildStartContext above), before the stop below.
-	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, agentName)); !d.OK {
 		trace.SpanFromContext(ctx).SetStatus(codes.Error, d.detail())
 		s.writeHarnessPolicyRefusal(w, d, "restart agent", id, nil)
 		return
@@ -6916,7 +6924,7 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // The result is resolveManagerForOptsStrict's, with its error dropped: on
 // the error-carrying returns it still holds the agent runtime's default manager.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) runtimeResolution {
-	res, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
+	res, _ := s.resolveManagerForOptsStrict(opts, profileLenient)
 	return res
 }
 
@@ -6947,9 +6955,6 @@ const (
 	// there were no project settings (non-strict) or the default or
 	// requested profile did not resolve.
 	resolutionDefaultFallback
-	// resolutionStrictFallback: the strict recorded-runtime fallback to the
-	// default runtime (savedProfileUnresolved).
-	resolutionStrictFallback
 	// resolutionErrorRuntime: the profile's runtime failed to build; the
 	// manager wraps the error runtime and is stored in no holder.
 	resolutionErrorRuntime
@@ -6968,8 +6973,6 @@ func (k resolutionKind) String() string {
 		return "flat"
 	case resolutionDefaultFallback:
 		return "defaultFallback"
-	case resolutionStrictFallback:
-		return "strictFallback"
 	case resolutionErrorRuntime:
 		return "errorRuntime"
 	default:
@@ -7060,13 +7063,13 @@ func (s *Server) restartPin(match agentMatch) pinnedRuntime {
 // (ServerConfig.ForceRuntime) still takes precedence when it resolves to a
 // registered runtime; one that resolves to none is ignored by
 // resolveManagerForOptsStrict, so it does not drop the pin either.
-func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (runtimeResolution, error) {
+func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, pin pinnedRuntime) (runtimeResolution, error) {
 	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
 		if _, forced := s.forcedRuntime(); !forced {
 			return runtimeResolution{Manager: pin.mgr, Runtime: pin.rt, Record: pin.record, RuntimeType: pin.name, How: resolutionUnrecorded}, nil
 		}
 	}
-	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
+	return s.resolveManagerForOptsStrict(opts, mode)
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a
@@ -7077,23 +7080,19 @@ const (
 	// profileLenient falls back to the broker's default runtime, as for a
 	// fresh start.
 	profileLenient profileResolution = iota
-	// profileStrict is for an existing agent's saved profile
-	// (agent-info.json). A profile that does not resolve returns
-	// errSavedProfileUnresolved, with one fallback: if the agent's recorded
-	// runtime (AgentInfo.Runtime) is the default runtime, the default is
-	// used. The fallback never applies to a profile missing from the hub's
-	// stored profiles.
+	// profileStrict is for an existing agent's Hub-sent profile (an agent
+	// without image provenance). A profile that does not resolve returns
+	// errSavedProfileUnresolved.
 	profileStrict
 	// profileStrictProvisioned is for the profile recorded in an agent's
-	// broker-side image provenance: errSavedProfileUnresolved, with no
-	// recorded-runtime fallback, since agent-info.json is not an input to
-	// such an agent's runtime selection.
+	// broker-side image provenance: errSavedProfileUnresolved, naming the
+	// provisioned profile and how to recover.
 	profileStrictProvisioned
 )
 
 // existingAgentProfileResolution returns the resolution mode for an existing
-// agent's start/restart: lenient without a profile, otherwise strict, with
-// the recorded-runtime fallback only for an agent without image provenance.
+// agent's start/restart: lenient without a profile, otherwise strict
+// (profileStrictProvisioned for a profile from image provenance).
 func existingAgentProfileResolution(profile string, provisioned bool) profileResolution {
 	switch {
 	case profile == "":
@@ -7141,14 +7140,9 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // With a strict mode, used when opts.Profile is an existing agent's saved
 // or provisioned profile, a settings load failure, missing settings or a
 // profile/runtime the settings do not define returns
-// errSavedProfileUnresolved instead of the broker's default manager. Under
-// profileStrict only, when the agent's recorded runtime (AgentInfo.Runtime)
-// is the default runtime, the default is used instead
-// (savedProfileUnresolved) and logged at fallbackLevel, except for a
-// profile missing from the hub's stored profiles
-// (*config.StoredProfileNotFoundError), which always returns
-// errSavedProfileUnresolved. With
-// profileLenient those cases fall back to the default, as for a fresh start.
+// errSavedProfileUnresolved instead of the broker's default manager
+// (savedProfileUnresolved). With profileLenient those cases fall back to
+// the default, as for a fresh start.
 // In every mode, a dispatch with no profile whose default profile cannot be
 // resolved against the Hub's stored profiles (*config.ActiveProfileError:
 // active_profile is not one of them and they do not hold exactly one)
@@ -7161,7 +7155,7 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // the profile and a fixed cause; it does not include file paths or
 // settings content. The full detail is logged here at Warn, once per
 // failure.
-func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level) (runtimeResolution, error) {
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution) (runtimeResolution, error) {
 	// Every default-holder return below uses this one snapshot, so its
 	// manager, runtime and record belong together.
 	defMgr, defRT, defRec := s.defaultPair()
@@ -7194,7 +7188,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
 	vs, _, err := s.loadRuntimeSettings(projectDir)
 	if err != nil && strict {
-		return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, err,
+		return s.savedProfileUnresolved(opts, projectDir, mode, err,
 			fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
 				errSavedProfileUnresolved, opts.Name, opts.Profile))
 	}
@@ -7208,7 +7202,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		// project with no settings file reaches ResolveRuntime below and
 		// fails there with "profile not found" instead.
 		if strict {
-			return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, errors.New("no project settings found"),
+			return s.savedProfileUnresolved(opts, projectDir, mode, errors.New("no project settings found"),
 				fmt.Errorf("%w: agent %q profile %q: no project settings found",
 					errSavedProfileUnresolved, opts.Name, opts.Profile))
 		}
@@ -7257,7 +7251,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		if strict {
 			// ResolveRuntime's errors name only the profile and runtime
 			// ("profile %q not found", "runtime %q not found for profile %q").
-			return s.savedProfileUnresolved(opts, projectDir, mode, fallbackLevel, err,
+			return s.savedProfileUnresolved(opts, projectDir, mode, err,
 				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
 		}
 		// Profile or its runtime not found in settings; use default
@@ -7373,48 +7367,21 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	return fromProfile(runtimeResolution{Manager: mgr, Runtime: resolved, Record: rec, RuntimeType: resolved.Name(), How: selHow}), nil
 }
 
-// savedProfileUnresolved handles a strict resolution failure. If the
-// agent's agent-info.json records that it last ran on the broker's default
-// runtime, that runtime is still the right one, so it returns the default
-// manager and logs the fallback at level. Otherwise it logs cause and
-// returns clientErr, which handlers write as the 503.
-//
-// agent-info.json records only the runtime type, so the fallback applies
-// only where a type match is an identity match: not for Kubernetes (the
-// identity includes context and namespace, see auxiliaryRuntimeIdentity)
-// and not for runtimes with per-profile instances. Those get the 503.
+// savedProfileUnresolved handles a strict resolution failure: it logs
+// cause and returns clientErr, which handlers write as the 503. There is
+// no fallback to the default runtime: the broker keeps no record of the
+// runtime an existing agent last ran on outside the agent home.
 //
 // Under profileStrictProvisioned the profile is the one recorded in the
-// agent's image provenance; agent-info.json is not consulted, and the 503
-// names the provisioned profile and how to recover.
-//
+// agent's image provenance, and the error names it and how to recover.
 // A saved profile missing from the hub's stored profiles
-// (*config.StoredProfileNotFoundError) never takes the fallback either: the
-// stored profiles are authoritative, so the request gets the 503 naming the
-// available profiles rather than running on the default runtime
-// (ptone/scion#3907). Brokers without stored profiles keep the fallback.
-func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (runtimeResolution, error) {
-	// Its own snapshot: the fallback's manager, runtime and record belong
-	// together.
-	defMgr, defRT, defRec := s.defaultPair()
+// (*config.StoredProfileNotFoundError) gets the 503 naming the available
+// profiles (ptone/scion#3907).
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, cause, clientErr error) (runtimeResolution, error) {
+	s.logSavedProfileUnresolved(opts, projectDir, cause)
 	if mode == profileStrictProvisioned {
-		s.logSavedProfileUnresolved(opts, projectDir, cause)
 		return runtimeResolution{}, fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
 	}
-	var spe *config.StoredProfileNotFoundError
-	if errors.As(cause, &spe) {
-		s.logSavedProfileUnresolved(opts, projectDir, cause)
-		return runtimeResolution{}, clientErr
-	}
-	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
-		recorded == defRT.Name() &&
-		!scionrt.HasPerProfileInstances(defRT) &&
-		auxiliaryRuntimeIdentity(defRT) == defRT.Name() {
-		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
-			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
-		return defaultResolution(defMgr, defRT, defRec, resolutionStrictFallback), nil
-	}
-	s.logSavedProfileUnresolved(opts, projectDir, cause)
 	return runtimeResolution{}, clientErr
 }
 

@@ -188,16 +188,19 @@ func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
 // harnessPolicyInputForStart builds the policy input for start and restart
 // from the built start context: the hydrated harness-config launch will use
 // (opts.HarnessConfigPath, set by buildStartContext's hydration) and a
-// harness-config name: the dispatch's opts.HarnessConfig, else the agent's
-// saved agent-info harness-config, else the settings default (resolved by
-// lookupHarnessConfigDirForPolicy). That is the early check's view; names Start
-// derives from the stored or template config are evaluated by the policy hook
-// where Start resolves them. The template chain is taken from opts.Template,
-// as harness.Resolve's caller does.
+// harness-config name: the dispatch's opts.HarnessConfig (Hub-sent), else
+// the harness-config recorded in the agent's scion-agent config in its
+// broker-side agent dir (agent.PersistedHarnessConfig, the stored-config
+// tier Start resolves from), else the settings default (resolved by
+// lookupHarnessConfigDirForPolicy). The agent-info.json in the agent home is
+// not read. That is the early check's view; names Start derives from the
+// stored or template config are evaluated by the policy hook where Start
+// resolves them. The template chain is taken from opts.Template, as
+// harness.Resolve's caller does. agentName is the agent dir Start reads.
 func harnessPolicyInputForStart(opts api.StartOptions, agentName string) harnessPolicyInput {
 	name := opts.HarnessConfig
 	if name == "" && opts.ProjectPath != "" {
-		name = agent.GetSavedHarnessConfig(agentName, harnessConfigProjectDir(opts.ProjectPath))
+		name = agent.PersistedHarnessConfig(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID)
 	}
 	// The project path is passed as given; lookupHarnessConfigDirForPolicy
 	// resolves it to the project dir launch uses.

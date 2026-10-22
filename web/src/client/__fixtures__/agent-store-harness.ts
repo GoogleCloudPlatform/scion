@@ -203,6 +203,8 @@ export const COMPACT_KEYS = [
   'lastActivityEvent',
   '_capabilities',
   '_messageability',
+  'harnessVendor',
+  'modelSize',
   // Always sent by the hub (null when no delete is active or failed); rows
   // here that leave it out stand for a listing without the deletion view.
   'deletion',

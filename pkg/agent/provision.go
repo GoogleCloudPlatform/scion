@@ -2874,7 +2874,7 @@ const (
 // SavedProfileOnDisk returns the saved profile of the agent agentName in
 // projectPath on this host, as the start path would see it, for the hub's
 // built-in profile reference count (ptone/scion#5113). It reads
-// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// agent-info.json via readSavedAgentInfo (GetResolvedProjectDir,
 // then GetAgentHomePath). When that file exists but cannot be used, the
 // start path's runtime selection would use the provisioned profile from the
 // image provenance record (ProvisionedProfile), so that is returned instead.
@@ -2903,7 +2903,7 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 }
 
 // readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
-// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// the one reader behind GetSavedPhase and SavedProfileOnDisk, so they always
 // look at the same file. info is non-nil only when state is
 // SavedProfileFound.
 func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
@@ -2911,11 +2911,13 @@ func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, S
 	if err != nil {
 		return nil, SavedProfileMissing
 	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err != nil {
+	// Read confined to the agent home (readHomeAgentInfo): a link, a
+	// non-regular file or a second hard link at agent-info.json is
+	// unreadable, never read through.
+	data, err := readHomeAgentInfo(config.GetAgentHomePath(projectDir, agentName))
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, SavedProfileMissing
 	}
-	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
 		return nil, SavedProfileUnreadable
 	}
@@ -2959,28 +2961,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
 
-func GetSavedProfile(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Profile
-	}
-	return ""
-}
-
-// GetSavedRuntime returns the runtime name agent-info.json records the
-// agent last ran on, or "" if none is recorded.
-func GetSavedRuntime(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Runtime
-	}
-	return ""
-}
-
-func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.HarnessConfig
-	}
-	return ""
-}
+// There is deliberately no getter for the profile, runtime or harness
+// config recorded in agent-info.json: the agent home is writable by the
+// agent, so those copies are display-only. The broker reads them from its
+// own records instead (ProvisionedProfile, PersistedHarnessConfig).
 
 func GetSavedPhase(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -3001,7 +2985,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	// This might happen if provisioning failed or hasn't finished.
 	// Checked before the lock too, so no lock file is left in a home
 	// that has no agent-info.json.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	if _, err := os.Lstat(agentInfoPath); os.IsNotExist(err) {
 		return nil
 	}
 
@@ -3033,23 +3017,14 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
-	// process cannot lose this update or have its own lost (#4681).
-	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
-		mode := os.FileMode(0o644)
-		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-			return nil
-		} else if err == nil {
-			mode = fi.Mode().Perm()
-		}
-
-		data, err := os.ReadFile(agentInfoPath)
-		if err != nil {
-			return err
-		}
-
+	// process cannot lose this update or have its own lost (#4681). They
+	// are confined to the agent home (updateHomeAgentInfo): a link at
+	// agent-info.json or at a directory component is refused, never read
+	// through or written through.
+	return updateHomeAgentInfo(agentHome, true, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		update(&info)
@@ -3060,12 +3035,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 			info.RunID = ""
 		}
 
-		newData, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(agentInfoPath, newData, mode)
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }
 
@@ -4082,7 +4052,7 @@ func dirHasEntries(path string) (bool, error) {
 // GetAgent reads it from) if it parses and names a template or
 // harness-config, or nil otherwise.
 func readStoredAgentRecord(agentHome string) *api.AgentInfo {
-	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	data, err := readHomeAgentInfo(agentHome)
 	if err != nil {
 		return nil
 	}
@@ -4271,10 +4241,36 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 	}
 
-	// Try to load agent-info.json first to get the template
-	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	// Load agent-info.json (read confined to the agent home; a link there is
+	// refused, never read through). Its template is used only as described
+	// below.
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
+	if infoData, err := readHomeAgentInfo(agentHome); err == nil {
+		if err := json.Unmarshal(infoData, &agentInfo); err != nil {
+			agentInfo = nil
+		}
+	}
+
+	// The template chain comes from the template recorded in the agent's
+	// broker-side image provenance (provisioning writes the same template
+	// there and in agent-info.json), never from agent-info.json in the agent
+	// home, which also replaces Info's template fields below. An agent
+	// provisioned before that record existed keeps agent-info.json's
+	// template. With a record that exists but cannot be used, no recorded
+	// template applies (the settings default chain); Start then fails on
+	// the same record.
+	provenance, provErr := readImageProvenance(agentDir)
+	if provErr != nil {
+		logImageProvenanceError(agentName, provErr)
+	}
+	var templateRecord *api.AgentInfo
+	switch {
+	case provenance != nil:
+		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
+	case provErr == nil:
+		templateRecord = agentInfo
+	}
 
 	// A template recorded as loaded from a content-addressed cache (a
 	// TemplateHash, or a content hash stored as the name by older versions)
@@ -4282,12 +4278,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// name: the agent loads from its persisted config alone, as it did when
 	// the stored name was the cache directory's hash.
 	hydratedTemplate := false
-	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
-		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
-			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
-			if agentInfo.Template != "" {
-				effectiveTemplate = agentInfo.Template
-			}
+	if templateRecord != nil {
+		hydratedTemplate = normalizeHydratedTemplateInfo(templateRecord, api.TemplateNameFromContext(ctx))
+		if templateRecord.Template != "" {
+			effectiveTemplate = templateRecord.Template
+		}
+	}
+	if agentInfo != nil && templateRecord != agentInfo {
+		if templateRecord != nil {
+			agentInfo.Template, agentInfo.TemplateHash = templateRecord.Template, templateRecord.TemplateHash
+		} else {
+			agentInfo.Template, agentInfo.TemplateHash = "", ""
 		}
 	}
 
@@ -4301,7 +4302,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	var chain []*config.Template
 	if hydratedTemplate {
-		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, agentInfo.TemplateHash))
+		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
 		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
 	}

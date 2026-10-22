@@ -133,9 +133,11 @@ func (f *ownRTFixture) forbid(ns string) {
 	f.forbiddenNS[ns] = true
 }
 
-// newOwnRTFixture builds the fixture. savedProfile is written to the agent's
-// agent-info.json ("" leaves it empty, as for an agent started without a
-// profile). withPod creates the agent pod in scion-agents.
+// newOwnRTFixture builds the fixture. savedProfile is the agent's
+// provisioned profile, written to its broker-side image provenance record
+// and, as provisioning does, to its agent-info.json ("" writes no record,
+// as for an agent provisioned before the record existed). withPod creates
+// the agent pod in scion-agents.
 func newOwnRTFixture(t *testing.T, savedProfile string, withPod bool) *ownRTFixture {
 	t.Helper()
 	return newOwnRTFixtureWith(t, ownRTOptions{savedProfile: savedProfile, withPod: withPod})
@@ -193,6 +195,9 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	info, _ := json.Marshal(api.AgentInfo{Name: ownRTAgent, Profile: savedProfile, HarnessConfig: "default"})
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if savedProfile != "" {
+		writeProvisionedProfile(t, projectDir, ownRTAgent, savedProfile)
 	}
 
 	f := &ownRTFixture{
@@ -635,6 +640,7 @@ func TestDeleteAgent_DockerOwnRuntime_ContainerIDUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeProvisionedProfile(t, projectDir, ownRTAgent, "local")
 
 	const containerID = "3f2a9c1d0b7e5a4f"
 	mgr := &mockManager{agents: []api.AgentInfo{{
