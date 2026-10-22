@@ -261,3 +261,39 @@ func TestDispatchDeleteFailedCreate_PlacementRefusalCarriesRun(t *testing.T) {
 
 	assert.Equal(t, "", createCleanupTargetRun(errors.New("other")))
 }
+
+// --- pre-check before the availability check (ptone/scion#4959) --------------
+
+// A delete without force of an agent whose saved placement is inconsistent
+// answers the placement 409, not the availability 503, when its Runtime
+// Broker is offline: the pre-check runs first. Nothing is dispatched and
+// no claim is taken. A consistent agent on an offline Runtime Broker still
+// gets the 503.
+func TestAgentDelete_PlacementPreCheckBeforeAvailability(t *testing.T) {
+	ctx := context.Background()
+	t.Run("inconsistent placement, Runtime Broker offline", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.stalePinnedAgent(t, "stale-offline", string(state.PhaseRunning))
+		require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.legacy.ID, store.BrokerStatusOffline))
+		before := mustGetAgent(t, f.s, a.ID)
+
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
+		details := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+		assert.Equal(t, a.ID, details["agentId"])
+		assert.False(t, f.client.deleteCalled, "nothing is dispatched")
+		after := mustGetAgent(t, f.s, a.ID)
+		assert.Equal(t, before.DeletionClaim, after.DeletionClaim, "no claim is taken")
+		assert.Equal(t, before.DeletionState, after.DeletionState)
+		assert.Equal(t, before.Phase, after.Phase)
+	})
+
+	t.Run("consistent placement, Runtime Broker offline", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.pinnedAgent(t, "pinned-offline", string(state.PhaseRunning))
+		require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.flat.ID, store.BrokerStatusOffline))
+
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		assert.False(t, f.client.deleteCalled, "nothing is dispatched")
+	})
+}

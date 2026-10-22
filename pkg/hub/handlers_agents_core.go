@@ -5084,7 +5084,8 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 
 // performAgentDelete deletes an agent through the backend-driven engine
 // (design ptone/scion#2483 §2.4): load, authorize, DeletedAt → 204, an
-// active delete → join, broker availability → 503, claim, then start the
+// active delete → join, placement pre-check → 409, broker availability →
+// 503, claim, then start the
 // engine and wait up to deleteSyncWait for its outcome. A fast delete answers
 // 204 (or 502/409 on failure) exactly as before; a slow one answers 202
 // {agentId, deletion} and its outcome arrives as events. A second DELETE
@@ -5140,6 +5141,17 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		// A live delete: join it rather than starting a second one.
 		if deletionActive(agent) {
 			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline, isAdmin)
+			return
+		}
+
+		// The placement pre-check first (the claim repeats it on the row it
+		// re-reads): an agent whose saved placement is inconsistent is
+		// refused with its specific 409 whether or not its Runtime Broker
+		// is reachable, force or not (ptone/scion#4959).
+		if err := s.deletePlacementPreCheckRow(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
 			return
 		}
 

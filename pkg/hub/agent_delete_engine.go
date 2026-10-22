@@ -375,11 +375,19 @@ func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) er
 	if err != nil {
 		return err
 	}
+	return s.deletePlacementPreCheckRow(ctx, row)
+}
+
+// deletePlacementPreCheckRow is deletePlacementPreCheck on an already-read
+// row, with the same skip list. The delete handler runs it on the row it
+// loaded before its Runtime Broker availability check, so an offline
+// Runtime Broker does not hide the placement refusal (ptone/scion#4959).
+func (s *Server) deletePlacementPreCheckRow(ctx context.Context, row *store.Agent) error {
 	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() ||
 		row.DeletionState == store.DeletionStateFinalizing || row.DeletionState == store.DeletionStateDeleting {
 		return nil
 	}
-	_, err = checkAgentPinnedPlacement(ctx, s.store, row)
+	_, err := checkAgentPinnedPlacement(ctx, s.store, row)
 	return err
 }
 
