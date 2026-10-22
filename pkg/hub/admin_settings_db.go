@@ -384,6 +384,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
 		resp.Federation = v1Server.Federation
 	}
+	// server.federation reports the same value, the one in effect, never
+	// the settings.yaml seed (ptone/scion#4326).
+	resp.Server.Federation = resp.Federation
 
 	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
 	// values. An empty map (len 0, non-nil) from the snapshot is intentional
@@ -1014,6 +1017,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
+	if rejectNullFederation(w, rawBody) {
 		return
 	}
 

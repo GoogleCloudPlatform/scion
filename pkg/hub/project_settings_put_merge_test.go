@@ -99,8 +99,9 @@ var putMergeFields = []putMergeField{
 	{name: "defaultModel", setJSON: `"model-b"`, setWant: map[string]string{projectSettingDefaultModel: "model-b"}, clearJSON: `""`, keys: []string{projectSettingDefaultModel}},
 	{
 		name: projectSettingsFieldThinkingLevel, setJSON: `70`, setWant: map[string]string{projectSettingDefaultThinkingLevel: "70"},
+		// No zero row: the handler refuses 0 before the merge result is
+		// stored (ptone/scion#4052).
 		clearJSON: `null`, keys: []string{projectSettingDefaultThinkingLevel}, nullClears: true,
-		zeroJSON: `0`, zeroWant: map[string]string{projectSettingDefaultThinkingLevel: "0"},
 	},
 	{
 		name: projectSettingsFieldTelemetryEnabled, setJSON: `false`, setWant: map[string]string{projectSettingTelemetryEnabled: "false"},
