@@ -477,8 +477,8 @@ func TestBuildAppliedConfig_DropsChangedFields(t *testing.T) {
 	assert.Nil(t, ac.InlineConfig.ChangedFields)
 	assert.Nil(t, ac.InlineConfig.ClearedFields)
 	assert.Equal(t, "p", ac.InlineConfig.SystemPrompt)
-	if ac.CreateInputs != nil && ac.CreateInputs.InlineConfig != nil {
-		assert.Nil(t, ac.CreateInputs.InlineConfig.ChangedFields)
-		assert.Nil(t, ac.CreateInputs.InlineConfig.ClearedFields)
-	}
+	require.NotNil(t, ac.CreateInputs)
+	require.NotNil(t, ac.CreateInputs.InlineConfig)
+	assert.Nil(t, ac.CreateInputs.InlineConfig.ChangedFields)
+	assert.Nil(t, ac.CreateInputs.InlineConfig.ClearedFields)
 }
