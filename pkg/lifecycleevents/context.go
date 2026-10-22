@@ -78,8 +78,31 @@ type DispatchResult struct {
 	// BrokerEvidence: the broker's answer named RunID and reported
 	// running (brokerNamedRun && brokerPhaseRunning).
 	BrokerEvidence bool
-	// NoBrokerRun: the broker's answer named no run (a legacy broker).
+	// NoBrokerRun: the broker's answer named no run (a legacy broker) and
+	// itself reported running (P1b).
 	NoBrokerRun bool
+	// BrokerNamedRun: the broker's answer named RunID, whatever its phase.
+	BrokerNamedRun bool
+}
+
+// NewDispatchResult maps a synchronous broker answer to the evidence a
+// dispatch-result write carries (design 2.4a E(iv), r7 N1/N2, F2 ruling
+// 22:06): rowRunID is the row's run after adoptBrokerRunID, brokerRunID
+// the run the answer named ("" for a legacy broker), brokerRunning whether
+// the answer itself reported running.
+//   - named run and running: E(iv) (BrokerEvidence);
+//   - named run, not running: correlated but not a start;
+//   - no run and running: a legacy running observation (P1b);
+//   - no run and not running (a Hub-forced running on env submit), or a
+//     different run (a failed CAS, 10b item 12): no evidence at all.
+func NewDispatchResult(rowRunID, brokerRunID string, brokerRunning bool) DispatchResult {
+	named := brokerRunID != "" && brokerRunID == rowRunID
+	return DispatchResult{
+		RunID:          rowRunID,
+		BrokerNamedRun: named,
+		BrokerEvidence: named && brokerRunning,
+		NoBrokerRun:    brokerRunID == "" && brokerRunning,
+	}
 }
 
 type dispatchResultKey struct{}

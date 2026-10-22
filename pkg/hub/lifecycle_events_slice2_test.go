@@ -248,6 +248,19 @@ func TestLifecycleEvents_SyncCreateStartingAnswer(t *testing.T) {
 	assertDense(t, evs)
 }
 
+// TestLifecycleEvents_SyncCreateLegacyStartingAnswer: a legacy broker
+// answering starting with no run gives no started (F2, tele-wp1-arch
+// 22:06): neither a correlated start nor a legacy running observation.
+func TestLifecycleEvents_SyncCreateLegacyStartingAnswer(t *testing.T) {
+	srv, ls, projectID, sink, _ := lcDispatchServer(t, "starting", false)
+	id := lifecycleCreateAgent(t, srv, projectID, "lc-legacy-starting")
+	evs := lcEvents(t, ls, sink, id)
+	for _, e := range evs {
+		assert.NotEqual(t, tc.TransitionStarted, e.Transition, "no started: %s", lcSeqFull(evs))
+	}
+	assertDense(t, evs)
+}
+
 // TestLifecycleEvents_StopRestartHalt: the HTTP restart of a running agent
 // closes R1 at the stop leg (restart_stop_leg, before R2 is minted) and
 // starts R2; a stop closes R2; a restart from stopped starts R3 with no

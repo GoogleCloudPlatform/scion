@@ -435,11 +435,8 @@ func lifecycleDispatchResult(ctx context.Context, agent *store.Agent) context.Co
 	if !ok {
 		return ctx
 	}
-	return lifecycleevents.WithDispatchResult(ctx, lifecycleevents.DispatchResult{
-		RunID:          a.RunID,
-		BrokerEvidence: a.BrokerNamedRun && a.BrokerPhaseRunning,
-		NoBrokerRun:    !a.BrokerNamedRun && a.BrokerRunEmpty,
-	})
+	return lifecycleevents.WithDispatchResult(ctx,
+		lifecycleevents.NewDispatchResult(a.RunID, a.BrokerRunID, a.BrokerPhaseRunning))
 }
 
 // onSyncDispatchAnswer runs in settleLandedRun right after
@@ -458,7 +455,7 @@ func onSyncDispatchAnswer(ctx context.Context, agent *store.Agent, resp *RemoteA
 		RunID:              agent.RunID,
 		BrokerNamedRun:     resp.Agent.RunID != "" && resp.Agent.RunID == agent.RunID,
 		BrokerPhaseRunning: resp.Agent.Phase == string(state.PhaseRunning),
-		BrokerRunEmpty:     resp.Agent.RunID == "",
+		BrokerRunID:        resp.Agent.RunID,
 	})
 }
 

@@ -53,3 +53,26 @@ func TestSelectSinkKind(t *testing.T) {
 		}
 	}
 }
+
+// TestNewDispatchResult pins the broker-answer mapping of E(iv) (r7 N1/N2)
+// and the F2 ruling (tele-wp1-arch 22:06): only an answer that itself said
+// running is a start or a legacy running observation.
+func TestNewDispatchResult(t *testing.T) {
+	cases := []struct {
+		name    string
+		broker  string
+		running bool
+		want    DispatchResult
+	}{
+		{"named and running: E(iv)", "R1", true, DispatchResult{RunID: "R1", BrokerNamedRun: true, BrokerEvidence: true}},
+		{"named, starting: correlated, no start", "R1", false, DispatchResult{RunID: "R1", BrokerNamedRun: true}},
+		{"legacy and running: P1b", "", true, DispatchResult{RunID: "R1", NoBrokerRun: true}},
+		{"legacy, starting, Hub-forced running: nothing", "", false, DispatchResult{RunID: "R1"}},
+		{"another run (failed CAS): nothing", "L1", true, DispatchResult{RunID: "R1"}},
+	}
+	for _, c := range cases {
+		if got := NewDispatchResult("R1", c.broker, c.running); got != c.want {
+			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}

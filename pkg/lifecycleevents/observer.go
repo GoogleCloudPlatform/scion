@@ -411,8 +411,11 @@ func writeFacts(ctx context.Context, w store.AgentWrite, f *Facts) {
 				f.Evidence = EvidenceDispatchResult
 			case r.NoBrokerRun:
 				f.Evidence = EvidenceDispatchNoBrokerRun
-			default:
+			case r.BrokerNamedRun:
 				f.Evidence = EvidenceDispatchNotRunning
+			default:
+				// A legacy answer that was not running (the Hub forced
+				// running), or one naming another run: no evidence (F2).
 			}
 		}
 	case store.AgentWriteLaunch:

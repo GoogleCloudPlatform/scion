@@ -493,10 +493,22 @@ func TestLifecycleStore2_SyncDispatchResult(t *testing.T) {
 
 	h, c := newS2Fixture(t)
 	h.mint(c.ID, "R1")
-	dispatch(h, c.ID, lifecycleevents.DispatchResult{RunID: "R1"}, "starting")
+	dispatch(h, c.ID, lifecycleevents.NewDispatchResult("R1", "R1", false), "starting")
 	h.heartbeat(c.ID, "running", "R1")
 	assert.Equal(t, "created@1[/1] configured@2[R1/1] started@3[R1/1]", lcFull(h.events(c.ID)),
 		"a starting answer gives no start; the correlated heartbeat does")
+
+	// F2 (tele-wp1-arch 22:06): a legacy broker answered starting with no
+	// run and the Hub forced running (env submit): no event at all; the
+	// later run-less heartbeat is the legacy observation.
+	m, e := newS2Fixture(t)
+	m.mint(e.ID, "R1")
+	m.status(ctx, e.ID, store.AgentStatusUpdate{Phase: "starting"})
+	dispatch(m, e.ID, lifecycleevents.NewDispatchResult("R1", "", false), "running")
+	assert.Equal(t, "created@1[/1] configured@2[R1/1]", lcFull(m.events(e.ID)), "a Hub-forced running is not a start")
+	m.status(ctx, e.ID, store.AgentStatusUpdate{Phase: "stopped"})
+	m.heartbeat(e.ID, "running", "")
+	assert.Equal(t, "created@1[/1] configured@2[R1/1] started@3(run_uncorrelated)[R1/1]", lcFull(m.events(e.ID)))
 
 	k, d := newS2Fixture(t)
 	k.mint(d.ID, "R1")

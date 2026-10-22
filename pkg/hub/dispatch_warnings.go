@@ -42,8 +42,8 @@ type dispatchAnswer struct {
 	BrokerNamedRun bool
 	// BrokerPhaseRunning: the answer reported phase running.
 	BrokerPhaseRunning bool
-	// BrokerRunEmpty: the answer named no run (a legacy broker).
-	BrokerRunEmpty bool
+	// BrokerRunID is the run the answer named ("" for a legacy broker).
+	BrokerRunID string
 }
 
 // recordDispatchAnswer stores a on the collector carried by ctx, if any;
