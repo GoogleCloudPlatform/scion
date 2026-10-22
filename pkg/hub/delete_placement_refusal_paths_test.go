@@ -297,3 +297,22 @@ func TestAgentDelete_PlacementPreCheckBeforeAvailability(t *testing.T) {
 		assert.False(t, f.client.deleteCalled, "nothing is dispatched")
 	})
 }
+
+// --- the run-mismatch retry (ptone/scion#5016) -------------------------------
+
+// A force delete whose retry of the run the broker reported holding is
+// refused for an inconsistent saved placement answers with the refusal's
+// own code and details, as the first dispatch's refusal does.
+func TestForceDelete_RunMismatchRetryPlacementRefusalAnswersSpecificCode(t *testing.T) {
+	f := newRunMismatchFixture(t, "pr-retry-"+uuid.NewString()[:8], state.PhaseRunning)
+	refusal := placementRefusalFor(f.agent)
+	f.client.answer = answerHeld(t, "run-b", func(string) error { return refusal })
+
+	r := f.del(t, "?force=true")
+	requirePlacementAnswer(t, r.rec, f.agent, ErrCodeRuntimeTargetPinStale, true)
+	assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted(), "the retry is sent once, then refused")
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored")
+}

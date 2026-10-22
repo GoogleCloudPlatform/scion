@@ -1102,7 +1102,7 @@ func (e *deletionEngine) retryReportedRunDelete(ctx context.Context, first *Dele
 	if refusal, ok := placementRefusalOf(err); ok {
 		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; the run the broker held was not deleted, not finalizing",
 			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
-		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		return e.rollbackPlacement(refusal), false
 	}
 	var second *DeleteRunMismatchError
 	if errors.As(err, &second) {
