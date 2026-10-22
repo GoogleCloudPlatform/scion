@@ -67,6 +67,11 @@ export interface Artifact {
   expiresAt?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The hub found the artifact's owner gone (a deleted agent or user;
+   * ptone/scion#4529). The artifact is otherwise unchanged.
+   */
+  ownerDeleted?: boolean;
 }
 
 export interface ArtifactResponse {
@@ -89,6 +94,24 @@ export interface ArtifactResponse {
    * super-admins. Never set with canManage.
    */
   canGrantReview?: boolean;
+  /**
+   * On a GET: the caller may share the artifact: canManage, or a steward of
+   * an artifact owned by an agent (design D25, ptone/scion#5144), who may
+   * change its expiry, revoke its links, remove grants and delete it, but
+   * not give admin access or move it.
+   */
+  canShare?: boolean;
+  /**
+   * On a GET, for a steward without canManage: the steward clause,
+   * "project_owner" or "delegator".
+   */
+  shareAuthority?: string;
+  /**
+   * On a GET: the caller may delete the artifact: the decision DELETE makes
+   * for the same request (the owner, an admin grantee, a steward, or an
+   * owner or admin of its home project).
+   */
+  canRetire?: boolean;
   /**
    * On a GET: the artifact's home project was deleted. Advisory: absent when
    * the hub cannot tell.
@@ -801,6 +824,29 @@ export async function revokeLink(id: string, linkId: string): Promise<void> {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/**
+ * Deletes an artifact (DELETE /api/v1/artifacts/{id}, ptone/scion#4529). The
+ * hub answers 204; a 403 (the caller may read but not delete it) or a 404
+ * (gone, or moved meanwhile) throws with the hub's message.
+ */
+export async function deleteArtifact(id: string): Promise<void> {
+  const res = await apiFetch(artifactPath(id), { method: 'DELETE' });
+  if (!res.ok) {
+    throw new ArtifactDeleteError(await extractApiError(res, `HTTP ${res.status}`), res.status);
+  }
+}
+
+/** A refused or failed delete, with the hub's HTTP status. */
+export class ArtifactDeleteError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'ArtifactDeleteError';
+  }
 }
 
 /** Lists an artifact's grants, the home project's first. */

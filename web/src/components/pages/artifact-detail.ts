@@ -32,7 +32,12 @@
  * shown only when the hub reports canPublish; for a caller with canReview
  * (a review grant, ptone/scion#4538) only Review is shown. Share is shown for canManage;
  * Grant review access (the Share dialog limited to giving a user review
- * access) for canGrantReview without canManage.
+ * access) for canGrantReview without canManage. Retention… (the Retention
+ * and access dialog: expiry, revoke links, remove grants) is shown for
+ * canShare without canManage (a steward), and Delete… for canRetire
+ * (ptone/scion#4535). An artifact whose owner was deleted has the Owner
+ * deleted badge and its owner struck through; the meta row shows when it
+ * expires.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -46,6 +51,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatInstant } from '../../utils/time.js';
+import { showToast } from '../../utils/toast.js';
 import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
@@ -97,6 +103,8 @@ import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
+import '../shared/artifact-delete-dialog.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
 import './not-found.js';
 
@@ -202,6 +210,10 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private shareOpen = false;
   /** The Move dialog is open (ptone/scion#4583). */
   @state() private moveOpen = false;
+  /** The Retention and access dialog is open. */
+  @state() private retentionOpen = false;
+  /** The Delete artifact confirmation is open. */
+  @state() private deleteOpen = false;
   /**
    * The hub's cross-project sharing setting, from the grants response (read
    * only for a caller who manages the artifact). The hub refuses every move
@@ -248,6 +260,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   static override styles = [
     untrustedViewFrameStyles,
+    ownerDeletedStyles,
     css`
       :host {
         display: block;
@@ -742,6 +755,41 @@ export class ScionPageArtifactDetail extends LitElement {
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
 
+  /** Delete… is offered exactly when the hub reports canRetire. */
+  private get canRetire(): boolean {
+    return this.data?.canRetire === true;
+  }
+
+  /**
+   * Retention… is offered to a caller who may change the expiry, revoke
+   * links and remove grants but is not offered Share: canShare without
+   * canManage (a steward).
+   */
+  private get canRetention(): boolean {
+    return !!this.data?.canShare && !this.data?.canManage;
+  }
+
+  /** Where the back link goes: the home project, or the artifacts list when it was deleted. */
+  private get backTarget(): { href: string; label: string } {
+    return this.data?.scopeDeleted
+      ? { href: '/artifacts', label: 'Artifacts' }
+      : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
+  }
+
+  /** After a delete: say so, and go back to where the artifact was listed (mock S8). */
+  private onDeleted(deleted: Artifact): void {
+    this.deleteOpen = false;
+    const target = this.backTarget.href;
+    showToast(`Deleted “${deleted.title}”.`, 'success');
+    navigateTo(target);
+  }
+
+  /** How many versions the artifact has, when every page of them is loaded. */
+  private get knownVersionCount(): number | null {
+    if (this.versionsNext !== 0 || this.versionsError || this.versions.length === 0) return null;
+    return this.versions.length;
+  }
+
   private get canEdit(): boolean {
     return this.canPublish && this.entryEditable;
   }
@@ -1058,6 +1106,33 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
+      ${this.canRetention
+        ? html`<scion-artifact-share-dialog
+            class="retention-dialog"
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            .mode=${'retention'}
+            ?open=${this.retentionOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.retentionOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
+      ${this.canRetire
+        ? html`<scion-artifact-delete-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.deleteOpen}
+            ?countsAvailable=${!!this.data.canShare}
+            .versionCount=${this.knownVersionCount}
+            @artifact-deleted=${(e: CustomEvent<Artifact>): void => this.onDeleted(e.detail)}
+            @artifact-delete-closed=${(): void => {
+              this.deleteOpen = false;
+            }}
+          ></scion-artifact-delete-dialog>`
+        : nothing}
       ${this.data?.canManage
         ? html`<scion-artifact-move-dialog
             .artifact=${this.data.artifact}
@@ -1128,12 +1203,16 @@ export class ScionPageArtifactDetail extends LitElement {
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v || this.canEdit || this.canReview || !!this.data?.canManage || this.canGrantReview);
+      (!!v ||
+        this.canEdit ||
+        this.canReview ||
+        !!this.data?.canManage ||
+        this.canGrantReview ||
+        this.canRetention ||
+        this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
-    const back = this.data?.scopeDeleted
-      ? { href: '/artifacts', label: 'Artifacts' }
-      : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
+    const back = this.backTarget;
     return html`
       <scion-detail-header heading=${a.title}>
         <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
@@ -1143,10 +1222,17 @@ export class ScionPageArtifactDetail extends LitElement {
               <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
             </sl-badge>`
           : nothing}
+        ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
         <div slot="meta" class="meta">
-          <span>Owner: ${owner}</span>
+          <span
+            >Owner: ${a.ownerDeleted ? html`<span class="owner-gone">${owner}</span>` : owner}</span
+          >
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
+          <span class="expires"
+            ><sl-icon name="clock"></sl-icon> Expires:
+            ${a.expiresAt ? formatInstant(a.expiresAt) : 'Never'}</span
+          >
           <span class="ref">
             <code>${v ? v.ref : a.ref}</code>
             <sl-tooltip content=${this.copied ? 'Copied' : 'Copy reference'}>
@@ -1195,6 +1281,18 @@ export class ScionPageArtifactDetail extends LitElement {
                         Grant review access
                       </sl-button>`
                     : nothing}
+                ${this.canRetention
+                  ? html`<sl-button
+                      size="small"
+                      class="retention"
+                      @click=${(): void => {
+                        this.retentionOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="clock"></sl-icon>
+                      Retention…
+                    </sl-button>`
+                  : nothing}
                 ${this.data!.canManage && this.crossProjectSharing
                   ? html`<sl-button
                       size="small"
@@ -1204,6 +1302,20 @@ export class ScionPageArtifactDetail extends LitElement {
                     >
                       <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
                       Move…
+                    </sl-button>`
+                  : nothing}
+                ${this.canRetire
+                  ? html`<sl-button
+                      size="small"
+                      class="delete"
+                      variant="danger"
+                      outline
+                      @click=${(): void => {
+                        this.deleteOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="trash"></sl-icon>
+                      Delete…
                     </sl-button>`
                   : nothing}
                 ${v && f && ownFiles.length === 1
