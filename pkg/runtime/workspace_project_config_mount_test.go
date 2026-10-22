@@ -514,3 +514,129 @@ func TestErrProjectConfigMarkerNoBindText(t *testing.T) {
 		}
 	}
 }
+
+// In the full-repo-root fallback, a project kept in a subdirectory of the
+// repository has its own .scion below the repo root: it is masked (a
+// directory, with its agents root and homes) or bound read-only (a marker
+// file; refused on Apple). A project .scion at the repo root itself gets
+// only the existing /repo-root/.scion mask.
+func TestBuildCommonRunArgs_FallbackNestedProjectConfig(t *testing.T) {
+	type layout func(t *testing.T, repo string) string // returns ProjectConfigPath
+	nestedDir := func(t *testing.T, repo string) string {
+		mkdirs(t, filepath.Join(repo, "sub", ".scion", "agents", "a", "home"))
+		return filepath.Join(repo, "sub", ".scion")
+	}
+	nestedRoot := func(t *testing.T, repo string) string {
+		mkdirs(t, filepath.Join(repo, "sub", ".scion"))
+		return filepath.Join(repo, "sub") // a project root, not its .scion
+	}
+	nestedMarker := func(t *testing.T, repo string) string {
+		writeFile(t, filepath.Join(repo, "sub", ".scion"), "project-id: x\n")
+		return filepath.Join(repo, "sub")
+	}
+	nestedSymlink := func(t *testing.T, repo string) string {
+		mkdirs(t, filepath.Join(repo, "sub", "cfg"))
+		if err := os.Symlink("cfg", filepath.Join(repo, "sub", ".scion")); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(repo, "sub", ".scion")
+	}
+	atRoot := func(t *testing.T, repo string) string {
+		return filepath.Join(repo, ".scion")
+	}
+	for _, rt := range []string{"docker", appleContainerRuntimeName} {
+		for _, tt := range []struct {
+			name    string
+			layout  layout
+			want    func(repo string) (flag, value string)
+			wantErr error
+		}{
+			{"nested .scion directory", nestedDir, func(repo string) (string, string) {
+				if rt == appleContainerRuntimeName {
+					return "--tmpfs", "/repo-root/sub/.scion"
+				}
+				return "--mount", "type=tmpfs,destination=/repo-root/sub/.scion"
+			}, nil},
+			{"nested project root", nestedRoot, func(repo string) (string, string) {
+				if rt == appleContainerRuntimeName {
+					return "--tmpfs", "/repo-root/sub/.scion"
+				}
+				return "--mount", "type=tmpfs,destination=/repo-root/sub/.scion"
+			}, nil},
+			{"nested marker", nestedMarker, func(repo string) (string, string) {
+				return "-v", filepath.Join(repo, "sub", ".scion") + ":/repo-root/sub/.scion:ro"
+			}, nil},
+			{"nested symlink", nestedSymlink, nil, errProjectConfigSymlink},
+			{"project .scion at the repo root", atRoot, nil, nil},
+		} {
+			t.Run(rt+"/"+tt.name, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				repo := filepath.Join(t.TempDir(), "repo")
+				mkdirs(t, filepath.Join(repo, ".git"), filepath.Join(repo, ".scion"))
+				ws := filepath.Join(t.TempDir(), "outside")
+				mkdirs(t, ws)
+				cfg := minimalRunConfig()
+				cfg.BrokerMode = true
+				cfg.RuntimeName = rt
+				cfg.RepoRoot, cfg.Workspace = repo, ws
+				cfg.ProjectConfigPath = tt.layout(t, repo)
+				resolvedRepo, err := filepath.EvalSymlinks(repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args, err := buildCommonRunArgs(cfg)
+				wantErr := tt.wantErr
+				if rt == appleContainerRuntimeName && tt.name == "nested marker" {
+					wantErr = errProjectConfigMarkerNoBind
+				}
+				if wantErr != nil {
+					if !errors.Is(err, wantErr) {
+						t.Fatalf("error = %v, want %v", err, wantErr)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("buildCommonRunArgs: %v", err)
+				}
+				if tt.want == nil {
+					for i := 0; i < len(args)-1; i++ {
+						if strings.Contains(args[i+1], "/repo-root/sub") {
+							t.Errorf("unexpected nested mount %s %s", args[i], args[i+1])
+						}
+					}
+					return
+				}
+				flag, value := tt.want(resolvedRepo)
+				if !hasArgPair(args, flag, value) {
+					t.Errorf("args lack %s %s: %q", flag, value, args)
+				}
+			})
+		}
+	}
+}
+
+func TestNestedProjectConfigRel(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	mkdirs(t, filepath.Join(repo, "sub"))
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		path string
+		rel  string
+		ok   bool
+	}{
+		{filepath.Join(repo, "sub", ".scion"), filepath.Join("sub", ".scion"), true},
+		{filepath.Join(repo, "sub"), filepath.Join("sub", ".scion"), true},
+		{filepath.Join(repo, ".scion"), "", false},
+		{repo, "", false},
+		{filepath.Join(t.TempDir(), "elsewhere", ".scion"), "", false},
+		{"", "", false},
+	} {
+		rel, ok := nestedProjectConfigRel(resolved, tt.path)
+		if rel != tt.rel || ok != tt.ok {
+			t.Errorf("%s: (%q, %v), want (%q, %v)", tt.path, rel, ok, tt.rel, tt.ok)
+		}
+	}
+}

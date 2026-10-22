@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // sharedWorkspaceAgentsDir is the in-project agents root, relative to the
@@ -154,4 +155,28 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 	default:
 		return "", "", false, nil
 	}
+}
+
+// nestedProjectConfigRel returns the path of the project's .scion entry
+// (projectConfigPath, or <projectConfigPath>/.scion when that is a project
+// root) relative to repoRoot, when it lies below repoRoot somewhere other
+// than <repoRoot>/.scion.
+func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
+	if repoRoot == "" || projectConfigPath == "" {
+		return "", false
+	}
+	p := filepath.Clean(projectConfigPath)
+	if filepath.Base(p) != workspaceProjectConfigDir {
+		p = filepath.Join(p, workspaceProjectConfigDir)
+	}
+	// Resolve the parent (not the entry itself, which may be a marker
+	// file or a link) the way repoRoot was resolved.
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		p = filepath.Join(parent, filepath.Base(p))
+	}
+	rel, err := filepath.Rel(repoRoot, p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == workspaceProjectConfigDir {
+		return "", false
+	}
+	return rel, true
 }

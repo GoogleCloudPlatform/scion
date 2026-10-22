@@ -2368,7 +2368,8 @@ authDone:
 		Workspace:            effectiveWorkspace,
 		RepoRoot:             repoRoot,
 		ContainerWorkspace:   containerWorkspace,
-		AgentOwnWorkspace:    isAgentOwnWorkspace(agentDir, effectiveWorkspace),
+		AgentOwnWorkspace:    isAgentOwnWorkspace(agentDir, projectDir, effectiveWorkspace),
+		ProjectConfigPath:    projectConfigPath(opts.ProjectPath, projectDir),
 		ResolvedAuth:         resolvedAuth,
 		Harness:              h,
 		Project:              projectName,
@@ -2829,7 +2830,11 @@ func writeAgentTokenFile(agentHome, token string) error {
 // workspace's contents, which the agent can write. With no record, only
 // <agentDir>/workspace counts, so any other workspace's .scion is treated as
 // project configuration (read-only).
-func isAgentOwnWorkspace(agentDir, workspace string) bool {
+//
+// The recorded path is accepted only when it is not the project root or
+// the repository root and contains neither, and git (run hardened) lists
+// it as a linked worktree of the project's repository.
+func isAgentOwnWorkspace(agentDir, projectDir, workspace string) bool {
 	if agentDir == "" || workspace == "" {
 		return false
 	}
@@ -2837,10 +2842,49 @@ func isAgentOwnWorkspace(agentDir, workspace string) bool {
 	if ws == resolvedClean(filepath.Join(agentDir, "workspace")) {
 		return true
 	}
-	if recorded := readAgentOwnWorkspace(agentDir); recorded != "" {
-		return ws == resolvedClean(recorded)
+	recorded := readAgentOwnWorkspace(agentDir)
+	if recorded == "" || ws != resolvedClean(recorded) {
+		return false
 	}
-	return false
+	return validAttachedWorktree(projectDir, ws)
+}
+
+// validAttachedWorktree reports whether ws (resolved) may be an attached
+// worktree of the project at projectDir: neither the project root nor the
+// repository root, containing neither, and a registered linked worktree of
+// the repository.
+func validAttachedWorktree(projectDir, ws string) bool {
+	if projectDir == "" {
+		return false
+	}
+	projectRoot := projectDir
+	if filepath.Base(projectRoot) == config.DotScion {
+		projectRoot = filepath.Dir(projectRoot)
+	}
+	projectRoot = resolvedClean(projectRoot)
+	if ws == projectRoot || pathWithin(projectRoot, ws) {
+		return false
+	}
+	repoRoot, err := util.HardenedRepoRootDir(projectRoot)
+	if err != nil {
+		return false
+	}
+	repoRoot = resolvedClean(repoRoot)
+	if ws == repoRoot || pathWithin(repoRoot, ws) {
+		return false
+	}
+	ok, err := util.IsRegisteredLinkedWorktree(repoRoot, ws)
+	return err == nil && ok
+}
+
+// projectConfigPath is the broker-side path of the project's .scion entry
+// as the request named it (projectPath, a project root or its .scion), else
+// the resolved project dir.
+func projectConfigPath(projectPath, projectDir string) string {
+	if projectPath != "" {
+		return projectPath
+	}
+	return projectDir
 }
 
 // resolvedClean returns p with symlinks resolved where it exists, cleaned.

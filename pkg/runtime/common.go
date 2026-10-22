@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -765,6 +766,32 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 		} else {
 			addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
+		}
+		// A project kept in a subdirectory of the repository has its
+		// .scion (and agents root) below the repo root: shadow it too, or
+		// bind its marker file read-only.
+		if rel, ok := nestedProjectConfigRel(config.RepoRoot, config.ProjectConfigPath); ok {
+			hostPath := filepath.Join(config.RepoRoot, rel)
+			target := "/repo-root/" + filepath.ToSlash(rel)
+			info, err := os.Lstat(hostPath)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				return nil, fmt.Errorf("cannot check the project's .scion to mask it: %w", err)
+			case info.Mode()&os.ModeSymlink != 0:
+				return nil, errProjectConfigSymlink
+			case info.IsDir():
+				if config.RuntimeName == appleContainerRuntimeName {
+					addArg("--tmpfs", target)
+				} else {
+					addArg("--mount", "type=tmpfs,destination="+target)
+				}
+			default:
+				if config.RuntimeName == appleContainerRuntimeName {
+					return nil, errProjectConfigMarkerNoBind
+				}
+				addArg("-v", hostPath+":"+target+":ro")
+			}
 		}
 	}
 	// Shadow the in-project agents root of a shared workspace mount with a

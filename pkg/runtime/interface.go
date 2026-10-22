@@ -51,6 +51,11 @@ type RunConfig struct {
 	// agent's branch checkout, which stays writable; any other workspace's
 	// .scion is project configuration and is mounted read-only.
 	AgentOwnWorkspace bool
+	// ProjectConfigPath is the broker-side path of the project's .scion
+	// entry (a directory or marker file). In the full-repo-root fallback
+	// layout, a project whose .scion lies below the repo root other than at
+	// <repo>/.scion has that entry masked (or a marker bound read-only) too.
+	ProjectConfigPath string
 	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
 	// trusts. In broker mode, this field arrives already resolved by the
 	// runtime broker from operator-controlled tiers only — the request's

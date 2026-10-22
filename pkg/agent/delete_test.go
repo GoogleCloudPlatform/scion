@@ -1070,7 +1070,7 @@ func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *tes
 	// Provisioning records, broker-side, that the attached worktree is the
 	// agent's own checkout, so its .scion is not treated as project
 	// configuration.
-	if agentDir := config.ResolveAgentDir(scionDir, "agent-x"); !isAgentOwnWorkspace(agentDir, userWorktree) {
+	if agentDir := config.ResolveAgentDir(scionDir, "agent-x"); !isAgentOwnWorkspace(agentDir, scionDir, userWorktree) {
 		t.Errorf("attached worktree %s not recorded as the agent's own (agent dir %s, record %q)", userWorktree, agentDir, readAgentOwnWorkspace(agentDir))
 	}
 
