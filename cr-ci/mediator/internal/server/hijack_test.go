@@ -438,3 +438,41 @@ func TestSwapRebindsTakersRunner(t *testing.T) {
 		t.Error("busy cr-job-100 deleted")
 	}
 }
+
+// TestSecretRefetchDoesNotBlockValidDeliveries: a delivery with a bad
+// signature (anyone can send one) triggers a Secret Manager refetch at most
+// once a minute; while it is in flight, correctly signed deliveries are
+// verified against the cached secret without waiting.
+func TestSecretRefetchDoesNotBlockValidDeliveries(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	ping := []byte(`{"zen":"hi"}`)
+	if code, _ := h.webhookWith(fakeHookSecret, "ping", ping); code != http.StatusOK {
+		t.Fatalf("first delivery: %d", code)
+	}
+	h.clock.Add(61 * time.Second)
+	h.gapis.SecretStarted, h.gapis.SecretRelease = make(chan struct{}), make(chan struct{})
+	bad := make(chan int, 1)
+	go func() {
+		code, _ := h.webhookWith("FAKE-forged-secret", "ping", ping)
+		bad <- code
+	}()
+	<-h.gapis.SecretStarted // the refetch is in flight and blocked
+
+	fast := make(chan int, 1)
+	go func() {
+		code, _ := h.webhookWith(fakeHookSecret, "ping", ping)
+		fast <- code
+	}()
+	select {
+	case code := <-fast:
+		if code != http.StatusOK {
+			t.Errorf("valid delivery during a refetch: %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("a correctly signed delivery waited for the in-flight secret refetch")
+	}
+	close(h.gapis.SecretRelease)
+	if code := <-bad; code != http.StatusUnauthorized {
+		t.Errorf("forged delivery: %d, want 401", code)
+	}
+}

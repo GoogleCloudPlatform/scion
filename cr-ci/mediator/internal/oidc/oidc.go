@@ -50,7 +50,10 @@ type Verifier struct {
 	Email    string
 	Now      func() time.Time
 
+	// mu guards the fields below and is never held across a network call;
+	// fetchMu makes JWKS fetches single-flight.
 	mu          sync.Mutex
+	fetchMu     sync.Mutex
 	keys        map[string]*rsa.PublicKey
 	keysExpire  time.Time
 	lastFetched time.Time
@@ -164,26 +167,28 @@ func audienceMatches(raw json.RawMessage, want string) bool {
 }
 
 // key returns the public key for kid, fetching the JWKS when it is stale or
-// does not contain kid (at most once a minute for unknown kids).
+// does not contain kid (at most once a minute for unknown kids). The fetch
+// runs without holding mu, so callers whose key is cached and fresh are never
+// delayed by a fetch (which an unauthenticated token with an unknown kid can
+// trigger once a minute).
 func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	v.mu.Lock()
+	k, ok := v.keys[kid]
+	fresh := ok && v.now().Before(v.keysExpire)
+	v.mu.Unlock()
+	if fresh {
+		return k, nil
+	}
+
+	fetchErr := v.maybeFetch(ctx)
+
+	v.mu.Lock()
 	defer v.mu.Unlock()
-	now := v.now()
-	if k, ok := v.keys[kid]; ok && now.Before(v.keysExpire) {
-		return k, nil
-	}
-	// Fetch at most once a minute, whether the key set is missing, stale or
-	// lacks kid, so unauthenticated callers cannot drive a fetch per request.
-	if v.lastFetched.IsZero() || now.Sub(v.lastFetched) >= minRefetchDelay {
-		if err := v.fetch(ctx, now); err != nil {
-			if k, ok := v.keys[kid]; ok {
-				return k, nil // keep serving the last good key set
-			}
-			return nil, fmt.Errorf("%w: %v", ErrKeysUnavailable, err)
-		}
-	}
 	if k, ok := v.keys[kid]; ok {
-		return k, nil
+		return k, nil // fresh, or the last good key set if the fetch failed
+	}
+	if fetchErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrKeysUnavailable, fetchErr)
 	}
 	if v.keys == nil {
 		return nil, ErrKeysUnavailable // no key set yet; fetch backed off
@@ -191,15 +196,43 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	return nil, errors.New("oidc: unknown signing key")
 }
 
-func (v *Verifier) fetch(ctx context.Context, now time.Time) error {
-	v.lastFetched = now
+// maybeFetch fetches the JWKS unless one was fetched less than a minute ago
+// (whether the key set is missing, stale or lacks a kid, so unauthenticated
+// callers cannot drive a fetch per request). Concurrent callers share one
+// fetch. It returns the fetch error, or nil if it fetched successfully or
+// did not need to.
+func (v *Verifier) maybeFetch(ctx context.Context) error {
+	v.fetchMu.Lock()
+	defer v.fetchMu.Unlock()
+	v.mu.Lock()
+	now := v.now()
+	due := v.lastFetched.IsZero() || now.Sub(v.lastFetched) >= minRefetchDelay
+	if due {
+		v.lastFetched = now
+	}
+	v.mu.Unlock()
+	if !due {
+		return nil
+	}
+	keys, ttl, err := v.fetch(ctx)
+	if err != nil {
+		return err
+	}
+	v.mu.Lock()
+	v.keys, v.keysExpire = keys, now.Add(ttl)
+	v.mu.Unlock()
+	return nil
+}
+
+// fetch downloads and parses the JWKS; it does not touch the Verifier state.
+func (v *Verifier) fetch(ctx context.Context) (map[string]*rsa.PublicKey, time.Duration, error) {
 	u := v.CertsURL
 	if u == "" {
 		u = DefaultCertsURL
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	hc := v.HTTP
 	if hc == nil {
@@ -207,11 +240,11 @@ func (v *Verifier) fetch(ctx context.Context, now time.Time) error {
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("oidc: fetching JWKS: %w", err)
+		return nil, 0, fmt.Errorf("oidc: fetching JWKS: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("oidc: fetching JWKS: HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("oidc: fetching JWKS: HTTP %d", resp.StatusCode)
 	}
 	var set struct {
 		Keys []struct {
@@ -223,7 +256,7 @@ func (v *Verifier) fetch(ctx context.Context, now time.Time) error {
 		} `json:"keys"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&set); err != nil {
-		return errors.New("oidc: decoding JWKS failed")
+		return nil, 0, errors.New("oidc: decoding JWKS failed")
 	}
 	keys := map[string]*rsa.PublicKey{}
 	for _, k := range set.Keys {
@@ -239,11 +272,9 @@ func (v *Verifier) fetch(ctx context.Context, now time.Time) error {
 		keys[k.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(exp)}
 	}
 	if len(keys) == 0 {
-		return errors.New("oidc: JWKS has no RSA keys")
+		return nil, 0, errors.New("oidc: JWKS has no RSA keys")
 	}
-	v.keys = keys
-	v.keysExpire = now.Add(maxAge(resp.Header.Get("Cache-Control")))
-	return nil
+	return keys, maxAge(resp.Header.Get("Cache-Control")), nil
 }
 
 func maxAge(cc string) time.Duration {

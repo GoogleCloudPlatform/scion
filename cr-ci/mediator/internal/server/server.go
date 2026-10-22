@@ -126,7 +126,10 @@ type runnerRecord struct {
 type Server struct {
 	o Options
 
+	// secretMu guards the secret fields and is never held across a network
+	// call; secretFetchMu makes Secret Manager refetches single-flight.
 	secretMu      sync.Mutex
+	secretFetchMu sync.Mutex
 	secret        []byte
 	prevSecret    []byte
 	prevUntil     time.Time

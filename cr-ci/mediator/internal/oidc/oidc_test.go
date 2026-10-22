@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,5 +108,46 @@ func TestJWKSOutageBackoff(t *testing.T) {
 	now = now.Add(61 * time.Second)
 	if err := v.Verify(context.Background(), g.IDToken(aud, email, now)); err != nil {
 		t.Errorf("after the outage: %v", err)
+	}
+}
+
+// TestFetchDoesNotBlockCachedKeys: while a JWKS fetch is in flight (here
+// triggered by a token with an unknown kid, which anyone can send), a token
+// signed with a cached, fresh key verifies without waiting for it.
+func TestFetchDoesNotBlockCachedKeys(t *testing.T) {
+	g := fakes.NewGoogle(fakes.Key(1))
+	defer g.Close()
+	var mu sync.Mutex
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	v := &Verifier{CertsURL: g.Server.URL, Audience: aud, Email: email, Now: clock}
+	ctx := context.Background()
+	if err := v.Verify(ctx, g.IDToken(aud, email, clock())); err != nil {
+		t.Fatalf("initial verify: %v", err)
+	}
+	mu.Lock()
+	now = now.Add(61 * time.Second) // refetch allowed; keys still fresh (1 h)
+	mu.Unlock()
+
+	g.Started, g.Release = make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- v.Verify(ctx, fakes.Mint(g.Key, "other-kid", map[string]any{"iss": "accounts.google.com"}))
+	}()
+	<-g.Started // the fetch is in flight and blocked
+
+	fast := make(chan error, 1)
+	go func() { fast <- v.Verify(ctx, g.IDToken(aud, email, clock())) }()
+	select {
+	case err := <-fast:
+		if err != nil {
+			t.Errorf("cached-key verify failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("a cached-key verify waited for the in-flight JWKS fetch")
+	}
+	close(g.Release)
+	if err := <-done; err == nil {
+		t.Error("unknown kid verified")
 	}
 }

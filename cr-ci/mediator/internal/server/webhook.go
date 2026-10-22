@@ -185,27 +185,46 @@ func (s *Server) verifySignature(ctx context.Context, body []byte, header string
 		m.Write(body)
 		return hmac.Equal(m.Sum(nil), sig)
 	}
+	// Fast path: compare against the cached secrets without waiting for a
+	// refetch (which any sender of a bad signature can trigger once a minute).
 	s.secretMu.Lock()
-	defer s.secretMu.Unlock()
-	now := s.o.Now()
-	if s.secret != nil && check(s.secret) {
+	cur, prev, prevUntil := s.secret, s.prevSecret, s.prevUntil
+	s.secretMu.Unlock()
+	if cur != nil && check(cur) {
 		return true, nil
 	}
-	if s.prevSecret != nil && now.Before(s.prevUntil) && check(s.prevSecret) {
+	if prev != nil && s.o.Now().Before(prevUntil) && check(prev) {
 		return true, nil
+	}
+
+	// Slow path: refetch, single-flight, without holding secretMu.
+	s.secretFetchMu.Lock()
+	defer s.secretFetchMu.Unlock()
+	s.secretMu.Lock()
+	now := s.o.Now()
+	if s.secret != nil && !hmac.Equal(s.secret, cur) && check(s.secret) {
+		s.secretMu.Unlock()
+		return true, nil // another request refetched it meanwhile
 	}
 	backoff := secretRefetchBackoff
 	if s.secret == nil {
 		backoff = secretRetryBackoff
 	}
 	if !s.secretAttempt.IsZero() && now.Sub(s.secretAttempt) < backoff {
-		if s.secret == nil {
+		empty := s.secret == nil
+		s.secretMu.Unlock()
+		if empty {
 			return false, errSecretUnavailable
 		}
 		return false, nil
 	}
 	s.secretAttempt = now
+	s.secretMu.Unlock()
+
 	secret, err := s.o.WebhookSecret(ctx)
+
+	s.secretMu.Lock()
+	defer s.secretMu.Unlock()
 	if err != nil {
 		if s.secret != nil {
 			return false, nil

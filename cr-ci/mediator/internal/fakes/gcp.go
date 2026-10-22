@@ -187,6 +187,11 @@ func (t teeReader) Read(p []byte) (int, error) {
 
 // GoogleAPIs fakes the metadata server token endpoint and Secret Manager.
 type GoogleAPIs struct {
+	// SecretGate, if set: each secret access sends on SecretStarted, then
+	// waits for SecretRelease to be closed before answering.
+	SecretStarted chan struct{}
+	SecretRelease chan struct{}
+
 	Server  *httptest.Server
 	Project string
 
@@ -257,6 +262,12 @@ func (g *GoogleAPIs) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := "/v1/projects/" + g.Project + "/secrets/"
 	if name, ok := strings.CutPrefix(r.URL.Path, prefix); ok && strings.HasSuffix(name, "/versions/latest:access") {
+		if started, release := g.SecretStarted, g.SecretRelease; started != nil {
+			g.mu.Unlock()
+			started <- struct{}{}
+			<-release
+			g.mu.Lock()
+		}
 		name = strings.TrimSuffix(name, "/versions/latest:access")
 		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		known := false
@@ -301,6 +312,10 @@ type Google struct {
 	mu      sync.Mutex
 	Fetches int
 	Fail    bool // JWKS endpoint answers 500
+	// Gate, if set: each JWKS request sends on Started, then waits for
+	// Release to be closed before answering.
+	Started chan struct{}
+	Release chan struct{}
 }
 
 // NewGoogle starts a JWKS server for key.
@@ -309,8 +324,12 @@ func NewGoogle(key *rsa.PrivateKey) *Google {
 	g.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.Fetches++
-		fail := g.Fail
+		fail, started, release := g.Fail, g.Started, g.Release
 		g.mu.Unlock()
+		if started != nil {
+			started <- struct{}{}
+			<-release
+		}
 		if fail {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
