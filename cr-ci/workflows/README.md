@@ -102,6 +102,37 @@ v1 routes `lint` only.
   "Cache sharing" below. The runner entrypoint sets this up; the first step of
   both templates only checks it.
 
+### Tuning (P6b results)
+
+Measured on 2026-10-22 in us-west2 (8 vCPU / 32 GiB, 23 GiB `/scratch`, warm Go
+and golangci-lint caches restored as in CI; `tuning-results.md` in the cr-ci
+exchange bucket, `p6/`). Five runs of the same lint:
+
+| conc / GOGC / GOMEMLIMIT | 4 / 25 / 24GiB | 8 / 25 | 8 / 50 | 8 / 100 | 8 / 100 (repeat) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| golangci-lint wall time | 1036 s | 978 s | 843 s | **772 s** | **796 s** |
+
+- **Shipped on the cr-ci runner** (snippet note 2, and the PoC template's
+  defaults): `--concurrency=8`, `GOGC=100`, `GOMEMLIMIT=24GiB`, no `-c=1`, build
+  cache on disk. GitHub-hosted runners keep 2 / 25 / 8GiB and `-c=1`.
+- **Memory:** 25.5 GB peak sampled, 6.6 GB still available; GOMEMLIMIT is what
+  bounds pkg/hub's compile. No guard trip. GOGC above 100 or `off` was not tested.
+- **Disk:** `/scratch` peaked at 15.8-16.5 GB. An on-disk build cache needs at
+  least 20 GiB of `RUNNER_DISK_GI`; the RAM build cache is not needed then.
+- **CPU and I/O:** iowait about 0 and system time 5-10 % under gVisor; 8 of 8
+  cores busy while 8 compiles run. What remains is a single-threaded analysis
+  tail of 280-320 s in every run (about 38 % of the lint), which no knob changed,
+  and pkg/hub's single compile (170-210 s).
+- **Queue to start:** 17-18 s warm (sandbox 5-7 s, runner connect about 5 s). The
+  first execution after an image push adds a ~15 s import (`--warm-up` takes it).
+  GitHub's webhook delivery can itself lag (101 s once in P6b); cr-ci cannot
+  control that, and only the reconcile backfill covers it.
+- **Against CI today:** `ci.yml`'s comment still cites a warm lint of 584-776 s.
+  On 2026-10-21/22 the warm lint step took 1506-1802 s on 15 PR runs and
+  1310-1690 s on 8 `main` runs, and the 16 GB runner got down to 137 MB
+  available: the ubuntu-latest lint is memory-starved. cr-ci is about 2x faster
+  than CI today.
+
 ### Cache sharing
 
 `actions/cache` (behind `setup-go-cache`, `save-go-cache` and
@@ -143,7 +174,7 @@ zstd are wrong.
 | | Result |
 | :--- | :--- |
 | **Parity holds** (the check passes) | **Shared.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. |
-| Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint, about 818-1063 s against 584-776 s warm, per ci.yml's comments). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
+| Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint; ci.yml's comments cite 818-1063 s cold against 584-776 s warm, and the warm lint took 1310-1802 s on ubuntu-latest in October 2026, see "Tuning"). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
 
 **`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`.** In actions/runner
 v2.338.0 the work directory is `Path.GetFullPath(Path.Combine(root,
@@ -174,23 +205,28 @@ From design section 7, phase 1. Read them from the PoC run's log, the
 mediator log and the execution log
 ([github-setup.md, step 9](../docs/github-setup.md#9-verify-a-routed-job)):
 
-- Queue to first step in under 20 s. (P6 measured 40-67 s: Cloud Run's
-  sandbox start alone takes 18-47 s, and the first execution after an image
-  change adds ~34 s of image import; `deploy-job.sh --warm-up` removes the latter.)
+- Queue to first step in under 20 s. (P6b in us-west2: 17-18 s warm, the sandbox
+  taking 5-7 s. P6 in us-central1 measured 40-67 s, the sandbox alone 18-47 s.
+  The first execution after an image change adds an image import, 15-34 s;
+  `deploy-job.sh --warm-up` removes it. GitHub's webhook delivery can lag on its
+  own, 101 s once in P6b.)
 - The Go cache is warm: the "Check that the Go cache is warm" step prints
   `go cache warm: yes`, based on the file count of `$(go env GOCACHE)` after
   the restore, not only the matched key.
 - `golangci-lint` finishes in under 14 minutes (the step prints its
-  duration). Compare it with CI's warm lint (584-776 s on ubuntu-latest); P6
-  measured 1026 s (17.1 min) with the build cache in RAM.
+  duration). Compare it with CI's warm lint on ubuntu-latest: 1310-1802 s in
+  October 2026 (ci.yml's comment still says 584-776 s). P6 measured 1026 s with
+  the build cache in RAM at concurrency 4; P6b 772-796 s at concurrency 8, GOGC
+  100, on disk.
 - Memory: `memory.peak` is not available under gVisor, so read the lint step's
   `sample peaks:` line (`MemTotal - MemAvailable`, which includes RAM-held
   files). P6 measured a compile peak near 21 GB, and 27.9 GB with the build
   cache in RAM, of 32 GiB.
 - Disk: the caches (8-9.5 GB of Go build cache during the lint, plus the
   workspace, modules and temp dirs; about 15-20 GiB in total) fit on `/scratch`.
-  That needs `RUNNER_DISK_GI` of about 25 after the per-instance quota increase
-  ([gcp-setup, "Quotas"](../docs/gcp-setup.md#9-quotas)), or
+  That needs `RUNNER_DISK_GI` of at least 20 after the per-instance quota increase
+  (P6b: peak 16.5 GB on 23 GiB, the us-west2 limit;
+  [gcp-setup, "Quotas"](../docs/gcp-setup.md#9-quotas)), or
   `RUNNER_BUILD_CACHE_IN_RAM=true`. With the default 10 GiB the lint runs out of
   space.
 - The runner deregisters itself, and the execution ends (and stops billing)

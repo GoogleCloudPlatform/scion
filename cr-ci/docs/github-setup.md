@@ -436,8 +436,8 @@ uninstall the App (G17): the App's installation page, **Suspend** or
 After the PoC dispatch, or after setting the variable and pushing to a
 branch with an open same-repo pull request:
 
-1. **GitHub:** the job leaves "Waiting for a runner" (P6: after 40-67 s, mostly
-   Cloud Run's start). **Settings**, **Actions**, **Runners** briefly shows
+1. **GitHub:** the job leaves "Waiting for a runner" (P6b in us-west2: 17-18 s warm;
+   P6 in us-central1: 40-67 s, mostly Cloud Run's start). **Settings**, **Actions**, **Runners** briefly shows
    `cr-job-<job id>`, and the runner disappears by itself after the job. Use the
    UI (repo admin) for this: the runners API
    (`gh api repos/OWNER/REPO/actions/runners`) needs repository Administration

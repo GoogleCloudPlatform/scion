@@ -336,9 +336,12 @@ so it is deferred.
   `RUNNER_DISK_GI` x running executions. The default 10 GiB is **not** enough
   for a warm golangci-lint: the P6 PoC measured about 15-20 GiB on disk
   (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
-  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. Raise
-  the per-instance quota and use about 25 GiB, and size the regional quota for
-  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 25 GiB the default 100 GiB
+  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. An
+  on-disk build cache needs at least 20 GiB: P6b peaked at 16.5 GB on a 23 GiB
+  disk. Raise the per-instance quota first; the limit the server then enforces
+  depends on the region and the grant (us-west2 runs with `RUNNER_DISK_GI=23`, its
+  limit after the grant). Size the regional quota for
+  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 23-25 GiB the default 100 GiB
   allows `MAX_CONCURRENT_RUNNERS=4`, and a 5th runner would fail as
   `launch_failed` (`RESOURCE_EXHAUSTED`)
   ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).

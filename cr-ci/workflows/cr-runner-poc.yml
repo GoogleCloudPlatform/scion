@@ -41,7 +41,7 @@ on:
       lint-concurrency:
         description: golangci-lint --concurrency (0 = golangci-lint's default, the CPU count)
         required: true
-        default: '4'
+        default: '8'
 
 permissions:
   contents: read
@@ -167,39 +167,79 @@ jobs:
           fi
 
       # Same lint as ci.yml, but WITHOUT the pkg/hub -c=1 compiler throttle and
-      # with more analysis concurrency. GOGC stays at 25 until the PoC shows
-      # the headroom (design: pkg/hub's compile peaks near 15 GiB).
+      # with the cr-ci settings the P6b tuning runs measured best on 8 vCPU /
+      # 32 GiB (cr-ci/workflows/README.md): concurrency 8, GOGC 100, GOMEMLIMIT
+      # 24GiB (which bounds the compile peak). The sampler adds CPU use (busy
+      # cores, system share, iowait from /proc/stat), the compile process count
+      # and the lowest MemAvailable; a guard stops the lint (its whole process
+      # group, via setsid) if MemAvailable falls below 2 GiB, before the
+      # container is OOM-killed. -v prints the loader and linter timings.
       - name: golangci-lint (no pkg/hub compiler throttle)
         shell: bash
         env:
-          GOGC: '25'
-          LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}
+          GOGC: '100'
+          GOMEMLIMIT: '24GiB'
+          LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '8' }}
+          # Stop the lint if MemAvailable falls below this (KiB): 2 GiB.
+          MEMGUARD_KB: '2097152'
         run: |
           set -uo pipefail
           samples="$RUNNER_TEMP/samples.log"
+          guard="$RUNNER_TEMP/memguard"
           : >"$samples"
+          rm -f "$guard"
+          start=$(date +%s)
+          # setsid: golangci-lint leads its own process group, so the memory
+          # guard can stop it together with its go list and compile children.
+          setsid golangci-lint run -v --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" >"$RUNNER_TEMP/lint.out" 2>&1 &
+          lint=$!
           (
             # On TERM, stop the pending sleep too, so no sleep outlives the step.
             trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
+            read -r _ u n s i w q sq st _ </proc/stat
+            pbusy=$((${u:-0} + ${n:-0} + ${s:-0} + ${q:-0} + ${sq:-0} + ${st:-0})); ptot=$((pbusy + ${i:-0} + ${w:-0})); psys=${s:-0}; pio=${w:-0}
             while :; do
+              # busy_cores: CPUs busy since the previous sample.
+              read -r _ u n s i w q sq st _ </proc/stat
+              busy=$((${u:-0} + ${n:-0} + ${s:-0} + ${q:-0} + ${sq:-0} + ${st:-0})); tot=$((busy + ${i:-0} + ${w:-0}))
+              dt=$((tot - ptot)); [ "$dt" -gt 0 ] || dt=1
+              cores=$(awk -v b=$((busy - pbusy)) -v t=$dt -v c="$(nproc)" 'BEGIN{printf "%.1f", b / t * c}')
+              # sys_pct: system share of busy time; iowait_cores: CPUs in iowait.
+              sysp=$(awk -v s=$((${s:-0} - psys)) -v b=$((busy - pbusy)) 'BEGIN{printf "%d", (b > 0 ? 100 * s / b : 0)}')
+              iow=$(awk -v w=$((${w:-0} - pio)) -v t=$dt -v c="$(nproc)" 'BEGIN{printf "%.1f", w / t * c}')
+              pbusy=$busy; ptot=$tot; psys=${s:-0}; pio=${w:-0}
               mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
               ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
               used_kb=$(df -k --output=used /scratch | tail -1 | tr -d ' ')
-              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) scratch_used_mb=$(( used_kb / 1024 ))" | tee -a "$samples"
+              ncomp=$(pgrep -c -x compile || true)
+              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) avail_mb=$(( ma / 1024 )) scratch_used_mb=$(( used_kb / 1024 )) compiles=$ncomp busy_cores=$cores sys_pct=$sysp iowait_cores=$iow t=$(( $(date +%s) - start ))" | tee -a "$samples"
+              if [ "$ma" -lt "$MEMGUARD_KB" ] && [ ! -e "$guard" ]; then
+                echo "$(date -u +%H:%M:%S) MemAvailable ${ma} KiB < ${MEMGUARD_KB} KiB at t=$(( $(date +%s) - start ))s" | tee "$guard"
+                echo "::error title=memory guard::MemAvailable fell below 2 GiB; stopping golangci-lint"
+                kill -TERM -- "-$lint" 2>/dev/null
+              fi
               sleep 5 &
               nap=$!
               wait "$nap"
             done
           ) &
           sampler=$!
-          start=$(date +%s)
+          trap 'kill "$sampler" 2>/dev/null || true; kill -TERM -- "-$lint" 2>/dev/null || true' EXIT
           rc=0
-          golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
-          echo "golangci-lint exit=$rc duration=$(( $(date +%s) - start ))s"
+          wait "$lint" || rc=$?
+          end=$(date +%s)
+          cat "$RUNNER_TEMP/lint.out"
           kill "$sampler" 2>/dev/null || true
           wait "$sampler" 2>/dev/null || true
-          awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[2] + 0 > max[kv[1]]) max[kv[1]] = kv[2] + 0 }}
-            END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], NR}' "$samples"
+          echo "golangci-lint exit=$rc duration=$(( end - start ))s"
+          awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); v = kv[2] + 0; if (!(kv[1] in max) || v > max[kv[1]]) max[kv[1]] = v; if (!(kv[1] in min) || v < min[kv[1]]) min[kv[1]] = v }}
+            {if ($0 ~ /busy_cores=/) {split($0, a, "busy_cores="); split(a[2], b, " "); sum += b[1]; n++}}
+            END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d min avail_mb=%d max compiles=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], min["avail_mb"], max["compiles"], NR}
+            END {printf "sample cpu: mean busy_cores=%.1f max sys_pct=%d max iowait_cores=%.1f\n", (n ? sum / n : 0), max["sys_pct"], max["iowait_cores"]}' "$samples"
+          if [ -e "$guard" ]; then
+            echo "MEMORY GUARD TRIPPED: $(cat "$guard")"
+            exit 99
+          fi
           exit "$rc"
 
       - name: Memory and disk report

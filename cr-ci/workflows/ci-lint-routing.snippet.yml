@@ -17,10 +17,13 @@
 # 2. The golangci-lint step's env: the memory throttles exist for the 16 GB
 #    ubuntu-latest runner (ptone/scion#4208). On the 32 GiB cr-ci runner
 #    (runner.environment == 'self-hosted') the pkg/hub -c=1 throttle is
-#    dropped, the soft memory limit is raised, and golangci-lint analyses 4
-#    packages at once instead of 2. GOGC stays at 25 on both until the P6
-#    PoC has measured the headroom. On any GitHub-hosted runner, including a
-#    larger one used as the fallback, the current values apply unchanged.
+#    dropped, the soft memory limit is raised to 24GiB, golangci-lint analyses
+#    8 packages at once instead of 2, and GOGC is 100 instead of 25. These are
+#    the P6b tuning results on the 8 vCPU / 32 GiB runner (us-west2, warm
+#    caches): about 13 min of lint, peak about 25 GiB with 6.6 GB of RAM left;
+#    GOMEMLIMIT is what bounds the compile peak (cr-ci/workflows/README.md,
+#    "Tuning"). On any GitHub-hosted runner, including a larger one used as
+#    the fallback, the current values apply unchanged.
 #
 # 3. A new FIRST step, on the cr-ci runner only, checks cache parity and
 #    fails the job if it is off. It creates nothing: the runner entrypoint
@@ -83,10 +86,10 @@ lint:
     - name: golangci-lint
       shell: bash
       env:
-        GOGC: '25'
+        GOGC: ${{ runner.environment == 'self-hosted' && '100' || '25' }}
         GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}
         GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}
-        LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}
+        LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '8' || '2' }}
       run: |
         # ... unchanged, except the golangci-lint line (see note 4) ...
         golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
