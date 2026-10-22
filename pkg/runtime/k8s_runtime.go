@@ -2578,7 +2578,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	agentsExcluded := false
 	if !nfsAgentDir && !nfsWorktree {
 		var maskTarget string
-		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "")
+		nfsShared := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, nfsShared)
+		// An NFS-shared workspace is mounted directly, so its project
+		// configuration directory is mounted read-only over it, as on the
+		// local runtimes. The local backend's per-pod copy is private to
+		// the pod; a sync from the pod leaves that directory out instead
+		// (k8sWorkspaceSyncFromExcludes).
+		if agentsExcluded && nfsShared {
+			if m, ok := k8sProjectConfigVolumeMount(config); ok {
+				agentVolumeMounts = append(agentVolumeMounts, m)
+			}
+		}
 		if maskTarget != "" {
 			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
 			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
@@ -4469,8 +4480,9 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 
 	if direction == SyncFrom {
 		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
+		fromExcludes := k8sWorkspaceSyncFromExcludes(agent.Annotations)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false, workspaceExcludes)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false, fromExcludes)
 		}); err != nil {
 			return err
 		}
@@ -5031,6 +5043,37 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 		out[k8sWorkspaceAgentsAnnotation] = "true"
 	}
 	return out
+}
+
+// k8sProjectConfigVolumeMount returns the read-only mount of the project
+// configuration directory of an NFS-shared workspace, whose broker-side
+// view is config.RepoRoot, over the pod's /workspace mount of the same
+// export. ok is false when that directory does not exist on the broker's
+// view (workspaceProjectConfigMount).
+func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool) {
+	_, target, ok := workspaceProjectConfigMount(config.RepoRoot, "/workspace")
+	if !ok {
+		return corev1.VolumeMount{}, false
+	}
+	rel := strings.TrimPrefix(target, "/workspace/")
+	return corev1.VolumeMount{
+		Name:      "workspace",
+		MountPath: target,
+		SubPath:   path.Join(config.NFSSubPath, rel),
+		ReadOnly:  true,
+	}, true
+}
+
+// k8sWorkspaceSyncFromExcludes returns the workspace paths a tar sync from
+// a pod with these annotations leaves out: the whole project configuration
+// directory, so that a sync from the pod never replaces the broker's copy
+// of it. A sync to the pod still carries it (minus the agents root), so the
+// agent can read it.
+func k8sWorkspaceSyncFromExcludes(annotations map[string]string) []string {
+	if annotations[k8sWorkspaceAgentsAnnotation] == "true" {
+		return []string{workspaceProjectConfigDir}
+	}
+	return nil
 }
 
 // k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to or

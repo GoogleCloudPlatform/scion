@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // sharedWorkspaceAgentsDir is the in-project agents root, relative to the
@@ -77,4 +78,45 @@ func sharedWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string, r
 func isDir(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+// workspaceProjectConfigDir is the project configuration directory,
+// relative to a workspace mounted at the container's workspace path.
+const workspaceProjectConfigDir = ".scion"
+
+// workspaceProjectConfigMount returns the broker-side .scion directory of
+// a workspace that is mounted into the container at containerWorkspace,
+// and the container path it is mounted read-only at. The broker reads
+// project settings, templates and harness-configs from that directory when
+// it starts agents in the project, so an agent that shares the workspace
+// gets it read-only. Agent homes and agent state never live under it in
+// this layout (they are external, see the agents mask), so the agent's own
+// writable paths are unaffected.
+//
+// ok is false when <workspace>/.scion is not a directory on the broker (a
+// project marker file, or no .scion at all): there is no project
+// configuration in the workspace to protect, and binding a missing path
+// would make the container runtime create it in the host checkout. It is
+// also false when .scion is a symlink to a directory outside the workspace,
+// which the container cannot reach.
+func workspaceProjectConfigMount(workspace, containerWorkspace string) (hostPath, target string, ok bool) {
+	if workspace == "" || containerWorkspace == "" {
+		return "", "", false
+	}
+	root, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", "", false
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, workspaceProjectConfigDir))
+	if err != nil || !isDir(resolved) {
+		return "", "", false
+	}
+	// A .scion symlink is followed the way the broker follows it. Its
+	// target is only reachable in the container when it lies inside the
+	// workspace; that path is the one mounted read-only.
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", false
+	}
+	return resolved, path.Join(containerWorkspace, filepath.ToSlash(rel)), true
 }

@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -497,14 +498,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// from the in-project agents root under this mount; that is the
 			// control on every runtime. The in-project agents root is
 			// additionally kept out of the container's view (below):
-			// Docker/Podman shadow it with a tmpfs when <workspace>/.scion
-			// is a directory. Apple does so only when the agents dir
-			// already exists, since a mount point the Apple runtime
-			// created would land in the host checkout.
+			// every runtime shadows it with a tmpfs when it already exists.
+			//
+			// The project configuration directory <workspace>/.scion
+			// (settings, templates, harness-configs), which the broker
+			// reads when it starts agents in this project, is mounted
+			// read-only (workspaceProjectConfigMount). Since it is
+			// read-only, the agents mask needs its mount point to exist
+			// already, so the mask is added only when the agents dir
+			// exists; when it does not, there is nothing to hide and the
+			// agent cannot create it.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
-			requireAgentsDir := config.RuntimeName == appleContainerRuntimeName
-			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", requireAgentsDir); ok {
+			if src, tgt, ok := workspaceProjectConfigMount(config.Workspace, "/workspace"); ok {
+				registerMount(src, tgt, true, true)
+			}
+			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
 				sharedWorkspaceAgentsMask = target
 			}
 		} else {
@@ -519,6 +528,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	} else if config.Workspace != "" {
 		registerMount(config.Workspace, "/workspace", false, true)
 		addArg("--workdir", "/workspace")
+		// A workspace that holds a project configuration directory (a
+		// project that keeps its .scion directory in place, or an explicit
+		// workspace pointing at one) gets it read-only, with any agents
+		// root in it masked, as in the shared-workspace layout above.
+		if src, tgt, ok := workspaceProjectConfigMount(config.Workspace, "/workspace"); ok {
+			registerMount(src, tgt, true, true)
+			if isDir(filepath.Join(src, "agents")) {
+				sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
+			}
+		}
 	}
 
 	// Add generic volumes from config, deduplicating among themselves first
@@ -683,8 +702,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// Shadow the .scion directory with a tmpfs when the full repo root is
 	// mounted into the container. This prevents agents from accessing other
 	// agents' home directories and secrets via the host filesystem.
+	// The Apple runtime drops --mount arguments, so it gets the equivalent
+	// --tmpfs flag, and only when the directory exists, so the runtime
+	// never creates that mount point in the host checkout.
 	if fullRepoRootMounted {
-		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
+		if config.RuntimeName == appleContainerRuntimeName {
+			if isDir(filepath.Join(config.RepoRoot, workspaceProjectConfigDir)) {
+				addArg("--tmpfs", "/repo-root/"+workspaceProjectConfigDir)
+			}
+		} else {
+			addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
+		}
 	}
 	// Shadow the in-project agents root of a shared workspace mount with a
 	// tmpfs, so it is empty in the container. The Apple runtime drops

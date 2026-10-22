@@ -247,8 +247,9 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 }
 
 // In the shared-workspace layout the in-project agents root is shadowed with
-// a tmpfs when <workspace>/.scion is a directory, and no mask is added when
-// .scion is a project marker file.
+// a tmpfs when <workspace>/.scion/agents is a directory (the read-only
+// .scion mount above it means the mount point must already exist), and no
+// mask is added when .scion is a project marker file.
 func TestSharedWorkspaceAgentsMask(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	hasMask := func(args []string) bool {
@@ -260,7 +261,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		return false
 	}
 	root := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".scion", "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := minimalRunConfig()
@@ -273,7 +274,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasMask(args) {
-		t.Error("shared workspace with a .scion directory: expected the agents tmpfs mask")
+		t.Error("shared workspace with a .scion/agents directory: expected the agents tmpfs mask")
 	}
 
 	markerRoot := filepath.Join(t.TempDir(), "repo")

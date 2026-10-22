@@ -122,14 +122,15 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
 	// When the agents mask applies, refuse a CLI known to be older than
 	// appleMaskMinVersion; an unknown version is left to the check after
-	// the start (verifyAgentsMask).
-	masked := slices.Contains(newArgs, "--tmpfs")
+	// the start (verifyMasks).
+	maskTargets := appleTmpfsTargets(newArgs)
+	masked := len(maskTargets) > 0
 	cliVersion := "unknown"
 	if masked {
 		v, below, ok := appleCLIVersion(ctx, r.Command)
 		if ok && below {
 			floor := appleMaskMinVersionString()
-			return "", fmt.Errorf("container CLI %s is older than %s: the .scion/agents mask relies on nested mount ordering that needs apple/container %s or later", v, floor, floor)
+			return "", fmt.Errorf("container CLI %s is older than %s: the %s mask relies on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(maskTargets, ", "), floor)
 		}
 		if ok {
 			cliVersion = v
@@ -160,7 +161,7 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	id := strings.TrimSpace(out)
 	reportAppleContainerCreated(hooks, config.Name, id)
 	if masked {
-		if err := r.verifyAgentsMask(ctx, id); err != nil {
+		if err := r.verifyMasks(ctx, id, maskTargets); err != nil {
 			checkErr := fmt.Errorf("%w (container CLI version %s)", err, cliVersion)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
@@ -179,14 +180,38 @@ var (
 	appleMaskCheckTimeout = 10 * time.Second
 	// appleMaskCheckAttempts and appleMaskCheckRetryDelay: how often, and
 	// how far apart, the check runs when it could not run (see
-	// verifyAgentsMask).
+	// verifyMasks).
 	appleMaskCheckAttempts   = 3
 	appleMaskCheckRetryDelay = 500 * time.Millisecond
 )
 
-// verifyAgentsMask checks, in the started container, that the agents mask
-// is mounted: /workspace/.scion/agents must be on a different device from
-// its parent /workspace/.scion. This tests that the mount exists, not that
+// appleTmpfsTargets returns the container paths of the --tmpfs masks in
+// args, in order.
+func appleTmpfsTargets(args []string) []string {
+	var targets []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--tmpfs" {
+			targets = append(targets, args[i+1])
+		}
+	}
+	return targets
+}
+
+// verifyMasks runs verifyMask for each tmpfs mask target, in order, and
+// returns the first error.
+func (r *AppleContainerRuntime) verifyMasks(ctx context.Context, id string, targets []string) error {
+	for _, target := range targets {
+		if err := r.verifyMask(ctx, id, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyMask checks, in the started container, that a tmpfs mask is
+// mounted at target (the agents mask at /workspace/.scion/agents, or the
+// /repo-root/.scion mask): target must be on a different device from its
+// parent directory. This tests that the mount exists, not that
 // the directory looks empty, since an existing directory that happens to
 // be empty would pass an emptiness check with no mask. stat compares the
 // exact path with no mount table parsing; it runs as the container's
@@ -207,10 +232,10 @@ var (
 // all within appleMaskCheckTimeout, only when it could not run (the exec
 // failed or stat exited non-zero). A result is never retried: equal
 // devices, or output that does not parse, fail closed at once.
-func (r *AppleContainerRuntime) verifyAgentsMask(ctx context.Context, id string) error {
+func (r *AppleContainerRuntime) verifyMask(ctx context.Context, id, target string) error {
 	ctx, cancel := context.WithTimeout(ctx, appleMaskCheckTimeout)
 	defer cancel()
-	agents := "/workspace/" + sharedWorkspaceAgentsDir
+	agents := target
 	var out string
 	var err error
 	// A deadline that passes during the backoff ends the loop, keeping the

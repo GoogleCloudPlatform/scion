@@ -60,23 +60,27 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 		name             string
 		cfg              RunConfig
 		excluded, masked bool
+		// configReadOnly: the project configuration directory is mounted
+		// read-only over the NFS-shared workspace.
+		configReadOnly bool
 	}{
-		{"local, agents dir exists", shared(local, withAgents), true, false},
-		{"local, .scion only", shared(local, scionOnly), true, false},
-		{"local without .scion", shared(local, noScion), false, false},
-		{"local, caller-set annotation dropped", callerSet, false, false},
-		{"local, repo root does not resolve", RunConfig{Name: "local", Image: "test-image", UnixUsername: "scion", RepoRoot: filepath.Join(noScion, "missing"), Workspace: withAgents}, false, false},
-		{"NFS shared, agents dir exists", shared(nfsBaseConfig("nfs"), withAgents), true, true},
-		{"NFS shared, no agents dir", shared(nfsBaseConfig("nfs"), scionOnly), true, false},
-		{"NFS shared without .scion", shared(nfsBaseConfig("nfs"), noScion), false, false},
-		{"NFS worktree", shared(nfsWorktreeConfig("wt"), withAgents), false, false},
-		{"NFS agent dir", shared(nfsAgentDirConfig("cpa"), withAgents), false, false},
+		{"local, agents dir exists", shared(local, withAgents), true, false, false},
+		{"local, .scion only", shared(local, scionOnly), true, false, false},
+		{"local without .scion", shared(local, noScion), false, false, false},
+		{"local, caller-set annotation dropped", callerSet, false, false, false},
+		{"local, repo root does not resolve", RunConfig{Name: "local", Image: "test-image", UnixUsername: "scion", RepoRoot: filepath.Join(noScion, "missing"), Workspace: withAgents}, false, false, false},
+		{"NFS shared, agents dir exists", shared(nfsBaseConfig("nfs"), withAgents), true, true, true},
+		{"NFS shared, no agents dir", shared(nfsBaseConfig("nfs"), scionOnly), true, false, true},
+		{"NFS shared without .scion", shared(nfsBaseConfig("nfs"), noScion), false, false, false},
+		{"NFS worktree", shared(nfsWorktreeConfig("wt"), withAgents), false, false, false},
+		{"NFS agent dir", shared(nfsAgentDirConfig("cpa"), withAgents), false, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			pod, err := newNFSTestK8sRuntime().buildPod("default", tt.cfg)
 			if err != nil {
 				t.Fatalf("buildPod: %v", err)
 			}
+			checkK8sProjectConfigMount(t, pod, tt.cfg, tt.configReadOnly)
 			var maskVolumes []corev1.Volume
 			names := map[string]int{}
 			for _, v := range pod.Spec.Volumes {
@@ -195,10 +199,17 @@ func TestSync_WorkspaceAgentsAnnotationExcludes(t *testing.T) {
 				if len(got) != 2 {
 					t.Fatalf("transfers = %v, want workspace and home", got)
 				}
+				// A sync from the pod leaves the whole project
+				// configuration directory out; a sync to it only the
+				// agents root.
+				wantWorkspace := []string{".scion/agents"}
+				if dir == SyncFrom {
+					wantWorkspace = []string{".scion"}
+				}
 				for k, ex := range got {
 					isWorkspace := strings.Contains(k, "/workspace")
-					if isWorkspace && excluded && !slices.Equal(ex, []string{".scion/agents"}) {
-						t.Errorf("%s excludes = %q, want [.scion/agents]", k, ex)
+					if isWorkspace && excluded && !slices.Equal(ex, wantWorkspace) {
+						t.Errorf("%s excludes = %q, want %q", k, ex, wantWorkspace)
 					}
 					if (!isWorkspace || !excluded) && ex != nil {
 						t.Errorf("%s excludes = %q, want none", k, ex)
@@ -268,5 +279,51 @@ func TestSyncArchiveArgs_ExcludeAgentsDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
 		t.Errorf("workspace file not extracted: %v", err)
+	}
+}
+
+// checkK8sProjectConfigMount checks the agent container's mounts: with
+// want, exactly one read-only mount of the workspace volume's .scion
+// subpath at /workspace/.scion, after the workspace mount and before any
+// agents mask; without it, none. In every case the workspace, home and
+// agents mask mounts stay writable.
+func checkK8sProjectConfigMount(t *testing.T, pod *corev1.Pod, cfg RunConfig, want bool) {
+	t.Helper()
+	mounts := pod.Spec.Containers[0].VolumeMounts
+	configAt, maskAt, workspaceAt := -1, -1, -1
+	for i, m := range mounts {
+		switch {
+		case m.MountPath == "/workspace/.scion":
+			if configAt >= 0 {
+				t.Errorf("more than one mount at /workspace/.scion: %+v", mounts)
+			}
+			configAt = i
+			wantSub := filepath.Join(cfg.NFSSubPath, ".scion")
+			if !m.ReadOnly || m.Name != "workspace" || m.SubPath != wantSub {
+				t.Errorf("project config mount = %+v, want read-only workspace subPath %q", m, wantSub)
+			}
+		case m.Name == k8sAgentsMaskVolume:
+			maskAt = i
+		case m.MountPath == "/workspace":
+			workspaceAt = i
+		}
+		if m.ReadOnly && (m.MountPath == "/workspace" || m.MountPath == "/workspace/.scion/agents" || strings.HasPrefix(m.MountPath, "/home/")) {
+			t.Errorf("agent mount %+v is read-only; the agent's workspace, home and agents mask stay writable", m)
+		}
+	}
+	if !want {
+		if configAt >= 0 {
+			t.Errorf("unexpected project config mount %+v", mounts[configAt])
+		}
+		return
+	}
+	if configAt < 0 {
+		t.Fatalf("no read-only project config mount in %+v", mounts)
+	}
+	if workspaceAt < 0 || configAt < workspaceAt {
+		t.Errorf("project config mount at %d must follow the workspace mount at %d", configAt, workspaceAt)
+	}
+	if maskAt >= 0 && maskAt < configAt {
+		t.Errorf("agents mask at %d must follow the project config mount at %d", maskAt, configAt)
 	}
 }

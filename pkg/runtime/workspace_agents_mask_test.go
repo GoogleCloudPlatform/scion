@@ -373,6 +373,18 @@ func TestAppleContainerRuntime_Run_AgentsMaskArgs(t *testing.T) {
 	if !strings.Contains(log, "--tmpfs /workspace/.scion/agents") || strings.Contains(log, "type=tmpfs") {
 		t.Errorf("run args: %s", log)
 	}
+	// The project configuration directory is mounted read-only under the
+	// agents mask; the agent home is not.
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log, "-v "+filepath.Join(resolvedRoot, ".scion")+":/workspace/.scion:ro") {
+		t.Errorf("run args lack the read-only .scion mount: %s", log)
+	}
+	if strings.Count(log, ":ro") != 1 {
+		t.Errorf("want exactly one read-only mount: %s", log)
+	}
 	var execs [][]string
 	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
 		if f := strings.Fields(line); len(f) > 0 && f[0] == "exec" {
@@ -436,5 +448,46 @@ func TestAppleCLIVersion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// In the full-repo-root fallback the Apple runtime masks /repo-root/.scion
+// with --tmpfs and checks after the start that the mask is mounted
+// (different device from /repo-root).
+func TestAppleContainerRuntime_Run_FallbackScionMask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	command, calls := appleGateMock(t, appleGateOpts{version: "container CLI version 1.6.0", statOut: "41\n40"})
+	rt := &AppleContainerRuntime{Command: command}
+	root := sharedRepoWithScionDir(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Run(context.Background(), RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RepoRoot: root, Workspace: ws,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	b, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(b)
+	if !strings.Contains(log, "--tmpfs /repo-root/.scion") || strings.Contains(log, "type=tmpfs") {
+		t.Errorf("run args: %s", log)
+	}
+	var execs [][]string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == "exec" {
+			execs = append(execs, f)
+		}
+	}
+	want := []string{"exec", "cid", "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", "/repo-root/.scion", "/repo-root"}
+	if len(execs) != 1 || !slices.Equal(execs[0], want) {
+		t.Errorf("mask check argv = %q, want exactly %q", execs, want)
 	}
 }
