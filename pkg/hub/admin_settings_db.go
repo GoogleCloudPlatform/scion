@@ -378,11 +378,14 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
-	// Federation — populate from snapshot's FederationConfig.
+	// Federation — populate from snapshot's FederationConfig, which is set
+	// whenever the stored (or bootstrap) federation settings have enabled or
+	// trusted_issuers. It is reported in full, also when it is disabled and
+	// has no trusted issuers, so a stored section with only algorithms or
+	// intervals is shown (ptone/scion#5694).
 	if snap.FederationConfig != nil {
-		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
-		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
-		resp.Federation = v1Server.Federation
+		fc := *snap.FederationConfig
+		resp.Federation = config.ConvertFederationToV1(&fc)
 	}
 	// server.federation reports the same value, the one in effect, never
 	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
