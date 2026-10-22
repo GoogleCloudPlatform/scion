@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/google/uuid"
@@ -244,6 +246,47 @@ func TestSenderAgentProject_CoversDelegatedSenders(t *testing.T) {
 	assert.False(t, ok)
 	assert.Empty(t, got)
 	assert.Empty(t, senderAgentProjectID(context.Background()))
+}
+
+// TestAgentDelegatedMessage_ObserverCopyFollowsTheActorProject: through the
+// real handler, a delegated send publishes the agent-to-agent observer copy
+// to the target's project. A send from agent A (P1) to agent B (P2) is
+// cross-project, so its single observer copy carries no body. The control,
+// A to agent C in P1, keeps the body.
+func TestAgentDelegatedMessage_ObserverCopyFollowsTheActorProject(t *testing.T) {
+	f := newADTFixture(t, "adt-msg-observer")
+	f.adtMessageWorld(t)
+	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.proj.ID, "agent.message")
+	f.mutateAgent(t, f.agentC.ID, func(a *store.Agent) { a.Phase = "running"; a.RuntimeBrokerID = f.broker.ID })
+	spy := &spyBrokerBus{}
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	f.srv.SetMessageBrokerProxy(NewMessageBrokerProxy(spy, f.store, events,
+		func() AgentDispatcher { return f.srv.GetDispatcher() }, slog.Default()))
+	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
+
+	observers := func(recipientSlug string) []*messages.StructuredMessage {
+		var out []*messages.StructuredMessage
+		for _, evt := range spy.getEvents() {
+			if evt.msg != nil && evt.msg.ObserverOnly && evt.msg.Recipient == "agent:"+recipientSlug {
+				out = append(out, evt.msg)
+			}
+		}
+		return out
+	}
+
+	rec := f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("cross-project body"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	cross := observers(f.agentB.Slug)
+	require.Len(t, cross, 1, "one observer copy for the cross-project send")
+	assert.Equal(t, "agent:"+f.agentA.Slug, cross[0].Sender)
+	assert.Empty(t, cross[0].Msg, "a cross-project observer copy carries no body")
+
+	rec = f.sendMessage(t, cred.Token, agentMessagePath(f.agentC.ID), adtText("same-project body"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	same := observers(f.agentC.Slug)
+	require.Len(t, same, 1, "one observer copy for the same-project send")
+	assert.Equal(t, "same-project body", same[0].Msg, "a same-project observer copy keeps the body")
 }
 
 // TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode: a super-admin's
