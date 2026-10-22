@@ -406,9 +406,6 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private windowTick = 0;
 
-  /** Whether web.agent_badges is on, read once at the start of each render. */
-  private badgesOn = false;
-
   /** One lease timer for the agents this page shows (ptone/scion#2483 N4). */
   private readonly deletionLease = new DeletionLeaseController(this, () =>
     this.agentWindow.state === 'paged' ? this.agentWindow.items : this.agents
@@ -2687,8 +2684,6 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   override render() {
-    // Read once per render, not per row (web.agent_badges, ptone/scion#5503).
-    this.badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     if (this.loading) {
       return this.renderLoading();
     }
@@ -3270,6 +3265,8 @@ export class ScionPageProjectDetail extends LitElement {
    * the wrong order meanwhile.
    */
   private renderAgentRows(): TemplateResult | typeof nothing {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const win = this.agentWindow;
     if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
       return this.agentsLoading
@@ -3295,7 +3292,7 @@ export class ScionPageProjectDetail extends LitElement {
         ${items.length === 0
           ? this.renderNoAgentRows()
           : html`<div class="agent-grid ${this.agentsExpanded ? '' : 'agents-collapsed'}">
-              ${items.map((agent) => this.renderAgentCard(agent))}
+              ${items.map((agent) => this.renderAgentCard(agent, badgesOn))}
             </div>`}
         ${this.renderAgentPager(items.length)}
       `;
@@ -3373,6 +3370,8 @@ export class ScionPageProjectDetail extends LitElement {
   /** The list view: the window's page `items` and the pager, in every state. */
   private renderAgentWindowList() {
     const items = this.agentWindow.items;
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${items.length === 0
@@ -3381,7 +3380,7 @@ export class ScionPageProjectDetail extends LitElement {
               <table>
                 ${this.renderAgentTableHead()}
                 <tbody>
-                  ${items.map((agent) => this.renderAgentRow(agent))}
+                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn))}
                 </tbody>
               </table>
             `}
@@ -3441,7 +3440,7 @@ export class ScionPageProjectDetail extends LitElement {
     this.onAgentViewStateChanged();
   }
 
-  private renderAgentRow(agent: Agent) {
+  private renderAgentRow(agent: Agent, badgesOn: boolean) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -3451,7 +3450,7 @@ export class ScionPageProjectDetail extends LitElement {
       <tr>
         <td>
           <span class="name-cell">
-            ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
+            ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
@@ -3614,7 +3613,7 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
-  private renderAgentCard(agent: Agent) {
+  private renderAgentCard(agent: Agent, badgesOn: boolean) {
     const isLoading = this.actionLoading[agent.id] || false;
     // While the hub is deleting, hide every lifecycle action and Delete.
     const deleting = this.deletionLease.isDeleting(agent);
@@ -3625,7 +3624,7 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="agent-header">
           <div>
             <h3 class="agent-name">
-              ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
+              ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>

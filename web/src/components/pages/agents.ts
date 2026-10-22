@@ -184,9 +184,6 @@ export class ScionPageAgents extends LitElement {
   @state()
   private viewMode: ViewMode = 'grid';
 
-  /** Whether web.agent_badges is on, read once at the start of each render. */
-  private badgesOn = false;
-
   /**
    * One lease timer for this page's deleting agents (ptone/scion#2483 N4).
    * While paged, `this.agents` is empty and the rows are the window's page.
@@ -1373,8 +1370,6 @@ export class ScionPageAgents extends LitElement {
   }
 
   override render() {
-    // Read once per render, not per row (web.agent_badges, ptone/scion#5503).
-    this.badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="header">
         <h1>Agents</h1>
@@ -1800,12 +1795,14 @@ export class ScionPageAgents extends LitElement {
   }
 
   private renderGrid(items: Agent[]): TemplateResult {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="resource-grid">
         ${repeat(
           items,
           (agent) => agent.id,
-          (agent) => this.renderAgentCard(agent)
+          (agent) => this.renderAgentCard(agent, badgesOn)
         )}
       </div>
     `;
@@ -2016,13 +2013,13 @@ export class ScionPageAgents extends LitElement {
     ></scion-deletion-banner>`;
   }
 
-  private renderAgentCard(agent: Agent) {
+  private renderAgentCard(agent: Agent, badgesOn: boolean) {
     return html`
       <div class="agent-card">
         <div class="agent-header">
           <div>
             <h3 class="resource-name">
-              ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
+              ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}" style="color: inherit; text-decoration: none;">
                 ${agent.name}
               </a>
@@ -2088,6 +2085,8 @@ export class ScionPageAgents extends LitElement {
   }
 
   private renderTable(items: Agent[]): TemplateResult {
+    // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
+    const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     return html`
       <div class="resource-table-container">
         <table>
@@ -2122,7 +2121,7 @@ export class ScionPageAgents extends LitElement {
             ${repeat(
               items,
               (agent) => agent.id,
-              (agent) => this.renderAgentRow(agent)
+              (agent) => this.renderAgentRow(agent, badgesOn)
             )}
           </tbody>
         </table>
@@ -2130,12 +2129,12 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  private renderAgentRow(agent: Agent) {
+  private renderAgentRow(agent: Agent, badgesOn: boolean) {
     return html`
       <tr>
         <td>
           <span class="name-cell">
-            ${this.badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
+            ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>

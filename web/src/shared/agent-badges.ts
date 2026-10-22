@@ -119,7 +119,7 @@ export function agentBadgeView(
   harness?: string
 ): AgentBadgeView {
   const mark = vendorMark(vendor);
-  const chip = !mark.multiVendor && size ? (MODEL_SIZE_CHIPS[size] ?? null) : null;
+  const chip = !mark.multiVendor && size ? (MODEL_SIZE_CHIPS[size.toLowerCase()] ?? null) : null;
   const harnessText = harness
     ? `Harness: ${harnessDisplayName(harness)}${mark === UNKNOWN_VENDOR_MARK || mark.multiVendor ? '' : ` (${mark.label})`}`
     : mark === UNKNOWN_VENDOR_MARK

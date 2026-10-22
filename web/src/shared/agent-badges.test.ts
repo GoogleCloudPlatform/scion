@@ -56,6 +56,14 @@ describe('agent badge view', () => {
     expect(agentBadgeView('google', 'huge').size).toBeNull();
   });
 
+  it('matches the size alias case-insensitively', () => {
+    expect(agentBadgeView('google', 'Large').size?.chip).toBe('L');
+    expect(agentBadgeView('google', 'EXTRA-LARGE').size).toEqual({
+      chip: 'XL',
+      label: 'Extra large',
+    });
+  });
+
   it('drops the size for a multi-vendor harness', () => {
     const view = agentBadgeView('hermes', 'large', 'hermes');
     expect(view.size).toBeNull();
