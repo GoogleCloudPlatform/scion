@@ -437,17 +437,32 @@ var outboxIdentityFields = []string{
 	agentlifecycleoutbox.FieldAgentID, agentlifecycleoutbox.FieldTransitionRevision,
 }
 
+// lockTrimCandidates makes a trim selection lock its rows on PostgreSQL
+// (FOR UPDATE SKIP LOCKED), so the rows a trim reports are exactly the
+// rows it deletes: another replica can neither claim and deliver a
+// selected row before the delete (it would be counted as a drop although
+// delivered) nor select and report the same rows (double counting); it
+// skips them. SQLite has one writer, so the transaction already gives
+// that.
+func lockTrimCandidates(client *ent.Client, q *ent.AgentLifecycleOutboxQuery) *ent.AgentLifecycleOutboxQuery {
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+	}
+	return q
+}
+
 // TrimLifecycleOutbox implements store.LifecycleOutboxStore. Rows under a
 // live lease are never trimmed, so a row another replica is emitting is
-// never counted as dropped.
+// never counted as dropped; the selected rows are locked until the delete
+// commits (lockTrimCandidates), so each drop is counted once, by the
+// replica that removed it.
 func (c *CompositeStore) TrimLifecycleOutbox(ctx context.Context, now time.Time, maxAge time.Duration, maxRows, maxPermanentFailures int) (store.LifecycleOutboxTrim, error) {
 	var t store.LifecycleOutboxTrim
 	err := runInEntTx(ctx, c.client, c.inTx, func(client *ent.Client) error {
-		aged, err := client.AgentLifecycleOutbox.Query().
+		aged, err := lockTrimCandidates(client, client.AgentLifecycleOutbox.Query().
 			Where(outboxUnleased(now), agentlifecycleoutbox.CreatedAtLT(now.Add(-maxAge))).
-			Order(ent.Asc(agentlifecycleoutbox.FieldID)).
-			Select(outboxIdentityFields...).
-			All(ctx)
+			Order(ent.Asc(agentlifecycleoutbox.FieldID))).
+			Select(outboxIdentityFields...).All(ctx)
 		if err != nil {
 			return err
 		}
@@ -456,11 +471,10 @@ func (c *CompositeStore) TrimLifecycleOutbox(ctx context.Context, now time.Time,
 		}
 		t.Age = toDropped(aged)
 
-		poison, err := client.AgentLifecycleOutbox.Query().
+		poison, err := lockTrimCandidates(client, client.AgentLifecycleOutbox.Query().
 			Where(outboxUnleased(now), agentlifecycleoutbox.PermanentFailuresGTE(maxPermanentFailures)).
-			Order(ent.Asc(agentlifecycleoutbox.FieldID)).
-			Select(outboxIdentityFields...).
-			All(ctx)
+			Order(ent.Asc(agentlifecycleoutbox.FieldID))).
+			Select(outboxIdentityFields...).All(ctx)
 		if err != nil {
 			return err
 		}
@@ -474,12 +488,11 @@ func (c *CompositeStore) TrimLifecycleOutbox(ctx context.Context, now time.Time,
 			return err
 		}
 		if excess := total - maxRows; excess > 0 {
-			oldest, err := client.AgentLifecycleOutbox.Query().
+			oldest, err := lockTrimCandidates(client, client.AgentLifecycleOutbox.Query().
 				Where(outboxUnleased(now)).
 				Order(ent.Asc(agentlifecycleoutbox.FieldID)).
-				Limit(excess).
-				Select(outboxIdentityFields...).
-				All(ctx)
+				Limit(excess)).
+				Select(outboxIdentityFields...).All(ctx)
 			if err != nil {
 				return err
 			}
