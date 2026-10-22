@@ -137,8 +137,8 @@ func startModeHub(t *testing.T, srv *Server, rt http.RoundTripper) hubclient.Cli
 	return c
 }
 
-// uploadFiles PUTs each collected file to its upload URL.
-func uploadFiles(t *testing.T, ctx context.Context, urls []hubclient.UploadURLInfo, files []hubclient.FileInfo, put func(ctx context.Context, url, method string, headers map[string]string, r io.Reader) error) {
+// modeUploadFiles PUTs each collected file to its upload URL.
+func modeUploadFiles(t *testing.T, ctx context.Context, urls []hubclient.UploadURLInfo, files []hubclient.FileInfo, put func(ctx context.Context, url, method string, headers map[string]string, r io.Reader) error) {
 	t.Helper()
 	byPath := make(map[string]hubclient.FileInfo, len(files))
 	for _, f := range files {
@@ -162,7 +162,7 @@ func uploadRequests(files []hubclient.FileInfo) []hubclient.FileUploadRequest {
 	return reqs
 }
 
-func manifestFiles(files []hubclient.FileInfo) []hubclient.TemplateFile {
+func modeManifestFiles(files []hubclient.FileInfo) []hubclient.TemplateFile {
 	out := make([]hubclient.TemplateFile, len(files))
 	for i, f := range files {
 		out[i] = hubclient.TemplateFile{Path: f.Path, Size: f.Size, Hash: f.Hash, Mode: f.Mode}
@@ -216,8 +216,8 @@ func TestTemplateFileMode_RoundTripsThroughHub(t *testing.T) {
 			id := created.Template.ID
 			up, err := client.Templates().RequestUploadURLs(ctx, id, uploadRequests(files))
 			require.NoError(t, err)
-			uploadFiles(t, ctx, up.UploadURLs, files, client.Templates().UploadFile)
-			_, err = client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: manifestFiles(files)}, created.Template.ContentHash, up.UploadID)
+			modeUploadFiles(t, ctx, up.UploadURLs, files, client.Templates().UploadFile)
+			_, err = client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: modeManifestFiles(files)}, created.Template.ContentHash, up.UploadID)
 			require.NoError(t, err)
 
 			// Stored: the manifest records the mode.
@@ -277,8 +277,8 @@ func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	id := created.Template.ID
 	up, err := client.Templates().RequestUploadURLs(ctx, id, uploadRequests(files))
 	require.NoError(t, err)
-	uploadFiles(t, ctx, up.UploadURLs, files, client.Templates().UploadFile)
-	v1, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: manifestFiles(files)}, created.Template.ContentHash, up.UploadID)
+	modeUploadFiles(t, ctx, up.UploadURLs, files, client.Templates().UploadFile)
+	v1, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: modeManifestFiles(files)}, created.Template.ContentHash, up.UploadID)
 	require.NoError(t, err)
 
 	first, err := templatecache.NewHydrator(cache, client).Hydrate(ctx, id)
@@ -289,7 +289,7 @@ func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	require.NoError(t, os.Chmod(filepath.Join(dir, "bin", "tool"), 0o755))
 	files, err = hubclient.CollectFiles(dir, nil)
 	require.NoError(t, err)
-	v2, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: manifestFiles(files)}, v1.ContentHash, "")
+	v2, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: modeManifestFiles(files)}, v1.ContentHash, "")
 	require.NoError(t, err)
 	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: a mode-only commit keeps the content hash")
 	// The commit is neither refused by the content-hash precondition nor
@@ -331,8 +331,8 @@ func TestHarnessConfigFileMode_ProvisionScriptRoundTrips(t *testing.T) {
 			id := created.HarnessConfig.ID
 			up, err := client.HarnessConfigs().RequestUploadURLs(ctx, id, uploadRequests(files))
 			require.NoError(t, err)
-			uploadFiles(t, ctx, up.UploadURLs, files, client.HarnessConfigs().UploadFile)
-			_, err = client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: manifestFiles(files)}, "", up.UploadID)
+			modeUploadFiles(t, ctx, up.UploadURLs, files, client.HarnessConfigs().UploadFile)
+			_, err = client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: modeManifestFiles(files)}, "", up.UploadID)
 			require.NoError(t, err)
 
 			cache, err := templatecache.New(t.TempDir(), templatecache.DefaultMaxSize)
