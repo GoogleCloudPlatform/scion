@@ -354,31 +354,69 @@ export interface ReadableProjects {
   truncated: boolean;
 }
 
+interface ProjectsPage {
+  projects?: Array<{ id: string; name?: string; slug?: string }>;
+  nextCursor?: string;
+}
+
+function toChoices(page: ProjectsPage): ProjectChoice[] {
+  return (page.projects ?? [])
+    .filter((p) => !!p.id)
+    .map((p) => ({ id: p.id, name: p.name || p.slug || p.id, slug: p.slug ?? '' }));
+}
+
 /**
- * The projects the caller can see (GET /api/v1/projects, paged), global
- * first, then by name. Not mine=true: on the hub that means projects the
- * caller owns, and a member may publish too (agent-create.ts has the same
- * note). canCreate decides; over-listing only costs checks. The list stops
- * at READABLE_PROJECTS_CAP projects and says so (truncated).
+ * The hub's global project, when it exists and the caller can see it: one
+ * exact lookup by slug (GET /api/v1/projects?slug=global), so it never
+ * depends on paging. The project list is newest first, and global, made
+ * when the hub starts, is among the oldest.
  */
-export async function listReadableProjects(): Promise<ReadableProjects> {
+export async function findGlobalProject(signal?: AbortSignal): Promise<ProjectChoice | null> {
+  const params = new URLSearchParams({ slug: GLOBAL_PROJECT_SLUG, limit: '1' });
+  const page = await okJSON<ProjectsPage>(
+    await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: signal ?? null })
+  );
+  return toChoices(page).find((p) => p.slug === GLOBAL_PROJECT_SLUG) ?? null;
+}
+
+/**
+ * The projects the caller can see (GET /api/v1/projects, paged), by name,
+ * leaving out the project with id skip. Not mine=true: on the hub that
+ * means projects the caller owns, and a member may publish too
+ * (agent-create.ts has the same note). canCreate decides; over-listing only
+ * costs checks. The list stops at READABLE_PROJECTS_CAP projects and says
+ * so (truncated).
+ */
+export async function listReadableProjects(
+  opts: { skip?: string | undefined; signal?: AbortSignal | undefined } = {}
+): Promise<ReadableProjects> {
   const out: ProjectChoice[] = [];
   let cursor = '';
   for (let page = 0; page < READABLE_PROJECTS_MAX_PAGES; page++) {
     const params = new URLSearchParams({ limit: String(READABLE_PROJECTS_PAGE) });
     if (cursor) params.set('cursor', cursor);
-    const body = await okJSON<{
-      projects?: Array<{ id: string; name?: string; slug?: string }>;
-      nextCursor?: string;
-    }>(await apiFetch(`/api/v1/projects?${params.toString()}`));
-    for (const p of body.projects ?? []) {
-      if (!p.id) continue;
-      out.push({ id: p.id, name: p.name || p.slug || p.id, slug: p.slug ?? '' });
-    }
+    const body = await okJSON<ProjectsPage>(
+      await apiFetch(`/api/v1/projects?${params.toString()}`, { signal: opts.signal ?? null })
+    );
+    out.push(...toChoices(body).filter((p) => p.id !== opts.skip));
     cursor = body.nextCursor ?? '';
     if (!cursor) break;
   }
   return { projects: sortProjectChoices(out), truncated: cursor !== '' };
+}
+
+/**
+ * The projects to offer as a new artifact's home, before the canCreate
+ * filter: the global project first (looked up on its own, so the cap never
+ * drops it), then the other projects the caller can see, by name.
+ */
+export async function listPublishCandidates(signal?: AbortSignal): Promise<ReadableProjects> {
+  const global = await findGlobalProject(signal);
+  const rest = await listReadableProjects({ skip: global?.id, signal });
+  return {
+    projects: global ? [global, ...rest.projects] : rest.projects,
+    truncated: rest.truncated,
+  };
 }
 
 /** Orders choices global first, then by name. */
@@ -398,10 +436,11 @@ export function sortProjectChoices(projects: ProjectChoice[]): ProjectChoice[] {
  * throw. (A hub with no artifact routes at all also answers 404, but the
  * callers only run with hub.artifacts on.)
  */
-export async function canPublishIn(projectId: string): Promise<boolean> {
+export async function canPublishIn(projectId: string, signal?: AbortSignal): Promise<boolean> {
   const params = new URLSearchParams({ mine: '1', scope: projectId, limit: '1' });
   const res = await apiFetch(`/api/v1/artifacts?${params.toString()}`, {
     suppressAccessDeniedToast: true,
+    signal: signal ?? null,
   });
   if (res.status === 403 || res.status === 404) return false;
   const body = await okJSON<ArtifactListResponse>(res);
@@ -415,32 +454,36 @@ export async function canPublishIn(projectId: string): Promise<boolean> {
  * caller can render it progressively. With firstOnly no new check starts
  * after the first pass, and the result holds that one project. Any failed
  * check fails the whole call, so a hub error never looks like "nowhere to
- * publish".
+ * publish"; after a failure, or once signal aborts, no check starts and no
+ * update is reported. signal also cancels the checks in flight.
  */
 export async function filterPublishable(
   projects: ProjectChoice[],
   opts: {
     firstOnly?: boolean;
-    check?: (id: string) => Promise<boolean>;
+    check?: (id: string, signal?: AbortSignal) => Promise<boolean>;
     onUpdate?: (publishable: ProjectChoice[]) => void;
+    signal?: AbortSignal;
   } = {}
 ): Promise<ProjectChoice[]> {
   const check = opts.check ?? canPublishIn;
+  const signal = opts.signal;
   const allowed: boolean[] = projects.map(() => false);
   const passed = (): ProjectChoice[] => projects.filter((_, i) => allowed[i]);
   let next = 0;
   let stop = false;
+  const halted = (): boolean => stop || signal?.aborted === true;
   const worker = async (): Promise<void> => {
-    while (!stop && next < projects.length) {
+    while (!halted() && next < projects.length) {
       const i = next++;
       let ok: boolean;
       try {
-        ok = await check(projects[i].id);
+        ok = await check(projects[i].id, signal);
       } catch (err) {
         stop = true;
         throw err;
       }
-      if (!ok) continue;
+      if (!ok || halted()) continue;
       allowed[i] = true;
       if (opts.firstOnly) stop = true;
       opts.onUpdate?.(passed());
@@ -448,6 +491,7 @@ export async function filterPublishable(
   };
   const workers = Math.min(PUBLISH_CHECK_CONCURRENCY, projects.length);
   await Promise.all(Array.from({ length: workers }, () => worker()));
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const out = passed();
   return opts.firstOnly ? out.slice(0, 1) : out;
 }

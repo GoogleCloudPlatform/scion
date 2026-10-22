@@ -23,7 +23,11 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { ArtifactListItem, ArtifactListResponse } from '../../client/artifacts.js';
+import {
+  PUBLISH_CHECK_CONCURRENCY,
+  type ArtifactListItem,
+  type ArtifactListResponse,
+} from '../../client/artifacts.js';
 import type { ScionPageArtifacts } from './artifacts.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
@@ -625,19 +629,21 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
     });
 
   /**
-   * Mocks fetch: an empty artifact list, the caller's projects (or
-   * projectsStatus; 'hang' never answers), and canCreate per project id in
-   * publishable.
+   * Mocks fetch: an empty artifact list, the projects the caller can see
+   * (or projectsStatus; 'hang' never answers), answering ?slug= with the
+   * matching project, and canCreate per project id in publishable (ids in
+   * hold never answer). signals collects the canCreate requests' signals.
    */
   function mockPublish(
     projects: Array<{ id: string; name: string; slug: string }>,
     publishable: Set<string>,
-    projectsStatus: number | 'hang' = 200
+    projectsStatus: number | 'hang' = 200,
+    opts: { hold?: Set<string>; signals?: AbortSignal[] } = {}
   ): Mock {
     const m: Mock = { urls: [] };
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: RequestInfo | URL) => {
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = requestUrl(input);
         m.urls.push(url);
         if (url.startsWith('/api/v1/projects?')) {
@@ -647,11 +653,16 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
               json({ error: { code: 'internal', message: 'boom' } }, projectsStatus)
             );
           }
-          return Promise.resolve(json({ projects }));
+          const slug = new URL(url, 'http://x').searchParams.get('slug');
+          return Promise.resolve(
+            json({ projects: slug ? projects.filter((p) => p.slug === slug) : projects })
+          );
         }
         if (url.startsWith('/api/v1/artifacts?')) {
           const scope = new URL(url, 'http://x').searchParams.get('scope');
           if (!scope) return Promise.resolve(json({ artifacts: [] }));
+          if (init?.signal) opts.signals?.push(init.signal);
+          if (opts.hold?.has(scope)) return new Promise<Response>(() => {});
           return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
         }
         return Promise.resolve(json({ error: { code: 'forbidden', message: 'denied' } }, 403));
@@ -678,19 +689,54 @@ describe('artifacts list page: New artifact (ptone/scion#5477)', () => {
       .filter((s): s is string => !!s);
   }
 
-  it('enables New artifact after checking the global project only', async () => {
-    const m = mockPublish([WEB, GLOBAL], new Set(['g-1', 'w-1']));
+  it('enables New artifact after one lookup and one check of the global project', async () => {
+    const others = Array.from({ length: 10 }, (_, i) => ({
+      id: `p-${i}`,
+      name: `P${i}`,
+      slug: `p${i}`,
+    }));
+    const m = mockPublish([...others, GLOBAL], new Set(['g-1', ...others.map((p) => p.id)]));
     const el = await mount(true);
     const btn = newButton(el);
     expect(btn.textContent).toContain('New artifact');
     expect(disabled(btn)).toBe(false);
     expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
-    // Global is checked first, and no check starts after it passes.
-    expect(scopedChecks(m)[0]).toBe('g-1');
-    expect(scopedChecks(m).length).toBeLessThanOrEqual(2);
-    // Not mine=true, which means owned projects only: members publish too.
+    // Only global is checked, and the project list is never paged: the one
+    // request is the exact lookup by slug (and has no mine=true, which
+    // would mean owned projects only).
+    expect(scopedChecks(m)).toEqual(['g-1']);
     const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));
-    expect(projectCalls).toEqual(['/api/v1/projects?limit=200']);
+    expect(projectCalls).toEqual(['/api/v1/projects?slug=global&limit=1']);
+  });
+
+  it('when global is not publishable, pages the projects and stops at the first pass', async () => {
+    const others = Array.from({ length: 20 }, (_, i) => ({
+      id: `p-${String(i).padStart(2, '0')}`,
+      name: `P${String(i).padStart(2, '0')}`,
+      slug: `p${i}`,
+    }));
+    const m = mockPublish([...others, GLOBAL], new Set(['p-00', 'p-15']));
+    const el = await mount(true);
+    expect(disabled(newButton(el))).toBe(false);
+    const checks = scopedChecks(m);
+    expect(checks[0]).toBe('g-1');
+    // Global, then one pool's worth: not all twenty.
+    expect(checks.length).toBeLessThanOrEqual(1 + PUBLISH_CHECK_CONCURRENCY);
+    const projectCalls = m.urls.filter((u) => u.startsWith('/api/v1/projects?'));
+    expect(projectCalls).toEqual([
+      '/api/v1/projects?slug=global&limit=1',
+      '/api/v1/projects?limit=200',
+    ]);
+  });
+
+  it('cancels the running check when the page is removed', async () => {
+    const signals: AbortSignal[] = [];
+    mockPublish([GLOBAL], new Set(['g-1']), 200, { hold: new Set(['g-1']), signals });
+    const el = await mount(true);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+    el.remove();
+    expect(signals[0].aborted).toBe(true);
   });
 
   it('a stale check from an earlier mount cannot overwrite a newer result', async () => {

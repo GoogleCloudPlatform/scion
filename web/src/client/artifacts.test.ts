@@ -29,6 +29,8 @@ import {
   formatBytes,
   isInlineType,
   linkLifetimeChoices,
+  findGlobalProject,
+  listPublishCandidates,
   listReadableProjects,
   listProjectArtifacts,
   orderArtifactRefs,
@@ -798,6 +800,70 @@ describe('where the caller may publish (ptone/scion#5477)', () => {
     expect(urls).toEqual(['/api/v1/projects?limit=200', '/api/v1/projects?limit=200&cursor=c1']);
     // mine=true means projects the caller owns: a member may publish too.
     for (const u of urls) expect(new URL(u, 'http://x').searchParams.has('mine')).toBe(false);
+  });
+
+  it('looks up the global project by slug, exactly', async () => {
+    const urls: string[] = [];
+    let answer: unknown = { projects: [{ id: 'g', name: 'Global', slug: 'global' }] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        urls.push(requestUrl(input));
+        return Promise.resolve(json(answer));
+      })
+    );
+    expect(await findGlobalProject()).toEqual({ id: 'g', name: 'Global', slug: 'global' });
+    expect(urls).toEqual(['/api/v1/projects?slug=global&limit=1']);
+    answer = { projects: [] };
+    expect(await findGlobalProject()).toBeNull();
+    // Only the exact slug counts.
+    answer = { projects: [{ id: 'x', slug: 'global-1' }] };
+    expect(await findGlobalProject()).toBeNull();
+  });
+
+  it('puts global first even past the cap, and lists it once', async () => {
+    let pages = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.includes('slug=global')) {
+          return Promise.resolve(json({ projects: [{ id: 'g', name: 'Global', slug: 'global' }] }));
+        }
+        pages++;
+        // The first page also holds global; every page says there is more.
+        const projects = Array.from({ length: 200 }, (_, i) => ({
+          id: `p${pages}-${i}`,
+          slug: `s${i}`,
+        }));
+        if (pages === 1) projects[0] = { id: 'g', slug: 'global' };
+        return Promise.resolve(json({ projects, nextCursor: `c${pages}` }));
+      })
+    );
+    const out = await listPublishCandidates();
+    expect(out.truncated).toBe(true);
+    expect(out.projects[0].id).toBe('g');
+    expect(out.projects.filter((p) => p.id === 'g')).toHaveLength(1);
+  });
+
+  it('stops checking and reports nothing more once aborted', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    const abort = new AbortController();
+    const check = vi.fn(async (): Promise<boolean> => {
+      await new Promise((r) => setTimeout(r, 0));
+      return true;
+    });
+    const updates: number[] = [];
+    const run = filterPublishable(projects, {
+      check,
+      signal: abort.signal,
+      onUpdate: (sofar) => updates.push(sofar.length),
+    });
+    abort.abort();
+    await expect(run).rejects.toThrow();
+    // The first pool had started; nothing after the abort.
+    expect(check).toHaveBeenCalledTimes(PUBLISH_CHECK_CONCURRENCY);
+    expect(updates).toEqual([]);
   });
 
   it('stops at the cap and says the list was truncated', async () => {

@@ -44,15 +44,22 @@ interface Mock {
 
 /**
  * Mocks fetch: the projects the caller can see (or projectsStatus; with
- * nextCursor set, every page says there is more), canCreate per project id
- * in publishable (never answered for ids in hold), and the create, upload
- * and finalize calls of a publish.
+ * nextCursor set, every page says there is more; ?slug= answers from
+ * globalLookup), canCreate per project id in publishable (never answered for
+ * ids in hold; signals collects their signals), and the create, upload and
+ * finalize calls of a publish.
  */
 function mockFetch(
   projects: Project[],
   publishable: Set<string>,
   projectsStatus = 200,
-  opts: { hold?: Set<string>; nextCursor?: string } = {}
+  opts: {
+    hold?: Set<string>;
+    nextCursor?: string;
+    /** Projects the ?slug= lookup searches (default: projects). */
+    globalLookup?: Project[];
+    signals?: AbortSignal[];
+  } = {}
 ): Mock {
   const m: Mock = { calls: [], posted: [] };
   const json = (body: unknown, status = 200): Response =>
@@ -72,10 +79,16 @@ function mockFetch(
             json({ error: { code: 'internal', message: 'boom' } }, projectsStatus)
           );
         }
+        const slug = new URL(url, 'http://x').searchParams.get('slug');
+        if (slug) {
+          const found = (opts.globalLookup ?? projects).filter((p) => p.slug === slug);
+          return Promise.resolve(json({ projects: found }));
+        }
         return Promise.resolve(json({ projects, nextCursor: opts.nextCursor }));
       }
       if (method === 'GET' && url.startsWith('/api/v1/artifacts?')) {
         const scope = new URL(url, 'http://x').searchParams.get('scope') ?? '';
+        if (init?.signal) opts.signals?.push(init.signal);
         if (opts.hold?.has(scope)) return new Promise<Response>(() => {});
         return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
       }
@@ -232,12 +245,54 @@ describe('publish dialog project picker', () => {
     expect(published).toHaveBeenCalledTimes(1);
   });
 
-  it('asks for the projects the caller can see, not only owned ones (no mine)', async () => {
-    const m = mockFetch([GLOBAL], new Set(['g-1']));
+  it('looks up global by slug, then lists the projects the caller can see (no mine)', async () => {
+    const m = mockFetch([GLOBAL, WEB], new Set(['g-1']));
     await openDialog();
     const projectCalls = m.calls.filter((c) => c.startsWith('GET /api/v1/projects?'));
-    expect(projectCalls).toHaveLength(1);
-    expect(projectCalls[0]).not.toContain('mine');
+    expect(projectCalls).toEqual([
+      'GET /api/v1/projects?slug=global&limit=1',
+      'GET /api/v1/projects?limit=200',
+    ]);
+  });
+
+  it('offers and preselects global even when the capped list does not reach it', async () => {
+    // The paged list (newest first) is capped before global, the oldest.
+    mockFetch([WEB, RELEASE], new Set(['g-1', 'w-1', 'r-1']), 200, {
+      nextCursor: 'more',
+      globalLookup: [GLOBAL],
+    });
+    const el = await openDialog();
+    expect(optionIds(el)[0]).toBe('g-1');
+    expect(picker(el).value).toBe('g-1');
+    expect(el.shadowRoot!.querySelector('.choices-note.truncated')).not.toBeNull();
+  });
+
+  it('lists global once when the paged list also holds it', async () => {
+    mockFetch([WEB, GLOBAL], new Set(['g-1', 'w-1']));
+    const el = await openDialog();
+    expect(optionIds(el)).toEqual(['g-1', 'w-1']);
+  });
+
+  it('cancels the running checks when closed, and reopening starts afresh', async () => {
+    const signals: AbortSignal[] = [];
+    const m = mockFetch([GLOBAL, WEB], new Set(['g-1', 'w-1']), 200, {
+      hold: new Set(['g-1', 'w-1']),
+      signals,
+    });
+    const el = await openDialog();
+    expect(signals).toHaveLength(2);
+    const cancel = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find(
+      (b) => b.textContent!.trim() === 'Cancel'
+    ) as HTMLElement;
+    cancel.click();
+    await settle(el);
+    expect(signals.every((sig) => sig.aborted)).toBe(true);
+    const checksBefore = m.calls.filter((c) => c.includes('scope=')).length;
+    el.open = true;
+    await settle(el);
+    // A new load, with new signals, and the old ones stay cancelled.
+    expect(m.calls.filter((c) => c.includes('scope=')).length).toBe(checksBefore + 2);
+    expect(signals.slice(2).some((sig) => sig.aborted)).toBe(false);
   });
 
   it('shows choices as they pass, global preselected, while other checks run', async () => {

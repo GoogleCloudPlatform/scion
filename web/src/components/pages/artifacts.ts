@@ -45,7 +45,9 @@ import {
   ARTIFACTS_FLAG,
   artifactListUrl,
   artifactPagePath,
+  canPublishIn,
   filterPublishable,
+  findGlobalProject,
   listReadableProjects,
   type Artifact,
   type ArtifactResponse,
@@ -110,6 +112,8 @@ export class ScionPageArtifacts extends LitElement {
   private generation = 0;
   /** Bumped per publish check, so a stale result is dropped. */
   private publishGen = 0;
+  /** Cancels the running publish check. */
+  private publishAbort: AbortController | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private requested = new Set<string>();
 
@@ -180,26 +184,52 @@ export class ScionPageArtifacts extends LitElement {
     void this.checkPublishAccess();
   }
 
-  /** Works out whether the user may publish in any project. */
+  /** Stops the running publish check, if any; its result is dropped. */
+  private cancelPublishCheck(): void {
+    this.publishGen++;
+    this.publishAbort?.abort();
+    this.publishAbort = null;
+  }
+
+  /**
+   * Works out whether the user may publish in any project: the global
+   * project first, looked up on its own; only when it is missing or not
+   * publishable are the other projects listed and checked, stopping at the
+   * first publishable one.
+   */
   private async checkPublishAccess(): Promise<void> {
-    const gen = ++this.publishGen;
+    this.cancelPublishCheck();
+    const gen = this.publishGen;
+    const abort = new AbortController();
+    this.publishAbort = abort;
+    const signal = abort.signal;
+    const current = (): boolean => gen === this.publishGen && this.isConnected;
     this.publishAccess = 'checking';
     try {
-      const { projects } = await listReadableProjects();
-      if (gen !== this.publishGen || !this.isConnected) return;
-      const found = await filterPublishable(projects, { firstOnly: true });
-      if (gen !== this.publishGen || !this.isConnected) return;
+      const global = await findGlobalProject(signal);
+      if (!current()) return;
+      if (global && (await canPublishIn(global.id, signal))) {
+        if (current()) this.publishAccess = 'yes';
+        return;
+      }
+      if (!current()) return;
+      const { projects } = await listReadableProjects({ skip: global?.id, signal });
+      if (!current()) return;
+      const found = await filterPublishable(projects, { firstOnly: true, signal });
+      if (!current()) return;
       this.publishAccess = found.length > 0 ? 'yes' : 'no';
     } catch {
-      if (gen !== this.publishGen || !this.isConnected) return;
+      if (!current()) return;
       this.publishAccess = 'unknown';
+    } finally {
+      if (this.publishAbort === abort) this.publishAbort = null;
     }
   }
 
   /** The dialog finished loading the choices: that settles the button. */
   private onChoices(e: CustomEvent<{ count: number }>): void {
-    // Drop a page check still running: the dialog's answer is complete.
-    this.publishGen++;
+    // Stop a page check still running: the dialog's answer is complete.
+    this.cancelPublishCheck();
     this.publishAccess = e.detail.count > 0 ? 'yes' : 'no';
   }
 
@@ -211,6 +241,7 @@ export class ScionPageArtifacts extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.cancelPublishCheck();
   }
 
   private get filtered(): boolean {

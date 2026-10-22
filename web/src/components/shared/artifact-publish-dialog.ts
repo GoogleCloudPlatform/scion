@@ -38,7 +38,7 @@ import {
   defaultProjectChoice,
   filterPublishable,
   formatBytes,
-  listReadableProjects,
+  listPublishCandidates,
   READABLE_PROJECTS_CAP,
   publishErrorMessage,
   publishFiles,
@@ -122,6 +122,8 @@ export class ScionArtifactPublishDialog extends LitElement {
   private userPicked = false;
   /** Bumped per choices load, so a stale one is dropped. */
   private choicesGen = 0;
+  /** Cancels the running choices load. */
+  private choicesAbort: AbortController | null = null;
   /** The version a failed attempt left pending; the next attempt resumes it. */
   private pending: PendingPublish | null = null;
 
@@ -221,12 +223,30 @@ export class ScionArtifactPublishDialog extends LitElement {
     if (changed.has('open') && this.open && !changed.get('open')) {
       this.reset();
       if (this.chooseProject) void this.loadChoices();
+    } else if (changed.has('open') && !this.open) {
+      this.cancelChoices();
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.cancelChoices();
+  }
+
+  /** Stops the running choices load, if any; its results are dropped. */
+  private cancelChoices(): void {
+    this.choicesGen++;
+    this.choicesAbort?.abort();
+    this.choicesAbort = null;
   }
 
   /** Loads the projects where the user may publish and preselects one. */
   private async loadChoices(): Promise<void> {
-    const gen = ++this.choicesGen;
+    this.cancelChoices();
+    const gen = this.choicesGen;
+    const abort = new AbortController();
+    this.choicesAbort = abort;
+    const signal = abort.signal;
     this.choicesLoading = true;
     this.choicesError = null;
     this.choices = [];
@@ -234,7 +254,8 @@ export class ScionArtifactPublishDialog extends LitElement {
     this.choicesTruncated = false;
     this.userPicked = false;
     try {
-      const { projects, truncated } = await listReadableProjects();
+      // Global comes first, looked up on its own, so the cap never drops it.
+      const { projects, truncated } = await listPublishCandidates(signal);
       if (gen !== this.choicesGen) return;
       this.choicesTruncated = truncated;
       const publishable = await filterPublishable(projects, {
@@ -246,6 +267,7 @@ export class ScionArtifactPublishDialog extends LitElement {
           const global = sofar.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
           if (global && !this.userPicked && !this.chosen) this.chosen = global.id;
         },
+        signal,
       });
       if (gen !== this.choicesGen) return;
       this.choices = publishable;
@@ -262,6 +284,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       this.choicesError = err instanceof Error ? err.message : 'Could not load projects';
     } finally {
       if (gen === this.choicesGen) this.choicesLoading = false;
+      if (this.choicesAbort === abort) this.choicesAbort = null;
     }
   }
 
@@ -272,6 +295,7 @@ export class ScionArtifactPublishDialog extends LitElement {
 
   /** Closes the dialog and tells the parent, which owns the open flag. */
   private close(): void {
+    this.cancelChoices();
     this.open = false;
     this.dispatchEvent(
       new CustomEvent('artifact-publish-closed', { bubbles: true, composed: true })
