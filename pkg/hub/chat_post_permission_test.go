@@ -143,7 +143,11 @@ func TestChatPromote_RequiresChatPost(t *testing.T) {
 	readerToken := f.mint(t, reader, projectBoundary(f.projA), "project:read", "inbox:write")
 	rec = f.call(t, readerToken, http.MethodPost, chatConversationPath(dm, "promote"), map[string]string{"name": "promoted"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.NotEqual(t, ErrCodeChatPostDenied, errorCode(t, rec), "the token refusal comes first")
+	code, details := errorCodeAndDetails(t, rec)
+	assert.Equal(t, ErrCodeForbidden, code, "the token refusal comes first, not chat_post_denied")
+	wantResource, wantAction := selfPermissionResourceAction(permInboxWrite)
+	assert.Equal(t, wantResource, details["resource_type"], "refused by the token's inbox.write DM rule")
+	assert.Equal(t, string(wantAction), details["denied_action"])
 
 	// The built-in project-member role promotes its own agent DM. Its
 	// message is already dispatched, so no reply is in flight (a pending

@@ -143,11 +143,11 @@ func chatSendPath(key string) string {
 
 // chatPostAction is the project action a user's account needs to post
 // into the chat threads of a project (ptone/scion#5518). Read access to
-// the project reads its threads; it does not post in them. The action
-// does not yet gate thread creation, thread rename and delete,
-// attachment upload to a project, message edit, or thread posts sent
-// through the agent message endpoint's thread key; these are tracked in
-// ptone/scion#5519.
+// the project reads its threads; it does not post in them. These chat
+// writes do not check it yet: thread create; thread rename, default-agent
+// change and delete; project attachment upload; message edit and delete;
+// thread posts sent through the agent message endpoint's thread key. They
+// are tracked in ptone/scion#5519.
 const chatPostAction = ActionChatPost
 
 // chatSendPostDenied is the refusal for a sender who may read a thread
