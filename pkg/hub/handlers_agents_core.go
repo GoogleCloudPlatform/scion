@@ -4175,18 +4175,16 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	}
 	resp.Editability = buildAgentEditability(agent, s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
-	envView := s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap)
-
 	// The resolved container TZ, as on the PATCH response, for a caller who
 	// may view the agent's env: the zone can come from a user, project, hub
 	// or broker TZ env var (ptone/scion#2767). Others get neither field.
-	if envView {
+	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
 		tz := s.agentTZ(ctx, agent)
 		resp.ResolvedTimezone = &tz.TZ
 		resp.TimezoneSource = &tz.Source
 	}
 
-	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, envView)
+	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	writeJSON(w, http.StatusOK, resp)
 }
