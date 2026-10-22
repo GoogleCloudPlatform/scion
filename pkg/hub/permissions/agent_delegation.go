@@ -26,7 +26,8 @@ package permissions
 // for a delegated credential, so every key has an admitting catalog
 // operation (pinned by tests in pkg/hub).
 var AgentDelegableRegistry = map[string][]BoundaryKind{
-	"agent.read": {BoundaryKindProject, BoundaryKindHub},
+	"agent.read":   {BoundaryKindProject, BoundaryKindHub},
+	"project.read": {BoundaryKindProject, BoundaryKindHub},
 }
 
 // AgentDelegable reports whether permissionID may be delegated to an agent

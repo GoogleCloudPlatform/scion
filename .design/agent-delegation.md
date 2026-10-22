@@ -575,7 +575,11 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
 - **Narrowing setting.** An optional operational settings section `agent_delegation_policy`
   (`pkg/config/opsettings/registry.go`, database-only like `artifacts`) can remove permissions from
   the policy per boundary kind. It can never add any. Changes apply at the next exchange and on
-  every use.
+  every use. Its shape is `{"remove": {"project": [<permission ID>...], "hub": [...]}}`; a write
+  that does not match it is refused, and a stored document the hub cannot read (unreadable JSON,
+  an unknown field or boundary kind) refuses issuance and exchange with 500 and denies every use
+  with `lookup_error`. The section is refused for user access token writes, like the other
+  sections that confer authority.
 - Names: G's strings must not collide with existing uses of `agent_delegation`, which is already
   the agent-create mutation audit type (`agent_create_tx.go:36`) and a `CanDelegate` grant type
   (`authz_candelegate.go:44`). G's audit types use the `agent_delegation_grant_*` and
@@ -618,8 +622,16 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
   - `/events`, `/auth/*` and `/healthz` are on the web mux, outside `routeGuard` (`web.go:993-1012`).
     `/events` builds its identity only from a web session (`authorizeSSESubjects`, `web.go:2021`),
     so a `scion_adt_` bearer never becomes an event-stream identity.
-  - On a match, `routeGuard` puts the table's operation in the request context. The middleware
-    never sets it. `decideAgentDelegation` denies when the operation is missing or unknown,
+  - The project resource path has its own exact resolution, `projects.byId.resource`: exactly
+    `/api/v1/projects/{id}` (one segment, no sub-path, no trailing slash), with an operation only
+    for `GET` (`project.read`). It is resolved only on the `projects.byId` mux route.
+  - On a match, `routeGuard` puts the table's operation and the route's target (the agent or project
+    in the path) in the request context. The middleware never sets them.
+  - **Handler branch.** Every handler that serves an admitted operation calls
+    `admitDelegatedHandler(w, r, <operation>, <resource>)` after it loads the target and before it
+    authorizes. For a delegated caller it answers 403 `credential_not_admitted` unless `routeGuard`
+    admitted exactly that operation for that target. A drift test requires the operations named in
+    these calls to equal the catalog operations that admit the delegated pair. `decideAgentDelegation` denies when the operation is missing or unknown,
     including on internal service paths that reach `Decide` outside an HTTP route.
 - **Secondary checks.** A handler may call `Decide` again for another permission. For a delegated
   credential, that call is **evaluated** only if `(operation, permission)` is on the route's

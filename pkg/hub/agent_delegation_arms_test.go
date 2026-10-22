@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -228,11 +229,15 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 		assert.True(t, catalogAdmitsDelegated(spec), "catalog operation %s does not admit the delegated pair", entry.Operation)
 		found := false
 		for _, row := range agentSubRouteTable {
-			if row.id == entry.RouteID && row.operation(entry.Method) == entry.Operation {
+			if delegatedRouteID(row.id) == entry.RouteID && row.operation(entry.Method) == entry.Operation {
 				found = true
 			}
 		}
-		assert.True(t, found, "entry %s %s matches no sub-route row with that operation", entry.Method, entry.RouteID)
+		if entry.RouteID == projectResourceRouteID {
+			route, ok := resolveProjectResourceRoute(entry.Method, "/api/v1/projects/p-1")
+			found = ok && route.OperationID == entry.Operation
+		}
+		assert.True(t, found, "entry %s %s matches no exact route resolution with that operation", entry.Method, entry.RouteID)
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),
 			"the primary permission of %s is not delegable", entry.Operation)
@@ -317,7 +322,10 @@ func adtChainState(standing func(context.Context, string) error) (*AuthzService,
 		audience:         func() string { return "scion-hub:test" },
 		reservedIdentity: func(email string) bool { return email == "reserved@example.com" },
 		standing:         standing,
-		now:              func() time.Time { return now },
+		policy: func() (opsettings.AgentDelegationPolicySettings, error) {
+			return opsettings.AgentDelegationPolicySettings{}, nil
+		},
+		now: func() time.Time { return now },
 	}}
 	st := &delegatedRequestState{
 		identity: id,

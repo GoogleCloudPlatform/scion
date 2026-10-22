@@ -362,6 +362,15 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &ProfilingSettings{} },
 		},
+		{
+			// agent_delegation_policy is durable via DB but has no
+			// settings.yaml representation. It only narrows the code-owned
+			// hub agent-delegation policy. Absent DB row = no narrowing.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       AgentDelegationPolicySectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &AgentDelegationPolicySettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -612,6 +621,9 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// agent_delegation_policy schema is hand-written -- runtime state
+		// with no $defs in settings-v1.schema.json.
+		AgentDelegationPolicySectionName: agentDelegationPolicySchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
