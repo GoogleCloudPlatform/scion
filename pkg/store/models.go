@@ -650,8 +650,9 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // canAttach is true, and
 // GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). ClearedFields is dropped for every
-// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
+// dropped for every viewer: they are hub-internal bookkeeping
+// (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
 // entries name env keys a viewer without attach access must not learn, and
 // leaving it out means a GET echoed back into a PATCH never carries it. The
 // input is never mutated.
@@ -674,6 +675,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	}
 	copied := *cfg
 	copied.ClearedFields = nil
+	copied.ChangedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -1393,6 +1395,12 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries: it redeems the capabilities of a message request's
+	// attachments field and writes the files into the agent's home before
+	// delivering the text (ptone/scion#4596). The hub issues capabilities
+	// only to brokers that report it.
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -1400,6 +1408,19 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982). Only for such
+	// a broker does the hub report an edit of those keys on a stopped,
+	// created or suspended agent as applied at the next start rather than
+	// held for a reincarnation.
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890). Only
+	// for such a broker does the hub report a clear of a key the broker
+	// applies (api.ClearableConfigPath, and env key removals) as applied
+	// at the next start rather than held for a reincarnation.
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -3239,6 +3260,19 @@ type Message struct {
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// DeferredAttachments is never stored. For a deferred message, the
+	// conversation messages route lists its attachments stored as
+	// artifacts here, to a reader only, so catch-up can say they were not
+	// delivered (ptone/scion#4596).
+	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+}
+
+// DeferredAttachment names one attachment of a deferred message: its
+// reduced file name and size, and nothing else.
+type DeferredAttachment struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // MessageFilter defines query parameters for listing messages.

@@ -4233,6 +4233,9 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 		return agentEditAccess{}
 	}
 	access := agentEditAccess{CanUpdate: slices.Contains(caps.Actions, string(ActionUpdate))}
+	if access.CanUpdate {
+		access.Broker = s.agentBrokerStartSupport(ctx, agent)
+	}
 	if !access.CanUpdate || !slices.Contains(caps.Actions, string(ActionLifecycle)) || s.authzService == nil {
 		return access
 	}
