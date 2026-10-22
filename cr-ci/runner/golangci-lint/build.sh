@@ -48,7 +48,7 @@ case "$out" in
   *) out="$PWD/$out" ;;
 esac
 
-# shellcheck source=VERSIONS
+# shellcheck source-path=SCRIPTDIR source=VERSIONS
 . "$here/VERSIONS"
 patch="$here/go-tools-1839.patch"
 
