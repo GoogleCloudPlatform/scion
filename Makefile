@@ -555,7 +555,7 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^TestMaintenanceCommandsSchemaShadowGuard_Postgres$$' \
+		-run '^(TestMaintenanceCommandsSchemaShadowGuard_Postgres|TestServerPreflight_Postgres)$$' \
 		./cmd/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-cmd.log; \
 	status=$$(cat "$$st" 2>/dev/null); \
@@ -568,6 +568,10 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if ! grep -qE '^--- PASS: TestMaintenanceCommandsSchemaShadowGuard_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
 		echo "ERROR: the maintenance-command search_path guard Postgres test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestServerPreflight_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: the server preflight Postgres test did not run." >&2; \
 		exit 1; \
 	fi
 

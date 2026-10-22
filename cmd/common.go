@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -420,7 +421,7 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	ownProjectSlug := os.Getenv("SCION_PROJECT")
-	ownProjectID := os.Getenv("SCION_PROJECT_ID")
+	ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 		(ownProjectID != "" && projectPath == ownProjectID)
 	if isSameProject {
