@@ -818,10 +818,10 @@ const undispatchedBatchLimit = 100
 
 // writeNotSuspended appends a "phase is not suspended" condition to an
 // EXISTS subquery over the agents table. The phase column is nullable and a
-// NULL phase is not suspended, so it compares COALESCE(phase, empty string). A suspended subscriber's notifications are
-// parked: never claimed or attempted, and selected again once the agent
-// leaves the suspended phase. ExpireStaleAgentNotifications bounds how long
-// they can stay parked.
+// NULL phase is not suspended, so it compares COALESCE(phase, empty
+// string). A suspended subscriber's notifications are parked: never claimed
+// or attempted, and selected again once the agent leaves the suspended
+// phase. ExpireStaleAgentNotifications bounds how long they can stay parked.
 func writeNotSuspended(b *entsql.Builder) {
 	b.WriteString(" AND COALESCE(")
 	b.Ident(agent.Table)
