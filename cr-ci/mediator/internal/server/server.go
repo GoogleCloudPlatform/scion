@@ -86,9 +86,11 @@ type Options struct {
 	OrgScope    bool // runners are org-level: one runner list per owner
 	RunnerLabel string
 	// StackLabel is an extra label on every runner this stack registers
-	// (StackLabel()). Reconcile reaps only registrations with this label, or
-	// with no stack label at all, so two stacks that serve the same repo (a
-	// region move) do not reap each other's runners. Empty: no extra label.
+	// (StackLabel(); region plus job name, unique per project). Reconcile
+	// reaps registrations with this label, or with no stack label at all,
+	// after ReapAfter; another stack's only after TaskTimeout + ReapAfter
+	// offline, so two stacks that serve the same repo (a region move) do not
+	// reap each other's live runners. Empty: no extra label.
 	StackLabel    string
 	MaxConcurrent int
 	RunnerGroupID int64

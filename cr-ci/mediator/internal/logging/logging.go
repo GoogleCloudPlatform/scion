@@ -36,6 +36,7 @@ const (
 	EventReconcile           = "reconcile"
 	EventReconcileDenied     = "reconcile_denied"
 	EventReconcileSkip       = "reconcile_skip"
+	EventReconcileAllSkipped = "reconcile_all_skipped"
 	EventRunnerReaped        = "runner_reaped"
 	EventExecutionReaped     = "execution_reaped"
 	EventError               = "error"

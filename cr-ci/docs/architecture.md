@@ -195,9 +195,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      process launched the runner and otherwise from the first reconcile that
      saw it offline. A runner whose claim is still pending (slow cold start)
      is kept. Every runner is registered with `RUNNER_LABEL` plus a stack
-     label, `crci-stack-<REGION>-<RUNNER_JOB_NAME>`; a registration with
-     another stack's label is never reaped, one with no stack label (made
-     before stack labels) is. So two stacks serving the same repo, during a
+     label, `crci-stack-<REGION>-<RUNNER_JOB_NAME>` (unique per project); a
+     registration with another stack's label is reaped only after
+     `TASK_TIMEOUT` plus five minutes offline (it cannot be live then), one with
+     no stack label (made before stack labels) like this stack's own. So two stacks serving the same repo, during a
      region move, do not reap each other's cold-starting runners
      ([operations](operations.md#two-stacks-region-move));
    - cancels executions older than `TASK_TIMEOUT` plus five minutes, a safety
@@ -207,7 +208,8 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      executions once for the whole pass, and stopping when capacity is full.
 
    It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
-   one repo, run or job only skips that item, `reconcile_skip`) and logs
+   one repo, run or job only skips that item, `reconcile_skip`, unless every
+   repo was skipped, `reconcile_all_skipped`, which is a 500) and logs
    `reconcile`.
 
 ### Mediator-to-runner contract (claim contract v2)

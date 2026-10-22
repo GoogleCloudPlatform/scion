@@ -113,8 +113,15 @@ to another region. What is scoped per stack and what is not:
 
 - **Reaping is per stack.** Each runner is registered with the stack label
   `crci-stack-<REGION>-<RUNNER_JOB_NAME>` next to `RUNNER_LABEL` (jobs keep asking
-  for `RUNNER_LABEL` only). A reconcile reaps only registrations with its own stack
-  label or with none. Deploy this mediator version to **both** stacks before they
+  for `RUNNER_LABEL` only). A reconcile reaps registrations with its own stack
+  label, or with none, after five minutes offline. Another stack's offline
+  registrations are reaped only after `TASK_TIMEOUT` plus five minutes offline:
+  no live execution can be that old, so they are leftovers of a stack that is
+  gone, and one still holding `cr-job-<id>` would block the backfill of that job.
+  The label is unique per project (a project cannot hold two jobs with the same
+  name in one region); two **projects** serving the same repo with the same
+  `REGION` and `RUNNER_JOB_NAME` would share it, so give their jobs different
+  names. Deploy this mediator version to **both** stacks before they
   overlap: an older mediator reaps every offline `cr-job-*` registration, the other
   stack's cold-starting runners included.
 - **Backfill and the hijack guard are not.** Both reconcilers see the same queued
@@ -131,6 +138,12 @@ App's webhook URL to its `MEDIATOR_URL`, let the old stack's executions finish,
 then remove the old stack's regional resources with `scripts/teardown.sh
 --regional-only --config <old config.env> --apply` (it keeps the service accounts,
 secrets, staging bucket and project binding the new stack shares).
+
+**Check afterwards** that no registration of the old stack is left: repo
+**Settings**, **Actions**, **Runners** (or, with repository Administration read,
+`gh api repos/OWNER/REPO/actions/runners --jq '.runners[] | select(any(.labels[]; .name == "crci-stack-OLD_REGION-OLD_JOB")) | .name'`).
+The new stack reaps offline ones after `TASK_TIMEOUT` plus five minutes; delete
+any that remain (or are needed sooner) by hand: **Runners**, the runner, **Remove**.
 
 ## Webhook URL change
 
@@ -217,6 +230,8 @@ then run it with `--apply` (it asks you to type `GCP_PROJECT`;
 region's stack and keeps everything project-wide). It deletes in reverse
 order and skips what is gone; APIs stay enabled
 ([gcp-setup.md, step 10](gcp-setup.md#10-teardown-scriptsteardownsh)).
+After a `--regional-only` teardown, check for leftover registrations of that
+stack ([Two stacks](#two-stacks-region-move)).
 
 ## Monitoring and alerts
 
@@ -242,13 +257,15 @@ logged (a unit test enforces this).
 | `webhook_ignored` | INFO / DEBUG / WARNING | Not `workflow_job`, or job without `RUNNER_LABEL`; WARNING with `reason=labels_unservable` when a job has `RUNNER_LABEL` plus other labels a cr-ci runner cannot satisfy (fix its `runs-on`) |
 | `reconcile` | INFO | Reconcile summary (reaped, backfilled, left queued, errors, skipped). Any error makes `/reconcile` answer 500; skipped items do not |
 | `reconcile_skip` | WARNING | GitHub answered one repo's, run's or job's call in a reconcile with a 5xx (`stage`); that item is skipped and retried next pass, the rest of the pass goes on and `/reconcile` still answers 200 (listed under `skipped`). Only the same `stage` across many passes needs a look |
+| `reconcile_all_skipped` | ERROR | Every repo's runs lists got a GitHub 5xx: the pass discovered nothing, and `/reconcile` answers 500 (Cloud Scheduler shows the job failing). A sustained GitHub outage; jobs are not backfilled until it ends. **Alert on this.** |
 | `reconcile_denied` | WARNING | `/reconcile` called without a valid scheduler ID token |
 | `runner_reaped` / `execution_reaped` | WARNING | Stale registration deleted / execution past the task timeout cancelled |
 | `error` | ERROR | A GitHub, Cloud Run or Secret Manager call failed (`stage`, `error`) |
 
 - Suggested alerts: any `SECURITY_REJECT_FORK_PR` or
-  `SECURITY_KILL_HIJACKED_RUNNER`; repeated `launch_failed`
-  or `error`; `capacity_full` persisting across several reconciles (raise
+  `SECURITY_KILL_HIJACKED_RUNNER`; any `reconcile_all_skipped`, or
+  `reconcile_skip` for the same `stage` over several passes; repeated
+  `launch_failed` or `error`; `capacity_full` persisting across several reconciles (raise
   capacity or check for stuck executions); missing `reconcile` lines for
   more than two intervals (scheduler broken).
 - TODO(P6): execution results and memory utilisation of runner executions.

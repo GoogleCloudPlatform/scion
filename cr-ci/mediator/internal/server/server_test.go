@@ -770,8 +770,9 @@ func TestReconcileReapsStaleRunners(t *testing.T) {
 }
 
 // TestReconcileReapsOnlyItsOwnStack: during a region move two stacks serve
-// the same repo. Each reaps only registrations with its own stack label, or
-// with none (made before stack labels).
+// the same repo. Each reaps registrations with its own stack label, or with
+// none (made before stack labels), after ReapAfter; another stack's only after
+// TASK_TIMEOUT + ReapAfter offline.
 func TestReconcileReapsOnlyItsOwnStack(t *testing.T) {
 	if want := "crci-stack-us-central1-cr-gh-runner-8c32g"; testStackLabel != want {
 		t.Fatalf("StackLabel = %q, want %q", testStackLabel, want)
@@ -789,6 +790,16 @@ func TestReconcileReapsOnlyItsOwnStack(t *testing.T) {
 	}
 	if rs := h.gh.Runners(); len(rs) != 1 || rs[0].Name != "cr-job-1" {
 		t.Errorf("remaining runners = %+v, want only the other stack's cr-job-1", rs)
+	}
+	// Offline for TASK_TIMEOUT (45m) + ReapAfter, the other stack's registration
+	// cannot be live (a leftover of a torn-down stack) and is reaped too.
+	h.clock.Add(38 * time.Minute) // 44 min since first seen offline
+	if res := h.reconcile(); res.RunnersReaped != 0 {
+		t.Fatalf("reaped %d after 44 min, want 0 (other stack within its task budget)", res.RunnersReaped)
+	}
+	h.clock.Add(7 * time.Minute) // 51 min
+	if res := h.reconcile(); res.RunnersReaped != 1 || len(h.gh.Runners()) != 0 {
+		t.Fatalf("reaped %d, remaining %+v; want the other stack's leftover reaped", res.RunnersReaped, h.gh.Runners())
 	}
 }
 
@@ -861,10 +872,14 @@ func TestReconcileSkipsGitHubServerErrors(t *testing.T) {
 	if code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusInternalServerError || len(res.Errors) != 2 || len(res.Skipped) != 0 {
 		t.Errorf("403 on the runs list: %d %+v, want 500 with an error per status list", code, res)
 	}
+	// A 503 on every runs list of every repo: nothing could be discovered, so the
+	// pass is an error (a sustained outage must show), not just skips.
 	h.gh.FailListRuns = map[string]int{testRepo: http.StatusServiceUnavailable}
-	if res := h.reconcile(); len(res.Skipped) != 2 || len(res.Errors) != 0 {
-		t.Errorf("503 on the runs list: %+v, want both status lists skipped", res)
+	if code, res := h.reconcileWith(h.google.IDToken(testMediatorURL, schedulerEmail, h.clock.Now())); code != http.StatusInternalServerError ||
+		len(res.Skipped) != 2 || len(res.Errors) != 1 || !strings.HasPrefix(res.Errors[0], "all_skipped:") {
+		t.Errorf("503 on every runs list: %d %+v, want 500 with both lists skipped and all_skipped", code, res)
 	}
+	h.wantLog(logging.EventReconcileAllSkipped)
 }
 
 func TestReconcileBackfill(t *testing.T) {
