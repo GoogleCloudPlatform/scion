@@ -688,6 +688,47 @@ describe('edit-mode Clear matches what the hub does with an empty value (field t
   }
 });
 
+describe('Resources: removing a stored value', () => {
+  const sub = (el: ScionAgentConfigForm, name: string) =>
+    field(el, 'config.resources').querySelector(
+      `.sub[data-sub="${name}"] sl-input`
+    ) as HTMLInputElement;
+  async function setSub(el: ScionAgentConfigForm, name: string, value: string) {
+    const input = sub(el, name);
+    input.value = value;
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+  }
+  const note = (el: ScionAgentConfigForm) =>
+    field(el, 'config.resources').querySelector('[data-testid="clear-note"]');
+  const stored = { resources: { requests: { cpu: '1', memory: '2Gi' }, limits: { cpu: '4' } } };
+
+  it('emptying one stored value says the removal waits for a reincarnation', async () => {
+    const el = await mount('stopped', { values: stored });
+    expect(note(el)).toBeNull();
+    await setSub(el, 'limits.cpu', '');
+    expect(note(el)!.textContent).toContain('next reincarnation');
+    expect(el.collectConfigPatch()).toEqual({
+      resources: { requests: { cpu: '1', memory: '2Gi' } },
+    });
+  });
+
+  it('emptying every stored value sends null and says the same', async () => {
+    const el = await mount('stopped', { values: stored });
+    for (const name of ['requests.cpu', 'requests.memory', 'limits.cpu'])
+      await setSub(el, name, '');
+    expect(el.collectConfigPatch()).toEqual({ resources: null });
+    expect(note(el)!.textContent).toContain('next reincarnation');
+  });
+
+  it('changing or adding a value shows no note', async () => {
+    const el = await mount('stopped', { values: stored });
+    await setSub(el, 'limits.cpu', '8');
+    await setSub(el, 'disk', '20Gi');
+    expect(note(el)).toBeNull();
+  });
+});
+
 describe('Clear on a field that only inherits', () => {
   it('is disabled until the user types, then drops the edit instead of sending null', async () => {
     const el = await mount('stopped', { values: {} });

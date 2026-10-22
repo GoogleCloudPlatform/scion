@@ -1709,41 +1709,62 @@ export class ScionAgentConfigForm extends LitElement {
 
   private renderResources(off: boolean) {
     return html`<div class="grid">
-      ${RESOURCE_FIELDS.map((r) => {
-        const key = `config.resources.${r.sub}`;
-        const text = this.resourceDrafts[r.sub] ?? r.get(this.values?.resources) ?? '';
-        const p = this.placeholders?.[key];
-        const placeholder = p?.value ? `${p.value} (${p.source})` : `Inherited (${r.example})`;
-        return html`<div class="sub" data-sub=${r.sub}>
-          <span class="sub-label">${r.label}</span>
-          <sl-input
-            size="small"
-            .value=${text}
-            placeholder=${placeholder}
-            ?disabled=${off}
-            @sl-input=${(e: Event) => {
-              this.resourceDrafts = {
-                ...this.resourceDrafts,
-                [r.sub]: (e.target as HTMLInputElement).value,
-              };
-              this.emitChange();
-            }}
-          ></sl-input>
-        </div>`;
-      })}
-      ${Object.keys(this.resourceDrafts).length > 0
-        ? html`<sl-button
-            size="small"
-            class=${this.mode === 'edit' ? 'undo' : 'clear'}
-            ?disabled=${off}
-            @click=${() => {
-              this.resourceDrafts = {};
-              this.emitChange();
-            }}
-            >${this.mode === 'edit' ? 'Undo' : 'Clear'}</sl-button
-          >`
-        : nothing}
-    </div>`;
+        ${RESOURCE_FIELDS.map((r) => {
+          const key = `config.resources.${r.sub}`;
+          const text = this.resourceDrafts[r.sub] ?? r.get(this.values?.resources) ?? '';
+          const p = this.placeholders?.[key];
+          const placeholder = p?.value ? `${p.value} (${p.source})` : `Inherited (${r.example})`;
+          return html`<div class="sub" data-sub=${r.sub}>
+            <span class="sub-label">${r.label}</span>
+            <sl-input
+              size="small"
+              .value=${text}
+              placeholder=${placeholder}
+              ?disabled=${off}
+              @sl-input=${(e: Event) => {
+                this.resourceDrafts = {
+                  ...this.resourceDrafts,
+                  [r.sub]: (e.target as HTMLInputElement).value,
+                };
+                this.emitChange();
+              }}
+            ></sl-input>
+          </div>`;
+        })}
+        ${Object.keys(this.resourceDrafts).length > 0
+          ? html`<sl-button
+              size="small"
+              class=${this.mode === 'edit' ? 'undo' : 'clear'}
+              ?disabled=${off}
+              @click=${() => {
+                this.resourceDrafts = {};
+                this.emitChange();
+              }}
+              >${this.mode === 'edit' ? 'Undo' : 'Clear'}</sl-button
+            >`
+          : nothing}
+      </div>
+      ${this.resourcesRemoveStored()
+        ? html`<div class="status">
+            <span class="clear-note" data-testid="clear-note"
+              >Removing a value takes effect at the next reincarnation; a plain start keeps the
+              previous value.</span
+            >
+          </div>`
+        : nothing}`;
+  }
+
+  /**
+   * Edit mode: the user emptied a resource value the agent stores. A start
+   * merges resources value by value and keeps one the request leaves out, so
+   * the removal reaches the agent only at its next reincarnation.
+   */
+  private resourcesRemoveStored(): boolean {
+    if (this.mode !== 'edit') return false;
+    return RESOURCE_FIELDS.some((r) => {
+      const draft = this.resourceDrafts[r.sub];
+      return draft !== undefined && draft.trim() === '' && !!r.get(this.values?.resources);
+    });
   }
 
   private renderAutoExpose(f: AgentConfigFieldDef, off: boolean, id: string) {
