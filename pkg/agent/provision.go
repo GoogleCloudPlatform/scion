@@ -2166,11 +2166,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 3b: Resolve and install referenced skills from skill bank
 	var resolvedSkillsRecord *SkillResolutionRecord
-	if len(finalScionCfg.Skills) > 0 {
+	// Optional scion-platform:// entries are display-only: Step 3a2 installs
+	// those skills, so they are left out of resolution rather than logged as
+	// skipped on every start (ptone/scion#5431).
+	skillRefs := resolvableSkillRefs(finalScionCfg.Skills)
+	if len(skillRefs) > 0 {
 		resolver := SkillResolverFromContext(ctx)
 		if resolver == nil {
 			// S1: Fail closed for required skills
-			requiredURIs := collectRequiredSkillURIs(finalScionCfg.Skills)
+			requiredURIs := collectRequiredSkillURIs(skillRefs)
 			if len(requiredURIs) > 0 {
 				return "", "", nil, fmt.Errorf(
 					"skill resolution failed: %d required skill(s) declared but no skill resolver available\n"+
@@ -2178,7 +2182,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 						"  hint: connect to a Hub or mark skills as optional",
 					len(requiredURIs), strings.Join(requiredURIs, ", "))
 			}
-			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(finalScionCfg.Skills))
+			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(skillRefs))
 		} else {
 			projectID := ResolveProjectIDFromContext(ctx)
 			if projectID == "" {
@@ -2190,18 +2194,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 
 			skillFetchStart := time.Now()
-			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
+			result, err := resolver.Resolve(ctx, skillRefs, resolveOpts)
 			slog.Info("provision: skill fetch complete", "agent", agentName,
 				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
-				"requested", len(finalScionCfg.Skills), "ok", err == nil)
+				"requested", len(skillRefs), "ok", err == nil)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
 
 			// S1 completeness: build requested URI set
-			requestedURIs := make(map[string]*api.SkillReference, len(finalScionCfg.Skills))
-			for i := range finalScionCfg.Skills {
-				requestedURIs[finalScionCfg.Skills[i].URI] = &finalScionCfg.Skills[i]
+			requestedURIs := make(map[string]*api.SkillReference, len(skillRefs))
+			for i := range skillRefs {
+				requestedURIs[skillRefs[i].URI] = &skillRefs[i]
 			}
 
 			resolvedURIs := make(map[string]bool)
