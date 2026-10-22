@@ -259,6 +259,22 @@ func TestOriginOf_DefaultPorts(t *testing.T) {
 	}
 }
 
+// Same host and port, different scheme: the origins differ.
+func TestSameOrigin_SchemeDiffers(t *testing.T) {
+	hub := parseOrigin("https://hub.test:8443")
+	for _, tc := range []struct {
+		url  string
+		same bool
+	}{
+		{"https://hub.test:8443/x", true},
+		{"http://hub.test:8443/x", false},
+	} {
+		if got := sameOrigin(newGet(t, tc.url).URL, hub); got != tc.same {
+			t.Errorf("sameOrigin(%q, origin of https://hub.test:8443) = %v, want %v", tc.url, got, tc.same)
+		}
+	}
+}
+
 func TestAuthenticatedHTTPClient_NoUsableBaseURLSendsNoCredential(t *testing.T) {
 	n := newOriginTestNet(t, map[string]http.HandlerFunc{"hub.test:80": okHandler})
 	c := n.client("", &BearerAuth{Token: "hub-token"})

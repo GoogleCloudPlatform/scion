@@ -415,11 +415,11 @@ func TestAuthenticatedHTTPClient_CrossOriginRedirectDropsCallerScionHeaders(t *t
 	}
 }
 
-// The hop contract here rests on net/http copying redirect headers from
-// the initial request before the first send, so headers that the round
-// tripper adds never reach a hop. That is an implementation detail, not a
-// documented guarantee, and this test pins it: do not retire it as a test
-// of the standard library.
+// Three things keep these headers off a hop to another host:
+// authRoundTripper adds them only to a clone, the redirect policy drops
+// X-Scion-*, and net/http copies hop headers from a snapshot of the
+// initial request taken before the first send (undocumented). This test
+// pins the outcome, so do not retire it as a test of the standard library.
 func TestAuthenticatedHTTPClient_AgentTokenRedirectToOtherHostOmitsAgentHeaders(t *testing.T) {
 	rec := &hopRecorder{}
 	n := redirectNet(t, rec, "http://storage.test/landed")
