@@ -33,12 +33,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// adtGrantProjectPermissions binds userID in projectID to a custom project
+// role holding perms (a user keeps its one built-in membership role) and
+// returns the binding ID.
+func adtGrantProjectPermissions(t *testing.T, s store.Store, userID, projectID string, perms ...string) string {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "adt-custom-" + tid(userID+projectID+t.Name()),
+		Description: "agent delegation test role",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: perms,
+	})
+	require.NoError(t, err)
+	rb, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	return rb.ID
+}
+
 // adtMessageWorld readies the fixture for delegated message tests: agent B
-// in P2 is running, Alice is an admin of P2 (so she holds agent.message on
-// B), and dispatches are recorded.
+// in P2 is running, Alice holds agent.message in P2 through a custom role
+// (returned as its binding ID), and dispatches are recorded.
 func (f *adtFixture) adtMessageWorld(t *testing.T) *recordingDispatcher {
 	t.Helper()
-	adtGrantRole(t, f.store, f.alice.ID, f.other.ID, store.ProjectRoleAdmin)
+	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.other.ID, "agent.message")
 	f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running" })
 	d := &recordingDispatcher{}
 	f.srv.SetDispatcher(d)
@@ -90,6 +115,52 @@ func TestAgentDelegatedMessage_SendsAsTheAgent(t *testing.T) {
 		assert.Equal(t, "agent:"+f.agentA.Slug, m.Sender, "the stored sender is the agent")
 		assert.Equal(t, f.agentA.ID, m.SenderID)
 		assert.NotEqual(t, f.alice.ID, m.SenderID, "the issuer is never the sender")
+	}
+}
+
+// TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason: each
+// delegated message send and each attach handshake is recorded once, with
+// the grant, even with allow sampling at 0, and a denied one answers
+// without the decision's reason.
+func TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason(t *testing.T) {
+	f := newADTFixture(t, "adt-ma-records")
+	f.adtMessageWorld(t)
+	e, _ := f.adtAttachTarget(t, "adt-ma-records")
+	decisions := f.captureDecisions(t)
+	f.srv.authzService.DecisionAuditSampleRate = 0
+	t.Cleanup(func() { f.srv.authzService.DecisionAuditSampleRate = 1.0 })
+	grant := f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message", "agent:attach")
+	cred := f.delegated(t, grant.ID)
+
+	for name, request := range map[string]func() *httptest.ResponseRecorder{
+		"message": func() *httptest.ResponseRecorder {
+			return f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("x"))
+		},
+		"attach": func() *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, adtPTYPath(e.ID), nil, adtBearer(cred.Token))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			decisions.reset()
+			rec := request()
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			recs := decisions.delegated()
+			require.Len(t, recs, 1, "one record for the delegated check")
+			assert.Equal(t, "allow", recs[0].Result)
+			assert.Equal(t, "agent_delegation:"+grant.ID, recs[0].MatchedGrant)
+			assert.Equal(t, f.agentA.ID, recs[0].PrincipalID, "the actor is the agent")
+			assert.NotContains(t, rec.Body.String(), "agent delegation")
+		})
+	}
+
+	// Denied: the target is outside the issuer's authority (agent C).
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"message": f.sendMessage(t, cred.Token, agentMessagePath(f.agentC.ID), adtText("x")),
+		"attach":  f.do(t, http.MethodGet, adtPTYPath(f.agentC.ID), nil, adtBearer(cred.Token)),
+	} {
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "agent delegation", name)
+		assert.NotContains(t, rec.Body.String(), agentDelegationCodeIssuerAuthority, name)
 	}
 }
 
@@ -152,7 +223,7 @@ func TestAgentDelegatedMessage_Denials(t *testing.T) {
 		decisions.assertDelegatedDeny(t, agentDelegationCodeOutsideCeiling)
 	})
 	t.Run("project-bounded grant on another project", func(t *testing.T) {
-		adtGrantRole(t, f.store, f.alice.ID, f.proj.ID, store.ProjectRoleAdmin)
+		adtGrantProjectPermissions(t, f.store, f.alice.ID, f.proj.ID, "agent.message")
 		cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": f.proj.ID}, "agent:message").ID)
 		decisions.reset()
 		adtAssertAPIError(t, f.sendMessage(t, cred.Token, path, adtText("x")), http.StatusForbidden, ErrCodeMessageDenied)
