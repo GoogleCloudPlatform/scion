@@ -321,7 +321,7 @@ so it is deferred.
   `/scratch/.cache` (cache parity holds; tar follows links in parent components).
   It counts against `RUNNER_MEMORY`: in P6 PoC run 4 the lint passed at 27.9 GB of
   32 GiB (a ~21 GB compile plus the cache grown to ~9.5 GB), leaving about 4 GB.
-  Use it only at 32 GiB, and prefer the disk quota when available: the margin
+  It requires `RUNNER_MEMORY=32Gi` (the config loaders reject less), and the disk quota is preferable when available: the margin
   shrinks as the cache or pkg/hub grows. A Cloud Run in-memory volume
   (`--add-volume type=in-memory,size-limit=…`) would be an alternative with a hard
   size cap, untested.

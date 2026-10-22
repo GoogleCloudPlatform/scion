@@ -329,7 +329,19 @@ var validCases = []map[string]string{
 	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
 	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
 	{EnvRunnerBuildCacheInRAM: "true"},
+	{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "32768Mi"},
 	{EnvGitHubInstallScope: ""}, // defaults to repo
+}
+
+// invalidComboCases are multi-key changes to validEnv that Load must reject,
+// naming key.
+var invalidComboCases = []struct {
+	env map[string]string
+	key string
+}{
+	// The RAM build cache needs the 32 GiB shape.
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "30Gi"}, EnvRunnerBuildCacheInRAM},
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerCPU: "6", EnvRunnerMemory: "24Gi"}, EnvRunnerBuildCacheInRAM},
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation
@@ -383,6 +395,15 @@ func TestScriptValidatorMatchesLoad(t *testing.T) {
 			t.Errorf("%s=%q accepted by check-config.sh", tt.key, tt.value)
 		} else if !strings.Contains(out, tt.key) {
 			t.Errorf("%s=%q: check-config.sh does not name the key:\n%s", tt.key, tt.value, out)
+		}
+	}
+	for _, tt := range invalidComboCases {
+		env := merge(tt.env)
+		if _, err := Load(getenvFrom(env)); err == nil || !strings.Contains(err.Error(), tt.key) {
+			t.Fatalf("%v: Load err = %v, want a %s error", tt.env, err, tt.key)
+		}
+		if ok, out := check(env); ok || !strings.Contains(out, tt.key) {
+			t.Errorf("%v: check-config.sh ok=%v, want a %s error:\n%s", tt.env, ok, tt.key, out)
 		}
 	}
 	// Required keys.

@@ -337,6 +337,11 @@ func Load(getenv func(string) string) (*Config, error) {
 	default:
 		fail(EnvRunnerBuildCacheInRAM, "%q must be true or false", raw)
 	}
+	// The in-RAM cache (~9.5 GB) comes on top of the lint's ~21 GB compile (P6 PoC
+	// run 4: 27.9 GB of 32 GiB), so only the 32 GiB shape has room for it.
+	if c.RunnerBuildCacheInRAM && c.RunnerMemoryMi != 0 && c.RunnerMemoryMi < maxCloudRunMemoryMi {
+		fail(EnvRunnerBuildCacheInRAM, "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got %s", c.RunnerMemory)
+	}
 
 	if raw := get(EnvTaskTimeout); raw != "" {
 		d, err := time.ParseDuration(raw)
