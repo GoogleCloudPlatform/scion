@@ -1037,10 +1037,12 @@ old marker: in shared-workspace mode that dispatch is refused with `409 Conflict
 remove or correct the workspace's `.scion/project-id` (or the `.scion` marker file) so it names the
 agent's Hub project, or re-link the project.
 
-An agent provisioned before image provenance was recorded falls back to its previous behaviour,
-including reading those `agent-info.json` fields: its create-time inline image ranks at the top
-tier, its Hub-sent or requested profile drives the override lookup, and the merged
-`scion-agent.json` value stands in for an unresolvable template.
+An agent provisioned before image provenance was recorded falls back to its previous behaviour
+for the image fields and the template: its create-time inline image (`agent-info.json`'s
+`explicitImage` / `explicitImagePullPolicy`) ranks at the top tier, its template comes from
+`agent-info.json`, its Hub-sent or requested profile drives the override lookup, and the merged
+`scion-agent.json` value stands in for an unresolvable template. Its profile, harness config and
+runtime are never read from `agent-info.json` (below).
 
 On every start and restart, the Runtime Broker sets the start's profile to the profile recorded
 in the agent's image provenance (a flat broker has no profiles and skips this), so the
@@ -1050,7 +1052,11 @@ profile happens to be active on the broker at restart time. The Hub sends the ag
 image provenance was recorded. If such an agent is started or restarted by a Hub that sends no
 profile, the broker refuses with `409 Conflict`: "agent "<name>" has no broker-side record of its
 settings profile (it was provisioned by an older version) and the hub sent no profile:
-re-provision the agent (scion reincarnate, or delete and re-create it)". The profile, harness
+re-provision the agent (scion reincarnate, or delete and re-create it)". An agent that is not
+provisioned on this broker yet (a start that will provision it) also takes the Hub-sent profile,
+under the same strict rule as any existing agent: a profile this broker cannot resolve gets the
+`503` rather than the broker's default runtime. A legacy agent whose Hub record has no profile
+runs with the profile active on the broker; re-provision it to record one. The profile, harness
 config and runtime copies in `agent-info.json` are never used for a start, a restart, the early
 harness-config policy check, or the runtime that operations on an existing agent use. A profile
 that no longer resolves is refused with the usual `503`; there is no fallback to the broker's

@@ -53,7 +53,17 @@ func IsProvisioned(projectPath, agentName string, sharedWorkspace bool, hubProje
 // resolves the harness-config name from (config.ResolveHarnessConfigName).
 func PersistedHarnessConfig(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) string {
 	agentDir, ok := brokerAgentDir(projectPath, agentName, sharedWorkspace, hubProjectID)
-	if !ok || !config.ScionAgentConfigExists(agentDir) {
+	if !ok {
+		return ""
+	}
+	return harnessConfigInAgentDir(agentDir)
+}
+
+// harnessConfigInAgentDir returns the harness-config name recorded in the
+// scion-agent config in agentDir, or "" when there is none or it cannot be
+// read. PersistedHarnessConfig and List both read it here.
+func harnessConfigInAgentDir(agentDir string) string {
+	if !config.ScionAgentConfigExists(agentDir) {
 		return ""
 	}
 	cfg, err := (&config.Template{Path: agentDir}).LoadConfig()

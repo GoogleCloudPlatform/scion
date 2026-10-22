@@ -415,8 +415,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 }
 
 // brokerRecordedSettings returns the settings profile recorded in agentDir's
-// image provenance and the harness-config recorded in its scion-agent.json,
-// each "" when there is none or it cannot be read. Both files are in the
+// image provenance and the harness-config recorded in its scion-agent config
+// (harnessConfigInAgentDir), each "" when there is none or it cannot be read. Both files are in the
 // broker-side agent dir, outside every container mount, so List reports
 // them rather than the copies in agent-info.json in the agent home. An agent
 // provisioned before image provenance was recorded reports no profile.
@@ -424,13 +424,7 @@ func brokerRecordedSettings(agentDir string) (profile, harnessConfig string) {
 	if p, err := readImageProvenance(agentDir); err == nil && p != nil {
 		profile = p.Profile
 	}
-	if data, err := os.ReadFile(filepath.Join(agentDir, "scion-agent.json")); err == nil {
-		var cfg api.ScionConfig
-		if json.Unmarshal(data, &cfg) == nil {
-			harnessConfig = cfg.HarnessConfig
-		}
-	}
-	return profile, harnessConfig
+	return profile, harnessConfigInAgentDir(agentDir)
 }
 
 // createdAgentLabels approximates the label set a created agent's

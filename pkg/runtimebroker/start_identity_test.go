@@ -146,3 +146,37 @@ func TestStartIdentity_OwnRuntimeUsesProvisionedProfile(t *testing.T) {
 		}
 	})
 }
+
+// TestStartIdentity_UnprovisionedAgentTakesHubProfile: a start of an agent
+// not provisioned on this broker (no broker-side agent dir) takes the
+// Hub-sent profile under the same strict rule as an existing agent: a
+// profile this broker resolves selects its runtime, and one it cannot
+// resolve gets the retryable 503 instead of the broker's default runtime.
+func TestStartIdentity_UnprovisionedAgentTakesHubProfile(t *testing.T) {
+	t.Run("resolvable hub profile selects its runtime", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		w := lifecyclePost(t, f.srv, "/api/v1/agents/unprovisioned-agent/start", map[string]any{
+			"projectPath": f.projectPath,
+			"profile":     lifecycleK8sProfile,
+		})
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
+		}
+		if runs, _ := f.k8sRun(); runs != 1 || f.defaultMgr.StartCalls() != 0 {
+			t.Errorf("kubernetes runs = %d, default starts = %d; want 1, 0", runs, f.defaultMgr.StartCalls())
+		}
+	})
+	t.Run("unresolvable hub profile is a 503", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		w := lifecyclePost(t, f.srv, "/api/v1/agents/unprovisioned-agent/start", map[string]any{
+			"projectPath": f.projectPath,
+			"profile":     "vanished",
+		})
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "saved runtime profile cannot be resolved") {
+			t.Fatalf("status = %d, want the 503 for an unresolvable profile: %s", w.Code, w.Body.String())
+		}
+		if runs, _ := f.k8sRun(); runs != 0 || f.defaultMgr.StartCalls() != 0 {
+			t.Errorf("kubernetes runs = %d, default starts = %d; want none", runs, f.defaultMgr.StartCalls())
+		}
+	})
+}
