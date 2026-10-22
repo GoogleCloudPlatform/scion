@@ -154,8 +154,8 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 
 // TestPlatformSkillsFS_ScionPortServing pins the scion-port-serving platform
 // skill (ptone/scion#5567). It reads the embedded copies, the ones agents
-// get, so it fails if the skill or its web-apps reference is missing from
-// go:embed, gated to a subset of agents, or loses its guidance: scion expose
+// get, so it fails if the skill or its web-apps reference is not embedded,
+// is gated to a subset of agents, or loses its guidance: scion expose
 // and the URL as printed, what the proxy carries, scion tunnel for full apps,
 // and for pages one self-contained file and an honest browser check.
 func TestPlatformSkillsFS_ScionPortServing(t *testing.T) {
