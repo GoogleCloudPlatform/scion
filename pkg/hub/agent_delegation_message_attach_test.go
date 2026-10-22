@@ -45,16 +45,6 @@ func (f *adtFixture) adtMessageWorld(t *testing.T) *recordingDispatcher {
 	return d
 }
 
-// exchangeFor exchanges grantID with agent's own token.
-func (f *adtFixture) exchangeFor(t *testing.T, agent *store.Agent, grantID string) ExchangeAgentDelegationResponse {
-	t.Helper()
-	rec := f.exchange(t, f.agentJWT(t, agent), agent.ID, grantID, map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var out ExchangeAgentDelegationResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	return out
-}
-
 func (f *adtFixture) sendMessage(t *testing.T, token, path string, body map[string]interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	return f.do(t, http.MethodPost, path, body, adtBearer(token))
@@ -118,7 +108,7 @@ func TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var grant AgentDelegationGrantResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &grant))
-	cred := f.exchangeFor(t, adminAgent, grant.ID)
+	cred := f.credentialFor(t, adminAgent, grant.ID)
 
 	rec = f.sendMessage(t, cred.Token, agentMessagePath(f.agentB.ID), adtText("from the admin's agent"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
