@@ -114,6 +114,20 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 	// rclone connection strings (":local:/" would have the hub copy its own
 	// filesystem) and bare http:// URLs (an SSRF vector against hub-internal
 	// hosts). Neither can ever yield a usable skill URI.
+	//
+	// The host check is also load-bearing for not echoing credentials. A
+	// pasted credential written with a confused delimiter lands in the host
+	// position: "https://github.com:SECRET/..." has the credential in the port
+	// (a parse error, or Host "github.com:<digits>" for an all-digit one), and
+	// "https://github.com:SECRET@other.example/..." moves the real host after
+	// the '@'. The check rejects these before base is built, logged or echoed:
+	// only a host equal to "github.com" under strings.EqualFold (any case, no
+	// port) gets through, and userinfo is dropped below. Do not widen it (a
+	// host allowlist, a pattern, other forges). If it is replaced or widened,
+	// for example by a shared source-URL validator, whoever lands second must
+	// re-derive the skills-discover rows of the shared URL redaction table
+	// (pkg/util/urlredact) against the new check and update their expected
+	// values; moving this comment is not enough.
 	u, parseErr := url.Parse(req.SourceURL)
 	if parseErr != nil || u.Scheme != "https" || !strings.EqualFold(u.Host, "github.com") {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
@@ -133,6 +147,9 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 	//     mid-path and make every child unnormalizable. It is re-attached per
 	//     skill below. It is also irrelevant to the fetch itself, which
 	//     authenticates from project credentials, so the fetch gets the bare URL.
+	//     Only the supported query parameter (token) is kept; every other
+	//     parameter is dropped here, so nothing else the caller put in the
+	//     query is copied onto the returned URIs.
 	//   - Drop any #fragment, for the same concatenation reason: ".../skills#notes"
 	//     would yield child URLs like ".../skills#notes/alpha-skill".
 	//   - Drop any userinfo. "https://x-access-token:SECRET@github.com/..." parses
@@ -140,9 +157,22 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 	//     "no skills found at <base>" message — so leaving it in would write a
 	//     pasted credential to the hub log and hand it back to the client.
 	//     Discovery authenticates from project credentials, never from the URL.
+	tokenName, hasToken := api.SkillURITokenParam(u.RawQuery)
+	if hasToken && !api.IsValidSkillTokenSecretName(tokenName) {
+		// Input hygiene, not the redaction boundary: a secret name and a pasted
+		// secret cannot be told apart from the string, so this check only
+		// rejects values that cannot be a secret name. The value is never
+		// echoed. What keeps the query out of the logs is the per-skill
+		// handling below, which must not be relaxed on the strength of this
+		// check.
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"the token query parameter in sourceUrl must name a secret "+
+				"(uppercase letters, digits and underscores, starting with a letter)", nil)
+		return
+	}
 	tokenSuffix := ""
-	if u.RawQuery != "" {
-		tokenSuffix = "?" + u.RawQuery
+	if hasToken {
+		tokenSuffix = "?token=" + tokenName
 	}
 	u.Host = "github.com"
 	u.User = nil
@@ -198,7 +228,17 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 			droppedNames = append(droppedNames, d.name)
 			continue
 		}
-		uri, normErr := api.NormalizeSkillURI(d.sourceURL + tokenSuffix)
+		// The candidate URI is normalized and logged WITHOUT its query, and the
+		// token suffix is attached to the normalized result. This is the
+		// control that keeps the caller's query out of the hub log: no query
+		// reaches NormalizeSkillURI (whose error text is logged below) or any
+		// log line, whatever the normalizer's error texts say. Do not relax it
+		// on the strength of the token-name check above, which is only input
+		// hygiene. NormalizeSkillURI appends a token suffix unchanged, so
+		// normalizing first and appending gives the same URI as normalizing
+		// the URI with the suffix.
+		candidate := api.SkillURIWithoutQuery(d.sourceURL)
+		uri, normErr := api.NormalizeSkillURI(candidate)
 		if normErr != nil {
 			// Defence in depth. The /tree/ check above means a well-formed GitHub
 			// URL should always normalize, so this branch is not reachable from
@@ -206,11 +246,11 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 			// skill URI is not addressable and so cannot be added. Drop it rather
 			// than failing the whole discovery.
 			s.resourceLog.Warn("skipping discovered skill with unnormalizable URI",
-				"sourceURL", d.sourceURL, "error", normErr)
+				"sourceURL", candidate, "error", normErr)
 			droppedNames = append(droppedNames, d.name)
 			continue
 		}
-		skills = append(skills, DiscoveredSkill{URI: uri, Name: d.name})
+		skills = append(skills, DiscoveredSkill{URI: uri + tokenSuffix, Name: d.name})
 	}
 
 	if len(skills) == 0 {
