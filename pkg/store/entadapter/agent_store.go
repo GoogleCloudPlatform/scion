@@ -1675,7 +1675,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetMessage("")
 		}
 		upd.SetStalledFromActivity("")
-		upd.ClearExitCode()
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
 		upd.SetExitReason("")
 	}
 
@@ -1686,8 +1688,12 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// (state.ExitReasonPreempted/ExitReasonEvicted), and that reason
 	// describes the old pod, not the new generation a start/restart brings
 	// up, so it must be cleared regardless of the current phase.
-	if su.ClearExit {
-		upd.ClearExitCode()
+	// A provisional start or reincarnation can retain old exits until the
+	// first running report; clear only after the guards accept that transition.
+	if su.ClearExit || (current.Phase == string(state.PhaseStarting) && su.Phase == string(state.PhaseRunning)) {
+		if su.ExitCode == nil {
+			upd.ClearExitCode()
+		}
 		upd.SetExitReason("")
 	}
 

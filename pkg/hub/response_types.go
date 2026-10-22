@@ -29,6 +29,13 @@ type AgentWithCapabilities struct {
 	ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 	CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+	// HarnessVendor is the vendor of the agent's harness (harness.Vendor):
+	// the model vendor for a single-vendor harness, the harness name for a
+	// multi-vendor one, and omitted for a custom or unresolved harness.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	// ModelSize is the model size alias the agent was created with
+	// (AppliedConfig.ModelSize), omitted when it has none.
+	ModelSize string `json:"modelSize,omitempty"`
 	// Editability is set on the single-agent GET only.
 	Editability *AgentEditability `json:"editability,omitempty"`
 	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
@@ -46,6 +53,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}{
@@ -55,6 +64,8 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ResolvedHarness:     a.ResolvedHarness,
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
+		HarnessVendor:       a.HarnessVendor,
+		ModelSize:           a.ModelSize,
 		Editability:         a.Editability,
 		SSHHostKey:          a.SSHHostKey,
 	})
@@ -71,6 +82,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		ResolvedHarness     string                           `json:"resolvedHarness,omitempty"`
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
+		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
+		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}
@@ -83,6 +96,8 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.ResolvedHarness = wrapper.ResolvedHarness
 	a.HarnessCapabilities = wrapper.HarnessCapabilities
 	a.CloudLogging = wrapper.CloudLogging
+	a.HarnessVendor = wrapper.HarnessVendor
+	a.ModelSize = wrapper.ModelSize
 	a.Editability = wrapper.Editability
 	a.SSHHostKey = wrapper.SSHHostKey
 	return nil

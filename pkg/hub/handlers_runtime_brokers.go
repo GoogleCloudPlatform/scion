@@ -1624,7 +1624,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-						if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+						// Starting -> running clears the prior run's exit fields in the store.
+						if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+							(curPhase == state.PhaseStarting && hbPhase == state.PhaseRunning)) {
 							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
@@ -1701,7 +1703,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// touching the phase or message derived from ContainerStatus.
 				hbExitReason := state.ExitReason(agentHB.ExitReason)
 				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-				if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+				if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+					(agent.Phase == string(state.PhaseStarting) && statusUpdate.Phase == string(state.PhaseRunning))) {
 					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
