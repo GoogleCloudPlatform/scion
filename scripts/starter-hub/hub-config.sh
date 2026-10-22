@@ -101,7 +101,7 @@ require_cert_email() {
 hub_env_base_url() {
     local raw=""
     if [[ -f "${HUB_ENV_FILE}" ]]; then
-        raw=$(grep -E "^[[:space:]]*SCION_SERVER_BASE_URL[[:space:]]*=" "${HUB_ENV_FILE}" 2>/dev/null | tail -1 | cut -d'=' -f2- || true)
+        raw=$(grep -E "^[[:space:]]*SCION_SERVER_BASE_URL[[:space:]]*=" "${HUB_ENV_FILE}" 2>/dev/null | tail -n 1 | cut -d'=' -f2- || true)
     fi
     raw="${raw%$'\r'}"
     # Trim surrounding whitespace.
