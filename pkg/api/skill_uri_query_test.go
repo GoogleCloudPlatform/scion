@@ -181,11 +181,11 @@ func TestNormalizeSkillURI_ErrorsOmitQuery(t *testing.T) {
 }
 
 // TestParseSkillURI_ErrorsOmitQuery checks the whole error text for skill://
-// URIs and bare names that carry a '?': the input is quoted only up to the
-// '?', and nothing after it (name, scope or segment detail included) appears.
-// Inputs without a '?' keep their detailed errors.
+// URIs and bare names that carry a '?' or '#': the input is quoted only up to
+// the first of them, and nothing after it (name, scope, version or segment
+// detail included) appears. Inputs without either keep their detailed errors.
 func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
-	const omitted = ": not a valid skill:// URI or bare skill name (the text from '?' on is not shown)"
+	const omitted = ": not a valid skill:// URI or bare skill name (the text from the first '?' or '#' on is not shown)"
 	tests := []struct {
 		name    string
 		input   string
@@ -235,6 +235,31 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 			name:    "skill:// with a bare trailing question mark",
 			input:   "skill://my-skill?",
 			wantErr: `invalid skill URI "skill://my-skill"` + omitted,
+		},
+		{
+			name:    "skill:// version before a fragment",
+			input:   "skill://my-skill@1.0#made-up-value-19",
+			wantErr: `invalid skill URI "skill://my-skill@1.0"` + omitted,
+		},
+		{
+			name:    "scoped skill:// version before a fragment",
+			input:   "skill://scion/core/my-skill@^1.0#made-up-value-20",
+			wantErr: `invalid skill URI "skill://scion/core/my-skill@^1.0"` + omitted,
+		},
+		{
+			name:    "bare name version before a fragment",
+			input:   "my-skill@1.0#made-up-value-21",
+			wantErr: `invalid skill URI "my-skill@1.0"` + omitted,
+		},
+		{
+			name:    "fragment before a query",
+			input:   "skill://my-skill@1.0#made-up-value-22?token=made-up-value-23",
+			wantErr: `invalid skill URI "skill://my-skill@1.0"` + omitted,
+		},
+		{
+			name:    "query before a fragment",
+			input:   "skill://my-skill@1.0?token=made-up-value-24#made-up-value-25",
+			wantErr: `invalid skill URI "skill://my-skill@1.0"` + omitted,
 		},
 		{
 			name:    "no query keeps the detailed error",
