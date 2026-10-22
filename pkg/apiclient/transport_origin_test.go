@@ -391,29 +391,56 @@ func TestAuthenticatedHTTPClient_BaseCheckRedirectStillApplies(t *testing.T) {
 }
 
 func TestAuthenticatedHTTPClient_BaseCheckRedirectKeepsCrossOriginDrop(t *testing.T) {
+	credHeaders := []string{"Authorization", "Proxy-Authorization", "X-Serverless-Authorization"}
+	var mu sync.Mutex
+	var seen []string
+	record := func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		line := r.Host + r.URL.Path
+		for _, h := range credHeaders {
+			line += " " + h + "=" + r.Header.Get(h)
+		}
+		seen = append(seen, line)
+		mu.Unlock()
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "http://hub.test:8080/object", http.StatusFound)
+			return
+		}
+		okHandler(w, r)
+	}
 	n := newOriginTestNet(t, map[string]http.HandlerFunc{
-		"hub.test:80":   redirectTo("http://hub.test:8080/object"),
-		"hub.test:8080": okHandler,
+		"hub.test:80":   record,
+		"hub.test:8080": record,
 	})
-	errBaseHook := errors.New("base hook saw Authorization")
+	errBaseHook := errors.New("base hook saw a credential header")
 	hc := &http.Client{
 		Transport: n.transport(),
 		Timeout:   10 * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if req.Header.Get("Authorization") != "" {
-				return errBaseHook
+			for _, h := range credHeaders {
+				if req.Header.Get(h) != "" {
+					return fmt.Errorf("%w: %s", errBaseHook, h)
+				}
 			}
 			return nil
 		},
 	}
 	c := NewTransport("http://hub.test", WithHTTPClient(hc)).AuthenticatedHTTPClient()
 	req := newGet(t, "http://hub.test/start")
-	req.Header.Set("Authorization", "Bearer caller-set")
+	for _, h := range credHeaders {
+		req.Header.Set(h, "Bearer caller-set")
+	}
 	resp, err := c.Do(req)
 	if err != nil {
-		t.Fatalf("GET: %v (Authorization still set when the base CheckRedirect ran)", err)
+		t.Fatalf("GET: %v (credential header still set when the base CheckRedirect ran)", err)
 	}
 	_ = resp.Body.Close()
-	wantAuth(t, n, "hub.test:80/start", "Bearer caller-set")
-	wantAuth(t, n, "hub.test:8080/object", "")
+	mu.Lock()
+	got := strings.Join(seen, "\n")
+	mu.Unlock()
+	want := "hub.test/start Authorization=Bearer caller-set Proxy-Authorization=Bearer caller-set X-Serverless-Authorization=Bearer caller-set\n" +
+		"hub.test:8080/object Authorization= Proxy-Authorization= X-Serverless-Authorization="
+	if got != want {
+		t.Errorf("credential headers:\n%s\nwant:\n%s", got, want)
+	}
 }

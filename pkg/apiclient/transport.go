@@ -254,7 +254,8 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 //
 // Redirects follow HTTPClient.CheckRedirect when it is set, and otherwise the
 // net/http default limit of 10 hops. Before either, a hop to another origin
-// has its Authorization header removed; same-origin hops keep the credential.
+// has its Authorization, Proxy-Authorization and X-Serverless-Authorization
+// headers removed; same-origin hops keep the credential.
 func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 	base := t.HTTPClient
 	if base == nil {
@@ -273,7 +274,9 @@ func (t *Transport) AuthenticatedHTTPClient() *http.Client {
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !sameOrigin(req.URL, hub) {
-				req.Header.Del("Authorization")
+				for _, h := range crossOriginDroppedHeaders {
+					req.Header.Del(h)
+				}
 			}
 			if baseCheck != nil {
 				return baseCheck(req, via)
@@ -310,6 +313,10 @@ func withoutHubOnlyLayers(rt http.RoundTripper) http.RoundTripper {
 	}
 	return rt
 }
+
+// crossOriginDroppedHeaders are removed from a redirect hop to another
+// origin: the headers that carry the hub or transport credential.
+var crossOriginDroppedHeaders = []string{"Authorization", "Proxy-Authorization", "X-Serverless-Authorization"}
 
 // maxRedirects matches the hop limit of net/http's default redirect policy.
 const maxRedirects = 10
