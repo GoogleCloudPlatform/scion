@@ -124,13 +124,14 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	// appleMaskMinVersion; an unknown version is left to the check after
 	// the start (verifyMasks).
 	maskTargets := appleTmpfsTargets(newArgs)
-	masked := len(maskTargets) > 0
+	roTargets := appleNestedReadOnlyTargets(newArgs)
+	masked := len(maskTargets) > 0 || len(roTargets) > 0
 	cliVersion := "unknown"
 	if masked {
 		v, below, ok := appleCLIVersion(ctx, r.Command)
 		if ok && below {
 			floor := appleMaskMinVersionString()
-			return "", fmt.Errorf("container CLI %s is older than %s: the %s mask relies on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(maskTargets, ", "), floor)
+			return "", fmt.Errorf("container CLI %s is older than %s: the nested mounts at %s rely on nested mount ordering that needs apple/container %s or later", v, floor, strings.Join(append(slices.Clone(roTargets), maskTargets...), ", "), floor)
 		}
 		if ok {
 			cliVersion = v
@@ -161,7 +162,11 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	id := strings.TrimSpace(out)
 	reportAppleContainerCreated(hooks, config.Name, id)
 	if masked {
-		if err := r.verifyMasks(ctx, id, maskTargets); err != nil {
+		err := r.verifyMasks(ctx, id, maskTargets)
+		if err == nil {
+			err = r.verifyReadOnly(ctx, id, roTargets)
+		}
+		if err != nil {
 			checkErr := fmt.Errorf("%w (container CLI version %s)", err, cliVersion)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
@@ -195,6 +200,91 @@ func appleTmpfsTargets(args []string) []string {
 		}
 	}
 	return targets
+}
+
+// appleNestedReadOnlyTargets returns the container paths of the read-only
+// -v binds in args that are nested in the workspace or repo root mount
+// (the project configuration directory), in order.
+func appleNestedReadOnlyTargets(args []string) []string {
+	var targets []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "-v" || !strings.HasSuffix(args[i+1], ":ro") {
+			continue
+		}
+		parts := strings.Split(strings.TrimSuffix(args[i+1], ":ro"), ":")
+		dst := parts[len(parts)-1]
+		if strings.HasPrefix(dst, "/workspace/") || strings.HasPrefix(dst, "/repo-root/") {
+			targets = append(targets, dst)
+		}
+	}
+	return targets
+}
+
+// appleExecCheck runs argv in the started container with the retry rule of
+// verifyMask: retried, up to appleMaskCheckAttempts runs within
+// appleMaskCheckTimeout, only when it could not run.
+func (r *AppleContainerRuntime) appleExecCheck(ctx context.Context, id string, argv ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, appleMaskCheckTimeout)
+	defer cancel()
+	var out string
+	var err error
+	// A deadline that passes during the backoff ends the loop, keeping the
+	// last real attempt's error and output.
+retry:
+	for attempt := 1; ; attempt++ {
+		out, err = appleBoundedCommand(ctx, r.Command, append([]string{"exec", id}, argv...)...)
+		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break retry
+		case <-time.After(appleMaskCheckRetryDelay):
+		}
+	}
+	return out, err
+}
+
+// verifyReadOnly checks, in the started container, that each target is
+// mounted read-only: the last /proc/self/mountinfo entry for that mount
+// point (the one in effect) must carry the per-mount "ro" option. It reads
+// the mount table with cat by absolute path and an empty environment, as
+// verifyMask runs stat, and fails closed when the table cannot be read or
+// has no entry for a target.
+func (r *AppleContainerRuntime) verifyReadOnly(ctx context.Context, id string, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/bin/cat", "/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("could not check that %s is mounted read-only in the container: %w (output: %q)", strings.Join(targets, ", "), err, truncateCheckOutput(out))
+	}
+	for _, target := range targets {
+		readOnly, found := mountinfoReadOnly(out, target)
+		if !found {
+			return fmt.Errorf("could not check that %s is mounted read-only in the container: no mount table entry for it", target)
+		}
+		if !readOnly {
+			return fmt.Errorf("%s is not mounted read-only in the container", target)
+		}
+	}
+	return nil
+}
+
+// mountinfoReadOnly reports whether the last /proc/self/mountinfo entry
+// whose mount point is target has the per-mount "ro" option, and whether
+// there is such an entry. Fields: ID, parent ID, major:minor, root, mount
+// point, mount options, ...
+func mountinfoReadOnly(mountinfo, target string) (readOnly, found bool) {
+	for _, line := range strings.Split(mountinfo, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 6 || f[4] != target {
+			continue
+		}
+		found = true
+		readOnly = slices.Contains(strings.Split(f[5], ","), "ro")
+	}
+	return readOnly, found
 }
 
 // verifyMasks runs verifyMask for each tmpfs mask target, in order, and
@@ -233,25 +323,8 @@ func (r *AppleContainerRuntime) verifyMasks(ctx context.Context, id string, targ
 // failed or stat exited non-zero). A result is never retried: equal
 // devices, or output that does not parse, fail closed at once.
 func (r *AppleContainerRuntime) verifyMask(ctx context.Context, id, target string) error {
-	ctx, cancel := context.WithTimeout(ctx, appleMaskCheckTimeout)
-	defer cancel()
 	agents := target
-	var out string
-	var err error
-	// A deadline that passes during the backoff ends the loop, keeping the
-	// last real attempt's error and output.
-retry:
-	for attempt := 1; ; attempt++ {
-		out, err = appleBoundedCommand(ctx, r.Command, "exec", id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", agents, path.Dir(agents))
-		if err == nil || attempt >= appleMaskCheckAttempts || ctx.Err() != nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			break retry
-		case <-time.After(appleMaskCheckRetryDelay):
-		}
-	}
+	out, err := r.appleExecCheck(ctx, id, "/usr/bin/env", "-i", "/usr/bin/stat", "-c", "%d", agents, path.Dir(agents))
 	if err != nil {
 		return fmt.Errorf("could not check that the mask is mounted at %s in the container: %w (output: %q)", agents, err, truncateCheckOutput(out))
 	}

@@ -504,7 +504,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// The project configuration directory <workspace>/.scion
 			// (settings, templates, harness-configs), which the broker
 			// reads when it starts agents in this project, is mounted
-			// read-only (workspaceProjectConfigMount). Since it is
+			// read-only (workspaceProjectConfigMount), as is a .scion
+			// project marker file on runtimes that can bind a file. Since it is
 			// read-only, the container runtime cannot create the agents
 			// mask's mount point in it, so on Docker/Podman the broker
 			// creates the (git-excluded) agents dir first, as the runtime
@@ -513,9 +514,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// only an existing agents dir.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
-			if src, tgt, ok := workspaceProjectConfigMount(config.Workspace, "/workspace"); ok {
+			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && filepath.Base(src) == workspaceProjectConfigDir {
+				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
 					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
 						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
 							"agent", config.Name, "error", err)
@@ -541,7 +546,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		// project that keeps its .scion directory in place, or an explicit
 		// workspace pointing at one) gets it read-only, with any agents
 		// root in it masked, as in the shared-workspace layout above.
-		if src, tgt, ok := workspaceProjectConfigMount(config.Workspace, "/workspace"); ok {
+		src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			registerMount(src, tgt, true, true)
 			if isDir(filepath.Join(src, "agents")) {
 				sharedWorkspaceAgentsMask = path.Join(tgt, "agents")

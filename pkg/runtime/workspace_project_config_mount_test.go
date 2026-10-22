@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -136,6 +137,15 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 		cfg.RepoRoot, cfg.Workspace = root, root
 		return cfg
 	}
+	plainSymlink := func(t *testing.T, cfg RunConfig) RunConfig {
+		ws := filepath.Join(t.TempDir(), "project")
+		mkdirs(t, filepath.Join(ws, "cfg"))
+		if err := os.Symlink("cfg", filepath.Join(ws, ".scion")); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Workspace = ws
+		return cfg
+	}
 	symlinkOutside := func(t *testing.T, cfg RunConfig) RunConfig {
 		root := filepath.Join(t.TempDir(), "repo")
 		outside := filepath.Join(t.TempDir(), "elsewhere")
@@ -158,18 +168,24 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			// maskNonApple overrides mask on Docker and Podman, where the
 			// broker creates a missing agents dir so that it can be masked.
 			maskNonApple string
+			// markerRO: the .scion marker file is bound read-only on
+			// Docker and Podman.
+			markerRO bool
+			// symlinkRefused: a symlinked .scion refuses the start.
+			symlinkRefused bool
 		}{
-			{"shared, agents dir exists", sharedWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", ""},
-			{"shared, no agents dir", sharedWith(false), ".scion", "/workspace/.scion", "", "/workspace/.scion/agents"},
-			{"shared, .scion marker file", sharedMarker, "", "", "", ""},
-			{"shared, no .scion", sharedNoScion, "", "", "", ""},
-			{"shared, .scion symlink inside the workspace", symlinkInside, "config/scion", "/workspace/config/scion", "", ""},
-			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", ""},
-			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", ""},
-			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", ""},
-			{"plain, .scion marker file", plainMarker, "", "", "", ""},
-			{"worktree", worktree, "", "", "", ""},
-			{"git clone", gitClone, "", "", "", ""},
+			{"shared, agents dir exists", sharedWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
+			{"shared, no agents dir", sharedWith(false), ".scion", "/workspace/.scion", "", "/workspace/.scion/agents", false, false},
+			{"shared, .scion marker file", sharedMarker, "", "", "", "", true, false},
+			{"shared, no .scion", sharedNoScion, "", "", "", "", false, false},
+			{"shared, .scion symlink inside the workspace", symlinkInside, "", "", "", "", false, true},
+			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", "", false, true},
+			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
+			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "", false, false},
+			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
+			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
+			{"worktree", worktree, "", "", "", "", false, false},
+			{"git clone", gitClone, "", "", "", "", false, false},
 		} {
 			t.Run(rt+"/"+tt.name, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
@@ -180,6 +196,12 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 				mkdirs(t, cfg.HomeDir)
 				cfg = tt.layout(t, cfg)
 				args, err := buildCommonRunArgs(cfg)
+				if tt.symlinkRefused {
+					if !errors.Is(err, errProjectConfigSymlink) {
+						t.Fatalf("buildCommonRunArgs error = %v, want errProjectConfigSymlink", err)
+					}
+					return
+				}
 				if err != nil {
 					t.Fatalf("buildCommonRunArgs: %v", err)
 				}
@@ -194,12 +216,18 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 					}
 				}
 				var wantRO []string
-				if tt.roTarget != "" {
-					src, err := filepath.EvalSymlinks(filepath.Join(cfg.Workspace, tt.roSrc))
+				roSrc, roTarget := tt.roSrc, tt.roTarget
+				if tt.markerRO && rt != appleContainerRuntimeName {
+					// A marker file is bound read-only over itself on
+					// runtimes that can bind a single file.
+					roSrc, roTarget = ".scion", "/workspace/.scion"
+				}
+				if roTarget != "" {
+					src, err := filepath.EvalSymlinks(filepath.Join(cfg.Workspace, roSrc))
 					if err != nil {
 						t.Fatal(err)
 					}
-					wantRO = []string{src + ":" + tt.roTarget + ":ro"}
+					wantRO = []string{src + ":" + roTarget + ":ro"}
 				}
 				if !slices.Equal(ro, wantRO) {
 					t.Errorf("read-only mounts = %q, want %q", ro, wantRO)
@@ -325,26 +353,43 @@ func TestWorkspaceProjectConfigMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, tgt, ok := workspaceProjectConfigMount(root, "/workspace")
-	if !ok || src != filepath.Join(resolved, ".scion") || tgt != "/workspace/.scion" {
-		t.Errorf("got (%q, %q, %v)", src, tgt, ok)
+	src, tgt, ok, err := workspaceProjectConfigMount(root, "/workspace", false)
+	if err != nil || !ok || src != filepath.Join(resolved, ".scion") || tgt != "/workspace/.scion" {
+		t.Errorf("directory: got (%q, %q, %v, %v)", src, tgt, ok, err)
 	}
 	for _, tt := range []struct{ name, ws, cw string }{
 		{"empty workspace", "", "/workspace"},
 		{"empty container path", root, ""},
 		{"missing workspace", filepath.Join(root, "missing"), "/workspace"},
 	} {
-		if _, _, ok := workspaceProjectConfigMount(tt.ws, tt.cw); ok {
-			t.Errorf("%s: ok, want false", tt.name)
+		if _, _, ok, err := workspaceProjectConfigMount(tt.ws, tt.cw, true); ok || err != nil {
+			t.Errorf("%s: (ok=%v, err=%v), want (false, nil)", tt.name, ok, err)
 		}
 	}
-	// .scion pointing at the workspace root itself is not a separate dir.
-	self := filepath.Join(t.TempDir(), "self")
-	mkdirs(t, self)
-	if err := os.Symlink(".", filepath.Join(self, ".scion")); err != nil {
+
+	// A marker file is mounted only when the runtime can bind a file.
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeFile(t, filepath.Join(marker, ".scion"), "project-id: x\n")
+	resolvedMarker, err := filepath.EvalSymlinks(marker)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := workspaceProjectConfigMount(self, "/workspace"); ok {
-		t.Error(".scion -> . : ok, want false")
+	if src, tgt, ok, err := workspaceProjectConfigMount(marker, "/workspace", true); err != nil || !ok || src != filepath.Join(resolvedMarker, ".scion") || tgt != "/workspace/.scion" {
+		t.Errorf("marker, file binds: got (%q, %q, %v, %v)", src, tgt, ok, err)
+	}
+	if _, _, ok, err := workspaceProjectConfigMount(marker, "/workspace", false); ok || err != nil {
+		t.Errorf("marker, no file binds: (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+
+	// Any symlinked .scion is refused, wherever it points.
+	for _, target := range []string{".", "cfg", t.TempDir()} {
+		ws := filepath.Join(t.TempDir(), "ws")
+		mkdirs(t, filepath.Join(ws, "cfg"))
+		if err := os.Symlink(target, filepath.Join(ws, ".scion")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok, err := workspaceProjectConfigMount(ws, "/workspace", true); ok || !errors.Is(err, errProjectConfigSymlink) {
+			t.Errorf(".scion -> %s: (ok=%v, err=%v), want errProjectConfigSymlink", target, ok, err)
+		}
 	}
 }

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,13 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 		t.Fatal(err)
 	}
 	noScion := t.TempDir()
+	markerOnly := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(markerOnly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerOnly, ".scion"), []byte("project-id: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	shared := func(cfg RunConfig, dir string) RunConfig {
 		cfg.RepoRoot, cfg.Workspace = dir, dir
 		return cfg
@@ -72,6 +80,8 @@ func TestBuildPod_SharedWorkspaceAgentsMask(t *testing.T) {
 		{"NFS shared, agents dir exists", shared(nfsBaseConfig("nfs"), withAgents), true, true, true},
 		{"NFS shared, no agents dir", shared(nfsBaseConfig("nfs"), scionOnly), true, false, true},
 		{"NFS shared without .scion", shared(nfsBaseConfig("nfs"), noScion), false, false, false},
+		{"NFS shared, .scion marker file", shared(nfsBaseConfig("nfs"), markerOnly), false, false, true},
+		{"local, .scion marker file", shared(local, markerOnly), false, false, false},
 		{"NFS worktree", shared(nfsWorktreeConfig("wt"), withAgents), false, false, false},
 		{"NFS agent dir", shared(nfsAgentDirConfig("cpa"), withAgents), false, false, false},
 	} {
@@ -325,5 +335,22 @@ func checkK8sProjectConfigMount(t *testing.T, pod *corev1.Pod, cfg RunConfig, wa
 	}
 	if maskAt >= 0 && maskAt < configAt {
 		t.Errorf("agents mask at %d must follow the project config mount at %d", maskAt, configAt)
+	}
+}
+
+// An NFS-shared workspace whose .scion is a symbolic link refuses the pod:
+// the link itself would stay writable.
+func TestBuildPod_ProjectConfigSymlinkRefused(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(root, "cfg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("cfg", filepath.Join(root, ".scion")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := nfsBaseConfig("nfs")
+	cfg.RepoRoot, cfg.Workspace = root, root
+	if _, err := newNFSTestK8sRuntime().buildPod("default", cfg); !errors.Is(err, errProjectConfigSymlink) {
+		t.Fatalf("buildPod error = %v, want errProjectConfigSymlink", err)
 	}
 }

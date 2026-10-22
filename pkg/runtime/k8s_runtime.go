@@ -2585,8 +2585,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// local runtimes. The local backend's per-pod copy is private to
 		// the pod; a sync from the pod leaves that directory out instead
 		// (k8sWorkspaceSyncFromExcludes).
-		if agentsExcluded && nfsShared {
-			if m, ok := k8sProjectConfigVolumeMount(config); ok {
+		if nfsShared {
+			m, ok, err := k8sProjectConfigVolumeMount(config)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				agentVolumeMounts = append(agentVolumeMounts, m)
 			}
 		}
@@ -5046,14 +5050,24 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 }
 
 // k8sProjectConfigVolumeMount returns the read-only mount of the project
-// configuration directory of an NFS-shared workspace, whose broker-side
+// configuration directory (or .scion marker file) of an NFS-shared workspace, whose broker-side
 // view is config.RepoRoot, over the pod's /workspace mount of the same
 // export. ok is false when that directory does not exist on the broker's
 // view (workspaceProjectConfigMount).
-func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool) {
-	_, target, ok := workspaceProjectConfigMount(config.RepoRoot, "/workspace")
-	if !ok {
-		return corev1.VolumeMount{}, false
+func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
+	// Only the shared layout mounts the project's checkout (the repo root)
+	// at /workspace.
+	if config.RepoRoot == "" || config.Workspace == "" {
+		return corev1.VolumeMount{}, false, nil
+	}
+	repoRoot, err1 := filepath.EvalSymlinks(config.RepoRoot)
+	workspace, err2 := filepath.EvalSymlinks(config.Workspace)
+	if err1 != nil || err2 != nil || repoRoot != workspace {
+		return corev1.VolumeMount{}, false, nil
+	}
+	_, target, ok, err := workspaceProjectConfigMount(repoRoot, "/workspace", true)
+	if err != nil || !ok {
+		return corev1.VolumeMount{}, false, err
 	}
 	rel := strings.TrimPrefix(target, "/workspace/")
 	return corev1.VolumeMount{
@@ -5061,7 +5075,7 @@ func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool) {
 		MountPath: target,
 		SubPath:   path.Join(config.NFSSubPath, rel),
 		ReadOnly:  true,
-	}, true
+	}, true, nil
 }
 
 // k8sWorkspaceSyncFromExcludes returns the workspace paths a tar sync from

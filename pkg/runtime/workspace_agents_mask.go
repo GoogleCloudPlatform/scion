@@ -15,10 +15,10 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 )
 
 // sharedWorkspaceAgentsDir is the in-project agents root, relative to the
@@ -84,39 +84,53 @@ func isDir(p string) bool {
 // relative to a workspace mounted at the container's workspace path.
 const workspaceProjectConfigDir = ".scion"
 
-// workspaceProjectConfigMount returns the broker-side .scion directory of
-// a workspace that is mounted into the container at containerWorkspace,
-// and the container path it is mounted read-only at. The broker reads
-// project settings, templates and harness-configs from that directory when
-// it starts agents in the project, so an agent that shares the workspace
-// gets it read-only. Agent homes and agent state never live under it in
-// this layout (they are external, see the agents mask), so the agent's own
+// errProjectConfigSymlink is returned when a workspace's .scion is a
+// symbolic link: the link itself would stay writable in the container, so
+// the agent could point it elsewhere for later starts.
+var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic link; project configuration in a workspace that agents share must be a directory or a project marker file, so that it can be mounted read-only")
+
+// workspaceProjectConfigMount returns the broker-side .scion entry of a
+// workspace that is mounted into the container at containerWorkspace, and
+// the container path it is mounted read-only at. The broker reads project
+// settings, templates and harness-configs from a .scion directory when it
+// starts agents in the project, so an agent that shares the workspace gets
+// it read-only. Agent homes and agent state never live under it in this
+// layout (they are external, see the agents mask), so the agent's own
 // writable paths are unaffected.
 //
-// ok is false when <workspace>/.scion is not a directory on the broker (a
-// project marker file, or no .scion at all): there is no project
-// configuration in the workspace to protect, and binding a missing path
-// would make the container runtime create it in the host checkout. It is
-// also false when .scion is a symlink to a directory outside the workspace,
-// which the container cannot reach.
-func workspaceProjectConfigMount(workspace, containerWorkspace string) (hostPath, target string, ok bool) {
+// A .scion project marker file (a regular file naming the project's
+// external configuration directory) is mounted read-only too when
+// allowMarkerFile is set: the broker reads it to locate the project's
+// configuration, so the agent must not change it or replace it with a
+// directory (a mount point cannot be removed or renamed in the container).
+// Runtimes that cannot bind a single file pass false and rely on the
+// broker's record of the workspace's .scion state.
+//
+// ok is false when there is no .scion at all: binding a missing path would
+// make the container runtime create it in the host checkout. A .scion that
+// is a symbolic link is refused with errProjectConfigSymlink.
+func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMarkerFile bool) (hostPath, target string, ok bool, err error) {
 	if workspace == "" || containerWorkspace == "" {
-		return "", "", false
+		return "", "", false, nil
 	}
 	root, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return "", "", false
+		return "", "", false, nil
 	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(root, workspaceProjectConfigDir))
-	if err != nil || !isDir(resolved) {
-		return "", "", false
+	candidate := filepath.Join(root, workspaceProjectConfigDir)
+	info, err := os.Lstat(candidate)
+	if err != nil {
+		return "", "", false, nil
 	}
-	// A .scion symlink is followed the way the broker follows it. Its
-	// target is only reachable in the container when it lies inside the
-	// workspace; that path is the one mounted read-only.
-	rel, err := filepath.Rel(root, resolved)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", false
+	target = path.Join(containerWorkspace, workspaceProjectConfigDir)
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", "", false, errProjectConfigSymlink
+	case info.IsDir():
+		return candidate, target, true, nil
+	case info.Mode().IsRegular() && allowMarkerFile:
+		return candidate, target, true, nil
+	default:
+		return "", "", false, nil
 	}
-	return resolved, path.Join(containerWorkspace, filepath.ToSlash(rel)), true
 }
