@@ -26,11 +26,15 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// The reduce-only invariant (plan.md standing rule; design §3.9 "Drain
-// through the proxy" and "Source of the cap"): no path moves a session's
-// lifetime cap or drain deadline later than it already was. A session gets
-// at most one GoAway, its drain deadline is never longer than the bounds
-// in force, and the session ends no later than its first planned end.
+// The reduce-only invariant (design §3.9 "Drain through the proxy" and
+// "Source of the cap"): no path moves a session's lifetime cap or drain
+// deadline later than it already was. A session gets at most one GoAway,
+// its drain deadline is never longer than the bounds in force, and the
+// session ends no later than its first planned end.
+//
+// Code that treats a draining relay as gone (for example, overlap
+// monitoring) relies on this bound; a change to it means revisiting such
+// code.
 
 // roSession is one agent session proxied by hub-a, with a PTY stream open
 // so that it lives until its drain deadline, and the GoAways it receives.
