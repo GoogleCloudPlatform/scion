@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,17 +141,31 @@ func countProjectSettingsReads(t *testing.T) *int {
 	return n
 }
 
-// A linked project's own hub.endpoint becomes a hub entry plus a link
-// entry for the project's hub ID; the project's hub.transport is not
-// copied; the import is recorded, the caller's context is updated and no
-// settings file changes.
+// listHub adds a hub entry name for endpoint to c and saves c as
+// context.yaml, as 'scion hub add' would have.
+func listHub(t *testing.T, c *CLIContext, name, endpoint string) {
+	t.Helper()
+	if err := c.AddHub(name, endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateCLIContext(func(fresh *CLIContext) error { *fresh = *c; return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A linked project's own hub.endpoint, when that hub is in the hub list,
+// becomes a link entry for the project's hub ID; the hub entry keeps its
+// own (empty) transport, whatever the project's settings say; the import
+// is recorded, the caller's context is updated and no settings file
+// changes.
 func TestLinkEntryForProject_ImportsTheProjectEndpoint(t *testing.T) {
 	ctxPath := cliContextTestHome(t)
 	settings := "hub:\n  endpoint: https://Proj.Example.com/\n  projectId: hub-1\n  linked: true\n  transport:\n    mode: iap\n    audience: aud-1\n"
 	projectDir, settingsPath, linkPath := linkImportProject(t, settings)
 
 	c := newCLIContext()
-	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	listHub(t, c, "proj", "https://proj.example.com")
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,13 +204,15 @@ func TestLinkEntryForProject_ImportsTheProjectEndpoint(t *testing.T) {
 }
 
 // A linked project without its own endpoint is linked to the global
-// settings' hub.endpoint; the project import sets no transport.
+// settings' hub.endpoint when that hub is in the hub list.
 func TestLinkEntryForProject_InheritsTheGlobalEndpoint(t *testing.T) {
 	cliContextTestHome(t)
 	writeGlobalSettingsFile(t, "hub:\n  endpoint: https://glob.example.com\n  transport:\n    mode: cloudrun_invoker\n    audience: aud-g\n")
 	projectDir, _, _ := linkImportProject(t, "hub:\n  projectId: hub-2\n  linked: true\n")
+	c := newCLIContext()
+	listHub(t, c, "glob", "https://glob.example.com")
 
-	p, h, err := LinkEntryForProject(newCLIContext(), projectDir, importNamer)
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,8 +229,10 @@ func TestLinkEntryForProject_InheritsTheGlobalEndpoint(t *testing.T) {
 func TestLinkEntryForProject_LegacyLinkWithoutLinkedFlag(t *testing.T) {
 	cliContextTestHome(t)
 	projectDir, _, _ := linkImportProject(t, "project_id: local-1\nhub:\n  endpoint: https://proj.example.com\n  projectId: hub-3\n")
+	c := newCLIContext()
+	listHub(t, c, "proj", "https://proj.example.com")
 
-	p, h, err := LinkEntryForProject(newCLIContext(), projectDir, importNamer)
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +253,7 @@ func TestLinkEntryForProject_NotLinked(t *testing.T) {
 			ctxPath := cliContextTestHome(t)
 			projectDir, _, linkPath := linkImportProject(t, settings)
 			c := newCLIContext()
-			p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+			p, h, err := LinkEntryForProject(c, projectDir)
 			if err != nil || p != nil || h != nil {
 				t.Fatalf("= %+v, %+v, %v; want nothing", p, h, err)
 			}
@@ -257,7 +276,8 @@ func TestLinkEntryForProject_Once(t *testing.T) {
 	reads := countProjectSettingsReads(t)
 
 	c := newCLIContext()
-	if _, _, err := LinkEntryForProject(c, projectDir, importNamer); err != nil {
+	listHub(t, c, "proj", "https://proj.example.com")
+	if _, _, err := LinkEntryForProject(c, projectDir); err != nil {
 		t.Fatal(err)
 	}
 	if *reads != 1 {
@@ -269,7 +289,7 @@ func TestLinkEntryForProject_Once(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	_, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +307,7 @@ func TestLinkEntryForProject_Once(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, h, err := LinkEntryForProject(c, projectDir, importNamer); err != nil || p != nil || h != nil {
+	if p, h, err := LinkEntryForProject(c, projectDir); err != nil || p != nil || h != nil {
 		t.Errorf("after removing the link entry = %+v, %+v, %v; want nothing", p, h, err)
 	}
 	if *reads != 1 {
@@ -309,7 +329,7 @@ func TestLinkEntryForProject_ReusesAnEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +345,7 @@ func TestLinkEntryForProject_InvalidEndpointRecorded(t *testing.T) {
 	cliContextTestHome(t)
 	projectDir, _, linkPath := linkImportProject(t, "hub:\n  endpoint: https://user:pw@proj.example.com\n  projectId: hub-1\n  linked: true\n")
 	c := newCLIContext()
-	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil || p != nil || h != nil {
 		t.Fatalf("= %+v, %+v, %v; want nothing", p, h, err)
 	}
@@ -345,7 +365,7 @@ func TestLinkEntryForProject_Skipped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p, _, err := LinkEntryForProject(c, projectDir, importNamer); err != nil || p != nil {
+		if p, _, err := LinkEntryForProject(c, projectDir); err != nil || p != nil {
 			t.Fatalf("= %+v, %v; want nothing", p, err)
 		}
 		if got := readFileString(t, ctxPath); got != "version: 99\n" {
@@ -356,7 +376,7 @@ func TestLinkEntryForProject_Skipped(t *testing.T) {
 		ctxPath := cliContextTestHome(t)
 		writeGlobalSettingsFile(t, "hub:\n  endpoint: https://glob.example.com\n  projectId: hub-1\n  linked: true\n")
 		globalDir := filepath.Join(os.Getenv("HOME"), GlobalDir)
-		if p, _, err := LinkEntryForProject(newCLIContext(), globalDir, importNamer); err != nil || p != nil {
+		if p, _, err := LinkEntryForProject(newCLIContext(), globalDir); err != nil || p != nil {
 			t.Fatalf("= %+v, %v; want nothing", p, err)
 		}
 		if _, err := os.Stat(ctxPath); !errors.Is(err, os.ErrNotExist) {
@@ -383,7 +403,10 @@ func TestLinkEntryForProject_SaveFailureKeepsView(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	c := newCLIContext()
-	p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+	if err := c.AddHub("proj", "https://proj.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if !errors.Is(err, ErrCLIContextImport) {
 		t.Fatalf("err = %v, want ErrCLIContextImport", err)
 	}
@@ -431,7 +454,7 @@ func TestLinkEntryForProject_NotBroughtBackAfterRemoval(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p, h, err := LinkEntryForProject(c, projectDir, importNamer)
+			p, h, err := LinkEntryForProject(c, projectDir)
 			if err != nil || p != nil || h != nil {
 				t.Fatalf("= %+v, %+v, %v; want nothing: the removed link came back", p, h, err)
 			}
@@ -472,7 +495,9 @@ func TestLinkEntryForProject_VersionedFile(t *testing.T) {
 	t.Run("linked", func(t *testing.T) {
 		cliContextTestHome(t)
 		projectDir, _, _ := linkImportProject(t, "schema_version: \"1\"\nhub:\n  linked: true\n  endpoint: https://proj.example.com\n  project_id: hub-v1\n  transport:\n    mode: iap\n    audience: aud-v1\n")
-		p, h, err := LinkEntryForProject(newCLIContext(), projectDir, importNamer)
+		c := newCLIContext()
+		listHub(t, c, "proj", "https://proj.example.com")
+		p, h, err := LinkEntryForProject(c, projectDir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -486,7 +511,7 @@ func TestLinkEntryForProject_VersionedFile(t *testing.T) {
 	t.Run("linked unset", func(t *testing.T) {
 		cliContextTestHome(t)
 		projectDir, _, _ := linkImportProject(t, "schema_version: \"1\"\nhub:\n  endpoint: https://proj.example.com\n  project_id: local-v1\n")
-		p, _, err := LinkEntryForProject(newCLIContext(), projectDir, importNamer)
+		p, _, err := LinkEntryForProject(newCLIContext(), projectDir)
 		if err != nil || p != nil {
 			t.Fatalf("= %+v, %v; want nothing", p, err)
 		}
@@ -499,11 +524,71 @@ func TestLinkEntryForProject_VersionedFile(t *testing.T) {
 func TestLinkEntryForProject_ShadowDirectory(t *testing.T) {
 	cliContextTestHome(t)
 	projectDir, _, _ := linkImportProject(t, "schema_version: \"1\"\nproject_type: shadow\nhub:\n  enabled: true\n  endpoint: https://shadow.example.com\n  project_id: shadow-project\n")
-	p, h, err := LinkEntryForProject(newCLIContext(), projectDir, importNamer)
+	c := newCLIContext()
+	listHub(t, c, "shadow", "https://shadow.example.com")
+	p, h, err := LinkEntryForProject(c, projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p == nil || h == nil || p.ID != "shadow-project" || h.Endpoint != "https://shadow.example.com" {
 		t.Fatalf("link entry = %+v, hub = %+v", p, h)
+	}
+}
+
+// A linked project whose hub is not in the hub list gets no link entry and
+// adds no hub: nothing is written, the import stays pending, and the error
+// names the hub to add. Once the hub is added, the import links the
+// project.
+func TestLinkEntryForProject_UnlistedHubIsNotLinked(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	projectDir, _, linkPath := linkImportProject(t, "hub:\n  endpoint: https://unlisted.example.com\n  projectId: hub-1\n  linked: true\n  transport:\n    mode: iap\n    audience: aud-1\n")
+
+	c := newCLIContext()
+	p, h, err := LinkEntryForProject(c, projectDir)
+	var notListed *ProjectHubNotListedError
+	if !errors.As(err, &notListed) || notListed.Endpoint != "https://unlisted.example.com" {
+		t.Fatalf("err = %v, want a ProjectHubNotListedError for the project's hub", err)
+	}
+	if !strings.Contains(err.Error(), "scion hub add <name> https://unlisted.example.com") {
+		t.Errorf("err = %q, want the hub add hint", err)
+	}
+	if p != nil || h != nil || len(c.Hubs) != 0 || c.ProjectImported(linkPath) {
+		t.Errorf("= %+v, %+v, context %+v; want no link, no hub, import pending", p, h, c)
+	}
+	if _, err := os.Stat(ctxPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("context.yaml was written: %v", err)
+	}
+
+	// The hub is in another process's saved list but not in the caller's
+	// view: the update under the lock links it.
+	if err := UpdateCLIContext(func(fresh *CLIContext) error { return fresh.AddHub("team", "https://unlisted.example.com") }); err != nil {
+		t.Fatal(err)
+	}
+	c.Hubs = map[string]*HubEntry{"team": {Endpoint: "https://unlisted.example.com"}}
+	p, h, err = LinkEntryForProject(c, projectDir)
+	if err != nil || p == nil || p.Hub != "team" || p.ID != "hub-1" {
+		t.Fatalf("after hub add: %+v, %+v, %v; want the link", p, h, err)
+	}
+	if h.Transport != nil {
+		t.Errorf("transport = %+v: the project's settings must not set it", h.Transport)
+	}
+}
+
+// When the caller's view lists the hub but the saved hub list no longer
+// does, nothing is written.
+func TestLinkEntryForProject_UnlistedUnderTheLock(t *testing.T) {
+	ctxPath := cliContextTestHome(t)
+	projectDir, _, _ := linkImportProject(t, "hub:\n  endpoint: https://gone.example.com\n  projectId: hub-1\n  linked: true\n")
+	c := newCLIContext()
+	if err := c.AddHub("gone", "https://gone.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := LinkEntryForProject(c, projectDir)
+	var notListed *ProjectHubNotListedError
+	if !errors.As(err, &notListed) {
+		t.Fatalf("err = %v, want a ProjectHubNotListedError", err)
+	}
+	if _, err := os.Stat(ctxPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("context.yaml was written: %v", err)
 	}
 }

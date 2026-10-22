@@ -36,6 +36,15 @@ const (
 	linkEntryTestPinnedHub = "https://pinned.example.com"
 )
 
+// listTestHub adds the hub name at endpoint to the hub list, as 'scion hub
+// add' does.
+func listTestHub(t *testing.T, name, endpoint string) {
+	t.Helper()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub(name, endpoint)
+	}))
+}
+
 // makeLinkedDirProject creates a directory project linked to a hub project
 // (hub.linked and hub.projectId in its settings), with hub.endpoint set to
 // endpoint ("" for none), and moves into it. It returns the .scion path.
@@ -114,6 +123,7 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		setupContextTest(t)
 		enableGlobalHubImport(t)
 		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		listTestHub(t, "pinned", linkEntryTestPinnedHub)
 		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
 		settingsFile := filepath.Join(dotScion, "settings.yaml")
 		before, err := os.ReadFile(settingsFile)
@@ -153,6 +163,28 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		assert.Equal(t, before, readFileT(t, contextFilePath()), "nothing is imported or saved")
 		c := readTestContext(t)
 		assert.False(t, c.ProjectImported(config.LinkPathForProject(dotScion)))
+	})
+	t.Run("a hub that is not in the hub list: a note, no link", func(t *testing.T) {
+		setupContextTest(t)
+		enableGlobalHubImport(t)
+		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
+		before := readFileT(t, contextFilePath())
+		c := findCommand(t, "list")
+		var stderr bytes.Buffer
+		c.SetErr(&stderr)
+		t.Cleanup(func() { c.SetErr(nil) })
+
+		require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+		assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies")
+		assert.Equal(t, targetSourceContext, hubSource)
+		assert.Equal(t, "Note: this project's settings name the hub "+linkEntryTestPinnedHub+
+			", which is not in your hub list; to use it here, add it with 'scion hub add <name> "+linkEntryTestPinnedHub+"'\n", stderr.String())
+		assert.Equal(t, before, readFileT(t, contextFilePath()), "nothing is written")
+		got := readTestContext(t)
+		_, h := got.HubByEndpoint(linkEntryTestPinnedHub)
+		assert.Nil(t, h, "the project's settings add no hub")
+		assert.False(t, got.ProjectImported(config.LinkPathForProject(dotScion)), "the import stays pending")
 	})
 	t.Run("not imported", func(t *testing.T) {
 		setupContextTest(t)
@@ -234,6 +266,9 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 				enableGlobalHubImport(t)
 			}
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			if tc.imports && tc.pinned != "" {
+				listTestHub(t, "pinned", tc.pinned)
+			}
 			dotScion := makeLinkedDirProject(t, tc.pinned)
 			if tc.linkEntry {
 				saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")

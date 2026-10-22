@@ -254,16 +254,21 @@ func (r targetResolution) loadContext() (*config.CLIContext, error) {
 }
 
 // linkEntry returns the link entry of the filesystem project dir and its
-// hub entry, or nil and nil. When r imports, a linked project whose hub is
-// not in the hub list yet is imported once (see
-// config.LinkEntryForProject); a failure to save that import is a warning,
-// and the imported link is used anyway.
+// hub entry, or nil and nil. When r imports, a linked project without a
+// link entry is imported once (see config.LinkEntryForProject), for a hub
+// that is already in the hub list; for a hub that is not, a note says how
+// to add it. A failure to save the import is a warning, and the imported
+// link is used anyway.
 func (r targetResolution) linkEntry(c *config.CLIContext, dir string) (*config.KnownProject, *config.HubEntry) {
 	if !r.imports {
 		return c.LinkEntryFor(config.LinkPathForProject(dir))
 	}
-	p, h, err := config.LinkEntryForProject(c, dir, useHubBaseName)
-	if err != nil {
+	p, h, err := config.LinkEntryForProject(c, dir)
+	var notListed *config.ProjectHubNotListedError
+	switch {
+	case errors.As(err, &notListed):
+		_, _ = fmt.Fprintf(r.stderr, "Note: %v\n", err)
+	case err != nil:
 		_, _ = fmt.Fprintf(r.stderr, "Warning: %v\n", err)
 	}
 	return p, h

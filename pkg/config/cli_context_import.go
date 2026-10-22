@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -140,18 +141,39 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 	return l
 }
 
+// ProjectHubNotListedError is returned by LinkEntryForProject when a linked
+// project's hub is not in the hub list: no link entry is written, and the
+// import stays pending, so it completes once the hub is added.
+type ProjectHubNotListedError struct {
+	// Endpoint is the hub URL the project's settings name.
+	Endpoint string
+}
+
+func (e *ProjectHubNotListedError) Error() string {
+	ep := RedactURL(NormalizeEndpoint(e.Endpoint))
+	return fmt.Sprintf("this project's settings name the hub %s, which is not in your hub list; to use it here, add it with 'scion hub add <name> %s'", ep, ep)
+}
+
+// errProjectHubNotListed stops the context update of LinkEntryForProject
+// when the project's hub is not in the hub list, so nothing is written.
+var errProjectHubNotListed = errors.New("project hub not in the hub list")
+
 // LinkEntryForProject returns the link entry of the project at projectDir
 // and its hub entry, or nil and nil when it has none. When the project has
 // no link entry and its hub was never imported, it runs that import once:
 //
 //   - a linked project (see projectHubLinkSettings) gets a link entry for
 //     its own hub.endpoint, or, without one, for the global settings'
-//     hub.endpoint; the hub gets an entry (named by baseName) when it has
-//     none. The import never sets a hub entry's transport;
-//   - the import is recorded for the project's link path even when there
-//     was nothing usable to import (no valid endpoint or no project ID), so
-//     its settings are not read again, and a link entry removed later
-//     ('scion hub unlink', 'scion hub remove') is not brought back.
+//     hub.endpoint, but only when the hub list already has an entry with
+//     that endpoint. A project's settings never add a hub to the hub list
+//     and never set a hub entry's transport. When the hub is not in the
+//     list, nothing is written, the import stays pending, and the error is
+//     a *ProjectHubNotListedError;
+//   - otherwise the import is recorded for the project's link path, also
+//     when there was nothing usable to import (no valid endpoint or no
+//     project ID), so its settings are not read again, and a link entry
+//     removed later ('scion hub unlink', 'scion hub remove') is not brought
+//     back.
 //
 // A project that is not linked is not recorded and nothing is written. The
 // global directory is never imported here (the global import covers it),
@@ -160,7 +182,7 @@ var projectHubLinkSettings = func(projectDir string) projectHubLink {
 // The import is written under the lock, and c is updated to the saved
 // context. When it cannot be saved, c holds the import anyway and the error
 // wraps ErrCLIContextImport.
-func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoint string) string) (*KnownProject, *HubEntry, error) {
+func LinkEntryForProject(c *CLIContext, projectDir string) (*KnownProject, *HubEntry, error) {
 	localPath := LinkPathForProject(projectDir)
 	if localPath == "" {
 		return nil, nil, nil
@@ -182,12 +204,20 @@ func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoin
 	if endpoint != "" && ValidateHubURL(endpoint) != nil {
 		endpoint = ""
 	}
+	usable := endpoint != "" && link.ProjectID != ""
+	notListed := func(target *CLIContext) bool {
+		_, h := target.HubByEndpoint(endpoint)
+		return usable && (h == nil || h.Endpoint == "")
+	}
+	if notListed(c) {
+		return nil, nil, &ProjectHubNotListedError{Endpoint: endpoint}
+	}
 	importInto := func(target *CLIContext, now time.Time) {
 		if _, h := target.LinkEntryFor(localPath); h != nil || target.ProjectImported(localPath) {
 			return
 		}
-		if endpoint != "" && link.ProjectID != "" {
-			name, _ := target.EnsureHub(endpoint, baseName(endpoint))
+		if usable {
+			name, _ := target.HubByEndpoint(endpoint)
 			// SetLinkEntry cannot fail here: the hub entry, the ID and
 			// the path are all set.
 			_ = target.SetLinkEntry(name, KnownProject{ID: link.ProjectID}, localPath, now)
@@ -196,10 +226,16 @@ func LinkEntryForProject(c *CLIContext, projectDir string, baseName func(endpoin
 	}
 	var saved *CLIContext
 	err := UpdateCLIContext(func(fresh *CLIContext) error {
+		if notListed(fresh) {
+			return errProjectHubNotListed
+		}
 		importInto(fresh, time.Now())
 		saved = fresh
 		return nil
 	})
+	if errors.Is(err, errProjectHubNotListed) {
+		return nil, nil, &ProjectHubNotListedError{Endpoint: endpoint}
+	}
 	if err != nil {
 		importInto(c, time.Now())
 		p, h := c.LinkEntryFor(localPath)
