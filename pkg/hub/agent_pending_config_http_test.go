@@ -624,8 +624,9 @@ func TestAgentPendingConfig_GetShowsPendingAndEffectiveNextRun(t *testing.T) {
 }
 
 // TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer:
-// pending env values and telemetry cloud headers, saved with keys spelled
-// in another case, are returned to the agent's owner (who may attach) and
+// pending env values, telemetry cloud headers, MCP server env and headers
+// and service env, some saved with keys spelled in another case, are
+// returned to the agent's owner (who may attach) and
 // never to a project member who may not attach: on GET, the project list
 // and that member's PATCH response.
 func TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer(t *testing.T) {
@@ -654,6 +655,15 @@ func TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer(t *t
 				"Headers":  map[string]string{"Authorization": "Bearer pending-secret"},
 			}},
 			"ENV": map[string]string{"PENDING_KEY": "pending-env-secret"},
+			"mcp_servers": map[string]any{"docs": map[string]any{
+				"transport": "http", "url": "https://mcp.example",
+				"Headers": map[string]string{"Authorization": "Bearer mcp-pending-secret"},
+				"env":     map[string]string{"MCP_TOKEN": "mcp-env-pending-secret"},
+			}},
+			"services": []map[string]any{{
+				"name": "db", "command": []string{"run"},
+				"env": map[string]string{"DB_PASSWORD": "svc-pending-secret"},
+			}},
 		},
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -668,6 +678,9 @@ func TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer(t *t
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "Bearer pending-secret")
 		assert.Contains(t, rec.Body.String(), "pending-env-secret")
+		assert.Contains(t, rec.Body.String(), "mcp-pending-secret")
+		assert.Contains(t, rec.Body.String(), "mcp-env-pending-secret")
+		assert.Contains(t, rec.Body.String(), "svc-pending-secret")
 	})
 	t.Run("non-attach member GET sees neither", func(t *testing.T) {
 		rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/agents/"+agent.ID+"?view=edit", nil)
@@ -675,6 +688,7 @@ func TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer(t *t
 		assert.NotContains(t, rec.Body.String(), "pending-secret")
 		assert.NotContains(t, rec.Body.String(), "pending-env-secret")
 		assert.Contains(t, rec.Body.String(), "https://otel.example", "the rest of the pending telemetry is shown")
+		assert.Contains(t, rec.Body.String(), "https://mcp.example", "the pending MCP server is still listed")
 	})
 	t.Run("non-attach member list sees neither", func(t *testing.T) {
 		rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/agents?projectId="+project.ID, nil)
@@ -859,4 +873,43 @@ func TestAgentPendingConfig_PatchRemovesUnappliableKeysAndAudits(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, recs, 1)
+}
+
+// TestAgentPendingConfig_AsyncStartAppliesHeldEdits: an asynchronous start
+// (hub.async_agent_start, accepted as a launch) goes through the same fold:
+// the held edit is applied and persisted before the dispatch, and audited.
+func TestAgentPendingConfig_AsyncStartAppliesHeldEdits(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	var active []experiments.Experiment
+	for _, e := range f.srv.experimentRegistry().All() {
+		if e.Name == experiments.AgentEditHeld || e.Name == experiments.AsyncAgentStart {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+	require.True(t, f.srv.heldEditsEnabled())
+	require.True(t, f.srv.experimentEnabled(experiments.AsyncAgentStart))
+
+	a := f.addAgent("as-held", string(state.PhaseStopped), "")
+	cur := pendingReloadAgent(t, f.s, a.ID)
+	cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{"model": json.RawMessage(`"async-held-model"`)}}
+	require.NoError(t, f.s.UpdateAgent(context.Background(), cur))
+
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	opts, _, _ := d.calls()
+	require.Len(t, opts, 1)
+	assert.True(t, opts[0].Async, "the start was dispatched asynchronously")
+
+	after := pendingReloadAgent(t, f.s, a.ID)
+	require.NotNil(t, after.AppliedConfig)
+	assert.Equal(t, "async-held-model", after.AppliedConfig.Model, "the held edit was applied before the dispatch")
+	assert.Nil(t, after.PendingConfig)
+	applied := pendingAudits(t, f.s, a.ID, mutationTypeAgentPendingConfigApplied, 1)
+	keys, trigger := pendingAuditSummary(t, applied[0])
+	assert.Equal(t, []string{"config.model"}, keys)
+	assert.Equal(t, pendingFoldTriggerStart, trigger)
 }

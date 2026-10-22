@@ -137,3 +137,38 @@ func TestAgentPendingConfig_RedactionIgnoresKeyCase(t *testing.T) {
 	assert.Contains(t, string(b), "Bearer secret")
 	assert.NotContains(t, string(b), "ghp", "GITHUB_TOKEN is never returned, whatever the env key's case")
 }
+
+// TestAgentPendingConfig_RedactsMCPServerAndServiceEnv: like the applied
+// inline config, a pending MCP server's env and headers and a pending
+// service's env are returned only to a viewer who may attach; the servers
+// and services themselves are listed for everyone.
+func TestAgentPendingConfig_RedactsMCPServerAndServiceEnv(t *testing.T) {
+	p := &AgentPendingConfig{Config: map[string]json.RawMessage{
+		"mcp_servers": json.RawMessage(`{"docs":{"transport":"http","url":"https://mcp.example","Headers":{"Authorization":"Bearer mcp-secret"},"env":{"TOKEN":"mcp-env-secret"}},"gone":null}`),
+		"services":    json.RawMessage(`[{"name":"db","command":["run"],"ENV":{"PASSWORD":"svc-secret"}},null]`),
+	}}
+	b, err := json.Marshal(p.ResponseView(false))
+	require.NoError(t, err)
+	out := string(b)
+	assert.NotContains(t, out, "mcp-secret")
+	assert.NotContains(t, out, "mcp-env-secret")
+	assert.NotContains(t, out, "svc-secret")
+	assert.Contains(t, out, "https://mcp.example", "the server is still listed")
+	assert.Contains(t, out, `"name":"db"`, "the service is still listed")
+
+	b, err = json.Marshal(p.ResponseView(true))
+	require.NoError(t, err)
+	out = string(b)
+	assert.Contains(t, out, "mcp-secret")
+	assert.Contains(t, out, "mcp-env-secret")
+	assert.Contains(t, out, "svc-secret")
+
+	malformed := &AgentPendingConfig{Config: map[string]json.RawMessage{
+		"mcp_servers": json.RawMessage(`["not","a","map"]`),
+		"services":    json.RawMessage(`{"not":"a list"}`),
+	}}
+	b, err = json.Marshal(malformed.ResponseView(false))
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "mcp_servers", "a malformed value is dropped (fails closed)")
+	assert.NotContains(t, string(b), "services")
+}

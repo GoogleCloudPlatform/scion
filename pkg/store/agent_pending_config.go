@@ -140,8 +140,10 @@ func UnmarshalPendingConfigFromStorage(raw string) (*AgentPendingConfig, error) 
 	return &p, nil
 }
 
-// redactPendingConfigForResponse returns a copy of cfg with config.env and
-// the telemetry cloud-export headers removed unless canAttach, and with
+// redactPendingConfigForResponse returns a copy of cfg with config.env, the
+// telemetry cloud-export headers, every MCP server's env and headers and
+// every service's env removed unless canAttach (as
+// AgentAppliedConfig.ResponseView redacts the inline config), and with
 // GITHUB_TOKEN removed from env always. The hub stores the pending config
 // in canonical form, but keys are matched case-insensitively here too, as
 // encoding/json decodes them, so a stored value of another spelling cannot
@@ -182,6 +184,20 @@ func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach bo
 				continue
 			}
 			out[k] = b
+		case strings.EqualFold(k, "mcp_servers") && !canAttach && string(raw) != "null":
+			b, ok := redactMCPServersRaw(raw)
+			if !ok {
+				delete(out, k)
+				continue
+			}
+			out[k] = b
+		case strings.EqualFold(k, "services") && !canAttach && string(raw) != "null":
+			b, ok := redactServicesRaw(raw)
+			if !ok {
+				delete(out, k)
+				continue
+			}
+			out[k] = b
 		}
 	}
 	return out
@@ -217,6 +233,77 @@ func redactTelemetryHeaders(raw json.RawMessage) (json.RawMessage, bool) {
 		tel[tk] = b
 	}
 	b, err := json.Marshal(tel)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// withoutKeys re-encodes the JSON object raw without the keys names matches
+// (case-insensitively). ok is false when raw is not an object.
+func withoutKeys(raw json.RawMessage, names ...string) (json.RawMessage, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	for k := range obj {
+		for _, n := range names {
+			if strings.EqualFold(k, n) {
+				delete(obj, k)
+			}
+		}
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// redactMCPServersRaw returns raw (an MCP server map) with every server's
+// env and headers removed; the servers themselves stay. ok is false when
+// raw is not the expected shape.
+func redactMCPServersRaw(raw json.RawMessage) (json.RawMessage, bool) {
+	var servers map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &servers); err != nil {
+		return nil, false
+	}
+	for name, srv := range servers {
+		if string(srv) == "null" {
+			continue
+		}
+		b, ok := withoutKeys(srv, "env", "headers")
+		if !ok {
+			return nil, false
+		}
+		servers[name] = b
+	}
+	b, err := json.Marshal(servers)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// redactServicesRaw returns raw (a service list) with every service's env
+// removed; the services themselves stay. ok is false when raw is not the
+// expected shape.
+func redactServicesRaw(raw json.RawMessage) (json.RawMessage, bool) {
+	var services []json.RawMessage
+	if err := json.Unmarshal(raw, &services); err != nil {
+		return nil, false
+	}
+	for i, svc := range services {
+		if string(svc) == "null" {
+			continue
+		}
+		b, ok := withoutKeys(svc, "env")
+		if !ok {
+			return nil, false
+		}
+		services[i] = b
+	}
+	b, err := json.Marshal(services)
 	if err != nil {
 		return nil, false
 	}
