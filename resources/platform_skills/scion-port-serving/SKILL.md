@@ -29,7 +29,7 @@ people with access to your agent can open.
 
 - `scion expose <port> --label "<what it is>"` exposes a port and prints its
   URL. Exposing a port that is already exposed succeeds and prints the same
-  URL.
+  URL; it does not change the label (unexpose and expose again to relabel).
 - `scion expose --list` lists your exposed ports with their labels and URLs,
   and whether auto-expose is on.
 - `scion unexpose <port>` stops exposing a port. It succeeds if the port was
