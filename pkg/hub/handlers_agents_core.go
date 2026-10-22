@@ -4549,7 +4549,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// they take effect at the next start, not at the next
 		// reincarnation (ptone/scion#3982).
 		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
-		provision = s.agentBrokerStartSupport(ctx, agent).heldProvisionEdits(provision)
+		// A broker with clearedFields applies the clears recorded above at
+		// the next start (ptone/scion#4890), so only the rest are held.
+		sup := s.agentBrokerStartSupport(ctx, agent)
+		provision = sup.heldProvisionEdits(provision)
+		cleared = sup.heldClearEdits(cleared)
+		removed = sup.heldRemovals(removed)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)

@@ -122,6 +122,9 @@ type BrokerCapabilities struct {
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982).
 	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates this broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

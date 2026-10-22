@@ -55,6 +55,8 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker re-renders the provision-rendered keys the hub lists
 		// in changed_fields at start (ptone/scion#3982).
 		ChangedFields: true,
+		// This broker applies cleared_fields at start (ptone/scion#4890).
+		ClearedFields: true,
 	}
 }
 
@@ -117,5 +119,6 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	add(c.ChangedFields, "changedFields")
+	add(c.ClearedFields, "clearedFields")
 	return names
 }

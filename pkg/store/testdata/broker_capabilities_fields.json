@@ -6,6 +6,7 @@
     "asyncStart",
     "attach",
     "changedFields",
+    "clearedFields",
     "emptyPerAgentWorkspace",
     "nodeImageRegistry",
     "reprovision",

@@ -44,6 +44,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'asyncLaunch',
   'asyncStart',
   'changedFields',
+  'clearedFields',
   'emptyPerAgentWorkspace',
   'nodeImageRegistry',
   'reprovision',

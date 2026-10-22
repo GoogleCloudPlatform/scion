@@ -303,7 +303,9 @@ type FieldEditState struct {
 	// the edit applies at resume and the conversation continues.
 	Note string `json:"note,omitempty"`
 	// ClearNeedsReincarnate is set on a T1 field: clearing or zeroing it
-	// takes effect only at the next reincarnation.
+	// takes effect only at the next reincarnation. It is not set on a
+	// field whose clear the agent's broker applies at the next start
+	// (brokerStartSupport.clearAppliesAtStart).
 	ClearNeedsReincarnate bool `json:"clearNeedsReincarnate,omitempty"`
 	// Reason explains a locked field.
 	Reason string `json:"reason,omitempty"`
@@ -321,7 +323,8 @@ type agentEditAccess struct {
 	CanChangeRole bool
 	// Broker is what the agent's broker applies at a start
 	// (agentBrokerStartSupport): with changedFields, provision-rendered
-	// keys of an agent with no container are editable "now".
+	// keys of an agent with no container are editable "now"; with
+	// clearedFields, clearing a clearable key needs no reincarnation.
 	Broker brokerStartSupport
 }
 
@@ -366,7 +369,7 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 			Tier:                  f.Tier,
 			Disposition:           d,
 			SessionSensitive:      f.SessionSensitive,
-			ClearNeedsReincarnate: f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix),
+			ClearNeedsReincarnate: f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix) && !access.Broker.clearAppliesAtStart(f.Key),
 		}
 		if d == EditLocked {
 			st.Reason = reason

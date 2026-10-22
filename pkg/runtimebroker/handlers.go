@@ -318,6 +318,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// Provision-rendered keys listed in changed_fields are
 			// re-rendered at start (ptone/scion#3982).
 			ChangedFields: true,
+			// cleared_fields is applied at start (ptone/scion#4890).
+			ClearedFields: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,

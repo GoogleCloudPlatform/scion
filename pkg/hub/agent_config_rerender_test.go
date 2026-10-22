@@ -124,3 +124,63 @@ func TestCapabilitiesFromStrings_ChangedFields(t *testing.T) {
 	}
 	assert.False(t, capabilitiesFromStrings([]string{"reprovision"}).ChangedFields)
 }
+
+// wantClearAppliedAtStart are the container keys whose clear a broker with
+// clearedFields applies at the next start (ptone/scion#4890): the keys
+// api.ClearableConfigPath accepts, and env (removed keys travel as
+// env.KEY entries).
+var wantClearAppliedAtStart = map[string]bool{
+	"config.max_turns":       true,
+	"config.max_model_calls": true,
+	"config.max_duration":    true,
+	"config.thinking_level":  true,
+	"config.resources":       true,
+	"config.system_prompt":   true,
+	"config.env":             true,
+}
+
+func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
+	with := brokerStartSupportFrom(&store.BrokerCapabilities{ClearedFields: true})
+	without := brokerStartSupportFrom(&store.BrokerCapabilities{ChangedFields: true})
+	for _, f := range agentEditFields {
+		assert.Equal(t, wantClearAppliedAtStart[f.Key], with.clearAppliesAtStart(f.Key), "with clearedFields: %s", f.Key)
+		assert.False(t, without.clearAppliesAtStart(f.Key), "without clearedFields: %s", f.Key)
+	}
+	cleared := []string{"config.max_turns", "config.model", "config.resources"}
+	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared))
+	assert.Equal(t, cleared, without.heldClearEdits(cleared))
+	removed := map[string][]string{"env": {"A"}, "volumes": {"/data"}}
+	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed))
+	assert.Equal(t, removed, without.heldRemovals(removed))
+}
+
+// TestAgentEditability_ClearNeedsReincarnateByBroker: with clearedFields
+// a clear of a clearable container key needs no reincarnation; every other
+// container key still flags it, and an older broker flags them all.
+func TestAgentEditability_ClearNeedsReincarnateByBroker(t *testing.T) {
+	full := agentEditAccess{CanUpdate: true, CanChangeRole: true}
+	clearing := full
+	clearing.Broker = brokerStartSupport{ClearedFields: true}
+	for _, phase := range state.Phases() {
+		agent := &store.Agent{Phase: string(phase)}
+		older := buildAgentEditability(agent, full)
+		newer := buildAgentEditability(agent, clearing)
+		for _, f := range agentEditFields {
+			want := older.Fields[f.Key]
+			if wantClearAppliedAtStart[f.Key] && f.Tier == EditTierContainer {
+				assert.True(t, want.ClearNeedsReincarnate, "older broker: clearing %s needs a reincarnation", f.Key)
+				want.ClearNeedsReincarnate = false
+			}
+			assert.Equal(t, want, newer.Fields[f.Key], "%s in %s", f.Key, phase)
+		}
+	}
+}
+
+// TestCapabilitiesFromStrings_ClearedFields: the registration name sets
+// the stored capability.
+func TestCapabilitiesFromStrings_ClearedFields(t *testing.T) {
+	for _, name := range []string{"clearedFields", "cleared_fields"} {
+		assert.True(t, capabilitiesFromStrings([]string{name}).ClearedFields, name)
+	}
+	assert.False(t, capabilitiesFromStrings([]string{"changedFields"}).ClearedFields)
+}

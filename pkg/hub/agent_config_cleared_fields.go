@@ -42,11 +42,11 @@ import (
 // cleared_fields value a client sends is never taken. The result is sorted,
 // and nil when empty.
 //
-// The PATCH dispositions and warnings, which still say a cleared value
-// waits for the next reincarnation, are deliberately left as they are: a
-// broker that predates ClearedFields keeps the previous value. Once every
-// broker honours it, the cleared keys can be reported as applied at the
-// next start instead of held, and ClearNeedsReincarnate dropped.
+// The PATCH dispositions and warnings report a recorded clear as applied at
+// the next start only when the agent's broker advertises clearedFields
+// (brokerStartSupport.heldClearEdits, ptone/scion#4890): a broker that
+// predates ClearedFields keeps the previous value, so for it the clear
+// still waits for the next reincarnation.
 func nextClearedFields(old, req *api.ScionConfig, rawConfig map[string]json.RawMessage, cleared []string, canViewEnv bool) []string {
 	set := map[string]bool{}
 	if old != nil {

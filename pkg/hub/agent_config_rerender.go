@@ -44,6 +44,10 @@ type brokerStartSupport struct {
 	// ChangedFields: the broker re-renders the provision-rendered keys
 	// listed in changed_fields at start.
 	ChangedFields bool
+	// ClearedFields: the broker applies cleared_fields at start, so a
+	// cleared key api.ClearableConfigPath accepts, and a removed env key,
+	// take effect at the next start (ptone/scion#4890).
+	ClearedFields bool
 }
 
 // brokerStartSupportFrom reads a broker's capabilities.
@@ -51,7 +55,7 @@ func brokerStartSupportFrom(caps *store.BrokerCapabilities) brokerStartSupport {
 	if caps == nil {
 		return brokerStartSupport{}
 	}
-	return brokerStartSupport{ChangedFields: caps.ChangedFields}
+	return brokerStartSupport{ChangedFields: caps.ChangedFields, ClearedFields: caps.ClearedFields}
 }
 
 // agentBrokerStartSupport is brokerStartSupportFrom for the agent's
@@ -89,6 +93,45 @@ func (sup brokerStartSupport) heldProvisionEdits(provision []string) []string {
 	for _, k := range provision {
 		if !sup.appliesAtStart(k) {
 			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// clearAppliesAtStart reports whether the broker applies a clear of the
+// config key with wire key key at the next start: with ClearedFields, a
+// key api.ClearableConfigPath accepts, and env, whose removed keys are
+// sent as env.KEY entries.
+func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
+	k, ok := strings.CutPrefix(key, agentConfigKeyPrefix)
+	return ok && sup.ClearedFields && (k == "env" || api.ClearableConfigPath(k))
+}
+
+// heldClearEdits returns the entries of cleared (wire keys of cleared
+// container keys, from reincarnateOnlyConfigEdits) that still wait for a
+// reincarnation with this broker.
+func (sup brokerStartSupport) heldClearEdits(cleared []string) []string {
+	var out []string
+	for _, k := range cleared {
+		if !sup.clearAppliesAtStart(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// heldRemovals returns removed (the entries removedConfigEntries reports
+// per config key) without the keys whose removals this broker applies at
+// the next start: the env keys, which nextClearedFields records as
+// env.KEY entries under the same rule.
+func (sup brokerStartSupport) heldRemovals(removed map[string][]string) map[string][]string {
+	if len(removed) == 0 {
+		return removed
+	}
+	out := make(map[string][]string, len(removed))
+	for k, v := range removed {
+		if !sup.clearAppliesAtStart(agentConfigKeyPrefix + k) {
+			out[k] = v
 		}
 	}
 	return out

@@ -167,3 +167,47 @@ func TestWarnRerenderUnsupported_StartResponseWarning(t *testing.T) {
 	d.warnRerenderUnsupported(ctx, agent, inline)
 	assert.Empty(t, warns.Warnings())
 }
+
+// TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart: with a broker
+// that applies cleared_fields (ptone/scion#4890), clearing max_turns and
+// removing env keys on a stopped agent is reported applied with no
+// reincarnation warning, and the start dispatches the cleared paths; a
+// clear the broker cannot apply (the model) is still held.
+func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	b, err := s.GetRuntimeBroker(context.Background(), broker.ID)
+	require.NoError(t, err)
+	b.Capabilities = &store.BrokerCapabilities{Reprovision: true, ClearedFields: true}
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), b))
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.Model = "old-model"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "old-model", MaxTurns: 3, Env: map[string]string{"KEEP": "1", "DROP": "2"}}
+	})
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"max_turns": 0, "env": map[string]string{"KEEP": "1"}},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.env", "config.max_turns"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+	assert.Empty(t, resp.Warnings)
+
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": ""},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.model"}, resp.Disposition.HeldForReincarnate, "a model clear is not applied at start")
+	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+
+	ed := getAgentEditability(t, srv, nil, agent.ID)
+	assert.False(t, ed.Fields["config.max_turns"].ClearNeedsReincarnate)
+	assert.True(t, ed.Fields["config.model"].ClearNeedsReincarnate)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.Equal(t, []string{"env.DROP", "max_turns"}, starts[0].inline.ClearedFields)
+}
