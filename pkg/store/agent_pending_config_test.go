@@ -118,3 +118,22 @@ func TestAgentPendingConfig_CloneIsDeep(t *testing.T) {
 	assert.Nil(t, (*AgentPendingConfig)(nil).Clone())
 	assert.True(t, (*AgentPendingConfig)(nil).IsEmpty())
 }
+
+// TestAgentPendingConfig_RedactionIgnoresKeyCase: a stored key of another
+// spelling (encoding/json decodes keys case-insensitively) is redacted like
+// its json key, at every depth.
+func TestAgentPendingConfig_RedactionIgnoresKeyCase(t *testing.T) {
+	p := &AgentPendingConfig{Config: map[string]json.RawMessage{
+		"Telemetry": json.RawMessage(`{"Cloud":{"HEADERS":{"Authorization":"Bearer secret"},"endpoint":"https://otel"}}`),
+		"ENV":       json.RawMessage(`{"API_KEY":"secret","GITHUB_TOKEN":"ghp"}`),
+	}}
+	b, err := json.Marshal(p.ResponseView(false))
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "secret")
+	assert.Contains(t, string(b), "https://otel", "the rest of the telemetry object is kept")
+
+	b, err = json.Marshal(p.ResponseView(true))
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "Bearer secret")
+	assert.NotContains(t, string(b), "ghp", "GITHUB_TOKEN is never returned, whatever the env key's case")
+}

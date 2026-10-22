@@ -4442,7 +4442,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// being created or removed, are refused. With held edits on,
 	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
 	// config instead (agent_pending_config.go).
-	var configHeld, pendingSaved, pendingFolded []string
+	var configHeld, pendingSaved, pendingFolded, pendingSuperseded []string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
@@ -4467,6 +4467,9 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			res := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent))
 			warnings = append(warnings, res.warnings...)
 			configApplied, configHeldForReincarnate = res.applied, res.heldForReincarnate
+			// A pending value stored while held edits were on must not be
+			// applied later over the value written now.
+			pendingSuperseded = dropPendingKeysNamed(agent, presentConfigKeys)
 		}
 	}
 
@@ -4683,6 +4686,9 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 	if len(pendingSaved) > 0 {
 		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
+	}
+	if len(pendingSuperseded) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
 	}
 
 	tz := s.agentTZ(ctx, agent)

@@ -66,16 +66,40 @@ func TestConfigPatchSubset(t *testing.T) {
 }
 
 func TestCanonicalConfigRaw(t *testing.T) {
-	p := decodeConfigPatch(t, `{"Model":"m","env":{"A":"1","TZ":"UTC"},"max_turns":null}`)
+	p := decodeConfigPatch(t, `{"Model":"m","env":{"A":"1","TZ":"UTC"},"max_turns":null,"thinking_level":null}`)
 	stripConfigEnvTZ(p.cfg)
 	raw := canonicalConfigRaw(p)
 	assert.JSONEq(t, `"m"`, string(raw["model"]), "keys are stored by their json key")
 	assert.JSONEq(t, `{"A":"1"}`, string(raw["env"]), "the stripped TZ is not stored")
-	assert.Equal(t, "null", string(raw["max_turns"]), "a null (clear) is kept")
+	assert.Equal(t, "0", string(raw["max_turns"]), "a null count is stored as its zero value, which applies the same way")
+	assert.Equal(t, "null", string(raw["thinking_level"]), "a null pointer key is kept as null")
 	assert.NotContains(t, raw, "Model")
 
 	nullEnv := decodeConfigPatch(t, `{"env":null}`)
 	assert.Equal(t, "null", string(canonicalConfigRaw(nullEnv)["env"]))
+}
+
+// TestCanonicalConfigRaw_NestedKeysAreCanonical: a nested key spelled in
+// another case (which encoding/json accepts) is stored under its json key,
+// so the response redaction of telemetry cloud headers applies to it.
+func TestCanonicalConfigRaw_NestedKeysAreCanonical(t *testing.T) {
+	p := decodeConfigPatch(t, `{"Telemetry":{"Cloud":{"Endpoint":"https://otel","Headers":{"Authorization":"Bearer secret"}}}}`)
+	raw := canonicalConfigRaw(p)
+	require.Contains(t, raw, "telemetry")
+	var tel map[string]map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["telemetry"], &tel))
+	require.Contains(t, tel, "cloud")
+	assert.Contains(t, tel["cloud"], "headers")
+	assert.NotContains(t, string(raw["telemetry"]), "Cloud")
+	assert.NotContains(t, string(raw["telemetry"]), "Headers")
+
+	pc := &store.AgentPendingConfig{Config: raw}
+	b, err := json.Marshal(pc.ResponseView(false))
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "Bearer secret", "a viewer without attach never sees the headers")
+	b, err = json.Marshal(pc.ResponseView(true))
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "Bearer secret")
 }
 
 func TestPendingConfigPatch_DecodesStoredKeys(t *testing.T) {
@@ -113,7 +137,7 @@ func TestEffectiveNextRunInline(t *testing.T) {
 
 func TestHeldForReincarnateWarning(t *testing.T) {
 	assert.Empty(t, heldForReincarnateWarning(nil))
-	assert.Equal(t, "Held for reincarnation: agent instructions, system prompt",
+	assert.Equal(t, "Held for reincarnation: agent instructions, system prompt. A reincarnation does not apply pending edits yet; they stay pending.",
 		heldForReincarnateWarning([]string{"config.agent_instructions", "config.system_prompt"}))
 }
 

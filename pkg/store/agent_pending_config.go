@@ -17,6 +17,7 @@ package store
 import (
 	"encoding/json"
 	"maps"
+	"strings"
 	"time"
 )
 
@@ -141,55 +142,83 @@ func UnmarshalPendingConfigFromStorage(raw string) (*AgentPendingConfig, error) 
 
 // redactPendingConfigForResponse returns a copy of cfg with config.env and
 // the telemetry cloud-export headers removed unless canAttach, and with
-// GITHUB_TOKEN removed from env always. A value that is not the expected
-// JSON shape is dropped when it could hold a redacted value, so a malformed
-// stored value fails closed.
+// GITHUB_TOKEN removed from env always. The hub stores the pending config
+// in canonical form, but keys are matched case-insensitively here too, as
+// encoding/json decodes them, so a stored value of another spelling cannot
+// escape redaction. A value that is not the expected JSON shape is dropped
+// when it could hold a redacted value, so a malformed stored value fails
+// closed.
 func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach bool) map[string]json.RawMessage {
 	if cfg == nil {
 		return nil
 	}
 	out := maps.Clone(cfg)
-	if raw, ok := out["env"]; ok {
+	for k, raw := range out {
 		switch {
-		case !canAttach:
-			delete(out, "env")
-		case string(raw) != "null":
+		case strings.EqualFold(k, "env"):
+			if !canAttach {
+				delete(out, k)
+				continue
+			}
+			if string(raw) == "null" {
+				continue
+			}
 			var env map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &env); err != nil {
-				delete(out, "env")
-				break
+				delete(out, k)
+				continue
 			}
 			delete(env, "GITHUB_TOKEN")
 			b, err := json.Marshal(env)
 			if err != nil {
-				delete(out, "env")
-				break
+				delete(out, k)
+				continue
 			}
-			out["env"] = b
-		}
-	}
-	if raw, ok := out["telemetry"]; ok && !canAttach && string(raw) != "null" {
-		var tel map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &tel); err != nil {
-			delete(out, "telemetry")
-		} else if cloudRaw, ok := tel["cloud"]; ok && string(cloudRaw) != "null" {
-			var cloud map[string]json.RawMessage
-			if err := json.Unmarshal(cloudRaw, &cloud); err != nil {
-				delete(tel, "cloud")
-			} else {
-				delete(cloud, "headers")
-				if b, err := json.Marshal(cloud); err == nil {
-					tel["cloud"] = b
-				} else {
-					delete(tel, "cloud")
-				}
+			out[k] = b
+		case strings.EqualFold(k, "telemetry") && !canAttach && string(raw) != "null":
+			b, ok := redactTelemetryHeaders(raw)
+			if !ok {
+				delete(out, k)
+				continue
 			}
-			if b, err := json.Marshal(tel); err == nil {
-				out["telemetry"] = b
-			} else {
-				delete(out, "telemetry")
-			}
+			out[k] = b
 		}
 	}
 	return out
+}
+
+// redactTelemetryHeaders returns raw (a telemetry object) with every
+// cloud.headers entry removed, matching both keys case-insensitively. ok is
+// false when raw is not the expected shape.
+func redactTelemetryHeaders(raw json.RawMessage) (json.RawMessage, bool) {
+	var tel map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &tel); err != nil {
+		return nil, false
+	}
+	for tk, cloudRaw := range tel {
+		if !strings.EqualFold(tk, "cloud") || string(cloudRaw) == "null" {
+			continue
+		}
+		var cloud map[string]json.RawMessage
+		if err := json.Unmarshal(cloudRaw, &cloud); err != nil {
+			delete(tel, tk)
+			continue
+		}
+		for ck := range cloud {
+			if strings.EqualFold(ck, "headers") {
+				delete(cloud, ck)
+			}
+		}
+		b, err := json.Marshal(cloud)
+		if err != nil {
+			delete(tel, tk)
+			continue
+		}
+		tel[tk] = b
+	}
+	b, err := json.Marshal(tel)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
 }

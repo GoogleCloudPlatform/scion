@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -313,10 +314,10 @@ func TestAgentPendingConfig_SystemPromptHeldForReincarnate(t *testing.T) {
 	require.NotNil(t, resp.PendingConfig)
 	assert.JSONEq(t, `"be brief"`, string(resp.PendingConfig.Config["system_prompt"]))
 	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
-	assert.Contains(t, resp.Warnings[0], "config.system_prompt: held until the next reincarnation")
+	assert.Equal(t, "config.system_prompt: "+heldProvisionNote, resp.Warnings[0])
 
 	warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
-	assert.Contains(t, warnings, "Held for reincarnation: system prompt")
+	assert.Contains(t, warnings, heldForReincarnateWarning([]string{"config.system_prompt"}))
 
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
@@ -324,7 +325,7 @@ func TestAgentPendingConfig_SystemPromptHeldForReincarnate(t *testing.T) {
 	after := pendingReloadAgent(t, s, agent.ID)
 	require.NotNil(t, after.PendingConfig, "the system prompt stays pending")
 	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(after.PendingConfig))
-	assert.Equal(t, "Held for reincarnation: system prompt", after.Message)
+	assert.Equal(t, heldForReincarnateWarning([]string{"config.system_prompt"}), after.Message)
 
 	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
 		MutationType: mutationTypeAgentPendingConfigApplied, TargetID: agent.ID, Limit: 5,
@@ -500,6 +501,33 @@ func TestAgentPendingConfig_FlagOffKeepsTodayBehaviour(t *testing.T) {
 		assert.Nil(t, resp.PendingConfig)
 	})
 
+	t.Run("an edit written through removes the pending keys it names", func(t *testing.T) {
+		srv, s, disp, stopped := off(t, state.PhaseStopped)
+		cur := pendingReloadAgent(t, s, stopped.ID)
+		cur.PendingConfig = &store.AgentPendingConfig{Config: map[string]json.RawMessage{
+			"model":         json.RawMessage(`"stale-model"`),
+			"system_prompt": json.RawMessage(`"pending prompt"`),
+		}}
+		require.NoError(t, s.UpdateAgent(context.Background(), cur))
+		resp := patchPending(t, srv, stopped.ID, map[string]interface{}{
+			"config": map[string]interface{}{"model": "newer-model"},
+		})
+		assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
+		require.NotNil(t, resp.PendingConfig)
+		assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(resp.PendingConfig), "only the key the edit named is removed")
+		discarded := pendingAudits(t, s, stopped.ID, mutationTypeAgentPendingConfigDiscarded, 1)
+		keys, trigger := pendingAuditSummary(t, discarded[0])
+		assert.Equal(t, []string{"config.model"}, keys)
+		assert.Equal(t, pendingDiscardTriggerSuperseded, trigger)
+
+		// Turned back on, the next start runs the newer value.
+		setHeldEditsExperiment(t, srv, true)
+		pendingLifecycleWarnings(t, srv, stopped.ID, "start")
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.Equal(t, "newer-model", starts[0].model)
+	})
+
 	t.Run("stored pending config stays inert at start", func(t *testing.T) {
 		srv, s, disp, stopped := off(t, state.PhaseStopped)
 		cur := pendingReloadAgent(t, s, stopped.ID)
@@ -593,4 +621,109 @@ func TestAgentPendingConfig_GetShowsPendingAndEffectiveNextRun(t *testing.T) {
 	assert.Equal(t, "be brief", edit.EffectiveNextRun.InlineConfig.SystemPrompt)
 	assert.Nil(t, edit.EffectiveNextRun.CreateInputs)
 	assert.Equal(t, "old-model", edit.AppliedConfig.Model, "the applied config itself is unchanged")
+}
+
+// TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer:
+// pending env values and telemetry cloud headers, saved with keys spelled
+// in another case, are returned to the agent's owner (who may attach) and
+// never to a project member who may not attach: on GET, the project list
+// and that member's PATCH response.
+func TestAgentPendingConfig_ResponsesRedactPendingSecretsForNonAttachViewer(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	setHeldEditsExperiment(t, srv, true)
+	ctx := context.Background()
+	agent := &store.Agent{
+		ID:        tid("agent-pending-redaction"),
+		Slug:      "agent-pending-redaction",
+		Name:      "Pending Redaction Agent",
+		ProjectID: project.ID,
+		OwnerID:   alice.ID,
+		Phase:     string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{Harness: "claude"},
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-pending-redaction"), "Bob", store.GroupMemberRoleOwner)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleOwner)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]any{
+		"config": map[string]any{
+			"Telemetry": map[string]any{"Cloud": map[string]any{
+				"Endpoint": "https://otel.example",
+				"Headers":  map[string]string{"Authorization": "Bearer pending-secret"},
+			}},
+			"ENV": map[string]string{"PENDING_KEY": "pending-env-secret"},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	stored := pendingReloadAgent(t, s, agent.ID)
+	require.NotNil(t, stored.PendingConfig)
+	assert.Contains(t, stored.PendingConfig.Config, "telemetry", "stored under the json key")
+	assert.Contains(t, stored.PendingConfig.Config, "env")
+	assert.NotContains(t, stored.PendingConfig.Config, "Telemetry")
+
+	t.Run("owner GET sees the pending secrets", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Bearer pending-secret")
+		assert.Contains(t, rec.Body.String(), "pending-env-secret")
+	})
+	t.Run("non-attach member GET sees neither", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/agents/"+agent.ID+"?view=edit", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "pending-secret")
+		assert.NotContains(t, rec.Body.String(), "pending-env-secret")
+		assert.Contains(t, rec.Body.String(), "https://otel.example", "the rest of the pending telemetry is shown")
+	})
+	t.Run("non-attach member list sees neither", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/agents?projectId="+project.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "pending-secret")
+		assert.NotContains(t, rec.Body.String(), "pending-env-secret")
+	})
+	t.Run("non-attach member PATCH response sees neither", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, bob, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]any{
+			"taskSummary": "updated by project owner",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "pending-secret")
+		assert.NotContains(t, rec.Body.String(), "pending-env-secret")
+	})
+}
+
+// TestAgentPendingConfig_ReincarnateDoesNotApplyPendingYet pins the interim
+// behaviour until reincarnation applies pending edits (ptone/scion#3978): a
+// reincarnation neither applies nor clears the pending config, and a pending
+// container key is applied at the next start after it, over the value the
+// reincarnation set. ptone/scion#3978 changes this deliberately.
+func TestAgentPendingConfig_ReincarnateDoesNotApplyPendingYet(t *testing.T) {
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+	patchPending(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": "held-model", "system_prompt": "held prompt"},
+	})
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{Model: "reincarnated-model"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	after := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, "reincarnated-model", after.AppliedConfig.Model, "the reincarnation applies its own patch")
+	require.NotNil(t, after.PendingConfig, "the reincarnation leaves the pending config in place")
+	assert.Equal(t, []string{"config.model", "config.system_prompt"}, pendingConfigKeys(after.PendingConfig))
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: mutationTypeAgentPendingConfigApplied, TargetID: agent.ID, Limit: 5,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, recs, "nothing pending was applied by the reincarnation")
+
+	before := len(disp.snapshot())
+	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	starts := disp.snapshot()
+	require.Len(t, starts, before+1)
+	assert.Equal(t, "held-model", starts[len(starts)-1].model, "the pending model is applied at the next start, over the reincarnation's")
+	final := pendingReloadAgent(t, s, agent.ID)
+	require.NotNil(t, final.PendingConfig)
+	assert.Equal(t, []string{"config.system_prompt"}, pendingConfigKeys(final.PendingConfig))
 }

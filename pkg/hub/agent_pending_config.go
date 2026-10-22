@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,8 +43,11 @@ import (
 //     start fold in startAgentCore covers start, restart, resume (wake) and
 //     the starts of create-on-existing.
 //   - Provision-rendered (T2) keys are held in every phase: a start does not
-//     re-render them, so they wait for a reincarnation (which applies them;
-//     not this file).
+//     re-render them. Applying them at a reincarnation is
+//     ptone/scion#3978; until then a reincarnation neither applies nor
+//     clears pending edits, so they stay pending, and pending T1 keys are
+//     still applied at the next start after a reincarnation. The experiment
+//     stays off until that lands.
 //
 // Applying a held edit runs applyAgentConfigPatch, the code the live PATCH
 // runs, so held and immediate edits have one meaning (clears, present-key
@@ -69,6 +73,11 @@ const (
 	pendingFoldTriggerWake    = "wake"
 )
 
+// pendingDiscardTriggerSuperseded is the trigger of an
+// agent_pending_config_discarded record for pending keys a config edit
+// written through (held edits off) replaced.
+const pendingDiscardTriggerSuperseded = "superseded"
+
 // agentViewEdit is the single-agent GET view (?view=edit) that adds
 // effectiveNextRun.
 const agentViewEdit = "edit"
@@ -86,8 +95,16 @@ const pendingFoldAttempts = 3
 var errPendingConfigFold = errors.New("start not sent: the agent's pending config edits could not be applied")
 
 // heldReincarnateWarningPrefix starts the start warning (and status message)
-// naming the keys that stay pending until a reincarnation.
+// naming the provision-rendered keys a start leaves pending.
 const heldReincarnateWarningPrefix = "Held for reincarnation: "
+
+// heldReincarnateWarningSuffix ends that warning. A reincarnation does not
+// apply pending edits yet (ptone/scion#3978): they stay pending through it,
+// and pending container keys are still applied at the next start after it.
+const heldReincarnateWarningSuffix = ". A reincarnation does not apply pending edits yet; they stay pending."
+
+// heldProvisionNote is the PATCH warning for held provision-rendered keys.
+const heldProvisionNote = "held in the pending config; a start does not re-render prompts, skills or services, and a reincarnation does not apply pending edits yet, so they stay pending"
 
 // heldEditsEnabled reports whether hub.agent_edit_held is on.
 func (s *Server) heldEditsEnabled() bool {
@@ -229,51 +246,56 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	return out
 }
 
-// heldEditWarnings returns the PATCH warnings for held keys that take
-// effect only at the next reincarnation: provision-rendered keys, and T1
-// clears and removals that a start does not apply.
+// heldEditWarnings returns the PATCH warnings for held keys a start does
+// not bring into effect: provision-rendered keys (which stay pending), and
+// T1 clears and removals (written at the next start, but not applied by it).
 func heldEditWarnings(provision, cleared []string, removed map[string][]string) []string {
 	var out []string
 	if len(provision) > 0 {
-		out = append(out, strings.Join(provision, ", ")+": held until the next reincarnation (a start does not re-render prompts, skills or services)")
+		out = append(out, strings.Join(provision, ", ")+": "+heldProvisionNote)
 	}
 	if len(cleared) > 0 {
-		out = append(out, strings.Join(cleared, ", ")+": the clear is held; the agent keeps its previous value until the next reincarnation (a start does not apply a cleared value)")
+		out = append(out, strings.Join(cleared, ", ")+": the clear is held and written at the next start; the agent keeps its previous value until a reincarnation after that (a start does not apply a cleared value)")
 	}
 	for _, w := range []struct{ key, what string }{
 		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
 	} {
 		if r := removed[w.key]; len(r) > 0 {
-			out = append(out, "config."+w.key+": the removal of "+strings.Join(r, ", ")+" is held; the agent keeps those "+w.what+" until the next reincarnation (a start does not remove them)")
+			out = append(out, "config."+w.key+": the removal of "+strings.Join(r, ", ")+" is held and written at the next start; the agent keeps those "+w.what+" until a reincarnation after that (a start does not remove them)")
 		}
 	}
 	return out
 }
 
-// canonicalConfigRaw returns p's raw config object keyed by each key's json
-// key (the request may spell a key in another case; encoding/json matches
-// it case-insensitively). A key spelled exactly as its json key wins over
-// another spelling. env is re-encoded from the decoded config, so the TZ
-// entry stripped from it is not stored; a JSON null is kept as null.
+// canonicalConfigRaw returns the pending-config form of p: each config key
+// p names, under its json key, encoded from the decoded config rather than
+// copied from the request bytes. So the stored object has the canonical
+// shape at every depth (a key the request spelled in another case, which
+// encoding/json accepts, is stored under its json key), response redaction
+// applies to every key, and env no longer holds the TZ entry stripped from
+// it. A value the request sent as null encodes as null (a nil pointer, map
+// or slice) or as its zero value, which the apply treats the same way.
 func canonicalConfigRaw(p configPatch) map[string]json.RawMessage {
 	out := make(map[string]json.RawMessage, len(p.raw))
-	exact := map[string]bool{}
-	for rk, rv := range p.raw {
+	if p.cfg == nil {
+		return out
+	}
+	v := reflect.ValueOf(p.cfg).Elem()
+	for rk := range p.raw {
 		f, ok := agentConfigEditFieldByLowerKey[strings.ToLower(rk)]
 		if !ok {
 			continue
 		}
 		k := strings.TrimPrefix(f.Key, agentConfigKeyPrefix)
-		if exact[k] {
+		i, ok := scionConfigFieldByJSONKey[k]
+		if !ok {
 			continue
 		}
-		out[k] = append(json.RawMessage(nil), rv...)
-		exact[k] = rk == k
-	}
-	if v, ok := out["env"]; ok && string(v) != "null" && p.cfg != nil {
-		if b, err := json.Marshal(p.cfg.Env); err == nil {
-			out["env"] = b
+		b, err := json.Marshal(v.Field(i).Interface())
+		if err != nil {
+			continue
 		}
+		out[k] = b
 	}
 	return out
 }
@@ -351,6 +373,37 @@ func (s *Server) foldPendingConfig(ctx context.Context, agent *store.Agent, keep
 	}
 	agent.PendingConfig = rest
 	return folded
+}
+
+// dropPendingKeysNamed removes from the agent's pending config, in memory,
+// every key present names (the lower-cased config keys of a PATCH the hub
+// wrote through, with held edits off), so a stale pending value cannot
+// later be applied over the newer one. It returns the removed wire keys,
+// sorted.
+func dropPendingKeysNamed(agent *store.Agent, present map[string]bool) []string {
+	if agent.PendingConfig.IsEmpty() || len(present) == 0 {
+		return nil
+	}
+	rest := agent.PendingConfig.Clone()
+	var dropped []string
+	for k := range rest.Config {
+		if present[strings.ToLower(k)] {
+			dropped = append(dropped, agentConfigKeyPrefix+k)
+			delete(rest.Config, k)
+		}
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	if _, ok := rest.Config["env"]; !ok {
+		rest.EnvSaverCanViewEnv = false
+	}
+	if rest.IsEmpty() {
+		rest = nil
+	}
+	agent.PendingConfig = rest
+	sort.Strings(dropped)
+	return dropped
 }
 
 // pendingConfigKeys returns the pending config's keys as sorted wire keys.
@@ -438,7 +491,8 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 
 // heldForReincarnateWarning is the start warning (and status message) for
 // pending keys a start leaves pending, e.g. "Held for reincarnation:
-// system prompt, skills"; "" when there are none.
+// system prompt, skills. A reincarnation does not apply pending edits yet;
+// they stay pending."; "" when there are none.
 func heldForReincarnateWarning(keys []string) string {
 	if len(keys) == 0 {
 		return ""
@@ -447,7 +501,7 @@ func heldForReincarnateWarning(keys []string) string {
 	for _, k := range keys {
 		labels = append(labels, strings.ReplaceAll(strings.TrimPrefix(k, agentConfigKeyPrefix), "_", " "))
 	}
-	return heldReincarnateWarningPrefix + strings.Join(labels, ", ")
+	return heldReincarnateWarningPrefix + strings.Join(labels, ", ") + heldReincarnateWarningSuffix
 }
 
 // noteHeldForReincarnate reports the keys a start left pending: a start
