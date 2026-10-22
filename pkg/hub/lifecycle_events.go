@@ -164,17 +164,19 @@ func (s *Server) wakeLifecycleDrainer() {
 // once they are delivered: design 5.4, a switched-off pipeline still
 // drains its committed backlog). Otherwise the cost is one synchronous
 // existence probe, with no goroutine and no poll (review r6 N4). The
-// drainer state is exported as lifecycle_drainer_state.
-func (s *Server) startLifecycleEvents(ctx context.Context) {
+// drainer state is exported as lifecycle_drainer_state. It returns the
+// started drainer's done channel (closed when the drainer exits), or nil
+// when no drainer started.
+func (s *Server) startLifecycleEvents(ctx context.Context) <-chan struct{} {
 	ls, ok := s.store.(lifecycleEventStore)
 	if !ok {
-		return
+		return nil
 	}
 	rt := &s.lifecycleEvents
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.drainer != nil {
-		return
+		return rt.done
 	}
 	installed := ls.AgentWriteObserverInstalled()
 	if !installed {
@@ -186,17 +188,17 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 		if err != nil {
 			slog.Warn("lifecycle outbox check failed; drainer not started", "error", err)
 			rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
-			return
+			return nil
 		}
 		if !has {
 			rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
-			return
+			return nil
 		}
 	}
 	if rt.sink == nil {
 		slog.Warn("lifecycle events: no sink configured; outbox rows are kept and not delivered")
 		rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
-		return
+		return nil
 	}
 	d, err := lifecycleevents.NewDrainer(lifecycleevents.DrainerConfig{
 		Store:         ls,
@@ -208,7 +210,7 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 	if err != nil {
 		slog.Warn("lifecycle drainer not started", "error", err)
 		rt.countersOrNop().DrainerState(telemetryemit.DrainerStateIdleDisabled)
-		return
+		return nil
 	}
 	if s.ctx != nil {
 		ctx = s.ctx // the server-lifetime context, as the registry loop uses
@@ -235,6 +237,7 @@ func (s *Server) startLifecycleEvents(ctx context.Context) {
 		rt.mu.Unlock()
 		cancel()
 	}()
+	return done
 }
 
 // stopLifecycleEvents stops the drainer and waits for its bounded final

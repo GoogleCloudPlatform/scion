@@ -194,10 +194,7 @@ func TestLifecycleEvents_BacklogDrainerStartsAndExits(t *testing.T) {
 	lifecycleCreateAgent(t, srv, projectID, "lc-backlog")
 	ls.SetAgentWriteObserver(nil)
 
-	srv.startLifecycleEvents(context.Background())
-	srv.lifecycleEvents.mu.Lock()
-	done := srv.lifecycleEvents.done
-	srv.lifecycleEvents.mu.Unlock()
+	done := srv.startLifecycleEvents(context.Background())
 	require.NotNil(t, done, "a backlog starts the drainer")
 	select {
 	case <-done:
@@ -272,10 +269,7 @@ func TestLifecycleEvents_BacklogDrainerClearsAndRestarts(t *testing.T) {
 	lifecycleCreateAgent(t, srv, projectID, "lc-restart-1")
 	ls.SetAgentWriteObserver(nil)
 
-	srv.startLifecycleEvents(context.Background())
-	srv.lifecycleEvents.mu.Lock()
-	done := srv.lifecycleEvents.done
-	srv.lifecycleEvents.mu.Unlock()
+	done := srv.startLifecycleEvents(context.Background())
 	require.NotNil(t, done)
 	select {
 	case <-done:
