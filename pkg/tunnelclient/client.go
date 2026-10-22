@@ -46,8 +46,8 @@ const (
 
 // Scope values reported for a credential.
 const (
-	// ScopeHub is an interactive user login (a stored OAuth login): the
-	// user's own permissions on the hub.
+	// ScopeHub is an interactive user login (a stored OAuth login) or the
+	// development token: the user's own permissions on the hub.
 	ScopeHub = "hub"
 	// ScopeUnknown is a credential whose scope the CLI holds no
 	// non-secret record of. The hub decides per tunnel.
@@ -108,15 +108,18 @@ type ScopeReporter interface {
 	Scope(cred Credential) string
 }
 
-// DefaultScope reports ScopeHub only for an interactive user login (a
-// stored OAuth login) and ScopeUnknown otherwise, including the
-// development token. It never reads the secret or guesses; unknown is
-// never treated as hub or as any broader scope.
+// DefaultScope reports ScopeHub for an interactive user login (a stored
+// OAuth login) and for the development token, which the hub accepts as
+// the development user with that user's own permissions, and ScopeUnknown
+// otherwise: a token from the environment may be a scoped user access
+// token. It never reads the secret or guesses; unknown is never treated as
+// hub or as any broader scope.
 type DefaultScope struct{}
 
 // Scope implements ScopeReporter.
 func (DefaultScope) Scope(cred Credential) string {
-	if cred.Kind == CredentialOAuth {
+	switch cred.Kind {
+	case CredentialOAuth, CredentialDev:
 		return ScopeHub
 	}
 	return ScopeUnknown
