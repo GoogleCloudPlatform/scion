@@ -796,3 +796,32 @@ func TestAgentScheduleScope_HealthPausedEmptyWithoutScope(t *testing.T) {
 	}
 	assert.Zero(t, reads.reads, "the store is not read")
 }
+
+// An agent's health summary scan of hub-paused schedules reads only the
+// ones it holds in its own project, so rows it cannot see do not use up the
+// scan limit.
+func TestAgentScheduleScope_HealthPausedScanSkipsUnheldRows(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour)
+	held := storeAgentScopeScheduleAt(t, s, projectID, "scope-paused-scan-held", holderCallerAgent, store.ScheduleStatusActive, base)
+	require.NoError(t, s.UpdateScheduleStatus(ctx, held.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted))
+	for i, h := range []agentScopeHolder{holderOtherAgent, holderUser, holderLegacy} {
+		at := base.Add(time.Duration(i+1) * time.Minute)
+		sc := storeAgentScopeScheduleAt(t, s, projectID, "scope-paused-scan-"+string(h), h, store.ScheduleStatusActive, at)
+		require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted))
+	}
+	prevScan, prevPage := healthSummaryScheduleScanLimit, healthSummarySchedulePageSize
+	healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = 1, 1
+	t.Cleanup(func() { healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = prevScan, prevPage })
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), agentScopeCaller(projectID)))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	require.Len(t, sec.Paused, 1)
+	assert.Equal(t, held.ID, sec.Paused[0].ID)
+	assert.Equal(t, 1, sec.PausedTotal)
+	assert.False(t, sec.PausedScanLimited)
+	assert.False(t, sec.PausedUnavailable)
+}
