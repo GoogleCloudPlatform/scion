@@ -199,6 +199,7 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 ARG TARGETARCH
 ARG BUILDARCH
 RUN GO_MIN_VERSION="${GO_MIN_VERSION}" \
+    HELM_VERSION="${HELM_VERSION}" \
     TARGETARCH="${TARGETARCH}" \
     BUILDARCH="${BUILDARCH}" \
     /opt/scion-image-build/lib/verify-base-contract.sh
