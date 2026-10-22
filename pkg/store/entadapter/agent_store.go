@@ -279,9 +279,19 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 
 // CreateAgent creates a new agent record.
 func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+	// With an observer installed outside a transaction, write through a
+	// copy of s on a new transaction (rolled back unless committed below),
+	// so the row and its lifecycle rows commit together; the same idiom as
+	// DeleteAgent.
 	obs := s.lifecycle.load()
-	if obs != nil && !s.inTx {
-		return s.withLifecycleTx(ctx, func(ts *AgentStore) error { return ts.CreateAgent(ctx, a) })
+	ambient := s.entTx
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if tx != ambient {
+		s = &AgentStore{client: client, inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
 	}
 	uid, err := parseUUID(a.ID)
 	if err != nil {
@@ -415,6 +425,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		return err
 	}
 
+	if err := commitLifecycleWriteTx(tx, ambient); err != nil {
+		return err
+	}
 	a.Created = created.Created
 	a.Updated = created.Updated
 	return nil

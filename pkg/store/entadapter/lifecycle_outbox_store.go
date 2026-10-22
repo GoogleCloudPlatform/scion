@@ -676,26 +676,6 @@ func deleteProjectLifecycleCursors(ctx context.Context, client *ent.Client, proj
 	return err
 }
 
-// withLifecycleTx runs fn on a copy of s inside a new transaction and
-// commits it when fn returns nil. An observed writer called outside any
-// transaction uses it so the row write and its lifecycle rows commit
-// together.
-func (s *AgentStore) withLifecycleTx(ctx context.Context, fn func(ts *AgentStore) error) error {
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return markTransient(fmt.Errorf("begin transaction: %w", err))
-	}
-	defer func() { _ = tx.Rollback() }()
-	ts := &AgentStore{client: tx.Client(), inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
-	if err := fn(ts); err != nil {
-		return markTransient(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return markTransient(fmt.Errorf("commit transaction: %w", err))
-	}
-	return nil
-}
-
 // lifecycleWriteTx returns the client an observed writer writes with: its
 // own when it already runs in a transaction or no observer is installed,
 // otherwise a new transaction, so the row and its lifecycle rows commit

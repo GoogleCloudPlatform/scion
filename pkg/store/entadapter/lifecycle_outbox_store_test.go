@@ -193,6 +193,74 @@ func TestLifecycleStore_LabelRoundTripAtAPILimits(t *testing.T) {
 	assert.Equal(t, in, evs[0].Metadata.Labels.Map(), "labels round trip exactly at the API limits")
 }
 
+// panickingObserver panics inside the writer's transaction.
+type panickingObserver struct{ value any }
+
+func (o panickingObserver) ObserveAgentWrite(context.Context, store.LifecycleTx, store.AgentWrite) error {
+	panic(o.value)
+}
+
+// TestLifecycleStore_CreateAgentPanicRollsBack: a panic inside CreateAgent's
+// own transaction (observer installed, no ambient transaction) propagates
+// unchanged and rolls everything back. The transaction is rolled back by
+// default unless the success path commits it, so the agent row can never
+// commit without its outbox rows (wp1s1-ci-fix R1).
+func TestLifecycleStore_CreateAgentPanicRollsBack(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	before := lifecycleSnapshot(t, f.cs)
+	sentinel := &struct{ name string }{"observer panic"}
+	f.cs.SetAgentWriteObserver(panickingObserver{value: sentinel})
+	a := makeAgent(f.projectID, "lc-panic")
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		_ = f.cs.CreateAgent(ctx, a)
+	}()
+	require.Same(t, sentinel, got, "the original panic value is re-panicked")
+	_, err := f.cs.GetAgent(ctx, a.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the agent row must not commit")
+	assert.Equal(t, before, lifecycleSnapshot(t, f.cs), "no outbox row or cursor may move")
+
+	// The store stays usable afterwards (the transaction was released).
+	f.cs.SetAgentWriteObserver(f.obs)
+	b := f.create("lc-after-panic")
+	evs, _ := lifecycleEvents(t, f.cs, b.ID)
+	assert.Equal(t, "created@1", lcSeq(evs))
+}
+
+// TestLifecycleWriteTx_PassThroughAndOwnTx: in an ambient transaction, or
+// with no observer, lifecycleWriteTx writes through the store's own client
+// and transaction; outside a transaction with an observer it opens a new one.
+func TestLifecycleWriteTx_PassThroughAndOwnTx(t *testing.T) {
+	f := newLifecycleFixture(t)
+	ctx := context.Background()
+	as := f.cs.AgentStore
+
+	client, tx, done, err := as.lifecycleWriteTx(ctx, nil)
+	require.NoError(t, err)
+	done()
+	assert.Same(t, as.client, client, "no observer: the store's own client")
+	assert.Nil(t, tx)
+
+	require.NoError(t, f.cs.WithTx(ctx, func(txs store.Store) error {
+		inner := txs.(*CompositeStore).AgentStore
+		c, x, d, err := inner.lifecycleWriteTx(ctx, f.obs)
+		require.NoError(t, err)
+		d()
+		assert.Same(t, inner.client, c, "ambient transaction: its client")
+		assert.Same(t, inner.entTx, x, "ambient transaction: no new one")
+		require.NotNil(t, x)
+		return nil
+	}))
+
+	client, tx, done, err = as.lifecycleWriteTx(ctx, f.obs)
+	require.NoError(t, err)
+	assert.NotNil(t, tx, "outside a transaction with an observer: a new one")
+	assert.NotSame(t, as.client, client)
+	done() // rolled back unless committed
+}
+
 func TestLifecycleStore_CreateOutsideTxIsObserved(t *testing.T) {
 	f := newLifecycleFixture(t)
 	a := makeAgent(f.projectID, "lc-notx")
