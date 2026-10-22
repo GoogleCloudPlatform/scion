@@ -571,19 +571,41 @@ func TestAgentScheduleScope_ListPagesHeldRowsFirst(t *testing.T) {
 	assert.Equal(t, 1, events.TotalCount)
 }
 
-// scheduledListReadStore fails every schedule and scheduled-event list read
-// and counts them.
+// setupScheduleTestWithStore is setupScheduleTest with wrap installed on
+// srv.store (installStoreFault) before any setup, so a test arms the
+// wrapper with the returned switch instead of reassigning srv.store.
+func setupScheduleTestWithStore[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*Server, store.Store, string, W, *storeFaultSwitch) {
+	t.Helper()
+	srv, s := testServer(t)
+	wrapped, fault := installStoreFault(t, srv, wrap)
+	srv, s, projectID := initScheduleTest(t, srv, s)
+	return srv, s, projectID, wrapped, fault
+}
+
+// scheduledListReadStore, once its switch is armed, fails every schedule
+// and scheduled-event list read and counts them.
 type scheduledListReadStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	reads int
 }
 
-func (f *scheduledListReadStore) ListSchedules(context.Context, store.ScheduleFilter, store.ListOptions) (*store.ListResult[store.Schedule], error) {
+func newScheduledListReadStore(inner store.Store, fault *storeFaultSwitch) *scheduledListReadStore {
+	return &scheduledListReadStore{Store: inner, fault: fault}
+}
+
+func (f *scheduledListReadStore) ListSchedules(ctx context.Context, filter store.ScheduleFilter, opts store.ListOptions) (*store.ListResult[store.Schedule], error) {
+	if !f.fault.Active() {
+		return f.Store.ListSchedules(ctx, filter, opts)
+	}
 	f.reads++
 	return nil, errors.New("schedule list read")
 }
 
-func (f *scheduledListReadStore) ListScheduledEvents(context.Context, store.ScheduledEventFilter, store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+func (f *scheduledListReadStore) ListScheduledEvents(ctx context.Context, filter store.ScheduledEventFilter, opts store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+	if !f.fault.Active() {
+		return f.Store.ListScheduledEvents(ctx, filter, opts)
+	}
 	f.reads++
 	return nil, errors.New("scheduled event list read")
 }
@@ -592,16 +614,14 @@ func (f *scheduledListReadStore) ListScheduledEvents(context.Context, store.Sche
 // scheduled-event lists and its health summary section are empty, carry no
 // cursor or count, and do not read the store.
 func TestAgentScheduleScope_EmptyAgentIDListsNothing(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
+	srv, s, projectID, reads, fault := setupScheduleTestWithStore(t, newScheduledListReadStore)
 	storeAgentScopeSchedule(t, s, projectID, "scope-empty-id-legacy", holderLegacy, store.ScheduleStatusActive)
 	noID := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: ""},
 		ProjectID: projectID,
 		Scopes:    []AgentTokenScope{ScopeProjectRead},
 	}}
-	reads := &scheduledListReadStore{Store: s}
-	srv.store = reads
-	t.Cleanup(func() { srv.store = s })
+	fault.Arm()
 
 	rec := doAuthoredScheduleRequest(t, srv, noID, projectID, "", http.MethodGet, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -655,17 +675,29 @@ func TestAgentScheduleScope_HealthScanSkipsUnheldRows(t *testing.T) {
 	assert.False(t, sec.ScanLimited)
 }
 
-// scheduledListWideStore lists schedules and scheduled events without the
-// InitiatorAgentID and ProjectID filters, as a store that ignored them would.
-type scheduledListWideStore struct{ store.Store }
+// scheduledListWideStore, once its switch is armed, lists schedules and
+// scheduled events without the InitiatorAgentID and ProjectID filters, as a
+// store that ignored them would.
+type scheduledListWideStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func newScheduledListWideStore(inner store.Store, fault *storeFaultSwitch) scheduledListWideStore {
+	return scheduledListWideStore{Store: inner, fault: fault}
+}
 
 func (w scheduledListWideStore) ListSchedules(ctx context.Context, f store.ScheduleFilter, o store.ListOptions) (*store.ListResult[store.Schedule], error) {
-	f.InitiatorAgentID, f.ProjectID = "", ""
+	if w.fault.Active() {
+		f.InitiatorAgentID, f.ProjectID = "", ""
+	}
 	return w.Store.ListSchedules(ctx, f, o)
 }
 
 func (w scheduledListWideStore) ListScheduledEvents(ctx context.Context, f store.ScheduledEventFilter, o store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
-	f.InitiatorAgentID, f.ProjectID = "", ""
+	if w.fault.Active() {
+		f.InitiatorAgentID, f.ProjectID = "", ""
+	}
 	return w.Store.ListScheduledEvents(ctx, f, o)
 }
 
@@ -674,7 +706,7 @@ func (w scheduledListWideStore) ListScheduledEvents(ctx context.Context, f store
 // scheduled-event list and the health summary still show only the row the
 // agent holds.
 func TestAgentScheduleScope_RowDecisionHidesRowsStoreReturns(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
+	srv, s, projectID, _, fault := setupScheduleTestWithStore(t, newScheduledListWideStore)
 	ctx := context.Background()
 	ranAt := time.Now().UTC().Add(-time.Minute)
 	ids := map[agentScopeHolder]string{}
@@ -685,8 +717,7 @@ func TestAgentScheduleScope_RowDecisionHidesRowsStoreReturns(t *testing.T) {
 		ids[h] = sc.ID
 		evtIDs[h] = storeAgentScopeEvent(t, s, projectID, h).ID
 	}
-	srv.store = scheduledListWideStore{Store: s}
-	t.Cleanup(func() { srv.store = s })
+	fault.Arm()
 	caller := agentScopeCaller(projectID)
 
 	rec := doAuthoredScheduleRequest(t, srv, caller, projectID, "", http.MethodGet, nil)
@@ -715,11 +746,9 @@ func TestAgentScheduleScope_RowDecisionHidesRowsStoreReturns(t *testing.T) {
 // An agent whose project claim is not a project ID reads no schedules in
 // its health summary: the section is empty and the store is not read.
 func TestAgentScheduleScope_HealthNonUUIDProjectClaimIsEmpty(t *testing.T) {
-	srv, s, _ := setupScheduleTest(t)
+	srv, _, _, reads, fault := setupScheduleTestWithStore(t, newScheduledListReadStore)
 	agent := authzHelperAgent("not-a-project-id", ScopeProjectRead)
-	reads := &scheduledListReadStore{Store: s}
-	srv.store = reads
-	t.Cleanup(func() { srv.store = s })
+	fault.Arm()
 
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
 	r = r.WithContext(contextWithIdentity(r.Context(), agent))
@@ -739,7 +768,7 @@ func TestAgentScheduleScope_HealthNonUUIDProjectClaimIsEmpty(t *testing.T) {
 // holds. A schedule the agent holds that a user paused (no reason) is not a
 // hub-paused schedule and is not listed.
 func TestAgentScheduleScope_HealthPausedShowsHeldRows(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
+	srv, s, projectID, _, fault := setupScheduleTestWithStore(t, newScheduledListWideStore)
 	ids := map[agentScopeHolder]string{}
 	for _, h := range agentScopeHolders {
 		sc := storeAgentScopeSchedule(t, s, projectID, "scope-paused-"+string(h), h, store.ScheduleStatusActive)
@@ -758,8 +787,7 @@ func TestAgentScheduleScope_HealthPausedShowsHeldRows(t *testing.T) {
 	assert.Equal(t, ids[holderCallerAgent], sec.Paused[0].ID)
 	assert.Equal(t, 1, sec.PausedTotal)
 
-	srv.store = scheduledListWideStore{Store: s}
-	t.Cleanup(func() { srv.store = s })
+	fault.Arm()
 	sec, err = srv.healthSummarySchedules(r)
 	require.NoError(t, err)
 	require.Len(t, sec.Paused, 1)
@@ -770,7 +798,7 @@ func TestAgentScheduleScope_HealthPausedShowsHeldRows(t *testing.T) {
 // An agent caller with an empty ID, or whose project claim is not a project
 // ID, gets an empty (not null) hub-paused list, and the store is not read.
 func TestAgentScheduleScope_HealthPausedEmptyWithoutScope(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
+	srv, s, projectID, reads, fault := setupScheduleTestWithStore(t, newScheduledListReadStore)
 	held := storeAgentScopeSchedule(t, s, projectID, "scope-paused-no-scope", holderCallerAgent, store.ScheduleStatusActive)
 	require.NoError(t, s.UpdateScheduleStatus(context.Background(), held.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonCreatorDeleted))
 	noID := &agentIdentityWrapper{&AgentTokenClaims{
@@ -779,9 +807,7 @@ func TestAgentScheduleScope_HealthPausedEmptyWithoutScope(t *testing.T) {
 		Scopes:    []AgentTokenScope{ScopeProjectRead},
 	}}
 	nonUUID := authzHelperAgent("not-a-project-id", ScopeProjectRead)
-	reads := &scheduledListReadStore{Store: s}
-	srv.store = reads
-	t.Cleanup(func() { srv.store = s })
+	fault.Arm()
 
 	for _, caller := range []Identity{noID, nonUUID} {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
