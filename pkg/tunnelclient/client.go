@@ -345,6 +345,8 @@ type client struct {
 	cur      *session
 	sessions []*session
 	tunnels  map[*tunnelEntry]struct{}
+	// listener is the open --local-port listener, or nil.
+	listener *ListenerRecord
 	started  time.Time
 	record   RecordWriter
 	pubSeq   uint64 // records built, guarded by mu
@@ -570,6 +572,9 @@ func (c *client) publish() {
 		}
 		rec.Tunnels = append(rec.Tunnels, tr)
 	}
+	if c.listener != nil {
+		rec.Listeners = []ListenerRecord{*c.listener}
+	}
 	c.mu.Unlock()
 	for id := range ids {
 		rec.SessionIDs = append(rec.SessionIDs, id)
@@ -680,6 +685,9 @@ func (c *client) runListener(ctx context.Context) error {
 	} else {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "Forwarding %s to port %d of agent %s\n", ln.Addr(), c.req.Port, c.req.Agent)
 	}
+	// The listener is listed in the status record while it accepts.
+	c.setListener(ln.Addr())
+	defer c.setListener(nil)
 	if c.req.Ready != nil {
 		c.req.Ready(ln.Addr())
 	}
@@ -727,8 +735,28 @@ func (c *client) runListener(ctx context.Context) error {
 	case err := <-c.lost:
 		return err
 	case err := <-fatal:
+		c.setListener(nil)
 		return c.stopAccepting(ctx, ln, acceptDone, &conns, &open, err)
 	}
+}
+
+// setListener records the listener accepting on addr, or none for nil,
+// and publishes the record.
+func (c *client) setListener(addr net.Addr) {
+	var l *ListenerRecord
+	if tcp, ok := addr.(*net.TCPAddr); ok {
+		l = &ListenerRecord{
+			Agent:     c.req.Agent,
+			Project:   c.req.Project,
+			Kind:      c.req.Kind(),
+			LocalPort: tcp.Port,
+			OpenedAt:  c.cfg.now().UTC(),
+		}
+	}
+	c.mu.Lock()
+	c.listener = l
+	c.mu.Unlock()
+	c.publish()
 }
 
 // stopAccepting ends a listener after a request failure no later
