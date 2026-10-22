@@ -405,7 +405,7 @@ var asyncStartPhaseReadAllowlist = map[string]int{
 	"handlers_agent_lifecycle.go:handleStopAllAgents: if agent.Phase != string(state.PhaseRunning) {":                                                                         1,
 	"handlers_agent_lifecycle.go:handleStopAllAgents: if startInFlightPhase(agent.Phase) {":                                                                                   1,
 	"handlers_agent_lifecycle.go:updateAgentStatus: oldPhase := agent.Phase":                                                                                                  1,
-	"start_claim.go:startAgentCore: (agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)":                                                      1,
+	"start_claim.go:startAgentCore: createsContainer := agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart":                                    1,
 	"start_claim.go:writeStartedStatus: phase := agent.Phase":                                                                                                                 1,
 	"start_dispatch.go:beginStartDispatch: IfPhase: agent.Phase,":                                                                                                             1,
 	"start_dispatch.go:beginStartDispatch: if !isBrokerQuotaCountedPhase(agent.Phase) {":                                                                                      1,
