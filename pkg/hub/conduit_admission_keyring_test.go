@@ -135,6 +135,7 @@ func admReplica(t *testing.T, st store.Store, k *keyring.Keyring) *Server {
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)
 	srv.SetHubID("test-hub-id")
+	waitUserScopedDataSweep(t, srv)
 	return srv
 }
 
@@ -152,6 +153,10 @@ func newAdmPair(t *testing.T, ka, kb *keyring.Keyring) *admPair {
 	now := relayClock(t, admT0)
 	st, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
+	// As testServerOnMigratedStore: the fixture creates agents directly,
+	// and the store is closed after both replicas shut down (LIFO).
+	_ = st.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+	t.Cleanup(func() { _ = st.Close() })
 	srvA := admReplica(t, st, ka)
 	srvB := admReplica(t, st, kb)
 	cf := newConduitFixtureOn(t, srvA, st)
