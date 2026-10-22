@@ -264,27 +264,31 @@ export class ScionArtifactPublishDialog extends LitElement {
       let globalOk = false;
       const withGlobal = (list: ProjectChoice[]): ProjectChoice[] =>
         global && globalOk ? [global, ...list] : list;
-      const globalCheck = (async (): Promise<void> => {
+      // Nothing is written once the load is stale or aborted (a failure on
+      // either side aborts the other).
+      const live = (): boolean => gen === this.choicesGen && !signal.aborted;
+      const globalCheck = async (): Promise<void> => {
         if (!global || !(await canPublishIn(global.id, signal))) return;
-        if (gen !== this.choicesGen) return;
+        if (!live()) return;
         globalOk = true;
         this.choices = withGlobal(others);
         if (!this.userPicked && !this.chosen) this.chosen = global.id;
-      })();
-      // Awaited at the end; a failure meanwhile must not go unhandled.
-      void globalCheck.catch(() => undefined);
-      const rest = await listReadableProjects({ skip: global?.id, signal });
-      if (gen !== this.choicesGen) return;
-      this.choicesTruncated = rest.truncated;
-      others = await filterPublishable(rest.projects, {
-        onUpdate: (sofar) => {
-          if (gen !== this.choicesGen) return;
-          others = sofar;
-          this.choices = withGlobal(sofar);
-        },
-        signal,
-      });
-      await globalCheck;
+      };
+      const listAndFilter = async (): Promise<void> => {
+        const rest = await listReadableProjects({ skip: global?.id, signal });
+        if (!live()) return;
+        this.choicesTruncated = rest.truncated;
+        others = await filterPublishable(rest.projects, {
+          onUpdate: (sofar) => {
+            if (!live()) return;
+            others = sofar;
+            this.choices = withGlobal(sofar);
+          },
+          signal,
+        });
+      };
+      // The first failure on either side surfaces at once.
+      await Promise.all([globalCheck(), listAndFilter()]);
       if (gen !== this.choicesGen) return;
       const publishable = withGlobal(others);
       this.choices = publishable;
@@ -298,6 +302,9 @@ export class ScionArtifactPublishDialog extends LitElement {
       );
     } catch (err) {
       if (gen !== this.choicesGen) return;
+      // Stop the other side, and keep Publish off while the error shows.
+      abort.abort();
+      this.chosen = '';
       this.choicesError = err instanceof Error ? err.message : 'Could not load projects';
     } finally {
       if (gen === this.choicesGen) this.choicesLoading = false;

@@ -61,6 +61,12 @@ function mockFetch(
     signals?: AbortSignal[];
     /** The paged list (not the ?slug= lookup) never answers. */
     holdList?: boolean;
+    /** The paged list answers with this error status. */
+    listStatus?: number;
+    /** canCreate checks of these ids answer 500. */
+    failScope?: Set<string>;
+    /** Global's canCreate check answers only once this resolves. */
+    gate?: Promise<void>;
   } = {}
 ): Mock {
   const m: Mock = { calls: [], posted: [] };
@@ -87,12 +93,23 @@ function mockFetch(
           return Promise.resolve(json({ projects: found }));
         }
         if (opts.holdList) return new Promise<Response>(() => {});
+        if (opts.listStatus) {
+          return Promise.resolve(
+            json({ error: { code: 'internal', message: 'list boom' } }, opts.listStatus)
+          );
+        }
         return Promise.resolve(json({ projects, nextCursor: opts.nextCursor }));
       }
       if (method === 'GET' && url.startsWith('/api/v1/artifacts?')) {
         const scope = new URL(url, 'http://x').searchParams.get('scope') ?? '';
         if (init?.signal) opts.signals?.push(init.signal);
         if (opts.hold?.has(scope)) return new Promise<Response>(() => {});
+        if (opts.failScope?.has(scope)) {
+          return Promise.resolve(json({ error: { code: 'internal', message: 'check boom' } }, 500));
+        }
+        if (opts.gate && scope === 'g-1') {
+          return opts.gate.then(() => json({ artifacts: [], canCreate: publishable.has(scope) }));
+        }
         return Promise.resolve(json({ artifacts: [], canCreate: publishable.has(scope) }));
       }
       if (method === 'POST' && url === '/api/v1/artifacts') {
@@ -283,6 +300,50 @@ describe('publish dialog project picker', () => {
     expect(optionIds(el)).toEqual(['g-1']);
     expect(picker(el).value).toBe('g-1');
     expect(el.shadowRoot!.querySelector('.choices-note.checking')).not.toBeNull();
+  });
+
+  it('shows a failed global check at once, without waiting for the other projects', async () => {
+    mockFetch([GLOBAL, WEB], new Set(['w-1']), 200, {
+      holdList: true,
+      failScope: new Set(['g-1']),
+    });
+    const el = await openDialog();
+    expect(el.shadowRoot!.querySelector('.project sl-alert')!.textContent).toContain('check boom');
+    expect(picker(el)).toBeNull();
+  });
+
+  it('a global pass after the list failed does not preselect behind the error', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const signals: AbortSignal[] = [];
+    mockFetch([GLOBAL, WEB], new Set(['g-1', 'w-1']), 200, { listStatus: 500, gate, signals });
+    const el = await openDialog();
+    expect(el.shadowRoot!.querySelector('.project sl-alert')!.textContent).toContain('list boom');
+    // The global check still in flight was cancelled.
+    expect(signals[0].aborted).toBe(true);
+    release();
+    await settle(el);
+    expect(picker(el)).toBeNull();
+    expect((el as unknown as { chosen: string }).chosen).toBe('');
+    await fillFile(el);
+    expect(disabled(publishButton(el))).toBe(true);
+  });
+
+  it('moves focus back to Retry when Retry fails again', async () => {
+    mockFetch([WEB], new Set(['w-1']), 500);
+    const el = await openDialog();
+    const focused: Element[] = [];
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement
+    ) {
+      focused.push(this);
+    });
+    (el.shadowRoot!.querySelector('.project sl-alert sl-button') as HTMLElement).click();
+    await settle(el);
+    spy.mockRestore();
+    const retry = el.shadowRoot!.querySelector('.project sl-alert sl-button');
+    expect(retry).not.toBeNull();
+    expect(focused).toContain(retry);
   });
 
   it('moves focus to the Project field after a successful Retry', async () => {
