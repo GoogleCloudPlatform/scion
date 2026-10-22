@@ -27,6 +27,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeInstancesClient and friends are a purpose-built double for
@@ -37,9 +38,25 @@ import (
 type fakeInstanceOperation struct {
 	instance *runpb.Instance
 	waitErr  error
+	// name is the operation name Name reports.
+	name string
+	// blocks makes Wait block until its ctx ends, then return blockErr,
+	// or the ctx's error when blockErr is nil.
+	blocks   bool
+	blockErr error
 }
 
+// Name reports the operation name, as the Cloud Run client's operations do.
+func (o *fakeInstanceOperation) Name() string { return o.name }
+
 func (o *fakeInstanceOperation) Wait(ctx context.Context, opts ...gax.CallOption) (*runpb.Instance, error) {
+	if o.blocks {
+		<-ctx.Done()
+		if o.blockErr != nil {
+			return nil, o.blockErr
+		}
+		return nil, ctx.Err()
+	}
 	if o.waitErr != nil {
 		return nil, o.waitErr
 	}
@@ -64,6 +81,15 @@ func (it *fakeInstanceIterator) Next() (*runpb.Instance, error) {
 	return inst, nil
 }
 
+// fakeGetResult is one canned GetInstance result.
+type fakeGetResult struct {
+	inst *runpb.Instance
+	err  error
+}
+
+// fakeDeleteOpName is the name of every delete operation the fake returns.
+const fakeDeleteOpName = "projects/test-project/locations/us-central1/operations/delete-op-1"
+
 type fakeInstancesClient struct {
 	// Canned responses.
 	getInstance *runpb.Instance
@@ -75,6 +101,31 @@ type fakeInstancesClient struct {
 	waitErr     error // applied to whichever operation is returned
 	listResult  []*runpb.Instance
 	listErr     error
+
+	// Launch cleanup extensions (ptone/scion#4761).
+	// getSeq and deleteErrSeq are per-call results, consumed in order;
+	// once exhausted, getInstance/getErr and deleteErr apply.
+	getSeq       []fakeGetResult
+	deleteErrSeq []error
+	// createBlocks and deleteBlocks make the call block until its ctx
+	// ends and return the ctx's error.
+	createBlocks bool
+	deleteBlocks bool
+	// createWaitErr and deleteWaitErr, when set, replace waitErr for the
+	// create and the delete operation.
+	createWaitErr error
+	deleteWaitErr error
+	// deleteWaitBlocks makes the delete operation's Wait block until its
+	// ctx ends, then return deleteWaitBlockErr, or the ctx's error when
+	// that is nil (ptone/scion#5154).
+	deleteWaitBlocks   bool
+	deleteWaitBlockErr error
+	// onCreate, when set, runs at the start of CreateInstance.
+	onCreate func()
+	// reconcilingReads is the number of further GetInstance calls that
+	// report the instance Reconciling; while it is above 0 DeleteInstance
+	// is refused with FailedPrecondition.
+	reconcilingReads int
 
 	// Recorded requests.
 	getReqs    []*runpb.GetInstanceRequest
@@ -88,16 +139,37 @@ type fakeInstancesClient struct {
 
 func (c *fakeInstancesClient) GetInstance(ctx context.Context, req *runpb.GetInstanceRequest, opts ...gax.CallOption) (*runpb.Instance, error) {
 	c.getReqs = append(c.getReqs, req)
-	if c.getErr != nil {
-		return nil, c.getErr
+	inst, err := c.getInstance, c.getErr
+	if len(c.getSeq) > 0 {
+		inst, err = c.getSeq[0].inst, c.getSeq[0].err
+		c.getSeq = c.getSeq[1:]
 	}
-	return c.getInstance, nil
+	if err != nil {
+		return nil, err
+	}
+	if inst != nil && c.reconcilingReads > 0 {
+		c.reconcilingReads--
+		cp := proto.Clone(inst).(*runpb.Instance)
+		cp.Reconciling = true
+		return cp, nil
+	}
+	return inst, nil
 }
 
 func (c *fakeInstancesClient) CreateInstance(ctx context.Context, req *runpb.CreateInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.createReqs = append(c.createReqs, req)
+	if c.onCreate != nil {
+		c.onCreate()
+	}
+	if c.createBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if c.createErr != nil {
 		return nil, c.createErr
+	}
+	if c.createWaitErr != nil {
+		return &fakeInstanceOperation{waitErr: c.createWaitErr}, nil
 	}
 	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
 }
@@ -120,10 +192,28 @@ func (c *fakeInstancesClient) StopInstance(ctx context.Context, req *runpb.StopI
 
 func (c *fakeInstancesClient) DeleteInstance(ctx context.Context, req *runpb.DeleteInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.deleteReqs = append(c.deleteReqs, req)
-	if c.deleteErr != nil {
-		return nil, c.deleteErr
+	if c.deleteBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	if c.reconcilingReads > 0 {
+		return nil, status.Error(codes.FailedPrecondition, "instance is reconciling")
+	}
+	err := c.deleteErr
+	if len(c.deleteErrSeq) > 0 {
+		err = c.deleteErrSeq[0]
+		c.deleteErrSeq = c.deleteErrSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.deleteWaitBlocks {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, blocks: true, blockErr: c.deleteWaitBlockErr}, nil
+	}
+	if c.deleteWaitErr != nil {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.deleteWaitErr}, nil
+	}
+	return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.waitErr}, nil
 }
 
 func (c *fakeInstancesClient) ListInstances(ctx context.Context, req *runpb.ListInstancesRequest, opts ...gax.CallOption) cloudrun.InstanceIterator {
@@ -149,16 +239,31 @@ func newFakeCloudRunRuntime(t *testing.T, fake *fakeInstancesClient) *CloudRunRu
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) {
 		return fake, nil
 	}
+	rt.provisionNFS = stubCloudRunNFSProvision
 	return rt
 }
 
-// runConfigForTest returns a RunConfig that does not exercise NFS provisioning,
-// so Run reaches the Instances API without touching the filesystem.
+// stubCloudRunNFSProvision stands in for provisionCloudRunNFS: it returns
+// fixed NFS export paths without touching the filesystem, so Run reaches
+// the Instances API on the NFS backend.
+func stubCloudRunNFSProvision(context.Context, RunConfig, string, int, int) (*cloudRunNFSProvisionPaths, error) {
+	return &cloudRunNFSProvisionPaths{
+		server:              "10.0.0.2",
+		workspaceExportPath: "/ws/projects/proj/workspace",
+		homeExportPath:      "/ws/projects/proj/agents/agent-1/home",
+		secretsExportPath:   "/ws/projects/proj/agents/agent-1/staged",
+	}, nil
+}
+
+// runConfigForTest returns a RunConfig on the NFS backend, the only one Run
+// accepts. With newFakeCloudRunRuntime's provisioning stub, Run reaches the
+// Instances API without touching the filesystem.
 func runConfigForTest() RunConfig {
 	return RunConfig{
-		Name:   "test-agent",
-		Image:  "docker.io/scion/agent:latest",
-		Labels: map[string]string{"agent_id": "agent-1"},
+		Name:                 "test-agent",
+		Image:                "docker.io/scion/agent:latest",
+		Labels:               map[string]string{"agent_id": "agent-1"},
+		WorkspaceBackendName: "nfs",
 	}
 }
 
@@ -223,7 +328,11 @@ func TestCloudRunRun_CreatesInstanceWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
+// TestCloudRunRun_NoSystemAnnotations checks that the built Instance carries
+// no run.googleapis.com/ annotation. The Instances API rejects system
+// annotations (including run.googleapis.com/restart-policy) with
+// INVALID_ARGUMENT, so any such key makes every create fail.
+func TestCloudRunRun_NoSystemAnnotations(t *testing.T) {
 	fake := &fakeInstancesClient{getErr: notFoundErr()}
 	rt := newFakeCloudRunRuntime(t, fake)
 
@@ -236,13 +345,13 @@ func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
 		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
 	}
 	inst := fake.createReqs[0].Instance
-	if inst.Annotations == nil {
-		t.Fatal("Instance.Annotations is nil, expected restart policy annotation")
+	if inst == nil {
+		t.Fatal("CreateInstance Instance is nil")
 	}
-	const wantKey = "run.googleapis.com/restart-policy"
-	const wantVal = "Always"
-	if got := inst.Annotations[wantKey]; got != wantVal {
-		t.Errorf("Instance.Annotations[%q] = %q, want %q", wantKey, got, wantVal)
+	for k, v := range inst.Annotations {
+		if strings.HasPrefix(k, "run.googleapis.com/") {
+			t.Errorf("Instance.Annotations has system annotation %q=%q; the Instances API rejects run.googleapis.com/ annotations", k, v)
+		}
 	}
 }
 
@@ -511,9 +620,9 @@ func TestCloudRunList_FiltersByLabelsAndMapsAgentInfo(t *testing.T) {
 		if a.ContainerID != "agent-wanted-0000000000" {
 			t.Errorf("AgentInfo.ContainerID = %q, want the short instance ID", a.ContainerID)
 		}
-		// Characterization, not a normalization contract: List currently
-		// surfaces the raw Cloud Run condition string. A future status/Phase
-		// mapping fix is expected to change this assertion.
+		// List keeps the raw Cloud Run condition string as the container
+		// status; the phase mapping is covered by
+		// TestCloudRunList_MapsInstanceConditionToPhase.
 		if a.ContainerStatus != runpb.Condition_CONDITION_SUCCEEDED.String() {
 			t.Errorf("AgentInfo.ContainerStatus = %q, want %q", a.ContainerStatus, runpb.Condition_CONDITION_SUCCEEDED.String())
 		}

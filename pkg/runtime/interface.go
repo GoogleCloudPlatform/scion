@@ -92,14 +92,15 @@ type RunConfig struct {
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
-	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
-	// be applied uniformly across adapters — currently the narrowed read-only
-	// mount over the shared base repo's .git admin surface (config/hooks/info)
-	// for hub-native worktree-per-agent projects, which the broker-git
-	// worktree change currently applies to Docker only. Left empty by
-	// adapters that have not yet been extended (podman, apple); code gating on
-	// this field must fail closed (i.e. skip the mount narrowing) for any
-	// value it does not explicitly recognize.
+	// runtime-specific choices in buildCommonRunArgs that cannot yet be
+	// applied uniformly across adapters: the narrowed read-only mount over
+	// the shared base repo's .git admin surface (config/hooks/info) for
+	// hub-native worktree-per-agent projects, which the broker-git worktree
+	// change currently applies to Docker ("docker") only, and the form and
+	// condition of the shared workspace .scion/agents mask for Apple
+	// ("container"). Docker and Apple set it; Podman leaves it empty. Code
+	// gating on this field must fail closed (i.e. skip the mount narrowing)
+	// for any value it does not explicitly recognize.
 	RuntimeName string
 
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
@@ -198,8 +199,20 @@ type RunConfig struct {
 	// reported handles (the async launch's CleanupLaunch). When it is nil,
 	// the runtime cleans up as on the synchronous path, whether or not
 	// Checkpoint is set. Callers set both hooks together.
+	//
+	// A runtime whose identity is known before the create may report the
+	// handle before issuing it, provided its DeleteResource never treats a
+	// not-yet-materialised create as gone (see the runtime's notes; the
+	// cloudrun-sandbox runtime reports after its Starting state entry is
+	// written and before `sandbox run`; the Cloud Run Instances runtime
+	// reports before CreateInstance and keeps the create "in doubt" until
+	// it is observed).
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
+	// Progress is an async launch's non-blocking step hook (design wave 3
+	// §3 E-b), copied from api.StartOptions. Runtimes call it through
+	// launchHooks.progress, which is a no-op when it is nil.
+	Progress func(step, message string)
 
 	// ObserveResourceCreated, when set, is called after each true create of
 	// a launch resource, after OnResourceCreated, on both the synchronous
@@ -211,8 +224,9 @@ type RunConfig struct {
 	// the start (a flat instance latches it for its Checkpoint). It also
 	// fires for resources created before a later failure. Honoured by the
 	// runtimes that create resources through launchHooks: Docker, Podman,
-	// Apple container and Kubernetes; other runtimes (Cloud Run,
-	// substrate) do not report created resources.
+	// Apple container, Kubernetes, cloudrun-sandbox and Cloud Run
+	// Instances; other runtimes (substrate) do not report created
+	// resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
 	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
@@ -240,21 +254,92 @@ type RunConfig struct {
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
 // §3.9's step names; container runtimes keep the generic "launching" step).
+// They are the shared api.LaunchStep* values.
 const (
-	CheckpointStepSecrets   = "secrets"
-	CheckpointStepPodCreate = "pod_create"
-	CheckpointStepLaunching = "launching"
+	CheckpointStepSecrets   = api.LaunchStepSecrets
+	CheckpointStepPodCreate = api.LaunchStepPodCreate
+	CheckpointStepLaunching = api.LaunchStepLaunching
+	// CheckpointStepSandboxLayout precedes the cloudrun-sandbox runtime's
+	// host directory layout (prepareScionLayout).
+	CheckpointStepSandboxLayout = api.LaunchStepSandboxLayout
 	// CheckpointStepPreClean precedes a name-based delete of a stale
 	// resource left by an earlier agent of the same name.
-	CheckpointStepPreClean = "pre_clean"
+	CheckpointStepPreClean = api.LaunchStepPreClean
+	// CheckpointStepWorkspaceProvision, CheckpointStepInstanceStart and
+	// CheckpointStepInstanceCreate precede the Cloud Run Instances
+	// runtime's NFS provisioning, StartInstance and CreateInstance.
+	CheckpointStepWorkspaceProvision = api.LaunchStepWorkspaceProvision
+	CheckpointStepInstanceStart      = api.LaunchStepInstanceStart
+	CheckpointStepInstanceCreate     = api.LaunchStepInstanceCreate
 )
 
+// launchStepMessage returns the fixed text a runtime sends with each
+// progress step (RunConfig.Progress), or "" for a step without one. It never
+// carries runtime detail such as an image reference, pod name or namespace.
+func launchStepMessage(step string) string {
+	switch step {
+	case api.LaunchStepScheduling:
+		return "waiting to be scheduled"
+	case api.LaunchStepAwaitingCapacity:
+		return "waiting for node capacity"
+	case api.LaunchStepInitContainers:
+		return "running init containers"
+	case api.LaunchStepContainerCreate:
+		return "preparing the container (image pull, volume mounts)"
+	case api.LaunchStepContainerStart:
+		return "starting the container"
+	case api.LaunchStepHomeSync:
+		return "syncing the agent home"
+	case api.LaunchStepWorkspaceSync:
+		return "syncing the workspace"
+	case api.LaunchStepStartupGate:
+		return "starting the agent"
+	default:
+		return ""
+	}
+}
+
+// LaunchFailure is a runtime start failure the runtime could classify
+// (design wave 3 §3 E-d): Code is an api.LaunchCode* value, Step the
+// api.LaunchStep* value the launch failed in, and Reason the runtime's own
+// reason enum (e.g. the Kubernetes waiting reason "ImagePullBackOff"), never
+// free text, an image reference or an object name. Err is the full error;
+// Error returns its text unchanged, so callers that print or match the
+// error see exactly what they saw before the error was typed.
+type LaunchFailure struct {
+	Code   string
+	Step   string
+	Reason string
+	Err    error
+}
+
+// Error returns the wrapped error's text.
+func (f *LaunchFailure) Error() string {
+	if f.Err == nil {
+		return f.Code
+	}
+	return f.Err.Error()
+}
+
+// Unwrap returns the wrapped error.
+func (f *LaunchFailure) Unwrap() error { return f.Err }
+
+// newLaunchFailure wraps err as a LaunchFailure, or returns nil when err is
+// nil.
+func newLaunchFailure(code, step, reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &LaunchFailure{Code: code, Step: step, Reason: reason, Err: err}
+}
+
 // launchHooks carries RunConfig's async-launch hooks into the helpers that
-// make the resource-creating calls. Its zero value (both hooks nil, the
+// make the resource-creating calls. Its zero value (every hook nil, the
 // synchronous path) makes every method a no-op.
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	progressFn   func(step, message string)
 	observedFn   func(api.ResourceHandle)
 	// recordFn, when set, also receives every created handle. Unlike
 	// createdFn it does not make the hooks active: the Kubernetes runtime
@@ -264,7 +349,16 @@ type launchHooks struct {
 
 // launchHooks returns config's async-launch hooks.
 func (config *RunConfig) launchHooks() launchHooks {
-	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated, observedFn: config.ObserveResourceCreated}
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated, progressFn: config.Progress, observedFn: config.ObserveResourceCreated}
+}
+
+// progress reports that the launch reached step, with the step's fixed
+// message. It must not block, and is a no-op when the hook is nil.
+func (h launchHooks) progress(step string) {
+	if h.progressFn == nil {
+		return
+	}
+	h.progressFn(step, launchStepMessage(step))
 }
 
 // checkpoint is called immediately before a resource-creating call. A

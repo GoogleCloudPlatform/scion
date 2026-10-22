@@ -1,0 +1,8 @@
+{
+  "profile_map": {
+    "profile-false": "k8s-b",
+    "rt-false": "k8s-a",
+    "unset": "k8s-c"
+  },
+  "findings": []
+}

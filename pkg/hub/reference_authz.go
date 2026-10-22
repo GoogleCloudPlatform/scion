@@ -83,10 +83,13 @@ func sameConversation(msg *store.Message, threadKey, convID string) bool {
 	return convID != "" && msg.ConversationID == convID
 }
 
-// attachmentUsableIn reports whether an attachment may be sent in a
-// conversation. The rule follows the conversation kind, not a resolved
-// project (an agent DM resolves to the agent's project, but files uploaded
-// in a direct message carry no project):
+// attachmentUsableIn reports whether an attachment of the AttachmentStore
+// may be sent in a conversation. (An attachment stored as an artifact is
+// usable only as an unsent upload of the sender: artifacts.Service
+// UsableAttachment, then BindAttachment under the row lock.) The rule
+// follows the conversation kind, not a resolved project (an agent DM
+// resolves to the agent's project, but files uploaded in a direct message
+// carry no project):
 //
 //   - direct message: a file the sender uploaded in a direct message
 //     (no project, uploaded by userID)
@@ -185,6 +188,13 @@ const attachmentLinkScanLimit = 20
 //     attachmentLinkScanLimit links), whatever the file's project: a reader
 //     of the message already sees what the message carries
 //
+// A user access token (chatToken) reads no more than the message a file
+// rides on: under rule 3 the token must also pass the token rule for
+// reading that message's conversation (tokenMayReadNativeMessage), and
+// rule 1 applies to a token only while the file is linked to no message,
+// with inbox:read on a hub boundary (the boundary a project-less upload
+// needs).
+//
 // Rule 3 depends on how files get attached to messages: only through send
 // validation (attachmentUsableIn) or hub ingest from the sending agent's own
 // project (see LinkAttachmentToMessage). Any store or authorization error
@@ -193,7 +203,9 @@ func (s *Server) canReadAttachment(ctx context.Context, user UserIdentity, meta 
 	if user == nil || meta == nil {
 		return false
 	}
-	if meta.UploadedBy != "" && meta.UploadedBy == user.ID() {
+	token := chatToken(ctx)
+	uploader := meta.UploadedBy != "" && meta.UploadedBy == user.ID()
+	if uploader && token == nil {
 		return true
 	}
 	if meta.ProjectID != "" && s.canReadProject(ctx, user, meta.ProjectID) {
@@ -210,6 +222,13 @@ func (s *Server) canReadAttachment(ctx context.Context, user UserIdentity, meta 
 		slog.WarnContext(ctx, "canReadAttachment: listing linked messages failed", "attachment", meta.ID, "error", err)
 		return false
 	}
+	var check *selfScopeCheck
+	if token != nil {
+		check = s.newSelfScopeCheck(ctx, token, permInboxRead)
+		if len(ids) == 0 {
+			return uploader && check.allows("")
+		}
+	}
 	for _, id := range ids {
 		msg, err := s.store.GetMessage(ctx, id)
 		if err != nil {
@@ -219,11 +238,53 @@ func (s *Server) canReadAttachment(ctx context.Context, user UserIdentity, meta 
 			slog.WarnContext(ctx, "canReadAttachment: message lookup failed", "attachment", meta.ID, "message", id, "error", err)
 			return false
 		}
-		if s.canReadNativeMessage(ctx, user, msg) {
+		if !s.canReadNativeMessage(ctx, user, msg) {
+			continue
+		}
+		if token == nil || s.tokenMayReadNativeMessage(ctx, wcs, token, check, msg) {
 			return true
 		}
 	}
 	return false
+}
+
+// tokenMayReadNativeMessage applies the token rule for reading a
+// conversation (tokenMayReadConversation) to the conversation of a native
+// chat message user can already read: the message's conversation when it
+// has one, otherwise the conversation its thread key names (a DM, or a
+// topic's project group). check must be the inbox:read self-scope check of
+// token. Any store error answers false.
+func (s *Server) tokenMayReadNativeMessage(ctx context.Context, wcs WebChatStore, token *ScopedUserIdentity, check *selfScopeCheck, msg *store.Message) bool {
+	var conv *store.Conversation
+	switch {
+	case msg.ConversationID != "":
+		c, err := s.store.GetConversation(ctx, msg.ConversationID)
+		if err != nil || c == nil {
+			slog.WarnContext(ctx, "tokenMayReadNativeMessage: conversation lookup failed", "message", msg.ID, "error", err)
+			return false
+		}
+		conv = c
+	case strings.HasPrefix(msg.ThreadID, "dm:"):
+		conv = chatConversationRecord(msg.ThreadID, "")
+	case msg.ThreadID != "":
+		topic, err := wcs.GetTopic(ctx, msg.ThreadID)
+		if err != nil {
+			slog.WarnContext(ctx, "tokenMayReadNativeMessage: topic lookup failed", "message", msg.ID, "error", err)
+			return false
+		}
+		if topic == nil {
+			return false
+		}
+		conv = chatConversationRecord(msg.ThreadID, topic.ProjectID)
+	default:
+		return false
+	}
+	ok, err := s.tokenMayReadConversation(ctx, token, check, conv)
+	if err != nil {
+		slog.WarnContext(ctx, "tokenMayReadNativeMessage: token check failed", "message", msg.ID, "error", err)
+		return false
+	}
+	return ok
 }
 
 // canReadNativeMessage reports whether user may read a native chat message:

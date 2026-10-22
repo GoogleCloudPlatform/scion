@@ -39,8 +39,7 @@ import (
 // hub-wide passthrough default reaches an agent dispatched by a schedule on a
 // project with no project-level override, on the embedded broker.
 func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "docker")
@@ -66,8 +65,7 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *t
 // default and get passthrough, with that profile pinned onto
 // AppliedConfig.Profile.
 func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local")
@@ -98,8 +96,7 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *
 // an explicit "block", so the broker's own runtime-aware default
 // (passthrough, for Kubernetes) applies instead.
 func TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "kubernetes")
@@ -128,8 +125,7 @@ func TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesI
 // (unchanged "block" on every runtime except Kubernetes) instead of exposing
 // that broker's host identity via an unchecked passthrough.
 func TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
@@ -168,8 +164,7 @@ func setProjectDefaultGCPMode(t *testing.T, f *bypassAgentsFixture, mode string)
 // would have produced (here, an unusable SA ID that would fail dispatch if it
 // were ever looked up).
 func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -207,8 +202,7 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 // (pkg/runtimebroker/start_context_test.go), not silently become
 // "passthrough" because it looked the same as "nothing configured".
 func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -236,8 +230,7 @@ func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
 // regressed into consulting the hub default, this dispatch would fail
 // (the SA does not exist) instead of succeeding with no GCP identity.
 func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -263,8 +256,7 @@ func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *test
 // explicit block, not be skipped or treated as unset, exactly as the
 // equivalent project-default and HTTP hub-default arms already do.
 func TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -293,8 +285,7 @@ func TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock(t *testing.
 // which pins the same gate function against a broker that merely claims to
 // be embedded via its label).
 func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADifferentBroker(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	// The hub does have an embedded broker — just not the one this project
 	// dispatches to (f.broker, wired by bypassAgentsSetup's AddProjectProvider).
@@ -323,8 +314,7 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADiffer
 // instead of writing an explicit "block" record, so the two paths agree: nil
 // means "let the broker apply its own runtime-aware default".
 func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-no-hub-default"))
@@ -344,8 +334,7 @@ func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) 
 // stay an explicit record rather than being silently reinterpreted as "apply
 // the broker's runtime-aware default" on a Kubernetes-bound dispatch.
 func TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModeBlock,
@@ -378,8 +367,7 @@ func TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
 // immediate creator) as the project-default rung already uses on this path,
 // and is recorded under the hub-default audit surface.
 func TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	audit := &mockAuditLogger{}
 	f.srv.SetAuditLogger(audit)
@@ -412,8 +400,7 @@ func TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault(t *
 // cannot act as must fail the dispatch rather than silently falling back
 // to block.
 func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -438,8 +425,7 @@ func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
 // Per ptone/scion#2328, the denial leaves GCPIdentity unset rather than
 // writing an explicit "block".
 func TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeavesIdentityUnset(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local") // broker default points at docker
@@ -471,8 +457,7 @@ func TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeav
 // the pin lands on CreateInputs.Profile on this path too, and survives a
 // project active-profile change made after the grant.
 func TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges(t *testing.T) {
-	// Not parallel: concurrent ent migrate (store Migrate) writes the
-	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local")
@@ -507,4 +492,241 @@ func TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActivePro
 	require.NoError(t, err)
 	assert.Equal(t, "local", fresh.Profile,
 		"reincarnate must replay the pinned profile from CreateInputs, not re-derive the project's current active profile")
+}
+
+// TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation pins
+// the hub-default passthrough arm of applyScheduledProjectDefaultGCPIdentity
+// for a scheduled event that names no profile, on the embedded broker with a
+// registered host service account. The arm picks the effective profile (the
+// project's active profile, else the broker's default profile), lets
+// hubDefaultPassthroughAllowed grant or deny it, pins the granted profile,
+// and then calls translatePassthroughForSandbox, where the mode follows the
+// pinned profile's type. The subtests cover these cases:
+//
+//   - local profile on a broker without a cloudrun-sandbox profile:
+//     passthrough is granted and kept as passthrough.
+//   - local profile on a broker that also has a cloudrun-sandbox profile:
+//     passthrough is granted and kept as passthrough, with
+//     RequireLocalRuntime, no service-account assignment and no
+//     translation annotation.
+//   - cloudrun-sandbox as the broker's default profile, or as the project's
+//     active profile: the gate denies (not a local container runtime), so no
+//     identity is written and no translation runs.
+//
+// The persisted record is the same agent value the scheduler then hands to
+// the dispatcher, so the profile and identity checked here are the ones the
+// dispatch receives.
+func TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		hostSAEmail   = "broker-host@sched-sandbox.iam.gserviceaccount.com"
+		hostProjectID = "sched-sandbox"
+		translatedKey = "scion.dev/gcp-identity-translated-from"
+	)
+	localOnly := []store.BrokerProfile{
+		{Name: "local", Type: "docker", Available: true},
+	}
+	localAndSandbox := []store.BrokerProfile{
+		{Name: "local", Type: "docker", Available: true},
+		{Name: "sandbox", Type: "cloudrun-sandbox", Available: true},
+	}
+
+	tests := []struct {
+		name                 string
+		profiles             []store.BrokerProfile
+		brokerDefault        string
+		projectActiveProfile string
+		// wantProfile is the AppliedConfig.Profile and CreateInputs.Profile
+		// the dispatch carries.
+		wantProfile       string
+		wantInputsProfile string
+		wantMode          string // "" means GCPIdentity stays unset
+	}{
+		{
+			name:              "local profile without sandbox profile stays passthrough",
+			profiles:          localOnly,
+			brokerDefault:     "local",
+			wantProfile:       "local",
+			wantInputsProfile: "local",
+			wantMode:          store.GCPMetadataModePassthrough,
+		},
+		{
+			name:              "local profile on broker with sandbox profile stays passthrough",
+			profiles:          localAndSandbox,
+			brokerDefault:     "local",
+			wantProfile:       "local",
+			wantInputsProfile: "local",
+			wantMode:          store.GCPMetadataModePassthrough,
+		},
+		{
+			name:          "cloudrun-sandbox broker default profile is denied and not translated",
+			profiles:      localAndSandbox,
+			brokerDefault: "sandbox",
+		},
+		{
+			name:                 "cloudrun-sandbox project active profile is denied and not translated",
+			profiles:             localAndSandbox,
+			brokerDefault:        "local",
+			projectActiveProfile: "sandbox",
+			// applyProjectDefaults stamps the project's active profile; the
+			// gate pins nothing on a denial, so CreateInputs stays empty.
+			wantProfile: "sandbox",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := bypassAgentsSetup(t)
+			markBrokerEmbedded(t, f)
+
+			b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+			require.NoError(t, err)
+			b.Profiles = tc.profiles
+			b.DefaultProfile = tc.brokerDefault
+			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostSAEmail, hostProjectID)
+			require.NoError(t, err)
+
+			if tc.projectActiveProfile != "" {
+				proj, err := f.store.GetProject(ctx, f.proj.ID)
+				require.NoError(t, err)
+				if proj.Annotations == nil {
+					proj.Annotations = map[string]string{}
+				}
+				proj.Annotations[projectSettingActiveProfile] = tc.projectActiveProfile
+				require.NoError(t, f.store.UpdateProject(ctx, proj))
+			}
+
+			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+				DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+			})
+
+			const agentName = "sched-hub-passthrough-profile"
+			require.NoError(t, fireScheduledDispatchAsOwner(t, f, agentName))
+
+			got, err := f.store.GetAgentBySlug(ctx, f.proj.ID, agentName)
+			require.NoError(t, err)
+			require.NotNil(t, got.AppliedConfig)
+			assert.Equal(t, tc.wantProfile, got.AppliedConfig.Profile,
+				"profile the scheduled dispatch runs under")
+			require.NotNil(t, got.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.wantInputsProfile, got.AppliedConfig.CreateInputs.Profile,
+				"profile pinned for reincarnate")
+
+			assignments, err := f.store.GetActiveAgentServiceAccountAssignments(ctx, got.ID)
+			require.NoError(t, err)
+			assert.Empty(t, assignments)
+			assert.Empty(t, got.Annotations[translatedKey])
+
+			if tc.wantMode == "" {
+				assert.Nil(t, got.AppliedConfig.GCPIdentity,
+					"a denied hub-default passthrough leaves the identity unset")
+				return
+			}
+
+			require.NotNil(t, got.AppliedConfig.GCPIdentity)
+			gcp := got.AppliedConfig.GCPIdentity
+			assert.Equal(t, tc.wantMode, gcp.MetadataMode)
+			assert.True(t, gcp.RequireLocalRuntime,
+				"a hub-default passthrough asks the broker to re-check the runtime")
+			assert.Empty(t, gcp.ServiceAccountID)
+			assert.Empty(t, gcp.ServiceAccountEmail)
+		})
+	}
+}
+
+// TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType: a
+// project-default passthrough on a scheduled dispatch, on a broker with both
+// a docker and a cloudrun-sandbox profile, is translated to the broker's host
+// service account only when the profile the agent resolves to (here the
+// broker default) is the cloudrun-sandbox one.
+func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testing.T) {
+	t.Parallel()
+
+	const (
+		hostSAEmail   = "broker-host@sched-project-pt.iam.gserviceaccount.com"
+		hostProjectID = "sched-project-pt"
+		translatedKey = "scion.dev/gcp-identity-translated-from"
+	)
+	tests := []struct {
+		name           string
+		brokerDefault  string
+		untranslatable bool // the broker has nothing registered to translate to
+		wantTranslated bool
+	}{
+		{name: "docker broker default stays passthrough", brokerDefault: "local"},
+		{name: "cloudrun-sandbox broker default is translated", brokerDefault: "sandbox", wantTranslated: true},
+		{name: "cloudrun-sandbox broker default the broker cannot translate stays passthrough", brokerDefault: "sandbox", untranslatable: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := bypassAgentsSetup(t)
+
+			b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+			require.NoError(t, err)
+			b.Profiles = []store.BrokerProfile{
+				{Name: "local", Type: "docker", Available: true},
+				{Name: "sandbox", Type: "cloudrun-sandbox", Available: true},
+			}
+			b.DefaultProfile = tc.brokerDefault
+			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+			hostEmail := hostSAEmail
+			if tc.untranslatable {
+				hostEmail = ""
+			}
+			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostEmail, hostProjectID)
+			require.NoError(t, err)
+			// Translation needs enforce mode, and the schedule's principal
+			// must pass the passthrough requirements: the fixture broker
+			// has no recorded owner (and UpdateRuntimeBroker does not write
+			// CreatedBy), so the principal is made an admin, and it holds
+			// actAs on the host account.
+			grantSuperAdmin(t, f.store, f.owner.ID)
+			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
+			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
+
+			const agentName = "sched-project-passthrough-profile"
+			require.NoError(t, fireScheduledDispatchAsOwner(t, f, agentName))
+
+			got, err := f.store.GetAgentBySlug(ctx, f.proj.ID, agentName)
+			require.NoError(t, err)
+			require.NotNil(t, got.AppliedConfig)
+			require.NotNil(t, got.AppliedConfig.GCPIdentity)
+			gcp := got.AppliedConfig.GCPIdentity
+
+			assignments, err := f.store.GetActiveAgentServiceAccountAssignments(ctx, got.ID)
+			require.NoError(t, err)
+
+			// The profile the mode was decided on is recorded, whichever way
+			// the mode went, so later starts and reincarnations use it.
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.Profile)
+			require.NotNil(t, got.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.CreateInputs.Profile)
+
+			if !tc.wantTranslated {
+				assert.Equal(t, store.GCPMetadataModePassthrough, gcp.MetadataMode)
+				assert.False(t, gcp.RequireLocalRuntime,
+					"a project-default passthrough is not flagged for a runtime re-check")
+				assert.Empty(t, gcp.ServiceAccountID)
+				assert.Empty(t, got.Annotations[translatedKey])
+				assert.Empty(t, assignments)
+				return
+			}
+
+			assert.Equal(t, store.GCPMetadataModeAssign, gcp.MetadataMode)
+			assert.Equal(t, hostSAEmail, gcp.ServiceAccountEmail)
+			assert.Equal(t, hostProjectID, gcp.ProjectID)
+			require.NotEmpty(t, gcp.ServiceAccountID)
+			assert.Equal(t, "passthrough", got.Annotations[translatedKey])
+			require.Len(t, assignments, 1)
+			assert.Equal(t, gcp.ServiceAccountID, assignments[0].ServiceAccountID)
+			assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, assignments[0].Origin)
+		})
+	}
 }

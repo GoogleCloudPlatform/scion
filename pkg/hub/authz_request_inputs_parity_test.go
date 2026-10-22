@@ -462,13 +462,15 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			// owner/ancestor candidates, whose project-access check
 			// (ptone/scion#2141) loads the closure and bindings once more per
 			// decision. The project-member role grants one of the eight agent
-			// actions, so seven decisions per agent make that check. Under
-			// the memo (asserted above) the check reads the memo and adds
-			// nothing.
+			// actions, so seven decisions per agent make that check. The
+			// check counts only a binding whose role confers membership
+			// (ptone/scion#4603), so it also loads the role definitions of
+			// its candidate bindings once. Under the memo (asserted above)
+			// the check reads the memo and adds nothing.
 			const relationshipChecks = 7
 			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
 			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals without the memo")
-			assert.Equal(t, k*n, plainStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs without the memo")
+			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs without the memo")
 			assert.Equal(t, k*n*pages, plainStore.countOf("ListAccessConstraints"), "ListAccessConstraints without the memo")
 		})
 	}
@@ -3567,8 +3569,8 @@ func TestParity_T2_TemplateGlobalAndProjectScoped(t *testing.T) {
 	addToHubMembersGroup(t, s, f.userID)
 	globalTplID := tid("t2-global-tpl")
 	projectTplID := tid("t2-project-tpl")
-	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Image: "img", Scope: store.TemplateScopeGlobal}))
-	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Image: "img", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Scope: store.TemplateScopeGlobal}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
 
 	t.Run("global", func(t *testing.T) {
 		actions, _ := runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: globalTplID, Scope: store.TemplateScopeGlobal}))

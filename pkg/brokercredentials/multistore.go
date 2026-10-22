@@ -16,6 +16,7 @@ package brokercredentials
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -24,6 +25,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 )
 
 const (
@@ -93,12 +97,27 @@ func (s *MultiStore) Save(creds *BrokerCredentials) error {
 	if creds.BrokerID == "" {
 		return fmt.Errorf("brokerId is required")
 	}
+	if err := ValidateBrokerIDPathElement(creds.BrokerID); err != nil {
+		return err
+	}
 	if creds.SecretKey == "" {
 		return fmt.Errorf("secretKey is required")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Ensure directory exists
+	if err := os.MkdirAll(s.dir, DirMode); err != nil {
+		return fmt.Errorf("failed to create credentials directory: %w", err)
+	}
+	// The dev-auth check reads the other files, so the cross-process lock
+	// is held from that read to the write.
+	unlock, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	// Enforce dev-auth limit: only one dev-auth connection allowed
 	if creds.AuthMode == AuthModeDevAuth {
@@ -107,18 +126,13 @@ func (s *MultiStore) Save(creds *BrokerCredentials) error {
 		}
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(s.dir, DirMode); err != nil {
-		return fmt.Errorf("failed to create credentials directory: %w", err)
-	}
-
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
 	path := s.filePath(creds.Name)
-	if err := os.WriteFile(path, data, FileMode); err != nil {
+	if err := writeFileAtomic(path, data, FileMode); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
 	}
 
@@ -271,6 +285,20 @@ func (s *MultiStore) MigrateFromLegacy(legacyPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		return nil // No legacy file, nothing to migrate
+	}
+	if err := os.MkdirAll(s.dir, DirMode); err != nil {
+		return fmt.Errorf("failed to create credentials directory: %w", err)
+	}
+	// Held from the read of the legacy file to its rename, so two
+	// processes cannot both migrate it.
+	unlock, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	data, err := os.ReadFile(legacyPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -308,7 +336,7 @@ func (s *MultiStore) MigrateFromLegacy(legacyPath string) error {
 	}
 
 	path := s.filePath(name)
-	if err := os.WriteFile(path, newData, FileMode); err != nil {
+	if err := writeFileAtomic(path, newData, FileMode); err != nil {
 		return fmt.Errorf("failed to write migrated credentials: %w", err)
 	}
 
@@ -319,6 +347,74 @@ func (s *MultiStore) MigrateFromLegacy(legacyPath string) error {
 		return nil
 	}
 
+	return nil
+}
+
+// lockFileName is the cross-process lock file in the credentials directory.
+// It is created on first use, never removed, and does not end in .json, so
+// List never reads it.
+const lockFileName = ".credentials.lock"
+
+// lockWait bounds how long lockDir waits for another process.
+var lockWait = 10 * time.Second
+
+// lockDir takes the cross-process lock on the credentials directory (which
+// must exist) and returns the function that releases it. When it creates
+// the lock file inside a git work tree, the file is added to the
+// repository's info/exclude so it never shows up as untracked.
+func (s *MultiStore) lockDir() (func(), error) {
+	l, err := filelock.Acquire(filepath.Join(s.dir, lockFileName), FileMode, lockWait)
+	if err != nil {
+		if errors.Is(err, filelock.ErrTimeout) {
+			return nil, fmt.Errorf("%w: another process may be writing hub credentials in %s; try again", err, s.dir)
+		}
+		return nil, fmt.Errorf("lock credentials directory: %w", err)
+	}
+	if l.Created {
+		_ = util.EnsureGitIgnoresFile(s.dir, lockFileName)
+	}
+	return l.Unlock, nil
+}
+
+// writeFileAtomic replaces path with data through a temporary file in the
+// same directory (written, synced, then renamed), so a reader or a crash
+// never leaves a partial credentials file.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	renamed = true
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 

@@ -215,6 +215,10 @@ var (
 		{Name: "launch_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_cause", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_prior_phase", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_revoke_on_fail", Type: field.TypeBool, Default: false},
+		{Name: "launch_resume_phase", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_claim", Type: field.TypeInt64, Default: 0},
 		{Name: "deletion_lease_at", Type: field.TypeTime, Nullable: true},
@@ -248,7 +252,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[88]},
+				Columns:    []*schema.Column{AgentsColumns[92]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -267,17 +271,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[88]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[92]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -295,12 +299,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[74]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[78]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[79], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[87]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -574,6 +578,7 @@ var (
 		{Name: "source_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "target_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "source_cleanup", Type: field.TypeString, Nullable: true},
+		{Name: "transfer_mode", Type: field.TypeString, Nullable: true},
 	}
 	// AgentReincarnationsTable holds the schema information for the "agent_reincarnations" table.
 	AgentReincarnationsTable = &schema.Table{
@@ -799,6 +804,7 @@ var (
 		{Name: "expires_at", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// BrokerJoinTokensTable holds the schema information for the "broker_join_tokens" table.
 	BrokerJoinTokensTable = &schema.Table{
@@ -806,6 +812,11 @@ var (
 		Columns:    BrokerJoinTokensColumns,
 		PrimaryKey: []*schema.Column{BrokerJoinTokensColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "brokerjointoken_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerJoinTokensColumns[5]},
+			},
 			{
 				Name:    "brokerjointoken_expires_at",
 				Unique:  false,
@@ -1302,6 +1313,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
 			},
+			{
+				Name:    "externalidentity_user_id_federation",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "provider = 'federation'",
+				},
+			},
 		},
 	}
 	// GcpServiceAccountsColumns holds the columns for the "gcp_service_accounts" table.
@@ -1436,6 +1455,8 @@ var (
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"member", "admin", "owner"}, Default: "member"},
 		{Name: "added_by", Type: field.TypeString, Nullable: true},
 		{Name: "added_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "group_id", Type: field.TypeUUID},
 		{Name: "user_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
@@ -1448,33 +1469,38 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "group_memberships_groups_memberships",
-				Columns:    []*schema.Column{GroupMembershipsColumns[4]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[6]},
 				RefColumns: []*schema.Column{GroupsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
 				Symbol:     "group_memberships_users_user",
-				Columns:    []*schema.Column{GroupMembershipsColumns[5]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[7]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "group_memberships_agents_agent",
-				Columns:    []*schema.Column{GroupMembershipsColumns[6]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[8]},
 				RefColumns: []*schema.Column{AgentsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
 			{
+				Name:    "groupmembership_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupMembershipsColumns[5]},
+			},
+			{
 				Name:    "groupmembership_group_id_user_id",
 				Unique:  true,
-				Columns: []*schema.Column{GroupMembershipsColumns[4], GroupMembershipsColumns[5]},
+				Columns: []*schema.Column{GroupMembershipsColumns[6], GroupMembershipsColumns[7]},
 			},
 			{
 				Name:    "groupmembership_group_id_agent_id",
 				Unique:  true,
-				Columns: []*schema.Column{GroupMembershipsColumns[4], GroupMembershipsColumns[6]},
+				Columns: []*schema.Column{GroupMembershipsColumns[6], GroupMembershipsColumns[8]},
 			},
 		},
 	}
@@ -1493,10 +1519,12 @@ var (
 		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "layout", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "image_status", Type: field.TypeEnum, Enums: []string{"unknown", "valid", "invalid", "error"}, Default: "unknown"},
 		{Name: "image_status_checked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "built_image", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
@@ -1523,7 +1551,7 @@ var (
 			{
 				Name:    "harnessconfig_status",
 				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[14]},
+				Columns: []*schema.Column{HarnessConfigsColumns[15]},
 			},
 			{
 				Name:    "harnessconfig_content_hash",
@@ -1638,6 +1666,7 @@ var (
 		{Name: "created_by", Type: field.TypeString},
 		{Name: "note", Type: field.TypeString, Default: ""},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// InviteCodesTable holds the schema information for the "invite_codes" table.
 	InviteCodesTable = &schema.Table{
@@ -1645,6 +1674,11 @@ var (
 		Columns:    InviteCodesColumns,
 		PrimaryKey: []*schema.Column{InviteCodesColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "invitecode_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{InviteCodesColumns[10]},
+			},
 			{
 				Name:    "invitecode_expires_at",
 				Unique:  false,
@@ -1671,7 +1705,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project"}, Default: "hub"},
 		{Name: "scope_id", Type: field.TypeString, Nullable: true},
 		{Name: "selector", Type: field.TypeJSON, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error", "halted"}},
 		{Name: "action", Type: field.TypeJSON, Nullable: true},
 		{Name: "execution_identity", Type: field.TypeString, Nullable: true},
 		{Name: "enabled", Type: field.TypeBool, Default: true},
@@ -1879,6 +1913,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
 			},
+			{
+				Name:    "message_project_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[21], MessagesColumns[0]},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
@@ -1944,6 +1983,7 @@ var (
 		{Name: "exchange_agent_credential_id", Type: field.TypeString, Nullable: true},
 		{Name: "actor_kind", Type: field.TypeString, Nullable: true},
 		{Name: "agent_delegation_code", Type: field.TypeString, Nullable: true},
+		{Name: "provenance_basis", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{
@@ -2015,6 +2055,8 @@ var (
 		{Name: "message", Type: field.TypeString},
 		{Name: "dispatched", Type: field.TypeBool, Default: false},
 		{Name: "acknowledged", Type: field.TypeBool, Default: false},
+		{Name: "dispatch_attempts", Type: field.TypeInt, Default: 0},
+		{Name: "dispatch_outcome", Type: field.TypeString, Default: ""},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// NotificationsTable holds the schema information for the "notifications" table.
@@ -2036,7 +2078,7 @@ var (
 			{
 				Name:    "notification_subscriber_type_created",
 				Unique:  false,
-				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[10]},
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[12]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatched = false",
 				},
@@ -2250,6 +2292,56 @@ var (
 			},
 		},
 	}
+	// ProjectVisitorExclusionsColumns holds the columns for the "project_visitor_exclusions" table.
+	ProjectVisitorExclusionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "rule_id", Type: field.TypeUUID},
+		{Name: "user_id", Type: field.TypeString},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ProjectVisitorExclusionsTable holds the schema information for the "project_visitor_exclusions" table.
+	ProjectVisitorExclusionsTable = &schema.Table{
+		Name:       "project_visitor_exclusions",
+		Columns:    ProjectVisitorExclusionsColumns,
+		PrimaryKey: []*schema.Column{ProjectVisitorExclusionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "projectvisitorexclusion_rule_id_user_id",
+				Unique:  true,
+				Columns: []*schema.Column{ProjectVisitorExclusionsColumns[1], ProjectVisitorExclusionsColumns[2]},
+			},
+		},
+	}
+	// ProjectVisitorRulesColumns holds the columns for the "project_visitor_rules" table.
+	ProjectVisitorRulesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "issuer", Type: field.TypeString},
+		{Name: "domain", Type: field.TypeString},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ProjectVisitorRulesTable holds the schema information for the "project_visitor_rules" table.
+	ProjectVisitorRulesTable = &schema.Table{
+		Name:       "project_visitor_rules",
+		Columns:    ProjectVisitorRulesColumns,
+		PrimaryKey: []*schema.Column{ProjectVisitorRulesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "projectvisitorrule_project_id_issuer_domain",
+				Unique:  true,
+				Columns: []*schema.Column{ProjectVisitorRulesColumns[1], ProjectVisitorRulesColumns[2], ProjectVisitorRulesColumns[3]},
+			},
+			{
+				Name:    "projectvisitorrule_issuer_domain",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectVisitorRulesColumns[2], ProjectVisitorRulesColumns[3]},
+			},
+		},
+	}
 	// RelayInstancesColumns holds the columns for the "relay_instances" table.
 	RelayInstancesColumns = []*schema.Column{
 		{Name: "instance_id", Type: field.TypeString},
@@ -2278,6 +2370,8 @@ var (
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "membership_kind", Type: field.TypeString, Nullable: true},
+		{Name: "source_rule_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "role_definition_id", Type: field.TypeUUID, Nullable: true},
 	}
 	// RoleBindingsTable holds the schema information for the "role_bindings" table.
@@ -2288,12 +2382,17 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[10]},
+				Columns:    []*schema.Column{RoleBindingsColumns[12]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
+			{
+				Name:    "rolebinding_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleBindingsColumns[11]},
+			},
 			{
 				Name:    "rolebinding_principal_type_principal_id",
 				Unique:  false,
@@ -2302,7 +2401,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[10]},
+				Columns: []*schema.Column{RoleBindingsColumns[12]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -2310,9 +2409,14 @@ var (
 				Columns: []*schema.Column{RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 			{
+				Name:    "rolebinding_source_rule_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleBindingsColumns[10]},
+			},
+			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[10], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[12], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}
@@ -2324,8 +2428,10 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "permissions", Type: field.TypeJSON, Nullable: true},
 		{Name: "system", Type: field.TypeBool, Default: false},
+		{Name: "confers_membership", Type: field.TypeBool, Default: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// RoleDefinitionsTable holds the schema information for the "role_definitions" table.
 	RoleDefinitionsTable = &schema.Table{
@@ -2333,6 +2439,11 @@ var (
 		Columns:    RoleDefinitionsColumns,
 		PrimaryKey: []*schema.Column{RoleDefinitionsColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "roledefinition_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleDefinitionsColumns[9]},
+			},
 			{
 				Name:    "roledefinition_name_scope_type",
 				Unique:  true,
@@ -2365,12 +2476,22 @@ var (
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
 		{Name: "gcp_host_service_account_email", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "gcp_host_source", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "host_identity_observed_email", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observation", Type: field.TypeString, Nullable: true},
+		{Name: "host_identity_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
 		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_presentation", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_presentation_hash", Type: field.TypeString, Nullable: true},
+		{Name: "presentation_epoch", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_seq", Type: field.TypeInt64, Nullable: true},
+		{Name: "presentation_fenced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "presentation_observed_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2393,7 +2514,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[26]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
 			},
 		},
 	}
@@ -2421,6 +2542,7 @@ var (
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "next_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_status", Type: field.TypeString, Nullable: true},
@@ -2455,7 +2577,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[22]},
+				Columns: []*schema.Column{SchedulesColumns[23]},
 			},
 		},
 	}
@@ -2716,8 +2838,6 @@ var (
 		{Name: "description", Type: field.TypeString, Nullable: true},
 		{Name: "harness", Type: field.TypeString},
 		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
-		{Name: "image", Type: field.TypeString, Nullable: true},
-		{Name: "config", Type: field.TypeString, Nullable: true},
 		{Name: "agent_config", Type: field.TypeString, Nullable: true},
 		{Name: "content_hash", Type: field.TypeString, Nullable: true},
 		{Name: "scope", Type: field.TypeString, Default: "global"},
@@ -2746,7 +2866,7 @@ var (
 			{
 				Name:    "template_slug_scope_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[11], TemplatesColumns[12]},
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[9], TemplatesColumns[10]},
 			},
 			{
 				Name:    "template_harness",
@@ -2756,12 +2876,12 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[20]},
+				Columns: []*schema.Column{TemplatesColumns[18]},
 			},
 			{
 				Name:    "template_content_hash",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[10]},
+				Columns: []*schema.Column{TemplatesColumns[8]},
 			},
 		},
 	}
@@ -2775,6 +2895,9 @@ var (
 		{Name: "label", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "grantor_kind", Type: field.TypeEnum, Enums: []string{"human", "test_infra_offline"}, Default: "human"},
+		{Name: "hub_id", Type: field.TypeString, Default: ""},
+		{Name: "marker_created_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
 	}
@@ -2951,7 +3074,7 @@ var (
 		{Name: "display_name", Type: field.TypeString},
 		{Name: "avatar_url", Type: field.TypeString, Nullable: true},
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited"}, Default: "active"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited", "pending"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "invited_by", Type: field.TypeString, Nullable: true},
@@ -2959,12 +3082,14 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
-		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin"}, Default: "human"},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin", "federated"}, Default: "human"},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "issued_by", Type: field.TypeString, Nullable: true},
 		{Name: "purpose", Type: field.TypeString, Nullable: true},
 		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "federated_email", Type: field.TypeString, Nullable: true},
+		{Name: "home_issuer", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_delegation_id", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
@@ -2984,9 +3109,17 @@ var (
 				Columns: []*schema.Column{UsersColumns[13], UsersColumns[15]},
 			},
 			{
+				Name:    "user_home_issuer_federated_email",
+				Unique:  true,
+				Columns: []*schema.Column{UsersColumns[20], UsersColumns[19]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "kind = 'federated'",
+				},
+			},
+			{
 				Name:    "user_kind_issuer_delegation_id",
 				Unique:  false,
-				Columns: []*schema.Column{UsersColumns[13], UsersColumns[19]},
+				Columns: []*schema.Column{UsersColumns[13], UsersColumns[21]},
 			},
 		},
 	}
@@ -3138,6 +3271,8 @@ var (
 		ProjectContributorsTable,
 		ProjectPreStartHooksTable,
 		ProjectSyncStateTable,
+		ProjectVisitorExclusionsTable,
+		ProjectVisitorRulesTable,
 		RelayInstancesTable,
 		RoleBindingsTable,
 		RoleDefinitionsTable,
@@ -3370,6 +3505,7 @@ func init() {
 		Table: "users",
 	}
 	UsersTable.Annotation.Checks = map[string]string{
+		"users_federated_identity_check":  "(kind <> 'federated' OR (home_issuer IS NOT NULL AND federated_email IS NOT NULL))",
 		"users_test_admin_expiry_check":   "(kind NOT IN ('test_hub_admin', 'test_super_admin') OR expires_at IS NOT NULL)",
 		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
 	}

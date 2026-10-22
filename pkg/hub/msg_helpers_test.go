@@ -121,6 +121,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// a previously authorized dispatch.
 	{file: "reconcile.go", function: "execDispatchStart", symbol: "DispatchAgentStart",
 		class: "exempt", reason: "durable-intent replay of previously authorized dispatch"},
+	// The same replay through the start-options entry point
+	// (ptone/scion#4669): a dispatcher that takes options gets the
+	// intent's options; it is classified with the plain call above.
+	{file: "reconcile.go", function: "execDispatchStart", symbol: "DispatchAgentStartWithOptions",
+		class: "exempt", reason: "durable-intent replay of previously authorized dispatch"},
 
 	// reconcile.go: execDispatchCreate (via DispatchAgentCreateWithGather) —
 	// durable-intent replay.
@@ -152,11 +157,34 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
-	// notification_sweep.go: RetryDispatch — guarded retry of previously
-	// authorized notification dispatch.
-	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "retry of previously authorized notification dispatch"},
+	// notification_sweep.go: retryDispatch — UNGUARDED notification retry.
+	// The periodic sweep and the broker-connect drain (both via retryBatch)
+	// and the exported RetryDispatch wrapper reach the call only through
+	// retryDispatch. It re-sends the same notification as notifications.go
+	// dispatchToAgent and shares that site's open item; a future guard must
+	// be added to both sites together.
+	{file: "notification_sweep.go", function: "retryDispatch", symbol: "dispatchWithBrokerRetry",
+		class: "exempt", reason: "UNGUARDED notification retry (F-RS6-08); shares dispatchToAgent's open item; guard both sites together; deferred to RS6/AH"},
 }
+
+// sharedClassificationSites pairs call sites that must carry the same
+// classification in effectCallSiteClassifications. A retry site re-sends
+// what its original send site sent, so the two change class together.
+var sharedClassificationSites = []struct {
+	site, sameAs effectCallSiteKey
+}{
+	{
+		site:   effectCallSiteKey{"notification_sweep.go", "retryDispatch", "dispatchWithBrokerRetry"},
+		sameAs: effectCallSiteKey{"notifications.go", "dispatchToAgent", "dispatchWithBrokerRetry"},
+	},
+	{
+		site:   effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStartWithOptions"},
+		sameAs: effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStart"},
+	},
+}
+
+// effectCallSiteKey identifies one entry in effectCallSiteClassifications.
+type effectCallSiteKey struct{ file, function, symbol string }
 
 type effectCallSite struct {
 	file     string // base filename

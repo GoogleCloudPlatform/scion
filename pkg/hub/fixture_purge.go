@@ -90,6 +90,53 @@ type fixturePurgeBasis struct {
 	RunID string `json:"purge_run_id"`
 	// Trigger is test_identity_purge or test_identity_expire.
 	Trigger string `json:"trigger"`
+	// IssuanceID is set on the audit rows of grant rows removed by their
+	// issuance stamp (admin kinds, test_admin_purge.go).
+	IssuanceID string `json:"issuance_id,omitempty"`
+}
+
+// errFixturePurgeNoBasis refuses a purge audit row without a complete
+// provenance basis, which rolls back the delete it records.
+var errFixturePurgeNoBasis = errors.New("test identity purge: audit row without a provenance basis")
+
+// stampFixturePurgeAudit writes b into record.ProvenanceBasis (the
+// mutation_audits.provenance_basis column, Phase 3c). Every delete of the
+// test identity purge (3b), the purge of admin kinds (A3) and the issuer
+// cleanup (3c) calls it on its audit row before writing it in the delete's
+// transaction; a basis without its root, selecting column or run is
+// refused with errFixturePurgeNoBasis, so the delete is not made.
+func stampFixturePurgeAudit(record *store.MutationAuditRecord, b fixturePurgeBasis) error {
+	if b.RootID == "" || b.Basis == "" || b.RunID == "" {
+		return errFixturePurgeNoBasis
+	}
+	j, err := json.Marshal(b)
+	if err != nil {
+		return fmt.Errorf("render provenance basis: %w", err)
+	}
+	record.ProvenanceBasis = string(j)
+	return nil
+}
+
+// fixturePurgeAuditFault, when non-nil, is consulted before every purge
+// audit row is written inside its delete's transaction
+// (writeFixturePurgeAuditTx); a non-nil result fails the write. It is nil
+// in production and set only by tests, which show that a failed audit
+// write aborts that resource's delete.
+var fixturePurgeAuditFault func(record *store.MutationAuditRecord) error
+
+// writeFixturePurgeAuditTx stamps record with b (stampFixturePurgeAudit)
+// and writes it with tx. It is called inside the delete's transaction, so
+// any failure rolls that delete back.
+func writeFixturePurgeAuditTx(ctx context.Context, tx store.Store, record *store.MutationAuditRecord, b fixturePurgeBasis) error {
+	if err := stampFixturePurgeAudit(record, b); err != nil {
+		return err
+	}
+	if f := fixturePurgeAuditFault; f != nil {
+		if err := f(record); err != nil {
+			return err
+		}
+	}
+	return tx.CreateMutationAudit(ctx, record)
 }
 
 // fixturePurgeBasisKey is the context key of the basis. It is unexported
@@ -117,6 +164,9 @@ type TestIdentityPurgeCounts struct {
 	Schedules int `json:"schedules"`
 	Groups    int `json:"groups"`
 	Projects  int `json:"projects"`
+	// Grants counts the grant rows removed by their issuance stamp
+	// (admin kinds only).
+	Grants int `json:"grants,omitempty"`
 }
 
 // TestIdentityPurgeItem is one resource the purge did not remove.
@@ -179,6 +229,12 @@ type TestIdentityPurgeReport struct {
 	// Truncated is true when more stamped resources exist than one run
 	// handles.
 	Truncated bool `json:"truncated,omitempty"`
+	// KeptGrants lists issuance-stamped grant rows the purge kept: a
+	// custom role a binding without the stamp still names (admin kinds).
+	KeptGrants []TestIdentityPurgeItem `json:"keptGrants,omitempty"`
+	// Residue is the residue report of an admin-kind identity, computed
+	// before anything was removed (test_admin_residue.go).
+	Residue *TestAdminResidueReport `json:"residue,omitempty"`
 }
 
 // emptyTestIdentityPurgeReport is the answer when nothing is selected: an
@@ -203,36 +259,80 @@ type fixturePurgeRun struct {
 	requestedBy string
 	// actor attributes the identity-level audit row.
 	actor AuditActor
+	// issuanceID is the issuance of an admin-kind identity: its stamped
+	// grants are removed first (purgeTestAdminGrants). Empty for the
+	// member tier.
+	issuanceID string
+	// runID, when set, is the run ID every audit row of this purge shares
+	// (provenance_basis.purge_run_id and the correlation ID): the issuer
+	// cleanup (3c) sets it to its own run, so the purges of all the
+	// identities one cleanup reaches share one correlation ID. Empty: the
+	// request ID, or a new ID.
+	runID string
+	// basisTrigger, when set, replaces trigger as provenance_basis.trigger
+	// (test_identity_cleanup for the issuer cleanup); the identity-level
+	// row keeps trigger as its mutation type.
+	basisTrigger string
 }
 
 // purgeTestIdentity runs one purge and returns its report. A returned
 // error is a store failure that stopped the run; the report is still the
 // partial one.
 func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*TestIdentityPurgeReport, error) {
+	report, err := s.purgeTestIdentityRun(ctx, run)
+	// An admin-kind identity's purge run is written to the test admin
+	// audit sink (admin tier A3), whatever its outcome.
+	s.emitTestAdminPurge(ctx, run, report)
+	return report, err
+}
+
+// purgeTestIdentityRun is one purge run; see purgeTestIdentity.
+func (s *Server) purgeTestIdentityRun(ctx context.Context, run fixturePurgeRun) (*TestIdentityPurgeReport, error) {
 	report := &TestIdentityPurgeReport{IdentityID: run.rootID}
-	runID := logging.RequestIDFromContext(ctx)
+	runID := run.runID
+	if runID == "" {
+		runID = logging.RequestIDFromContext(ctx)
+	}
 	if runID == "" {
 		runID = api.NewUUID()
+	}
+	trigger := run.trigger
+	if run.basisTrigger != "" {
+		trigger = run.basisTrigger
 	}
 	basis := fixturePurgeBasis{
 		RootID:   run.rootID,
 		IssuerID: run.issuerID,
 		Basis:    fixturePurgeBasisName,
 		RunID:    runID,
-		Trigger:  run.trigger,
+		Trigger:  trigger,
 	}
 	ctx = withFixturePurgeBasis(ctx, basis)
 	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: run.executor, ID: "test_identity:" + run.rootID})
-	if run.actor.CorrelationID == "" {
+	if run.actor.CorrelationID == "" || run.runID != "" {
 		run.actor.CorrelationID = runID
 	}
 	run.actor.ExecutorKind, run.actor.ExecutorID = run.executor, "test_identity:"+run.rootID
+
+	// 0. Admin kinds: the residue report, before anything is removed,
+	// then every grant stamped with the issuance.
+	if run.issuanceID != "" {
+		residue, err := s.testAdminResidue(ctx, run.rootID, run.issuanceID)
+		if err != nil {
+			return report, fmt.Errorf("residue report: %w", err)
+		}
+		report.Residue = residue
+		s.emitTestAdminResidueWarning(ctx, residue)
+		if err := s.purgeTestAdminGrants(ctx, run, basis, report); err != nil {
+			return report, err
+		}
+	}
 
 	set, err := s.store.ListFixtureRootedResources(ctx, run.rootID, fixturePurgeListLimit)
 	if err != nil {
 		return report, fmt.Errorf("list stamped resources: %w", err)
 	}
-	report.Truncated = set.Truncated
+	report.Truncated = report.Truncated || set.Truncated
 
 	// 1. Agents, deepest ancestry first, so a sub-agent goes before the
 	// agent that created it. A scheduled child has no ancestry.
@@ -318,7 +418,7 @@ func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*T
 		report.IdentityKeptReason = "resources_not_done"
 		return report, nil
 	}
-	if err := s.purgeFixtureUser(ctx, run, report); err != nil {
+	if err := s.purgeFixtureUser(ctx, run, basis, report); err != nil {
 		return report, err
 	}
 	report.Complete = report.IdentityDeleted
@@ -368,6 +468,11 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 		hard:         true,
 		requestedBy:  requestedBy,
 	})
+	if _, refused := placementRefusalOf(err); refused {
+		// The claim's placement pre-check refused the agent: its saved
+		// placement is inconsistent, and nothing was written.
+		return notDone("failed", "placement_conflict")
+	}
 	if err != nil {
 		return notDone("failed", "store_error")
 	}
@@ -510,14 +615,12 @@ func (s *Server) purgeFixtureSchedule(ctx context.Context, sc *store.Schedule, b
 	}
 	record := newScheduleAudit(ctx, mutationTypeScheduleDelete, sc.ID)
 	record.AfterSummary = fixturePurgeSummary(map[string]any{"project_id": sc.ProjectID, "name": sc.Name}, *b)
-	if record.CorrelationID == "" {
-		record.CorrelationID = basis.RunID
-	}
+	record.CorrelationID = basis.RunID
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.DeleteSchedule(ctx, sc.ID); err != nil {
 			return err
 		}
-		return tx.CreateMutationAudit(ctx, record)
+		return writeFixturePurgeAuditTx(ctx, tx, record, *b)
 	})
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
@@ -555,7 +658,7 @@ func (s *Server) purgeFixtureGroup(ctx context.Context, g *store.Group, basis fi
 		if err := tx.DeleteGroup(ctx, g.ID); err != nil {
 			return err
 		}
-		return tx.CreateMutationAudit(ctx, record)
+		return writeFixturePurgeAuditTx(ctx, tx, record, *b)
 	})
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
@@ -645,7 +748,7 @@ func (s *Server) unprovenFixtureAgents(ctx context.Context, rootID string) (out 
 // same transaction. A refusal by the cascade (agents still tied to the
 // identity, or the last owner of an unstamped project) keeps the identity
 // and is recorded in the report.
-func (s *Server) purgeFixtureUser(ctx context.Context, run fixturePurgeRun, report *TestIdentityPurgeReport) error {
+func (s *Server) purgeFixtureUser(ctx context.Context, run fixturePurgeRun, basis fixturePurgeBasis, report *TestIdentityPurgeReport) error {
 	u := run.user
 	now := s.testIdentities.clock()
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -662,6 +765,14 @@ func (s *Server) purgeFixtureUser(ctx context.Context, run fixturePurgeRun, repo
 		}
 		run.actor.ApplyActor(record)
 		applyHubActorFallback(record)
+		if err := stampFixturePurgeAudit(record, basis); err != nil {
+			return err
+		}
+		if f := fixturePurgeAuditFault; f != nil {
+			if err := f(record); err != nil {
+				return err
+			}
+		}
 		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
 			return fmt.Errorf("audit test identity purge: %w", err)
 		}

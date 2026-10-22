@@ -101,6 +101,11 @@ const (
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
+
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
 	// hub's claim on the delete may have lapsed, so acting could remove an
@@ -116,6 +121,11 @@ const (
 	// this code is the client-visible signal that the feature, not the
 	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+	// ErrCodeStatsNotImplemented marks an agent stats request: this broker
+	// does not collect per-agent resource usage, so the stats action answers
+	// 501 with this code instead of placeholder values.
+	ErrCodeStatsNotImplemented = "stats_not_implemented"
 
 	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
 	// before the WebSocket upgrade because the target runtime declines
@@ -294,6 +304,16 @@ func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
+// RetainedFilesRefused writes a 409 Conflict response with the stable
+// api.BrokerErrCodeRetainedFilesRefused code, for a purge of retained files
+// that removed nothing (ptone/scion#4744). reason, which names no host path,
+// is also in the details under api.BrokerErrDetailReason.
+func RetainedFilesRefused(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, api.BrokerErrCodeRetainedFilesRefused,
+		"Retained files not removed: "+reason,
+		map[string]interface{}{api.BrokerErrDetailReason: reason})
+}
+
 // StaleDispatch writes a 409 Conflict response with the stable
 // ErrCodeStaleDispatch code.
 func StaleDispatch(w http.ResponseWriter, message string) {
@@ -318,6 +338,12 @@ func AgentIdentityUnknown(w http.ResponseWriter, message string) {
 // meant to carry.
 func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// StatsNotImplemented writes a 501 Not Implemented response with the stable
+// ErrCodeStatsNotImplemented code for the agent stats action.
+func StatsNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeStatsNotImplemented, message, nil)
 }
 
 // RuntimeAttachUnsupported writes a 501 Not Implemented response with the
@@ -373,11 +399,17 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // and the stop handler's record-less-probe branch (handlers.go) call
 // runtimeOpError/RuntimeError directly instead, each with its own inline
 // log call (and, for create/start, its own span.SetStatus) rather than
-// going through writeRuntimeOpError — raw err still always reaches the
-// log on every path, just not through this one function.
+// going through writeRuntimeOpError — err's text still always reaches the
+// log on every path (through sanitizeFailureCause on the create and start
+// paths), just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(failedOpText(op), err)
 }
+
+// agentFilesDeleteRefusedMessage is the client message for an agent delete
+// whose files delete was refused (agent.ErrAgentFilesDeleteRefused). Like
+// every runtime-op message it names no path; the log has them.
+const agentFilesDeleteRefusedMessage = "Failed to delete agent: refused to remove a path outside the agent's own directories, or one that could not be resolved; nothing was removed there"
 
 // failedOpText is the fixed "Failed to <op>" lead every runtime-op error
 // message starts with (runtimeOpError, notFoundMessage).
@@ -489,15 +521,15 @@ func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, ca
 
 // runtimeFailureLogAttrs returns the log attributes describing err's cause
 // (runtimeFailureCause) for a terminal create failure's ERROR record:
-// cause (the innermost error text), and k8s_reason and cause_code when
-// set. Server logs only: none of these may reach a client body except the
-// fixed code.
+// cause (the innermost error text, through sanitizeFailureCause), and
+// k8s_reason and cause_code when set. Server logs only: none of these may
+// reach a client body except the fixed code.
 func runtimeFailureLogAttrs(err error) []any {
 	reason, code, cause := runtimeFailureCause(err)
 	if cause == nil {
 		return nil
 	}
-	attrs := []any{"cause", cause.Error()}
+	attrs := []any{"cause", sanitizeFailureCause(cause.Error())}
 	if reason != "" {
 		attrs = append(attrs, "k8s_reason", string(reason))
 	}
@@ -656,14 +688,18 @@ func skillResolutionHTTPStatus(code string) int {
 // cause instead of folding the failure into a generic 500/502 (#2546). Every
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
-func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
-	skillResolutionFailedWithDetails(w, err, nil)
+//
+// The message is fixed text (see skillResolutionPublicText) carrying ref,
+// the correlation id of the server-side log record; the caller logs the
+// full error with logSkillResolutionFailure.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError, ref string) {
+	skillResolutionFailedWithDetails(w, err, ref, nil)
 }
 
 // skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
 // details (for example the start markers from startFailureDetails) merged
 // alongside the skill and cause.
-func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, ref string, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
@@ -671,10 +707,10 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 	for k, v := range extra {
 		details[k] = v
 	}
-	details["skill"] = err.URI
+	details["skill"] = publicSkillRef(err.URI)
 	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(), details)
+		"Failed to provision agent: "+skillResolutionPublicText(err, ref), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by
@@ -692,10 +728,13 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior. The one exception is errSavedProfileUnresolved (a saved profile
-// that no longer resolves), which is checked ahead of every other case and
-// written as the retryable 503 from writeSavedProfileUnresolved; its text is
-// client-safe by construction.
+// behavior. The exceptions are errSavedProfileUnresolved (a saved profile
+// that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
+// a default profile the Hub's stored profiles lack) and
+// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// which are checked ahead of every other case and written as the retryable
+// 503 from writeProfileUnresolved; their text is client-safe by
+// construction.
 //
 // Within that Hub branch, a missing local file (OriginalErr matches
 // fs.ErrNotExist) is checked first and written as a 422 template_error by
@@ -721,16 +760,21 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // OriginalErr, the actual underlying failure, over its own curated Message)
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
-func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
+//
+// extra holds the caller's agent identification (agent_id, and runtime and
+// profile once resolved) for the log record.
+func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string, extra ...any) int {
 	// errSavedProfileUnresolved's text names only the agent, the profile
-	// and a fixed or ResolveRuntime cause, and is client-safe as is.
-	if errors.Is(err, errSavedProfileUnresolved) {
-		writeSavedProfileUnresolved(w, err)
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
+	// the stored profile names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
 	sce, ok := err.(*startContextError)
 	if !ok {
-		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)
+		s.logStartContextFailure("buildStartContext failed", op, err, extra)
 		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
@@ -743,7 +787,7 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		// through the templatecache.HubConnectivityError the resolver wraps
 		// such a failure in, via its Unwrap method.
 		if errors.Is(sce.OriginalErr, fs.ErrNotExist) {
-			s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", "op", op, "error", startContextDiagnostic(sce))
+			s.logStartContextFailure("buildStartContext failed: local file missing", op, startContextDiagnostic(sce), extra)
 			writeMissingLocalFileError(w, sce.OriginalErr, op)
 			return http.StatusUnprocessableEntity
 		}
@@ -751,7 +795,7 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable
 		}
-		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
@@ -763,9 +807,28 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		writeError(w, sce.Status, code, sce.Message, sce.Details)
 		return sce.Status
 	}
-	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+	s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 	RuntimeError(w, runtimeOpError(op, err).Error())
 	return http.StatusInternalServerError
+}
+
+// createRequestProfile returns the runtime profile a create request names,
+// or "" when it names none.
+func createRequestProfile(req CreateAgentRequest) string {
+	if req.Config == nil {
+		return ""
+	}
+	return req.Config.Profile
+}
+
+// logStartContextFailure writes writeStartContextError's one WARN record
+// for a start context failure: op, the caller's extra attributes, and the
+// failure's text and cause through sanitizeFailureCause.
+func (s *Server) logStartContextFailure(msg, op string, err error, extra []any) {
+	args := append([]any{"op", op}, extra...)
+	args = append(args, failureLogAttrs(err, nil)...)
+	args = append(args, runtimeFailureLogAttrs(err)...)
+	s.agentLifecycleLog.Warn(msg, args...)
 }
 
 // writeMissingLocalFileError writes the 422 template_error for a file the

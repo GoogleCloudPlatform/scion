@@ -33,6 +33,15 @@ import (
 // expects, and root must not let that choice affect its own control flow.
 var ErrNotSingleLinkRegular = errors.New("dirfd: not a single-link regular file")
 
+// ErrUnlinked is returned by ReadAtNoFollow (and everything built on it),
+// always together with ErrNotSingleLinkRegular, when the opened entry is a
+// regular file with no hard link left: it was removed or replaced (for
+// example by a rename over its name) after it was opened. Every caller
+// that tests for ErrNotSingleLinkRegular still sees the refusal; a caller
+// that rereads a file which is replaced by rename can test for ErrUnlinked
+// to tell this case apart and read the name again.
+var ErrUnlinked = errors.New("dirfd: file has no link left")
+
 // ErrTooLarge is returned when a read's content would exceed the caller-
 // supplied byte limit. Detected via io.LimitReader(f, max+1): if that many
 // bytes come back, the file is at least max+1 bytes long, so the read never
@@ -90,29 +99,53 @@ const maxSymlinkResolutionsUnderRoot = 20
 // walk — call this directly; ReadFileNoFollow wraps it for the common
 // "read one absolute path" case.
 func ReadAtNoFollow(dirFd int, name string, max int64) ([]byte, error) {
+	data, _, err := ReadAtNoFollowStat(dirFd, name, max)
+	return data, err
+}
+
+// ReadAtNoFollowStat is ReadAtNoFollow that also returns the fstat of the
+// file it read, taken on the same open descriptor, so a caller can apply a
+// further check (such as on the file's owner) to exactly the file whose
+// content it got. On error the returned Stat_t is not meaningful.
+//
+// A regular file with no link left is refused with an error that wraps
+// both ErrNotSingleLinkRegular and ErrUnlinked.
+func ReadAtNoFollowStat(dirFd int, name string, max int64) ([]byte, syscall.Stat_t, error) {
+	var st syscall.Stat_t
 	f, err := OpenAt(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("dirfd: open %s: %w", name, err)
+		return nil, st, fmt.Errorf("dirfd: open %s: %w", name, err)
 	}
 	defer func() { _ = f.Close() }()
+	if readAtPostOpenTestHook != nil {
+		readAtPostOpenTestHook(name)
+	}
 
-	var st syscall.Stat_t
 	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return nil, fmt.Errorf("dirfd: stat %s: %w", name, err)
+		return nil, st, fmt.Errorf("dirfd: stat %s: %w", name, err)
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		return nil, fmt.Errorf("dirfd: %s: %w", name, ErrNotSingleLinkRegular)
+		if st.Mode&syscall.S_IFMT == syscall.S_IFREG && st.Nlink == 0 {
+			return nil, st, fmt.Errorf("dirfd: %s: %w: %w", name, ErrNotSingleLinkRegular, ErrUnlinked)
+		}
+		return nil, st, fmt.Errorf("dirfd: %s: %w", name, ErrNotSingleLinkRegular)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
-		return nil, fmt.Errorf("dirfd: read %s: %w", name, err)
+		return nil, st, fmt.Errorf("dirfd: read %s: %w", name, err)
 	}
 	if int64(len(data)) > max {
-		return nil, fmt.Errorf("dirfd: %s: %w", name, ErrTooLarge)
+		return nil, st, fmt.Errorf("dirfd: %s: %w", name, ErrTooLarge)
 	}
-	return data, nil
+	return data, st, nil
 }
+
+// readAtPostOpenTestHook, when non-nil, fires in ReadAtNoFollowStat right
+// after the open and before the fstat. It receives the leaf name, so a test
+// can remove or replace the file in that window and check how the open
+// descriptor is classified. Production code never sets it.
+var readAtPostOpenTestHook func(name string)
 
 // ReadFileNoFollow reads path the way readServicesYAML's enforced branch
 // does: OpenParentNoFollow walks every directory component from "/" down

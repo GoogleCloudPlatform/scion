@@ -268,7 +268,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 				report.Summary.Stopping++
 			case state.PhaseStopped:
 				report.Summary.Stopped++
-			case state.PhaseError:
+			case state.PhaseError, state.PhaseHalted:
 				report.Summary.Error++
 			default:
 				report.Summary.OtherPhase++

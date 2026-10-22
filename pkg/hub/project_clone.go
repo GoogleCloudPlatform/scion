@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -445,9 +444,13 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusCreated, clone)
 }
 
-// authorizeProjectClone checks that the caller can read the source project and
-// create projects at hub scope. It writes the HTTP error response on failure and
-// returns a non-nil error; on success it returns nil.
+// authorizeProjectClone checks, before any source content is read or
+// copied, that the caller can read the source project and create projects
+// at hub scope. The create check is projectCreateDecision, the same
+// admission project create and project register apply. A user access token
+// must also carry the project:clone selector, eligible for its boundary; a
+// session needs no project.clone binding. It writes the HTTP error response
+// on failure and returns a non-nil error; on success it returns nil.
 func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWriter, src *store.Project) error {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -473,15 +476,43 @@ func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWrite
 		return errors.New("forbidden: cannot read source")
 	}
 
-	// 2. Caller must be able to create projects at hub scope.
-	caps := s.authzService.ComputeScopeCapabilities(ctx, userIdent, "", "", "project")
-	if !slices.Contains(caps.Actions, string(ActionCreate)) {
+	// 2. A token must carry project:clone (see projectCloneTokenDenial).
+	if reason := projectCloneTokenDenial(userIdent); reason != "" {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Insufficient permission to clone projects", nil)
+		return errors.New("forbidden: " + reason)
+	}
+
+	// 3. Caller must be able to create projects at hub scope.
+	if !s.projectCreateDecision(ctx, userIdent).Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Insufficient permission to create projects", nil)
 		return errors.New("forbidden: cannot create projects")
 	}
 
 	return nil
+}
+
+// projectCloneTokenDenial returns a reason when a user access token may not
+// clone a project, and "" otherwise. The token's ceiling must allow
+// project.clone and project.clone must be eligible for the token's boundary
+// kind. The check reads only the token's ceiling and boundary; it does not
+// look up a project.clone binding. authorizeProjectClone makes the live
+// checks: project.read on the source and project.create at the hub. Other
+// identities return "".
+func projectCloneTokenDenial(identity Identity) string {
+	scoped, ok := identity.(*ScopedUserIdentity)
+	if !ok {
+		return ""
+	}
+	if scoped == nil || !scoped.Ceiling().Allows("project.clone") {
+		return "token ceiling does not allow project.clone"
+	}
+	boundary := scoped.Boundary()
+	if !boundary.Valid() || !permissionEligibleForBoundary("project.clone", boundary.Kind) {
+		return "project.clone is not eligible for this token boundary"
+	}
+	return ""
 }
 
 // cloneProjectHarnessConfigs deep-copies all project-scoped harness configs from
@@ -503,51 +534,10 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 
 	stor := s.GetStorage()
 
-	for _, srcHC := range result.Items {
-		newHC := &store.HarnessConfig{
-			ID:          api.NewUUID(),
-			Name:        srcHC.Name,
-			Slug:        srcHC.Slug, // SAME slug — critical for annotation references
-			DisplayName: srcHC.DisplayName,
-			Description: srcHC.Description,
-			Harness:     srcHC.Harness,
-			Config:      srcHC.Config,
-			Scope:       store.HarnessConfigScopeProject,
-			ScopeID:     clone.ID,
-			Status:      srcHC.Status,
-			Files:       srcHC.Files,
-			ContentHash: srcHC.ContentHash,
-		}
-
-		storagePath := storage.HarnessConfigStoragePath(s.HubID(), newHC.Scope, newHC.ScopeID, newHC.Slug)
-		newHC.StoragePath = storagePath
-
-		if stor != nil {
-			newHC.StorageBucket = stor.Bucket()
-			newHC.StorageURI = storage.HarnessConfigStorageURI(s.HubID(), stor.Bucket(), newHC.Scope, newHC.ScopeID, newHC.Slug)
-		}
-
-		// Copy storage files
-		if stor != nil && len(srcHC.Files) > 0 && srcHC.StoragePath != "" {
-			for _, file := range srcHC.Files {
-				srcPath := srcHC.StoragePath + "/" + file.Path
-				dstPath := storagePath + "/" + file.Path
-				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-					return err
-				}
-			}
-		}
-
-		if err := s.store.CreateHarnessConfig(ctx, newHC); err != nil {
-			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-			}
-			return err
-		}
-	}
-
-	// Add rollback for all harness configs at once
+	// Register the rollback for all harness configs before creating any, so
+	// a failure part-way through the loop (e.g. a harness config the commit
+	// path refuses) still removes the ones already created. The rollback is
+	// scope-wide and idempotent.
 	*rollback = append(*rollback, func() {
 		rbCtx := context.WithoutCancel(ctx)
 		stor := s.GetStorage()
@@ -560,6 +550,58 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 				"clone_id", clone.ID, "error", err)
 		}
 	})
+
+	for _, srcHC := range result.Items {
+		// Harness is the fallback for a config.yaml that sets none; Config
+		// is never copied: the commit below re-derives Harness and Config
+		// from the copied files (ptone/scion#4219).
+		newHC := &store.HarnessConfig{
+			ID:          api.NewUUID(),
+			Name:        srcHC.Name,
+			Slug:        srcHC.Slug, // SAME slug — critical for annotation references
+			DisplayName: srcHC.DisplayName,
+			Description: srcHC.Description,
+			Harness:     srcHC.Harness,
+			Scope:       store.HarnessConfigScopeProject,
+			ScopeID:     clone.ID,
+			Status:      srcHC.Status,
+		}
+
+		// The clone is created in the blob layout with a row-unique path
+		// (ptone/scion#4219). It sits in the clone project's scope
+		// directory, so the rollback prefix above covers it.
+		newHC.Layout = store.HarnessConfigLayoutBlobs
+		storagePath := s.harnessConfigBlobStoragePath(newHC)
+		newHC.StoragePath = storagePath
+
+		if stor != nil {
+			newHC.StorageBucket = stor.Bucket()
+			newHC.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
+		}
+
+		// Create the row through the commit path, which copies each file
+		// the source references into the clone's blobs and re-derives
+		// Harness and Config from them.
+		var createErr error
+		if stor != nil && len(srcHC.Files) > 0 && srcHC.StoragePath != "" {
+			src := srcHC
+			createErr = s.commitHarnessConfigFiles(ctx, newHC, srcHC.Files, harnessConfigCommitOpts{create: true, copyFrom: &src})
+		} else {
+			// No stored content to copy and derive from: create the row
+			// without files, pending, as a harness-config clone does. Files
+			// and their hash are written only by the commit path, and a
+			// manifest copied here would list objects the clone never got.
+			newHC.Status = store.HarnessConfigStatusPending
+			createErr = s.store.CreateHarnessConfig(ctx, newHC)
+		}
+
+		if err := createErr; err != nil {
+			if stor != nil {
+				_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
+			}
+			return err
+		}
+	}
 
 	return nil
 }
@@ -605,7 +647,6 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
 			DisplayName:  srcTmpl.DisplayName,
 			Description:  srcTmpl.Description,
-			Config:       srcTmpl.Config,
 			Scope:        store.TemplateScopeProject,
 			ScopeID:      clone.ID,
 			Status:       srcTmpl.Status,

@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,18 +63,12 @@ func TestCLISettings(t *testing.T) {
 		t.Errorf("expected autohelp false after update, got %v", s.CLI.AutoHelp)
 	}
 
-	// 3. Test GetSettingValue
-	val, err := GetSettingValue(s, "cli.autohelp")
+	// 3. The setting's value and source, as config get and list read it.
+	v, err := ResolveSettingValue(projectScionDir, "cli.autohelp")
 	if err != nil {
-		t.Fatalf("GetSettingValue failed: %v", err)
+		t.Fatalf("ResolveSettingValue failed: %v", err)
 	}
-	if val != "false" {
-		t.Errorf("expected GetSettingValue 'false', got '%s'", val)
-	}
-
-	// 4. Test GetSettingsMap
-	m := GetSettingsMap(s)
-	if m["cli.autohelp"] != "false" {
-		t.Errorf("expected GetSettingsMap to have cli.autohelp=false, got %s", m["cli.autohelp"])
+	if v.Value != "false" || !strings.HasPrefix(v.Source, "project ") {
+		t.Errorf("ResolveSettingValue = %+v, want false from the project file", v)
 	}
 }

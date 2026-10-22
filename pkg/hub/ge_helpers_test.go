@@ -17,7 +17,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -68,11 +67,14 @@ type fakeGoogleValidator struct {
 
 type fakeUserStore struct {
 	store.Store
-	mu           sync.Mutex
-	users        map[string]*store.User // by ID
-	usersByEmail map[string]*store.User // by email (normalized lower-case key)
-	createErr    error
-	updateErr    error
+	mu                   sync.Mutex
+	users                map[string]*store.User // by ID
+	usersByEmail         map[string]*store.User // by email (normalized lower-case key)
+	createErr            error
+	updateErr            error
+	updateCalls          int
+	lastLoginUpdateCalls int
+	lastLoginUpdateErr   error
 }
 
 func newFakeUserStore() *fakeUserStore {
@@ -156,15 +158,6 @@ func validWorkspaceIdentity() *ValidatedGoogleIdentity {
 		UpstreamExpiry: time.Now().Add(30 * time.Minute),
 		HostedDomain:   "company.com",
 	}
-}
-
-func sqliteDriverName() string {
-	for _, driver := range sql.Drivers() {
-		if driver == "sqlite" || driver == "sqlite3" {
-			return driver
-		}
-	}
-	return ""
 }
 
 func (f *fakeGEExchangeMetrics) RecordGEExchangeRequest(outcome GEExchangeOutcome) {
@@ -251,12 +244,28 @@ func (s *fakeUserStore) CreateUser(_ context.Context, user *store.User) error {
 func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateCalls++
 	if s.updateErr != nil {
 		return s.updateErr
 	}
 	cp := *user
 	s.users[user.ID] = &cp
 	s.usersByEmail[strings.ToLower(user.Email)] = &cp
+	return nil
+}
+
+func (s *fakeUserStore) UpdateUserLastLogin(_ context.Context, id string, timestamp time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastLoginUpdateCalls++
+	if s.lastLoginUpdateErr != nil {
+		return s.lastLoginUpdateErr
+	}
+	u, ok := s.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.LastLogin = timestamp
 	return nil
 }
 

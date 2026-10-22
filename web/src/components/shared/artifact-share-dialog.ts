@@ -40,8 +40,7 @@ import { live } from 'lit/directives/live.js';
 
 import { apiFetch } from '../../client/api.js';
 import {
-  DEFAULT_LINK_HOURS,
-  LINK_LIFETIMES,
+  linkLifetimeChoices,
   PERMISSION_LABELS,
   SELECTABLE_PERMISSIONS,
   createLink,
@@ -114,6 +113,9 @@ export function expiryWarning(linksCutShort: number, grantsRemoved: number): str
   return parts.join(' and ');
 }
 
+/** The permissions the home project's grant may have (the API refuses admin). */
+const HOME_GRANT_PERMISSIONS: readonly GrantPermission[] = ['read', 'write'];
+
 @customElement('scion-artifact-share-dialog')
 export class ScionArtifactShareDialog extends LitElement {
   @property({ type: Object }) artifact: Artifact | null = null;
@@ -129,7 +131,9 @@ export class ScionArtifactShareDialog extends LitElement {
   @state() private links: ShareLink[] = [];
   @state() private grants: ArtifactGrant[] = [];
   @state() private crossProjectSharing = false;
-  @state() private ttlHours = DEFAULT_LINK_HOURS;
+  /** The link lifetimes offered: the hub's, once GET /links answers. */
+  @state() private lifetimes = linkLifetimeChoices();
+  @state() private ttlHours = this.lifetimes.selected;
   @state() private creating = false;
   @state() private created: CreateLinkResponse | null = null;
   @state() private copied = false;
@@ -349,7 +353,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private reset(): void {
     this.error = null;
     this.forgetCreated();
-    this.ttlHours = DEFAULT_LINK_HOURS;
+    this.lifetimes = linkLifetimeChoices();
+    this.ttlHours = this.lifetimes.selected;
     this.query = '';
     this.suggestions = [];
     this.subject = null;
@@ -377,7 +382,9 @@ export class ScionArtifactShareDialog extends LitElement {
     try {
       const [links, grants] = await Promise.all([listLinks(a.id), listGrants(a.id)]);
       if (gen !== this.loadGen) return;
-      this.links = links;
+      this.links = links.links;
+      this.lifetimes = linkLifetimeChoices(links.defaultTtlHours, links.maxTtlHours);
+      this.ttlHours = this.lifetimes.selected;
       this.grants = grants.grants;
       this.crossProjectSharing = grants.crossProjectSharing;
       this.resolveNames();
@@ -641,7 +648,7 @@ export class ScionArtifactShareDialog extends LitElement {
               this.ttlHours = Number((e.target as HTMLInputElement).value);
             }}
           >
-            ${LINK_LIFETIMES.map(
+            ${this.lifetimes.options.map(
               (l) => html`<sl-option value=${String(l.hours)}>${l.label}</sl-option>`
             )}
           </sl-select>
@@ -812,6 +819,10 @@ export class ScionArtifactShareDialog extends LitElement {
           Give a person who can already read “${a.title}” review access. They will be able to
           publish reviews of it, and nothing else.
         </p>
+        <p class="hint">
+          Review access is only for people who can already read this artifact: members of its home
+          project, or of a project it is shared with.
+        </p>
         ${this.reviewers.map(
           (r) =>
             html`<sl-alert class="granted" variant="success" open>
@@ -860,7 +871,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private renderPermissionSelect(
     value: GrantPermission,
     disabled: boolean,
-    onChange: (p: GrantPermission) => void
+    onChange: (p: GrantPermission) => void,
+    options: readonly GrantPermission[] = SELECTABLE_PERMISSIONS
   ): TemplateResult {
     return html`<sl-select
       size="small"
@@ -870,9 +882,7 @@ export class ScionArtifactShareDialog extends LitElement {
       @sl-change=${(e: Event): void =>
         onChange((e.target as HTMLInputElement).value as GrantPermission)}
     >
-      ${SELECTABLE_PERMISSIONS.map(
-        (p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`
-      )}
+      ${options.map((p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`)}
     </sl-select>`;
   }
 
@@ -886,12 +896,24 @@ export class ScionArtifactShareDialog extends LitElement {
       who = kind ? this.label(kind, ref) : g.subjectRef;
     }
     if (g.home) {
+      // The home project's grant may be read or write, never admin
+      // (ptone/scion#4582); it is never removed here.
       return html`<div class="grant">
         <sl-icon name="folder"></sl-icon>
         <span class="who"><strong>${who}</strong> <span class="muted">(home project)</span></span>
-        <span class="muted">${PERMISSION_LABELS[g.permission]}</span>
+        ${this.renderPermissionSelect(
+          g.permission,
+          !!this.busyId,
+          (p) => {
+            void this.changePermission(g, p);
+          },
+          HOME_GRANT_PERMISSIONS
+        )}
       </div>`;
     }
+    // While cross-project sharing is off, a grant to another project can
+    // still be removed but not changed (ptone/scion#4586).
+    const locked = isScope && !this.crossProjectSharing;
     return html`<div class="grant">
       <sl-icon name=${isScope ? 'folder' : 'person'}></sl-icon>
       <span class="who">
@@ -899,10 +921,15 @@ export class ScionArtifactShareDialog extends LitElement {
         ${isScope && this.crossProjectSharing
           ? html`<small>Cross-project sharing is on for this hub</small>`
           : nothing}
+        ${locked
+          ? html`<small
+              >Cross-project sharing is off: this grant can be removed but not changed</small
+            >`
+          : nothing}
       </span>
       ${g.permission === 'review'
         ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
-        : this.renderPermissionSelect(g.permission, !!this.busyId, (p) => {
+        : this.renderPermissionSelect(g.permission, !!this.busyId || locked, (p) => {
             void this.changePermission(g, p);
           })}
       <sl-button

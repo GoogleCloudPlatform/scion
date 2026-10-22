@@ -104,6 +104,7 @@ server:
           # send_queue_size: 100     # max queued messages per channel
           # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
           # agent_cache_ttl: 30s     # how long to cache agent lists from hub
+          # async_create: true       # opt /scion thread in to async agent create
 ```
 
 ### 5. Start the Hub
@@ -300,6 +301,7 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+| `async_create` | No | `true` | `/scion thread` asks the hub for an asynchronous create. When the hub's `hub.async_agent_launch` experiment is on, the hub answers as soon as the broker accepts the create; the bot then edits the thread's status message with each launch step (shown as its code, for example `image_pull`). It ends with "✅ Ready — agent `<slug>`" once the agent is running, "❌ Agent `<slug>` failed to start (`<code>`): <message>" when the launch fails, or "⚠️ Couldn't confirm that agent `<slug>` started: <reason>." when the wait ends first (the launch budget ran out, the agent was deleted, the hub refused the status read, or it gave up 13 minutes after the command, the limit of the Discord interaction; the agent may still start). The thread is bound and the kickoff is sent only once the agent is running; after a failure or an unconfirmed start the thread stays unbound (bind it later with `/scion default <agent>`). A hub without async launch answers synchronously, as before. `false` always uses the synchronous create. |
 | `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of internal `hub_url` to fix broken links behind auth proxies. |
 | `send_search_root` | No | `/scion-volumes/` | Configurable base directory for file searches when executing `/scion send` commands. |
 
@@ -373,9 +375,9 @@ Standalone mode runs the Discord bot as an independent service, communicating wi
 - The binary detects standalone mode via `--standalone` flag or `DISCORD_STANDALONE=true` env var
 - A Postgres advisory lock held on a dedicated database connection ensures only one instance opens the Discord Gateway at a time (Discord enforces one WebSocket session per bot token)
 - The lock holder periodically verifies the connection is alive; on loss, it closes the Gateway and re-enters standby
-- All instances serve gRPC and respond to health checks regardless of lock state
+- All instances serve gRPC and answer health checks; only the lock holder reports `SERVING` (see [Health Checks (Cloud Run)](#health-checks-cloud-run))
 - The lock holder runs the Gateway; standby instances retry every ~30s
-- On primary failure, Postgres releases the session-level lock and a standby promotes after a takeover delay (~60–90s) to prevent dual-Gateway storms
+- On primary failure, Postgres releases the session-level lock when it ends the holder's database session, and a standby promotes after a takeover delay (~30–60s after the lock is released) to prevent dual-Gateway storms
 - Outbound messages (hub → Discord) are delivered via REST API, which works from any instance — only the Gateway connection is serialized
 
 ### Quick Start (Standalone)
@@ -421,6 +423,36 @@ docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
 | `GRPC_PORT` | No | `50051` | gRPC listen port |
 | `CONFIG_FILE` | No | — | Path to local YAML config file |
 | `UPDATE_HOOK` | No | — | Command to run on update signal (default: exit for platform restart) |
+
+### Health Checks (Cloud Run)
+
+In standalone mode the binary registers the standard gRPC health service (`grpc.health.v1.Health`) on `GRPC_PORT`. The status is set on the overall service (empty service name), so a probe does not need a service name.
+
+The status is `SERVING` only while the instance holds the gateway lock. It is `NOT_SERVING` while the instance is starting, while it is a standby, after it loses the lock, and when the database or the database proxy is unreachable.
+
+Timing, from the lock loop's 30 s interval and its 5 s connection check timeout:
+
+- **Detection:** the lock holder pings its dedicated lock connection once per interval. If the ping fails immediately (for example, the proxy closed the connection or the connection was reset), the status becomes `NOT_SERVING` within 30 s of the failure. If the ping hangs, the 5 s timeout applies and the status becomes `NOT_SERVING` within 35 s.
+- **Recovery:** the instance re-acquires the lock without a restart. The lock must be acquirable on two consecutive ticks (the takeover delay), so the status returns to `SERVING` 30–60 s after the database is reachable again.
+- **Startup:** the status starts as `NOT_SERVING`. Startup retries the initial database connection until it succeeds. The store then opens with a single ping; if that ping fails, the process exits and Cloud Run replaces the container. After the store opens, the lock loop needs two consecutive ticks, so `SERVING` comes at least 30 s after the database is reachable. A new instance that starts while another instance holds the lock (for example during a revision rollout) stays `NOT_SERVING` until it takes the lock.
+
+Recommended probe configuration:
+
+- Keep the default TCP startup probe. Do not use the gRPC health check as a startup probe: a new instance reports `NOT_SERVING` for as long as another instance holds the lock, so the startup probe can fail during a rollout.
+- Use a gRPC liveness probe only when the service runs a single instance (`max-instances` 1). With more than one instance, standbys report `NOT_SERVING` and fail the liveness probe.
+
+Example liveness probe for the container spec (assumes `max-instances` 1 and the default `GRPC_PORT` of `50051`):
+
+```yaml
+livenessProbe:
+  grpc:
+    port: 50051
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  failureThreshold: 9
+```
+
+With these values a running container tolerates 90 s of `NOT_SERVING` (9 failures 10 s apart), which covers the 30–60 s takeover delay when an instance waits for the lock. A new container also waits the 60 s initial delay before the first probe, so it tolerates about 150 s of `NOT_SERVING` after it starts. A database or proxy failure leads to `NOT_SERVING` within 35 s and a failed liveness probe about 90 s later, so Cloud Run replaces the container instance about 2 minutes after the failure. While the database stays unreachable, each replacement container reports `NOT_SERVING` and is replaced in turn until the database returns.
 
 ### Hub Configuration for gRPC Mode
 
@@ -490,8 +522,8 @@ message_broker:
 
 1. Instance A acquires the advisory lock on a dedicated DB connection → opens the Discord Gateway
 2. Instance B fails to acquire → enters standby, retries every 30s
-3. Instance A crashes → Postgres releases the session-level lock (dedicated connection dies)
-4. Instance B observes the lock acquirable on two consecutive ticks (takeover delay) → opens Gateway within ~60–90s
+3. Instance A crashes → Postgres releases the session-level lock when it ends the session of the dedicated connection (at once when the connection closes; if the connection drops without closing, only once Postgres detects the dead session)
+4. Instance B observes the lock acquirable on two consecutive ticks (takeover delay) → opens Gateway ~30–60s after the lock is released
 5. Messages queued during the gap are delivered on reconnect (deferred message reconciliation)
 6. If Instance A's lock connection dies without a crash, Instance A detects it on the next verify tick, closes the Gateway, and re-enters standby
 

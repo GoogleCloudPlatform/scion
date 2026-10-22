@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -52,25 +51,10 @@ func runHarnessConfigUpdate(cmd *cobra.Command, args []string) error {
 		return newUsageError("--all and --url cannot be used together")
 	}
 
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err != nil {
-			return fmt.Errorf("failed to resolve project path %q: %w", projectPath, err)
-		}
-		gp = resolved
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
-
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not available, the update command requires a hub connection")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 120*time.Second)

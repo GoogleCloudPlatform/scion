@@ -51,6 +51,7 @@ list|show|upgrade|reset|sync|pull`.
   scion_harness.py   # vendored shared library imported by provision.py
   capture_auth.py    # thin shim: sys.exit(scion_harness.capture_auth_main())
   dialect.yaml       # optional — data-driven hook-event dialect
+  agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -61,7 +62,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -259,6 +260,66 @@ dependent vars); put the default in `provision.py` instead.
 multi-key interrupt, `interrupt_signal: sequence` +
 `interrupt_sequence: [Escape, C-c]` (each entry sent as a separate key).
 
+### Readiness and delivery
+
+Two optional blocks describe when the tool is ready for a pasted message and
+how a pasted message is submitted. Durations are Go duration strings
+(`300ms`, `1.5s`, `1m30s`). Durations need a unit, so write zero as `0s`:
+the schema rejects a bare `0`. Only the units `ns`, `us`, `ms`, `s`, `m`
+and `h` are accepted (not `µs`).
+
+```yaml
+ready:
+  strategy: hook      # hook | delay (default delay)
+  settle: 1.5s        # 0 to 60s; default 8s for delay, 1.5s for hook
+  timeout: 90s        # hook only, 10s to 10m; default 90s
+delivery:
+  submit_keys: [Enter]      # 1 to 4 tmux key names; default [Enter]
+  extra_submits: 2          # 0 to 5; default 2
+  extra_submit_delay: 300ms # 0 to 5s; default 300ms
+```
+
+**`ready`.** One rule: the tool is ready at *signal time + `settle`*.
+
+- `hook`: the signal is the ready marker that a session-start hook writes
+  for the current run. Use it only when the tool fires a session-start hook
+  at startup, before any user input. `timeout` is the deadline from launch:
+  when it passes, the message is pasted anyway.
+- `delay`: the signal is the creation of the tmux session. Use it when the
+  tool has no early hook. `timeout` is not allowed with `delay`.
+
+The broker passes the resolved `ready` block (project, template and hub
+harness-config overrides included) to the container, and both readiness
+readers use it: `sciontool init`, which ends the agent's initializing state,
+and the broker's wait before it pastes a held message. A session-start from
+`/clear` or `/compact` never counts as the hook signal. The built-in bundles
+use `hook` for claude, gemini-cli, copilot and grok-build, and `delay` 8s for
+every other harness; change a value only with evidence that the tool reads
+its input by then. A harness-config with no `ready` block gets the block of
+the built-in bundle for its `harness` type, or `delay` 8s if there is none.
+
+**`delivery`.** A message is loaded into a tmux buffer and pasted with
+bracketed paste. Then each key in `submit_keys` is sent with its own
+`tmux send-keys` call. After that, the whole `submit_keys` list is sent
+`extra_submits` more times, with `extra_submit_delay` before each pass. An
+empty message (a bare confirmation) sends `submit_keys` once, with no extra
+passes. The defaults give paste, Enter, then two more Enters 300ms apart.
+
+Each key must be 1 to 32 bytes, with no whitespace or control characters,
+and must not start with `-` (tmux would read it as a `send-keys` option).
+It must not end with `;` either: tmux strips a trailing `;` from the
+argument and treats it as a command separator, so `Enter;` would arrive as
+`Enter` and `;` would send nothing, with no error.
+
+Message delivery reads the embedded bundle's `delivery` block, the same as
+the interrupt keys. Project, template and hub harness-config overrides do not
+change it yet.
+
+Write both blocks out in full, even where they equal the defaults, so the
+values are visible to authors. If a value fails validation and the config
+reaches the runtime by a path that skips load-time validation, the runtime
+uses the default for that field and logs a warning.
+
 ### Capabilities
 
 An honest support matrix consumed by templates, preflight checks, and UIs:
@@ -304,6 +365,30 @@ one for anything but `yes`). What each signals:
   reflects whether project-scoped servers are honored or demoted to global.
 - **resume** — whether `resume_flag` genuinely restores a session.
 
+**Agent Plugins support goes in `agent-plugins.yaml`, not in `capabilities`.**
+The bundle file sits next to `config.yaml` and has the same shape as a
+capability field:
+
+```yaml
+support: "partial"
+reason: "Native install via local marketplace; Codex skips sse MCP servers"
+```
+
+It declares what this bundle's `provision.py` can install, so it is refreshed
+together with the provisioner scripts on seeding and `harness-config upgrade`.
+The harness reports it as the `agent_plugins` capability. A bundle without the
+file (and without the deprecated key below) has no plugin support: Scion
+reports it as predating Agent Plugins. An unreadable or invalid file (including
+a support level this Scion version does not know) is a warning, not a load
+error: Agent Plugins is treated as `no` with the error as the reason. Every
+bundled harness must ship a valid file; CI parses them strictly.
+`capabilities.agent_plugins` in `config.yaml` is deprecated: it is still read
+when the bundle has no `agent-plugins.yaml`, but hubs, brokers and CLIs built
+before Agent Plugins reject `config.yaml` with that key
+(ptone/scion#5196). The same applies to any new key: binaries already deployed
+validate `config.yaml` against their own schema, so data they do not need to
+read belongs in a separate bundle file.
+
 ### Auth
 
 ```yaml
@@ -345,7 +430,9 @@ auth:
   - `required`: broker must source the secret before dispatch (vs.
     documentary).
 - `autodetect` — maps discovered env vars / file secrets to an auth type when
-  the user didn't select one explicitly.
+  the user didn't select one explicitly. A file credential wins over an env
+  credential, except that when `default_type` is `api-key`, an env API key
+  wins over a `vertex-ai` file credential (for example `gcloud-adc`).
 
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.

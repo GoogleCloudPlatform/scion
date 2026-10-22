@@ -371,7 +371,7 @@ func TestValidate_AllValidCredentialKinds(t *testing.T) {
 		CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT,
 		CredentialBrokerToken, CredentialServiceAccount,
 		CredentialSystemInternal, CredentialIdentityToken, CredentialDelegatedAgent,
-		CredentialWorkloadDelegation,
+		CredentialWorkloadDelegation, CredentialFederatedUser,
 	}
 	for _, k := range kinds {
 		s := validSpec()
@@ -851,6 +851,30 @@ func TestValidate_NonHTTPEntryPointWithoutMethod(t *testing.T) {
 	s.EntryPoints = []EntryPoint{{Kind: EntryPointSchedulerJob, Pattern: "job"}}
 	if err := s.Validate(); err != nil {
 		t.Errorf("expected valid, got: %v", err)
+	}
+}
+
+func TestValidate_EntryPointResponseSensitivity(t *testing.T) {
+	for _, r := range []ResponseSensitivity{"", ResponseCredential, ResponseCallerSpecific} {
+		s := validSpec()
+		s.EntryPoints[0].Response = r
+		if err := s.Validate(); err != nil {
+			t.Errorf("response %q: expected valid, got: %v", r, err)
+		}
+	}
+
+	s := validSpec()
+	s.EntryPoints[0].Response = "bogus"
+	err := s.Validate()
+	if err == nil || !strings.Contains(err.Error(), `unknown response sensitivity "bogus"`) {
+		t.Errorf("expected unknown response sensitivity error, got: %v", err)
+	}
+
+	s = validSpec()
+	s.EntryPoints = []EntryPoint{{Kind: EntryPointSchedulerJob, Pattern: "job", Response: ResponseCredential}}
+	err = s.Validate()
+	if err == nil || !strings.Contains(err.Error(), "response sensitivity is only valid on HTTP-like entry points, not scheduler_job") {
+		t.Errorf("expected non-HTTP response sensitivity error, got: %v", err)
 	}
 }
 

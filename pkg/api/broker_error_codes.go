@@ -14,10 +14,11 @@
 
 package api
 
-// Runtime broker error codes the hub matches on to relay a specific broker
-// refusal instead of folding it into a generic dispatch failure. They live
-// here so the broker (which writes them) and the hub (which reads them)
-// share one definition without the hub importing pkg/runtimebroker.
+// Runtime broker error codes the hub or CLI matches on, to relay or show a
+// specific broker refusal instead of folding it into a generic dispatch
+// failure. They live here so the broker (which writes them) and the hub
+// and CLI (which read them) share one definition without importing
+// pkg/runtimebroker.
 const (
 	// BrokerErrCodeSkillResolution marks a create whose required skills
 	// could not be resolved.
@@ -47,7 +48,90 @@ const (
 	// one mapped to its GCP service account (400). The details also name
 	// the requested and mapped Kubernetes ServiceAccounts.
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
+
+	// BrokerErrCodePriorStartInProgress marks a create refused because an
+	// earlier start of the same agent name on the broker was still
+	// finishing its failure cleanup when the broker's supersede wait ended
+	// (503, with Retry-After). Retrying the same create shortly is expected
+	// to succeed (ptone/scion#2632).
+	BrokerErrCodePriorStartInProgress = "prior_start_in_progress"
+
+	// BrokerErrCodeStartCancelled marks a create whose start was cancelled
+	// on the broker before it took the agent name: a stop or delete of the
+	// agent, or a newer start of the same name, reached the broker first
+	// (409). Retry only if the create is still wanted (ptone/scion#2632).
+	BrokerErrCodeStartCancelled = "start_cancelled"
+
+	// BrokerErrCodeBrokerDraining marks a create, start or restart the
+	// broker refused because it is shutting down (503, with Retry-After).
+	// The handlers refuse at entry, before any work. An async create can
+	// also be refused later, in admission, after its start context (and
+	// so possibly its worktree) was prepared but before the launch was
+	// accepted, like the other pre-acceptance refusals (start_cancelled,
+	// prior_start_in_progress). Either way no agent was started; retrying
+	// shortly, against the restarted broker, is expected to succeed
+	// (ptone/scion#4668).
+	BrokerErrCodeBrokerDraining = "broker_draining"
+
+	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
+	// for a linked checkout that the co-located broker refused because the
+	// checkout failed verification (409). Nothing was created. The hub
+	// relays it like any other broker failure; the CLI reads
+	// BrokerErrDetailReason from its details to show the cause and the fix.
+	BrokerErrCodeLocalWorktreeRefused = "local_worktree_refused"
+
+	// BrokerErrCodeRetainedFilesRefused marks a PurgeRetainedQueryParam
+	// delete that removed nothing because the files are not, or may not
+	// be, the retained files of a soft-deleted agent (409): a runtime entry
+	// still holds the agent, a start of it is in flight, its project
+	// directory is unknown, its agent-info.json carries no soft-delete mark,
+	// or one of its directories is a symlink (ptone/scion#4744). The cause
+	// is in BrokerErrDetailReason. A retry gets the same answer while that
+	// state lasts.
+	BrokerErrCodeRetainedFilesRefused = "retained_files_refused"
+
+	// BrokerErrCodeRetainedPurgeInProgress marks a start, restart or create
+	// the broker refused because a removal of the agent's retained files
+	// (PurgeRetainedQueryParam) is running there (409, with Retry-After).
+	// Nothing was started or written. Retry after the removal ends.
+	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
+
+	// BrokerErrCodeMoveTargetNotFresh marks a forced move's provision
+	// (moved-agent expectation "fresh-agent-dir") the broker refused before
+	// creating anything, because it has files for the agent or cannot
+	// confirm that it has none (409). The message names no host path. The
+	// hub then rolls the move back without removing anything on that
+	// broker: the files there were not created by the move
+	// (ptone/scion#5441).
+	BrokerErrCodeMoveTargetNotFresh = "move_target_not_fresh"
+
+	// BrokerErrCodeMoveMarkerMismatch marks a forced move's rollback delete
+	// (MoveReincarnationIDQueryParam) that removed nothing because an agent
+	// directory on the broker exists without that move's marker: the files
+	// were not created by the move (409). The message names no host path.
+	BrokerErrCodeMoveMarkerMismatch = "move_marker_mismatch"
+
+	// BrokerErrCodeReloadUnconfirmed marks a reset-auth that wrote the new
+	// credential into the agent container but could not deliver the reload
+	// signal to the agent's init process (502), so the running agent did not
+	// confirm the reload. The credential file is in place; the hub relays the
+	// code to the caller.
+	BrokerErrCodeReloadUnconfirmed = "reload_unconfirmed"
 )
+
+// ReloadUnconfirmedMessage is the caller-facing text for
+// BrokerErrCodeReloadUnconfirmed, shared by the broker, the hub and the CLI.
+// It must stay true whether or not the agent also reloads the credential on
+// its own (for example from a credential file watch, where present).
+const ReloadUnconfirmedMessage = "credential issued and written; the running agent did not confirm the reload. " +
+	"If it keeps failing to authenticate, restart the agent"
+
+// BrokerErrDetailReason is the details key of a
+// BrokerErrCodeLocalWorktreeRefused error (the client-facing message, with
+// any remote shown without credentials) and of a
+// BrokerErrCodeRetainedFilesRefused or BrokerErrCodeRetainedPurgeInProgress
+// error (the cause, naming no host path).
+const BrokerErrDetailReason = "reason"
 
 // Values of details.cause on a broker runtime_error answer to a create
 // whose runtime start failed with a Kubernetes API status the operator can

@@ -59,6 +59,7 @@ func healthyPolicyResp() *HealthSummaryResponse {
 		Agents:       &HealthSummaryAgents{ByPhase: []HealthPhaseCount{}, Problems: []HealthAgentGroup{}},
 		Dispatch:     &HealthSummaryDispatch{},
 		Integrations: []HealthSummaryIntegration{},
+		Schedules:    &HealthSummarySchedules{Failing: []HealthFailingSchedule{}},
 	}
 	setPolicyFleet(r, policyRow("1", HealthStatusHealthy, time.Second, map[string]string{"database": "healthy"}))
 	return r

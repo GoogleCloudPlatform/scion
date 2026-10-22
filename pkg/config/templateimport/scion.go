@@ -133,6 +133,15 @@ func CopyScionTemplate(srcDir, destDir string, force bool) (string, error) {
 	}
 
 	if force {
+		// Check the source before removing the destination. Different path
+		// spellings or symlinked parents can refer to the same directory.
+		srcInfo, err := os.Stat(srcDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to stat source template: %w", err)
+		}
+		if destInfo, err := os.Stat(destDir); err == nil && os.SameFile(srcInfo, destInfo) {
+			return "", fmt.Errorf("source and destination are the same template directory: %s", srcDir)
+		}
 		_ = os.RemoveAll(destDir)
 	}
 

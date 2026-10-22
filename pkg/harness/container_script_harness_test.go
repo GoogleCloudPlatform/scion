@@ -1414,6 +1414,82 @@ func TestContainerScriptHarness_ProvisionReferencesMCPInputInManifest(t *testing
 	}
 }
 
+// The manifest names inputs.agent_plugins only when the control plane
+// staged inputs/plugins.json.
+func TestContainerScriptHarness_ManifestAgentPluginsInput(t *testing.T) {
+	read := func(t *testing.T, agentHome string) ProvisionManifest {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m ProvisionManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for _, staged := range []bool{false, true} {
+		h, _ := newTestContainerScriptHarness(t)
+		agentHome := t.TempDir()
+		if staged {
+			inputs := filepath.Join(agentHome, ".scion", "harness", "inputs")
+			if err := os.MkdirAll(inputs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(inputs, "plugins.json"), []byte(`{"schema_version":1,"plugins":[]}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := h.Provision(context.Background(), "a", agentHome, agentHome, "/workspace"); err != nil {
+			t.Fatal(err)
+		}
+		got := read(t, agentHome).Inputs.AgentPlugins
+		if staged && !strings.HasSuffix(got, "/inputs/plugins.json") {
+			t.Errorf("staged: manifest.Inputs.AgentPlugins=%q", got)
+		}
+		if !staged && got != "" {
+			t.Errorf("not staged: manifest.Inputs.AgentPlugins=%q, want empty", got)
+		}
+	}
+}
+
+func TestSetManifestAgentWorkspace(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	hostWorkspace := "/home/user/project/.scion/agents/a/workspace"
+	if err := h.Provision(context.Background(), "a", agentHome, agentHome, hostWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetManifestAgentWorkspace(agentHome, "/repo-root/.scion/agents/a/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.AgentWorkspace != "/repo-root/.scion/agents/a/workspace" {
+		t.Errorf("manifest.AgentWorkspace = %q, want the container workspace", manifest.AgentWorkspace)
+	}
+	if manifest.AgentName != "a" || manifest.HarnessBundleDir != "$HOME/.scion/harness" || manifest.SchemaVersion != 1 {
+		t.Errorf("other manifest fields not preserved: %+v", manifest)
+	}
+}
+
+func TestSetManifestAgentWorkspace_NoManifest(t *testing.T) {
+	agentHome := t.TempDir()
+	if err := SetManifestAgentWorkspace(agentHome, "/workspace"); err != nil {
+		t.Fatalf("SetManifestAgentWorkspace without a staged manifest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, ".scion", "harness", "manifest.json")); !os.IsNotExist(err) {
+		t.Errorf("expected no manifest to be created, stat err = %v", err)
+	}
+}
+
 func TestResolve_ContainerScriptDispatch(t *testing.T) {
 	home := t.TempDir()
 	configsDir := filepath.Join(home, ".scion", "harness-configs")

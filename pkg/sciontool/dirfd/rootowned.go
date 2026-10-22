@@ -266,3 +266,67 @@ func VerifyRootOwnedExecutable(candidate string) error {
 	}
 	return fmt.Errorf("dirfd: too many symlink hops resolving %s (> %d)", candidate, maxSymlinkHops)
 }
+
+// OpenParentNoFollowOwnedBy resolves path's parent directory like
+// OpenParentNoFollowRootOwned, but starting at base (which path must be
+// under) and requiring every component, base included, to be owned by
+// exactly uid and free of group and other write. Unlike
+// OpenParentNoFollowRootOwned it never trusts the caller's own uid, so a
+// process running as an unprivileged user can use it (with uid 0) to
+// check that a file was published by root. Every component is checked by
+// fstat on its own open descriptor during an O_NOFOLLOW walk.
+func OpenParentNoFollowOwnedBy(base, path string, uid uint32) (dirFd int, leaf string, err error) {
+	base = filepath.Clean(base)
+	abs := filepath.Clean(path)
+	if !filepath.IsAbs(base) || !filepath.IsAbs(abs) {
+		return -1, "", fmt.Errorf("dirfd: %s and %s must be absolute", base, path)
+	}
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return -1, "", fmt.Errorf("dirfd: %s is not under %s", path, base)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	leaf = parts[len(parts)-1]
+	dirs := parts[:len(parts)-1]
+
+	fd, err := syscall.Open(base, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, "", fmt.Errorf("dirfd: open %s: %w", base, err)
+	}
+	if verr := fstatRequireOwner(fd, base, uid); verr != nil {
+		_ = syscall.Close(fd)
+		return -1, "", verr
+	}
+	walked := base
+	for _, name := range dirs {
+		child, oerr := unix.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		_ = syscall.Close(fd)
+		if oerr != nil {
+			return -1, "", fmt.Errorf("dirfd: open %s: %w", name, oerr)
+		}
+		walked = filepath.Join(walked, name)
+		if verr := fstatRequireOwner(child, walked, uid); verr != nil {
+			_ = syscall.Close(child)
+			return -1, "", verr
+		}
+		fd = child
+	}
+	return fd, leaf, nil
+}
+
+// ErrNotOwned is returned (wrapped) when a component is not owned by the
+// required uid or is group- or other-writable.
+var ErrNotOwned = errors.New("dirfd: not owned by the required user, or writable by others")
+
+// fstatRequireOwner fstats fd and requires owner uid and no group or other
+// write. displayPath is used only in the error.
+func fstatRequireOwner(fd int, displayPath string, uid uint32) error {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("dirfd: fstat %s: %w", displayPath, err)
+	}
+	if st.Uid != uid || uint32(st.Mode)&trustedChainModeBits != 0 {
+		return fmt.Errorf("%w: %s (uid=%d mode=%#o)", ErrNotOwned, displayPath, st.Uid, st.Mode&0o7777)
+	}
+	return nil
+}

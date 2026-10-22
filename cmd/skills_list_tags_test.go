@@ -66,10 +66,10 @@ func TestSkillsListTags(t *testing.T) {
 // request as the hub's comma-joined tags query parameter.
 func TestRunSkillsList_TagsReachRequest(t *testing.T) {
 	origProjectPath := projectPath
-	origFormat, origYes, origNonInteractive, origNoHub := outputFormat, autoConfirm, nonInteractive, noHub
+	origFormat, origYes, origNonInteractive := outputFormat, autoConfirm, nonInteractive
 	t.Cleanup(func() {
 		projectPath = origProjectPath
-		outputFormat, autoConfirm, nonInteractive, noHub = origFormat, origYes, origNonInteractive, origNoHub
+		outputFormat, autoConfirm, nonInteractive = origFormat, origYes, origNonInteractive
 	})
 
 	var gotQueries []url.Values
@@ -92,7 +92,7 @@ func TestRunSkillsList_TagsReachRequest(t *testing.T) {
 	tmpHome := os.Getenv("HOME")
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	projectPath = setupEnvProject(t, tmpHome, server.URL)
-	outputFormat, autoConfirm, nonInteractive, noHub = "json", true, true, false
+	outputFormat, autoConfirm, nonInteractive = "json", true, true
 
 	f := skillsListCmd.Flags().Lookup("tags")
 	require.NotNil(t, f)

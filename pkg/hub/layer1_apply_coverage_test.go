@@ -163,6 +163,8 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.cloud.tls.enabled":              `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.insecure_skip_verify": `{"cloud":{"tls":{"insecure_skip_verify":true}}}`,
 	"telemetry.cloud.tls.ca_file":              `{"cloud":{"tls":{"ca_file":"/etc/ca.pem"}}}`,
+	"telemetry.cloud.tls.cert_file":            `{"cloud":{"tls":{"cert_file":"/etc/client.pem"}}}`,
+	"telemetry.cloud.tls.key_file":             `{"cloud":{"tls":{"key_file":"/etc/client-key.pem"}}}`,
 	"telemetry.cloud.batch":                    `{"cloud":{"batch":{"max_size":10}}}`,
 	"telemetry.cloud.batch.max_size":           `{"cloud":{"batch":{"max_size":10}}}`,
 	"telemetry.cloud.batch.timeout":            `{"cloud":{"batch":{"timeout":"7s"}}}`,
@@ -218,7 +220,7 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		"server.hub.start_claim_lease_ttl":         {section: "lifecycle", doc: `{"start_claim_lease_ttl":"2m"}`, observe: observeStartClaim},
 		"server.hub.start_max_duration":            {section: "lifecycle", doc: `{"start_max_duration":"41m"}`, observe: observeStartClaim},
 		"server.hub.start_unconfirmed_hold":        {section: "lifecycle", doc: `{"start_unconfirmed_hold":"20m"}`, observe: observeStartClaim},
-		"server.hub.start_create_unconfirmed_hold": {section: "lifecycle", doc: `{"start_create_unconfirmed_hold":"3m"}`, observe: observeStartClaim},
+		"server.hub.start_create_unconfirmed_hold": {section: "lifecycle", doc: `{"start_create_unconfirmed_hold":"16m30s"}`, observe: observeStartClaim},
 
 		// auto_expose_ports, quotas, agent_secrets, project_defaults
 		"auto_expose_ports.enabled": {section: "auto_expose_ports", doc: `{"enabled":true}`,

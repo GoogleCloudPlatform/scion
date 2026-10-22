@@ -22,7 +22,7 @@
  * zone named next to the absolute date, and re-render on a zone change.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../client/api.js', () => ({
   // Never resolves: the tests set entries directly and must not race a load.
@@ -41,9 +41,20 @@ beforeAll(async () => {
   await import('./unified-log-viewer.js');
 });
 
+// The viewers render ingested entries on the next animation frame
+// (webperf C6); run frames synchronously so `updateComplete` covers them.
+beforeEach(() => {
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    cb(0);
+    return 1;
+  });
+  vi.stubGlobal('cancelAnimationFrame', () => {});
+});
+
 afterEach(() => {
   document.body.innerHTML = '';
   setPreferredTimeZone('');
+  vi.unstubAllGlobals();
 });
 
 /** 15:00:00.000Z is midnight the next day in Tokyo (+09:00). */
@@ -60,7 +71,7 @@ describe('scion-agent-log-viewer timestamps', () => {
     const el: AnyEl = document.createElement('scion-agent-log-viewer');
     el.agentId = 'a1';
     document.body.appendChild(el);
-    el.entries = [
+    el.mergeEntries([
       { timestamp: TOKYO_MIDNIGHT, severity: 'INFO', message: 'hello', insertId: 'i1' },
       {
         timestamp: '2026-09-23T15:04:05.007Z',
@@ -68,7 +79,7 @@ describe('scion-agent-log-viewer timestamps', () => {
         message: 'later',
         insertId: 'i2',
       },
-    ];
+    ]);
     await el.updateComplete;
     return el;
   }
@@ -76,7 +87,8 @@ describe('scion-agent-log-viewer timestamps', () => {
   it('renders midnight as 00:00:00.000 in the display zone, divider names the zone', async () => {
     setPreferredTimeZone('Asia/Tokyo');
     const el = await mount();
-    expect(text(el, 'td.ts')).toEqual(['00:00:00.000', '00:04:05.007']);
+    // Newest first.
+    expect(text(el, 'td.ts')).toEqual(['00:04:05.007', '00:00:00.000']);
     expect(text(el, 'td.date-divider')).toEqual(['Sep 24, 2026 (Asia/Tokyo)']);
   });
 
@@ -85,24 +97,24 @@ describe('scion-agent-log-viewer timestamps', () => {
     const el = await mount();
     setPreferredTimeZone('America/New_York');
     await el.updateComplete;
-    expect(text(el, 'td.ts')).toEqual(['11:00:00.000', '11:04:05.007']);
+    expect(text(el, 'td.ts')).toEqual(['11:04:05.007', '11:00:00.000']);
     expect(text(el, 'td.date-divider')).toEqual(['Sep 23, 2026 (America/New_York)']);
   });
 });
 
 describe('scion-agent-message-viewer timestamps', () => {
-  function message(timestamp: string, insertId: string) {
+  function message(createdAt: string, id: string): Record<string, unknown> {
     return {
+      id,
+      projectId: 'p1',
       sender: 'user:alice',
+      senderId: 'a1',
       recipient: 'agent:bob',
-      direction: 'sent',
-      msgType: 'instruction',
-      body: 'hi',
-      urgent: false,
-      broadcasted: false,
-      timestamp,
-      insertId,
-      raw: null,
+      recipientId: 'b1',
+      msg: 'hi',
+      type: 'instruction',
+      agentId: 'a1',
+      createdAt,
     };
   }
 
@@ -110,7 +122,7 @@ describe('scion-agent-message-viewer timestamps', () => {
     const el: AnyEl = document.createElement('scion-agent-message-viewer');
     el.agentId = 'a1';
     document.body.appendChild(el);
-    el.messages = [message(TOKYO_MIDNIGHT, 'm1')];
+    el.mergeHubMessages([message(TOKYO_MIDNIGHT, 'm1')]);
     await el.updateComplete;
     return el;
   }
@@ -137,7 +149,7 @@ describe('scion-unified-log-viewer timestamps', () => {
   async function mount(): Promise<AnyEl> {
     const el: AnyEl = document.createElement('scion-unified-log-viewer');
     document.body.appendChild(el);
-    el.entries = [
+    el.mergeEntries([
       {
         timestamp: TOKYO_MIDNIGHT,
         severity: 'ERROR',
@@ -145,7 +157,7 @@ describe('scion-unified-log-viewer timestamps', () => {
         insertId: 'u1',
         source: 'hub',
       },
-    ];
+    ]);
     await el.updateComplete;
     return el;
   }
@@ -171,7 +183,7 @@ describe('scion-unified-log-viewer timestamps', () => {
   it('detail panel shows an unparsable timestamp as given, without throwing', async () => {
     const el: AnyEl = document.createElement('scion-unified-log-viewer');
     document.body.appendChild(el);
-    el.entries = [
+    el.mergeEntries([
       {
         timestamp: 'not-a-date',
         severity: 'ERROR',
@@ -179,7 +191,7 @@ describe('scion-unified-log-viewer timestamps', () => {
         insertId: 'u2',
         source: 'hub',
       },
-    ];
+    ]);
     await el.updateComplete;
     (el.shadowRoot.querySelector('.log-row') as HTMLElement).click();
     await el.updateComplete;

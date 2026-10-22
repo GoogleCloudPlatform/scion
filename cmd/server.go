@@ -32,7 +32,6 @@ var (
 	noAutoMigrate        bool
 	enableDevAuth        bool
 	enableTestLogin      bool
-	enableTestIdentities bool
 	enableDebugEndpoints bool
 	enableDebug          bool
 	storageBucket        string
@@ -253,8 +252,7 @@ func init() {
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
-	serverStartCmd.Flags().BoolVar(&enableTestIdentities, "enable-test-identities", false, "Enable hub-issued short-lived test identities (POST /api/v1/test-identities) for test hubs (do not use in production)")
-	registerTestAdminFlags(serverStartCmd)
+	registerTestModeFlags(serverStartCmd)
 
 	// Debug flags
 	serverStartCmd.Flags().BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "Serve diagnostic endpoints for local development; refused in hosted mode and independent of --debug")
@@ -279,7 +277,7 @@ func init() {
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
 	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")
-	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
+	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects and the hub endpoint; outranks server.hub.public_url (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
 	registerConduitServerFlags(serverStartCmd.Flags())

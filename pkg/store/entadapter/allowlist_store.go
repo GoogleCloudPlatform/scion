@@ -68,6 +68,7 @@ func entInviteToStore(i *ent.InviteCode) *store.InviteCode {
 		CreatedBy:  i.CreatedBy,
 		Note:       i.Note,
 		Created:    i.Created,
+		IssuanceID: i.IssuanceID,
 	}
 }
 
@@ -282,6 +283,7 @@ func (s *AllowListStore) BulkAddAllowListEntries(ctx context.Context, entries []
 // users.
 func (s *AllowListStore) ListEmailDomains(ctx context.Context) ([]string, error) {
 	emails, err := s.client.User.Query().
+		Where(notFederated()).
 		Select(user.FieldEmail).
 		Strings(ctx)
 	if err != nil {
@@ -386,6 +388,17 @@ func (s *AllowListStore) CreateInviteCode(ctx context.Context, invite *store.Inv
 	if invite.Created.IsZero() {
 		invite.Created = time.Now()
 	}
+	// Grant shaping (admin tier A3): an invite code made by an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID.
+	shaping, err := grantShapingFor(ctx, s.client, invite.CreatedBy)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		invite.ExpiresAt = *shaping.ClampExpiry(&invite.ExpiresAt)
+	}
+	invite.IssuanceID = issuanceStamp(shaping)
 
 	create := s.client.InviteCode.Create().
 		SetID(uid).
@@ -397,7 +410,8 @@ func (s *AllowListStore) CreateInviteCode(ctx context.Context, invite *store.Inv
 		SetRevoked(invite.Revoked).
 		SetCreatedBy(invite.CreatedBy).
 		SetNote(invite.Note).
-		SetCreated(invite.Created)
+		SetCreated(invite.Created).
+		SetNillableIssuanceID(invite.IssuanceID)
 
 	if err := create.Exec(ctx); err != nil {
 		return mapError(err)

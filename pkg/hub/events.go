@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -52,7 +53,10 @@ type EventPublisher interface {
 	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
-	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
+	// PublishInviteChanged emits admin.invite.changed carrying only the
+	// invite id and the action. No part of the invite code is included; the
+	// admin UI reads the code prefix from the invite row.
+	PublishInviteChanged(ctx context.Context, action string, inviteID string)
 	// PublishDispatchDone emits a slim completion event on
 	// broker.dispatch.<dispatchID>.done so the originator's subscription wakes
 	// and reads the result from the dispatch row (design §6.3).
@@ -61,6 +65,10 @@ type EventPublisher interface {
 	// deleted) on project.<projectID>.chat.topic so SSE subscribers can
 	// update the space rail in real time.
 	PublishChatTopicEvent(ctx context.Context, projectID string, action string, topic WebChatTopic)
+	// PublishChatThreadGroupEvent publishes a thread group lifecycle event
+	// (created, updated, deleted) on project.<projectID>.chat.thread_group so
+	// SSE subscribers can update the space rail in real time (ptone/scion#4424).
+	PublishChatThreadGroupEvent(ctx context.Context, projectID string, action string, group ThreadGroupResponse)
 	// PublishChatReadStateEvent publishes a read-watermark advance to the other
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.
@@ -131,7 +139,7 @@ func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
-func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _ string)    {}
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)        {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
@@ -199,6 +207,17 @@ type AgentStatusEvent struct {
 	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
 	// No omitempty: false must reach the web to clear a merged true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, with
+	// the same names and values (see agentEventBadges).
+	// HarnessVendor is omitempty: the harness cannot change after create,
+	// and an event cannot resolve the vendor of an older agent that names
+	// its harness only through a harness-config reference, so an omitted
+	// key keeps the value merged from a list fetch.
+	// ModelSize has no omitempty: a model PATCH or a reincarnation can
+	// change or clear it, and it is always known from the record, so ""
+	// must reach the web to clear a merged size.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -234,6 +253,20 @@ type AgentCreatedEvent struct {
 	// "provisioned, not started" without a refetch. No omitempty, as on
 	// the status event: a false must clear a value merged onto an existing row.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, so a
+	// new row shows its badges without a refetch (see agentEventBadges).
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize,omitempty"`
+}
+
+// agentEventBadges returns the harness vendor and model size an agent event
+// carries. Events are built from the agent record alone, with no store
+// access, so the harness comes from storedAgentHarness: an agent created
+// before the harness was stamped, naming its harness only through a
+// harness-config reference, gets no vendor here (the key is omitted, so a
+// merged value from a list fetch is kept).
+func agentEventBadges(agent *store.Agent) (vendor, size string) {
+	return harness.Vendor(storedAgentHarness(agent)), agentModelSize(agent)
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -359,11 +392,13 @@ type AllowListChangedEvent struct {
 	Email  string `json:"email,omitempty"`
 }
 
-// InviteChangedEvent is published when an invite code is created, redeemed, revoked, or deleted.
+// InviteChangedEvent is published when an invite code is created, redeemed,
+// revoked, or deleted. It carries identifiers only: no hub event channel
+// carries credential material, so no part of the invite code is included.
+// Consumers read the code prefix from the invite row.
 type InviteChangedEvent struct {
-	Action     string `json:"action"` // "created", "redeemed", "revoked", "deleted"
-	InviteID   string `json:"inviteId"`
-	CodePrefix string `json:"codePrefix,omitempty"`
+	Action   string `json:"action"` // "created", "redeemed", "revoked", "deleted"
+	InviteID string `json:"inviteId"`
 }
 
 // DispatchDoneEvent is a slim completion event emitted by the owner when a
@@ -531,6 +566,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Deletion:        deletionViewForCaller(agent, now, false),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
@@ -587,6 +623,7 @@ func newAgentCreatedEvent(agent *store.Agent) AgentCreatedEvent {
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
@@ -736,11 +773,10 @@ func (p *eventBuilder) PublishAllowListChanged(_ context.Context, action, _ stri
 }
 
 // PublishInviteChanged publishes an invite code change event.
-func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID, codePrefix string) {
+func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID string) {
 	evt := InviteChangedEvent{
-		Action:     action,
-		InviteID:   inviteID,
-		CodePrefix: codePrefix,
+		Action:   action,
+		InviteID: inviteID,
 	}
 	p.sink("admin.invite.changed", evt)
 }
@@ -767,8 +803,14 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 // artifactRefs are the references recorded for msg (recordMessageArtifacts);
 // they go only on the chat subjects (withChatArtifactRefs).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
-	evt := userMessageEvent(msg, attachments)
-	chatEvt := withChatArtifactRefs(evt, artifactRefs)
+	// Attachments stored as artifacts (ptone/scion#4595) go only on the chat
+	// subjects, which reach sessions only, the same audience their history
+	// lists them to. agent.<id>.message, user.<id>.message and
+	// project.<id>.user.message carry the AttachmentStore's attachments only:
+	// the hub's agent messages stream, which a user access token may open,
+	// reads agent.<id>.message (ptone/scion#4596).
+	evt := userMessageEvent(msg, legacyAttachmentRefs(attachments))
+	chatEvt := withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs)
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>

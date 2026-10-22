@@ -31,10 +31,10 @@ import (
 // The only writer is the offline host command
 // `scion server test-infra mark` (cmd/server_test_infra.go, through
 // pkg/testinfra). No hub route and no store.Store method writes it; the hub
-// only reads it once, at startup: the test admin gate reads it when
-// --enable-test-admin-identities is set, and the test-identity web session
-// key is read from it when --enable-test-identities is set. There is exactly
-// one row, id "test-infra-marker".
+// only reads it once, at startup: every --test-mode level other than off
+// requires it (the --test-mode gate reads it), and the test-identity web
+// session key is read from it at those levels. There is exactly one row, id
+// "test-infra-marker".
 //
 // Every field is immutable: re-designating a database is a deliberate
 // operator act (delete the row on the host, then mark again), never an
@@ -53,7 +53,7 @@ func (TestInfraMarker) Fields() []ent.Field {
 		field.String("hub_id").
 			NotEmpty().
 			Immutable().
-			Comment("Resolved hub id (PersistentHubID or server.hub.hub_id) this database is designated for"),
+			Comment("Resolved logical hub id (server.hub.hub_id, shared by every replica of the hub) this database is designated for"),
 		field.String("class").
 			NotEmpty().
 			Immutable().

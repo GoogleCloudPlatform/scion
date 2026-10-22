@@ -429,6 +429,8 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
+	// assignDeactErr fails DeactivateAgentServiceAccountAssignments.
+	assignDeactErr error
 	// outerDeleteErr fails DeleteAgent outside a transaction, and every
 	// FinalizeAgentDeletion (the conditional compensation's row delete).
 	outerDeleteErr error
@@ -879,7 +881,18 @@ type engineStubDispatcher struct {
 	mu      sync.Mutex
 	calls   int
 	softArg []bool
-	fn      func(ctx context.Context, a *store.Agent) error
+	// deleteFilesArg and removeBranchArg record each delete's flags.
+	deleteFilesArg  []bool
+	removeBranchArg []bool
+	fn              func(ctx context.Context, a *store.Agent) error
+}
+
+// deleteFlags returns the deleteFiles and removeBranch flags of every
+// delete dispatched so far.
+func (d *engineStubDispatcher) deleteFlags() (deleteFiles, removeBranch []bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]bool(nil), d.deleteFilesArg...), append([]bool(nil), d.removeBranchArg...)
 }
 
 // blockingDelete returns a dispatch fn that signals entered and blocks
@@ -2780,6 +2793,13 @@ func (s *createTxFaultStore) DeactivateDelegationEdgesForDelegate(ctx context.Co
 	return s.Store.DeactivateDelegationEdgesForDelegate(ctx, delegateType, delegateID, d)
 }
 
+func (s *createTxFaultStore) DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
+	if s.assignDeactErr != nil {
+		return 0, s.assignDeactErr
+	}
+	return s.Store.DeactivateAgentServiceAccountAssignments(ctx, agentID, d)
+}
+
 // createWithRequestID issues the fixture's create with request metadata
 // carrying requestID, as the request-log middleware installs it, and
 // returns the response and the compensation-failure records logged while
@@ -3049,10 +3069,12 @@ func (p *deleteRecordingPublisher) count(kind string) int {
 	return n
 }
 
-func (d *engineStubDispatcher) DispatchAgentDelete(ctx context.Context, a *store.Agent, _, _, soft bool, _ time.Time) error {
+func (d *engineStubDispatcher) DispatchAgentDelete(ctx context.Context, a *store.Agent, deleteFiles, removeBranch, soft bool, _ time.Time) error {
 	d.mu.Lock()
 	d.calls++
 	d.softArg = append(d.softArg, soft)
+	d.deleteFilesArg = append(d.deleteFilesArg, deleteFiles)
+	d.removeBranchArg = append(d.removeBranchArg, removeBranch)
 	fn := d.fn
 	d.mu.Unlock()
 	if fn == nil {
@@ -3666,7 +3688,7 @@ var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "projectSlug", "labels",
 	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
-	"_capabilities", "_messageability", "deletion",
+	"_capabilities", "_messageability", "deletion", "harnessVendor", "modelSize",
 }
 
 func rawKeys[V any](m map[string]V) []string {

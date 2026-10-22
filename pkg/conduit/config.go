@@ -15,6 +15,7 @@
 package conduit
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -120,6 +121,20 @@ type Config struct {
 	StreamHandler StreamHandler
 	// RPCHandler serves inbound RPCs. Nil answers 501.
 	RPCHandler RPCHandler
+	// OnStreamRenewal receives, on the dialer (target) side, each
+	// AuthRefresh{stream_id} the relay sends: the hub's renewal for one
+	// stream (design §3.5), with credential holding the renewal grant
+	// (empty for a notice that carries none). ctx is the session's
+	// context (WelcomeFromContext works on it). It is called from the
+	// session's frame reader, in arrival order, and must not block. Nil
+	// ignores renewals.
+	OnStreamRenewal func(ctx context.Context, streamID uint32, credential []byte)
+	// OnGrantKeysChanged is called, on the dialer (target) side, for each
+	// GrantKeysChanged the relay sends (design v2.21.27 §3.5). It only
+	// signals that the hub's grant keys changed: the target fetches them
+	// over its own authenticated channel. It is called from the session's
+	// frame reader and must not block. Nil ignores the frame.
+	OnGrantKeysChanged func(ctx context.Context)
 
 	// Interceptor, if set, sees every frame (test seam for fault
 	// injection; see Interceptor).
@@ -224,6 +239,8 @@ func FrameType(f *conduitv1.Frame) string {
 		return "ping"
 	case *conduitv1.Frame_Pong:
 		return "pong"
+	case *conduitv1.Frame_GrantKeysChanged:
+		return "grant_keys_changed"
 	case *conduitv1.Frame_RpcRequest:
 		return "rpc_request"
 	case *conduitv1.Frame_RpcResponse:

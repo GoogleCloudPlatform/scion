@@ -467,6 +467,115 @@ export function isAgentRunning(agent: Agent): boolean {
 }
 
 /**
+ * The client-facing view of an agent's current or most recent async launch
+ * (store.AgentLaunch, pkg/store/launch_view.go). The hub sends it on agent
+ * reads and on SSE `created` and `status` events. It is absent when the
+ * agent has never had an async launch, as after a synchronous create.
+ */
+export interface AgentLaunch {
+  id: string;
+  /**
+   * The launch's own state. It stays `active` while a failed or stopped
+   * create winds down, after the agent has left the in-flight phases.
+   */
+  state: 'active' | 'ended';
+  /**
+   * The hub's in-flight predicate (store.Agent.IsInFlight): the launch is
+   * active and the agent is still in a pre-running phase. It is not the same
+   * as `state === 'active'`; it is false in every phase an incomplete create
+   * can be in.
+   */
+  active: boolean;
+  /**
+   * create | start | restart. A resume is a `start` launch. Start and
+   * restart launches exist only where the hub runs starts asynchronously.
+   */
+  kind: string;
+  /** The last step the broker reported, e.g. `claim` or `launching`. */
+  step?: string;
+  /** Failure code, e.g. `runtime_error`, `launch_timeout`, `broker_lost`. */
+  error?: string;
+  /**
+   * The runtime cause behind a `runtime_error`, when the broker reported one
+   * (ptone/scion#4666): `runtime_forbidden` or `runtime_unauthorized`.
+   */
+  cause?: string;
+  /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
+  endReason?: string;
+  /**
+   * The resume memory of a failed start (ptone/scion#4669): the resting
+   * phase a later start or resume treats the agent as being in, sent only
+   * when it differs from the agent's phase.
+   */
+  resumePhase?: AgentPhase;
+  /** Present only while the launch is active. */
+  deadline?: string;
+  remainingSeconds?: number;
+}
+
+/** The agent fields the launch predicates read. */
+export interface AgentLaunchFields {
+  phase?: AgentPhase;
+  launch?: AgentLaunch;
+}
+
+/**
+ * Whether the hub is still launching the agent asynchronously. The hub
+ * computes this as `launch.active` from its in-flight predicate
+ * (store.Agent.IsInFlight), which already includes the phase check.
+ */
+export function isAgentLaunching(agent: AgentLaunchFields): boolean {
+  return agent.launch?.active === true;
+}
+
+/**
+ * Whether the agent is an async create that did not complete, mirroring the
+ * hub's incomplete-create predicate (store.Agent.IsIncompleteCreate). The
+ * hub refuses a start or resume of such an agent with 409
+ * `agent_create_incomplete`; the way out is to delete it and create it again.
+ */
+export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || launch.kind !== 'create') return false;
+  switch (agent.phase) {
+    case 'suspended':
+    case 'stopping':
+    case 'stopped':
+    case 'error':
+      // The hub's wind-down arm is LaunchState == "active", which reaches
+      // the web as `state`; `active` is always false in these phases.
+      return launch.state === 'active' || !!launch.error;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether the agent rests after a start or restart launch that failed
+ * (design wave 3 D-c, ptone/scion#4669). Unlike an incomplete create, the hub
+ * still accepts a start or resume of such an agent. A failed start launch
+ * ends in a resting phase: stopped, error (with launch.resumePhase when the
+ * agent rested in another phase before), or suspended. A launch the user
+ * stopped (`launch_stopped`) is not a failure. The hub clears launch.error
+ * only on a new launch or a running write, so a later synchronous start
+ * keeps the old error while it runs through starting, provisioning and
+ * cloning; those phases do not count.
+ */
+export function isFailedStartLaunch(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || (launch.kind !== 'start' && launch.kind !== 'restart')) return false;
+  if (launch.state !== 'ended' || !launch.error || launch.error === 'launch_stopped') return false;
+  switch (agent.phase) {
+    case 'stopped':
+    case 'suspended':
+    case 'error':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * Confirmation copy shown before a best-effort resume of an error-phase
  * agent (POST /start with `{ forceResume: true }`). The agent's home
  * directory and harness session are usually still intact even after a host
@@ -723,6 +832,10 @@ export interface AgentAppliedConfig {
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;
+  /** The harness type the hub resolved at create; absent on older agents. */
+  harness?: string;
+  /** The model size alias the agent was created with; absent for an explicit model ID or no model. */
+  modelSize?: AgentModelSize;
   creatorName?: string;
   hubAccessScopes?: string[];
   agentRole?: string;
@@ -776,7 +889,9 @@ export interface AgentEditability {
 /**
  * The agent PATCH response's disposition: the wire keys whose value the
  * request changed, grouped by when each edit takes effect. An unchanged
- * echo is in no list.
+ * echo is in no list, except gcp_identity, which is listed under applied
+ * whenever the request records a service-account assignment, the current
+ * account included.
  */
 export interface AgentUpdateDisposition {
   /** Keys that take effect at the next container creation (or at once, for metadata). */
@@ -790,6 +905,9 @@ export interface AgentUpdateDisposition {
   /** Keys stored now that take effect only at the next reincarnation. */
   heldForReincarnate: string[];
 }
+
+/** A model size alias (pkg/config KnownModelAliases). */
+export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
 
 /**
  * Agent information from the Hub API
@@ -807,6 +925,8 @@ export interface Agent {
   detail?: AgentDetail;
   taskSummary?: string;
   message?: string;
+  /** The async launch view; absent when the agent never had one. */
+  launch?: AgentLaunch;
   lastSeen?: string;
   lastActivityEvent?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
@@ -819,6 +939,21 @@ export interface Agent {
   harnessAuth?: string;
   resolvedHarness?: string;
   harnessCapabilities?: HarnessAdvancedCapabilities;
+  /**
+   * The harness vendor (pkg/harness Vendor): the model vendor of a
+   * single-vendor harness ("anthropic", "google", "openai", "xai", "meta"),
+   * the harness name of a multi-vendor one ("opencode", "copilot",
+   * "hermes"). Absent for a custom or unresolved harness. Set on list
+   * items (full and compact), the single-agent GET and SSE created/status
+   * events.
+   */
+  harnessVendor?: string;
+  /**
+   * The model size alias the agent was created with; absent when it has
+   * none. An SSE status event sends '' to clear it, so a merged row can
+   * hold ''. Test for truthiness, not presence.
+   */
+  modelSize?: AgentModelSize | '';
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
   /**
@@ -931,20 +1066,14 @@ export interface DeletionInfo {
 export type DeletionStage = 'finalizing' | (string & Record<never, never>);
 
 /**
- * Template configuration embedded in template detail responses.
- * Partial subset of the Go `store.TemplateConfig` struct, covering fields used by the frontend.
+ * The job keys the frontend reads from a template's agentConfig: the hub's
+ * read-only snapshot of the template's own scion-agent.yaml (keys in
+ * scion-agent.yaml spelling). The hub reads a template's job keys from it
+ * (ptone/scion#4222). Partial subset of the Go `api.ScionConfig`.
  */
-export interface TemplateConfig {
-  harness?: string;
-  image?: string;
-  configDir?: string;
-  env?: Record<string, string>;
-  detached?: boolean;
-  commandArgs?: string[];
+export interface TemplateAgentConfig {
   model?: string;
-  messageMode?: MessageMode;
-  telemetry?: TelemetryConfig;
-  kubernetes?: Record<string, unknown>;
+  message_mode?: MessageMode;
 }
 
 /**
@@ -958,7 +1087,6 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
-  image?: string;
   status: string;
   scope: string;
   scopeId?: string;
@@ -966,7 +1094,8 @@ export interface Template {
   /** URL the template was imported from, when it was imported. */
   sourceUrl?: string;
   files?: TemplateFileInfo[];
-  config?: TemplateConfig;
+  /** Read-only snapshot of the template's own scion-agent.yaml; see TemplateAgentConfig. */
+  agentConfig?: TemplateAgentConfig;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1008,6 +1137,12 @@ export interface HarnessConfig {
   files?: TemplateFileInfo[];
   imageStatus?: string;
   imageStatusCheckedAt?: string;
+  /**
+   * Image the hub's image-build executor last built for this harness-config
+   * (ptone/scion#4219). Operational state, not derived from config.yaml;
+   * when set it is the image to show and check, in place of config.image.
+   */
+  builtImage?: string;
   created?: string;
   updated?: string;
   _capabilities?: Capabilities;
@@ -1087,7 +1222,7 @@ export type BrokerStatus = 'online' | 'offline' | 'degraded';
  * Capabilities advertised by a Runtime Broker
  */
 export interface BrokerCapabilities {
-  webPTY: boolean;
+  webPty: boolean;
   sync: boolean;
   attach: boolean;
 }
@@ -1106,6 +1241,104 @@ export interface RuntimeTargetDescriptor {
   id: string;
   type: string;
   displayName?: string;
+}
+
+/**
+ * The publishable configuration a flat Runtime Broker instance last
+ * reported (Go `api.RuntimeTargetPresentation`, the frozen FC4-a
+ * "published" set). It is read-only, shown as the instance's defaults for
+ * new agents: not the configuration of any agent and not a check of cluster
+ * permissions. Fields FC4-a never publishes (kubeconfig context, service
+ * account policy, volume sources, secret targets, env values) have no field
+ * here; a client must render only the fields named below.
+ */
+export interface RuntimeTargetPresentation {
+  schemaVersion: number;
+  key: string;
+  name: string;
+  target?: PresentedTarget;
+  agentDefaults?: PresentedAgentDefaults;
+}
+
+/** The publishable part of an instance's runtime_target. */
+export interface PresentedTarget {
+  type: string;
+  displayName?: string;
+  namespace?: string;
+  gke?: boolean;
+  priorityClassName?: string;
+  sharedDirStorageClass?: string;
+  sharedDirSize?: string;
+  /** Tri-state: absent (or null) = unset; true and false are distinct. */
+  safeToEvict?: boolean | null;
+  sharedDirStorageBackend?: string;
+  sharedDirStorageBackends?: Record<string, string>;
+  homeStorageBackend?: string;
+  /**
+   * Kubernetes placement defaults (ptone/scion#5085). Optional: a Hub that
+   * does not publish them sends none, and the card then shows no
+   * Placement group.
+   */
+  nodeSelector?: Record<string, string>;
+  tolerations?: PresentedToleration[];
+  runtimeClassName?: string;
+}
+
+/**
+ * One Kubernetes toleration as presented. Only these four fields are ever
+ * rendered; any other key on the object is ignored.
+ */
+export interface PresentedToleration {
+  key?: string;
+  /** "Equal" or "Exists"; empty means Equal. */
+  operator?: string;
+  /** Empty for Exists. */
+  value?: string;
+  /** NoSchedule, PreferNoSchedule, NoExecute, or empty for any effect. */
+  effect?: string;
+}
+
+/** Resource quantities as the Hub sends them (Go `api.ResourceSpec`). */
+export interface PresentedResourceSpec {
+  requests?: { cpu?: string; memory?: string };
+  limits?: { cpu?: string; memory?: string };
+  disk?: string;
+}
+
+/** A volume mount's mount target, read-only flag and kind (never its source). */
+export interface PresentedVolume {
+  target: string;
+  readOnly?: boolean;
+  type?: string;
+}
+
+/** A secret declaration's key, kind and description (never a value or target). */
+export interface PresentedSecretDecl {
+  key: string;
+  type?: string;
+  description?: string;
+}
+
+/** One harness override; its environment is published as variable names only. */
+export interface PresentedHarnessOverride {
+  image?: string;
+  imagePullPolicy?: string;
+  authSelectedType?: string;
+  user?: string;
+  envKeys?: string[];
+  volumes?: PresentedVolume[];
+  resources?: PresentedResourceSpec;
+}
+
+/** The publishable part of an instance's agent_defaults. */
+export interface PresentedAgentDefaults {
+  defaultHarnessConfig?: string;
+  imageRegistry?: string;
+  cloneDepth?: string;
+  resources?: PresentedResourceSpec;
+  volumes?: PresentedVolume[];
+  secrets?: PresentedSecretDecl[];
+  harnessOverrides?: Record<string, PresentedHarnessOverride>;
 }
 
 /** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
@@ -1130,11 +1363,25 @@ export interface RuntimeBroker {
   profiles?: BrokerProfile[];
   /** Present only for a flat Runtime Broker (single runtime target). */
   runtimeTarget?: RuntimeTargetDescriptor;
+  /** What a flat Runtime Broker instance last reported; absent when none was. */
+  runtimeTargetPresentation?: RuntimeTargetPresentation;
+  /** When the Hub last saw runtimeTargetPresentation ("as reported at"). */
+  runtimeTargetPresentationObservedAt?: string;
+  /**
+   * True when the broker runs in the process that answered the request
+   * (this server's co-located broker or one of its flat instances).
+   * Read-only and display-only; absent otherwise.
+   */
+  hostedByThisServer?: boolean;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
+  /** Configured GCP host service account (Go JSON tag is snake_case). */
+  gcp_host_service_account_email?: string;
+  /** Configured GCP host project (read in snake_case; PATCH takes camelCase). */
+  gcp_host_project_id?: string;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -1177,6 +1424,27 @@ export interface RuntimeBroker {
    * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
+  /**
+   * Host identity state of a co-located broker: the configured GCP host
+   * service account compared with the identity the host reports. Mirrors Go
+   * store.HostIdentityStatus. observedEmail and observedAt are present only
+   * for callers allowed to update the broker.
+   */
+  hostIdentity?: BrokerHostIdentity;
+}
+
+/** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
+export interface BrokerHostIdentity {
+  state:
+    | 'unobserved'
+    | 'unknown'
+    | 'unset_detected'
+    | 'match'
+    | 'mismatch'
+    | 'pinned_absent'
+    | 'none';
+  observedEmail?: string;
+  observedAt?: string;
 }
 
 /**

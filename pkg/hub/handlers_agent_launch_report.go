@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -28,10 +29,11 @@ import (
 // /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch. `claim` and
 // `checkpoint` are sent synchronously and gate the launch (§3.8.2); `progress`
 // covers step changes and the keepalive. Agent is present only on a
-// `succeeded` report; of its fields the hub applies only Runtime (through
-// store.LaunchReport), WorkspacePlacement and RunID (see
-// handleAgentLaunchReport). The rest of the echo (exposed ports, applied
-// config, etc.) is not applied.
+// `succeeded` report; of its fields the hub applies the broker-resolved
+// config (template, harness config and auth, image, profile, runtime: see
+// store.ApplyBrokerAgentConfig), WorkspacePlacement and RunID (see
+// handleAgentLaunchReport). The rest of the echo (phase, activity, container
+// status, etc.) is not applied.
 type AgentLaunchReport struct {
 	LaunchID   string           `json:"launchId"`
 	InstanceID string           `json:"instanceId"`
@@ -41,6 +43,7 @@ type AgentLaunchReport struct {
 	Step       string           `json:"step,omitempty"`
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
+	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -81,6 +84,21 @@ func hasControlCharacter(s string) bool {
 	return false
 }
 
+// launchReportCause returns the cause the hub stores for report r
+// (ptone/scion#4666): r.Cause when r is a failed report whose code is
+// runtime_error (the code a cause qualifies, as on a synchronous create's
+// details.cause) and r.Cause is one of the fixed relayable codes
+// (relayableRuntimeCause), else "". An older broker sends no cause, and a
+// cause this hub does not know is dropped rather than rejected: rejecting
+// the terminal report would leave the broker retrying it and skipping its
+// cleanup.
+func launchReportCause(r AgentLaunchReport) string {
+	if r.State != store.LaunchReportStateFailed || r.ErrorCode != ErrCodeRuntimeError {
+		return ""
+	}
+	return relayableRuntimeCause(r.Cause)
+}
+
 // handleAgentLaunchReport implements the broker->Hub launch report endpoint
 // (design §3.2, §3.7). Authenticated by the broker's HMAC identity only,
 // routed next to message-failures.
@@ -89,7 +107,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	brokerIdent := GetBrokerIdentityFromContext(ctx)
 	if brokerIdent == nil || brokerIdent.BrokerID() != brokerID {
-		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "runtime_broker", ID: brokerID}, ActionUpdate,
+		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: permissions.ResourceBroker, ID: brokerID}, ActionUpdate,
 			"a launch report may only be sent by the broker itself")
 		Forbidden(w)
 		return
@@ -132,9 +150,21 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Step:       sanitizeFailureReason(req.Step),
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
+		Cause:      launchReportCause(req),
+	}
+	if req.Cause != "" && sr.Cause == "" {
+		// The raw cause is untrusted broker text, so only its length is
+		// logged, with the sanitized code it came with.
+		s.agentLifecycleLog.Debug("Launch report: dropped a cause the hub does not relay",
+			"agent_id", agentID, "broker_id", brokerID,
+			"error_code", sr.ErrorCode, "cause_len", len(req.Cause))
 	}
 	if req.Agent != nil {
-		sr.Runtime = req.Agent.Runtime
+		// The broker-resolved config is applied in the store's launch
+		// transaction with the same rules (and the same conversion) as a
+		// synchronous dispatch (ptone/scion#4818), so a report the launch
+		// fencing rejects writes none of it.
+		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)
@@ -168,9 +198,12 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// Result=Completed (the agent did start; nothing to revoke), and a
 	// failed report arriving during a stop/suspend returns a Conflict
 	// HTTPStatus — in both of those cases the agent may still be relying on
-	// its current credential.
+	// its current credential. The launch kind decides the rule
+	// (launchFailureRevokeReason).
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
-		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
+		if reason := launchFailureRevokeReason(&updated); reason != "" {
+			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
+		}
 	}
 
 	// An applied succeeded report settles the run the launch started
@@ -187,6 +220,17 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// later delete.
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		s.settleLaunchedRun(ctx, &updated, req.Agent)
+	}
+
+	// A write that changed the row (applied, or a 409 stale_launch that
+	// still ended the launch) may have released the launch's claim (a
+	// create, start or restart claim) with the agent already out of a
+	// counted phase: an exit observed during the launch skipped its release
+	// while the claim was held. Free the slot now if the agent holds no
+	// capacity and no start-kind claim; a no-op otherwise (a running agent,
+	// or a write that released quota itself).
+	if answer.Changed {
+		s.releaseSlotIfIdle(ctx, agentID)
 	}
 
 	if answer.HTTPStatus != 0 {
@@ -255,5 +299,34 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	if info.RunID != minted {
 		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
 			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID)
+	}
+}
+
+// launchFailureRevokeReason is the credential revoke an applied failed
+// launch report triggers, by launch kind (ptone/scion#4669, design D-c L6),
+// or "" for none:
+//   - a create (or a row from before launch kinds) revokes create_failed,
+//     as before;
+//   - a start revokes start_failed only when the hub decided so when it
+//     began the launch (LaunchRevokeOnFail: the same rule a synchronous
+//     DispatchAgentStart failure applies);
+//   - a restart never revokes: its stop leg tolerates a "not running" stop,
+//     so the hub cannot be sure no old container still holds the
+//     credential. This differs on purpose from a synchronous restart of a
+//     stopped agent, which can revoke through DispatchAgentStart.
+//
+// Only create launches exist until asynchronous start ships, so the start
+// and restart rules are not reached yet.
+func launchFailureRevokeReason(a *store.Agent) string {
+	switch a.LaunchKind {
+	case store.LaunchKindStart:
+		if a.LaunchRevokeOnFail {
+			return agentCredentialRevokeReasonStartFailed
+		}
+		return ""
+	case store.LaunchKindRestart:
+		return ""
+	default:
+		return agentCredentialRevokeReasonCreateFailed
 	}
 }

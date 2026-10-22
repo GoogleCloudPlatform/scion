@@ -25,11 +25,98 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // GetRuntime returns the appropriate Runtime implementation based on environment,
 // agent configuration (if available via GetAgentSettings), and project/global settings.
 func GetRuntime(projectPath string, profileName string) Runtime {
+	return selectRuntime(projectPath, profileName).build()
+}
+
+// GetRuntimeWithRecord is GetRuntime that also returns the runtime's build
+// record (Kubernetes placement defaults, ptone/scion#5085), taken from the
+// same settings read the runtime was built from. The record is carried with
+// the runtime and is not consulted when the runtime is built.
+//
+//   - Present is true for every runtime built here except an ErrorRuntime,
+//     whose record is the zero value.
+//   - EntryName is the runtimes key the resolved profile names, set only
+//     when that key exists in the overlay-inclusive global view
+//     (config.LoadGlobalSettingsWithOverlay) and, unless the settings
+//     overlay supplies the runtimes section, the project's own settings do
+//     not define the same key (a project-local same-name entry records "").
+//     When resolution fell back to a runtime type or auto-detection, or the
+//     global view cannot be read, it is "".
+//   - KubeconfigContext is a Kubernetes client's raw kubeconfig
+//     current-context at build (k8s.Client.RawCurrentContext), not its
+//     CurrentContext; "" when the client is in-cluster.
+//
+// A runtime resolved before the co-located settings overlay is installed
+// (the agent runtime's startup default) records its entry from the file
+// view, since the overlay does not exist yet.
+func GetRuntimeWithRecord(projectPath, profileName string) (Runtime, config.RuntimeBuildRecord) {
+	sel := selectRuntime(projectPath, profileName)
+	rt := sel.build()
+	return rt, sel.record(rt)
+}
+
+// runtimeSelection is what GetRuntime resolved from settings, before the
+// runtime is constructed.
+type runtimeSelection struct {
+	vs          *config.VersionedSettings
+	projectDir  string
+	profileName string
+	rtConfig    config.V1RuntimeConfig
+	runtimeType string
+	// entryName is the runtimes key the resolved profile names, or "" when
+	// settings did not resolve the profile.
+	entryName string
+}
+
+// record returns the build record of rt, built from s (see
+// GetRuntimeWithRecord).
+func (s runtimeSelection) record(rt Runtime) config.RuntimeBuildRecord {
+	if _, isErr := rt.(*ErrorRuntime); isErr || rt == nil {
+		return config.RuntimeBuildRecord{}
+	}
+	rec := config.RuntimeBuildRecord{Present: true, EntryName: globalEntryName(s.projectDir, s.entryName)}
+	if kr, ok := rt.(*KubernetesRuntime); ok && kr.Client != nil {
+		// "" for an in-cluster client: neither the sentinel branch nor the
+		// deferred loader's in-cluster fallback has a kubeconfig context.
+		rec.KubeconfigContext = kr.Client.RawCurrentContext
+	}
+	return rec
+}
+
+// globalEntryName returns name when it may be recorded as the global
+// runtimes entry a runtime was built from, else "" (see
+// GetRuntimeWithRecord). It only reads settings.
+func globalEntryName(projectDir, name string) string {
+	if name == "" {
+		return ""
+	}
+	gvs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil || gvs == nil {
+		return ""
+	}
+	if _, ok := gvs.Runtimes[name]; !ok {
+		return ""
+	}
+	if config.GetGlobalSettingsOverlay().SuppliesRuntimes() {
+		// The overlay replaces the runtimes section in the project-merged
+		// view too, so no project-local entry can shadow this one.
+		return name
+	}
+	if config.ProjectSettingsDefinesRuntime(projectDir, name) {
+		return ""
+	}
+	return name
+}
+
+// selectRuntime resolves the runtime type and configuration GetRuntime
+// builds, from one settings read.
+func selectRuntime(projectPath string, profileName string) runtimeSelection {
 	projectDir, _ := config.GetResolvedProjectDir(projectPath)
 	vs, warnings, _ := config.LoadEffectiveSettings(projectDir)
 	config.PrintDeprecationWarnings(warnings)
@@ -38,10 +125,19 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	var rtConfig config.V1RuntimeConfig
 	var runtimeType string
+	var entryName string
 
 	if vs != nil {
 		var err error
 		rtConfig, runtimeType, err = vs.ResolveRuntime(profileName)
+		if err == nil {
+			// ResolveRuntime("") resolves vs.ActiveProfile.
+			resolvedProfile := profileName
+			if resolvedProfile == "" {
+				resolvedProfile = vs.ActiveProfile
+			}
+			entryName = vs.Profiles[resolvedProfile].Runtime
+		}
 		if err != nil {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
@@ -94,7 +190,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
 			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
 			// distinguish cloudrun-sandbox from cloudrun-instances.
-			if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+			if cloudrunenv.IsInstance() {
 				if SandboxLauncherAvailable() {
 					runtimeType = "cloudrun-sandbox"
 					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
@@ -102,7 +198,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 					runtimeType = "cloudrun-instances"
 					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
 				}
-			} else if os.Getenv("K_SERVICE") != "" {
+			} else if cloudrunenv.IsService() {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -124,13 +220,28 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 
 	util.Debugf("GetRuntime: final runtime type: %s", runtimeType)
 
+	return runtimeSelection{
+		vs:          vs,
+		projectDir:  projectDir,
+		profileName: profileName,
+		rtConfig:    rtConfig,
+		runtimeType: runtimeType,
+		entryName:   entryName,
+	}
+}
+
+// build constructs the runtime s selected. It is GetRuntime's construction
+// step, unchanged.
+func (s runtimeSelection) build() Runtime {
+	vs, profileName, rtConfig, runtimeType := s.vs, s.profileName, s.rtConfig, s.runtimeType
+
 	switch runtimeType {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
 		// On Cloud Run Instances the docker daemon is unavailable.
 		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
-		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+		if cloudrunenv.IsInstance() {
 			if SandboxLauncherAvailable() {
 				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
 				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
@@ -154,7 +265,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		// On Cloud Run the docker daemon is unavailable regardless of
 		// whether the CLI binary exists in the container image.
-		if os.Getenv("K_SERVICE") != "" {
+		if cloudrunenv.IsService() {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
 			cfg := rtConfig.CloudRun
 			if cfg == nil {
@@ -197,7 +308,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
-		if cfg == nil && os.Getenv("K_SERVICE") != "" {
+		if cfg == nil && cloudrunenv.IsService() {
 			// Auto-detected Cloud Run environment with no explicit config
 			// from settings. Create a default config; project/region will
 			// be discovered from GCP metadata when API calls are made.

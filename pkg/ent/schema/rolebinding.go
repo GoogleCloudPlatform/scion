@@ -74,18 +74,40 @@ func (RoleBinding) Fields() []ent.Field {
 		field.String("membership_kind").
 			Optional().
 			Nillable(),
+		// source_rule_id is set only on a project-visitor binding created
+		// by a project visitor rule (ProjectVisitorRule): removing the
+		// rule deletes every binding carrying its ID. NULL on every other
+		// binding, including a visitor grant by email.
+		field.UUID("source_rule_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Immutable(),
+		// issuance_id is the issuance ID of the admin-kind test identity
+		// whose request created this row (ptone/scion#4240, admin tier A3),
+		// set only by the store's grant shaping (entadapter
+		// grantShapingFor and issuanceStamp), at create. NULL for every other row. The
+		// purge of that identity removes the rows carrying it.
+		field.String("issuance_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Issuance ID of the admin-kind test identity that created this row (grant shaping)"),
 	}
 }
 
 // Indexes of the RoleBinding.
 func (RoleBinding) Indexes() []ent.Index {
 	return []ent.Index{
+		// The admin-kind test identity purge selects rows by issuance_id.
+		index.Fields("issuance_id"),
 		// Find all bindings for a principal
 		index.Fields("principal_type", "principal_id"),
 		// Find all bindings for a role definition
 		index.Fields("role_definition_id"),
 		// Find all bindings for a scope (e.g. a project)
 		index.Fields("scope_type", "scope_id"),
+		// Find the bindings a project visitor rule created
+		index.Fields("source_rule_id"),
 		// Prevent duplicate bindings (lifecycle fields are NOT part of the unique
 		// constraint — the same (role, principal, scope) tuple must be unique
 		// regardless of activation windows).

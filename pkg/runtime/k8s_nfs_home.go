@@ -305,8 +305,8 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 	for _, l := range links {
 		targets = append(targets, l.Target)
 	}
-	runtimeLog.Info("Checking linked files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
-	out, err := r.execInPod(ctx, namespace, podName, k8sHomeLinksResultCommand)
+	runtimeLog().Info("Checking linked files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
+	out, err := r.execInPodDialRetry(ctx, namespace, podName, k8sHomeLinksResultCommand, config.Name, "home-files")
 	if err != nil {
 		return fmt.Errorf("failed to read %s: %w", k8sHomeLinksResultFile, err)
 	}
@@ -315,7 +315,7 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 		return err
 	}
 	script := k8sHomeLinkVerifyScript(util.GetHomeDir(config.UnixUsername), links, skipped)
-	if _, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", script}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, podName, []string{"sh", "-c", script}, config.Name, "home-files"); err != nil {
 		return fmt.Errorf("failed to verify linked files in agent home: %w", err)
 	}
 	return nil
@@ -790,7 +790,7 @@ func (r *KubernetesRuntime) waitForPodTermination(ctx context.Context, namespace
 			if !clock.now().Before(deadline) {
 				return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
 			}
-			runtimeLog.Debug("Reading the previous pod failed; retrying", "pod", podName, "error", err)
+			runtimeLog().Debug("Reading the previous pod failed; retrying", "pod", podName, "error", err)
 		case pod.UID != uid:
 			// The name now belongs to another pod: the one we waited for is gone.
 			return nil

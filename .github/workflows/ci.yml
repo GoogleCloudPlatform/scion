@@ -177,10 +177,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: build-test
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -197,6 +197,64 @@ jobs:
 
       - name: Verify Web Build
         run: ls -la web/dist
+
+      # Guards against stale chunks shipping in the hub binary (#3842).
+      # The build must not write output into public/ (Vite's publicDir copies
+      # it into the next build), and every .js in dist/client/assets must be
+      # referenced by the Vite manifest. Also runs the node:test suites of the
+      # build helper scripts; REQUIRE_BUILD=1 makes the precompress suite's
+      # real-build checks (sibling decoding, byte budgets) fail instead of
+      # skip if the build output is missing.
+      - name: Check Web Build Orphans
+        working-directory: ./web
+        run: |
+          REQUIRE_BUILD=1 npm run test:build-scripts
+          test ! -e public/assets || { echo "public/assets must not exist after the build (#3842)"; exit 1; }
+          npm run check:orphans
+
+      # Bundle budget (ptone/scion#5306): main.js and entry-closure size
+      # limits, the lazy terminal-workspace chunk exists, and no terminal-*
+      # module is in the static closure of the entry (client/main.ts) or of
+      # the login and home routes. Limits live in web/bundle-budget.json.
+      # Not gated: it only reads the build above.
+      - name: Check web bundle budget
+        working-directory: ./web
+        run: node scripts/check-bundle-budget.mjs
+
+      - name: Test web bundle budget script
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
+        working-directory: ./web
+        run: node --test scripts/check-bundle-budget.test.mjs
+
+      # npm run build moves the source maps out of web/dist/client (the tree
+      # web/embed.go embeds and the release images copy) into
+      # web/dist/sourcemaps (scripts/move-sourcemaps.mjs). Not gated on
+      # changes: this re-checks the dist/client that the Go tests and Build
+      # Binary below embed, on every run.
+      - name: Check Web Source Maps
+        working-directory: ./web
+        run: |
+          npm run test:move-sourcemaps
+          if find dist/client \( -name '*.map' -o -name '*.map.br' -o -name '*.map.gz' \) | grep .; then
+            echo "::error::source maps left in web/dist/client"; exit 1
+          fi
+          if grep -rlE --include='*.js' --include='*.mjs' --include='*.css' '[#@][[:space:]]*sourceMappingURL=' dist/client; then
+            echo "::error::sourceMappingURL comment left in web/dist/client"; exit 1
+          fi
+          test -f dist/sourcemaps/assets/main.js.map
+
+      # The maps hold only the TypeScript sources already in this repository.
+      # Kept for debugging and bundle attribution: uploaded only for pushes to
+      # main, with short retention. The release workflow never uploads or
+      # attaches them.
+      - name: Upload web source maps
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-sourcemaps
+          path: web/dist/sourcemaps/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
@@ -229,6 +287,14 @@ jobs:
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
         run: npm run test:e2e-perf
+
+      # Self-tests of the e2e harness (startHub options against a stand-in
+      # hub binary) and of the async create journey's pure helpers. Plain
+      # Playwright test runner: no browser, no Go, a few seconds.
+      - name: Test e2e support code (harness-selftest)
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
+        working-directory: ./web
+        run: npm run test:e2e-support
 
       - name: Run Web Tests
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
@@ -321,6 +387,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check Store Delete Callers
+        run: |
+          set +e
+          ./hack/check-store-delete-callers.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-store-delete-callers.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
@@ -336,6 +422,29 @@ jobs:
             0) ;;
             1) echo "::error title=Harness coverage::A harnesses/<name>/Dockerfile is out of sync with one or more cloudbuild-*.yaml configs (see ptone/scion#2357). Details are in the step log above." ;;
             *) echo "::error title=Harness coverage NOT checked::check-harness-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a coverage failure." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Image Go Directories
+        run: |
+          # Invoked directly rather than via `make check-image-go-dirs`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 2 (nothing was analysed).
+          set +e
+          ./hack/check-image-go-dirs.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Image Go directories NOT checked::check-image-go-dirs --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-image-go-dirs.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Image Go directories::A Dockerfile that builds the root Go module does not copy one of its top-level Go directories, or an ignore file drops one from the build context. Add the COPY line, or a justified EXCLUDED_DIRS entry in hack/check-image-go-dirs.sh; details are in the step log above." ;;
+            *) echo "::error title=Image Go directories NOT checked::check-image-go-dirs.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 
@@ -425,6 +534,31 @@ jobs:
             0) ;;
             1) echo "::error title=Debug defaults::A setup script, deploy template or hosted setup doc turns on debug logging by default. Remove it, or add a commented ALLOWLIST entry in hack/check-debug-defaults.sh for an intentional mention; details are in the step log above." ;;
             *) echo "::error title=Debug defaults NOT checked::check-debug-defaults.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
+      # Every package with a `//go:build !no_sqlite` test file must be in
+      # SQLITE_CI_PKGS (Makefile), i.e. tested untagged by a blocking job;
+      # Run Tests below uses -tags no_sqlite and never compiles those files
+      # (ptone/scion#1088). Invoked directly for the same reason as Check
+      # Debug Defaults above.
+      - name: Check SQLite Test Coverage
+        run: |
+          set +e
+          ./hack/check-sqlite-coverage.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=SQLite test coverage NOT checked::check-sqlite-coverage --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-sqlite-coverage.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=SQLite test coverage::A package has //go:build !no_sqlite test files that no blocking CI job runs with SQLite. Add it to SQLITE_NONHUB_PKGS in the Makefile; the package list is in the step log above." ;;
+            *) echo "::error title=SQLite test coverage NOT checked::check-sqlite-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 
@@ -627,6 +761,12 @@ jobs:
       - name: Build Binary
         run: make build
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   sqlite-nonhub-tests:
     name: SQLite Tests (non-hub)
     runs-on: ubuntu-latest
@@ -638,10 +778,21 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: sqlite-nonhub
+
+      # pkg/hub/attache2e attaches to a real tmux server; with
+      # SCION_TEST_REQUIRE_TMUX=1 it fails instead of skipping when tmux
+      # is missing (ptone/scion#3312).
+      - name: Install tmux
+        run: |
+          if ! command -v tmux &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          tmux -V
 
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
@@ -650,11 +801,18 @@ jobs:
       # somewhere that can fail a PR: the pkg/hub subpackages,
       # perf/bench/seed (ptone/scion#2393), pkg/store/entadapter
       # (ptone/scion#2851), pkg/conduit (relay/router tests on the
-      # SQLite-backed registry store) and pkg/artifacts. The pkg/hub package
-      # itself runs in the pkg/hub shard jobs below. The 60m go test timeout
-      # is kept from when pkg/hub ran here; the 70m job timeout stays above
-      # it so a real hang still produces go's goroutine dump.
+      # SQLite-backed registry store), pkg/artifacts, and pkg/brokerownership,
+      # pkg/brokerregistration, pkg/ent/entc, pkg/secret, pkg/store/storetest
+      # and pkg/testinfra (ptone/scion#1088); the list is SQLITE_NONHUB_PKGS
+      # in the Makefile, and Build & Test's Check SQLite Test Coverage step
+      # fails if a package with !no_sqlite tests is missing from it. The
+      # pkg/hub package itself runs in the pkg/hub shard jobs below. The 60m
+      # go test timeout is kept from when pkg/hub ran here; the 70m job
+      # timeout stays above it so a real hang still produces go's goroutine
+      # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
+        env:
+          SCION_TEST_REQUIRE_TMUX: "1"
         run: make test-sqlite-nonhub
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
@@ -673,6 +831,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: make test-cmd-sqlite
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The pkg/hub package's tests, split into build-tag shards
   # (hack/hubshard/README.md). A shard's test binary compiles with about
   # half the memory of the whole package's (about 6 GiB instead of 12), and
@@ -689,6 +853,10 @@ jobs:
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
       count: ${{ steps.plan.outputs.count }}
+      integration_shards: ${{ steps.integration.outputs.integration_shards }}
+      # The single place to change the runner label for every pkg/hub shard
+      # job (hub-shard and hub-shard-postgres-integration).
+      runner: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -696,30 +864,53 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-plan
 
       - name: List the pkg/hub shards
         id: plan
         run: |
-          shards=$(go run ./hack/hubshard -shards)
+          shards=$(./hack/hubshard/hubshard.sh -shards)
           echo "shards=$(echo "$shards" | jq -cs .)" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$shards" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards: $(echo "$shards" | tr '\n' ' ')"
 
+      # The shards that hold a -tags integration pkg/hub Postgres test
+      # (HUB_INTEGRATION_POSTGRES_TESTS in the Makefile); fails if a listed
+      # test no longer exists.
+      - name: List the pkg/hub shards with integration Postgres tests
+        id: integration
+        run: |
+          set -o pipefail
+          shards=$(make -s hub-postgres-integration-shards)
+          json=$(printf '%s\n' "$shards" | jq -cR 'select(length > 0) | tonumber' | jq -cs .)
+          # hubshard -locate fails on a name in no test file, so at least
+          # one shard must come back; [] means the listing itself broke.
+          if [ -z "$json" ] || [ "$json" = '[]' ]; then
+            echo "::error title=pkg/hub shard plan::no pkg/hub shard holds a HUB_INTEGRATION_POSTGRES_TESTS test (got '$json' from '$shards')"
+            exit 1
+          fi
+          echo "integration_shards=$json" >> "$GITHUB_OUTPUT"
+          echo "pkg/hub shards with integration Postgres tests: $json"
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
     needs: hub-shard-plan
-    # runner is the single place to change the runner label for every
-    # shard job.
-    runs-on: ${{ matrix.runner }}
+    # The runner label comes from hub-shard-plan (outputs.runner), the
+    # single place to change it for every pkg/hub shard job.
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest]
         shard: ${{ fromJSON(needs.hub-shard-plan.outputs.shards) }}
     services:
       postgres:
@@ -731,22 +922,38 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
+      # One Go cache for every shard (and the shard integration Postgres
+      # jobs). The shards share pkg/hub's non-test dependencies (the
+      # hubshard tags select only pkg/hub test files), but a test-only
+      # import that only one shard's test files use (for example chromedp,
+      # imported only by suspended_page_browser_test.go) is downloaded and
+      # built only by that shard, and so is not in the shared cache unless
+      # that shard is the first. Only the first shard saves the cache (the
+      # Save step's if:), so the shards do not race to save one key. Its
+      # trim drops the other shards' own pkg/hub test builds (about 30 s
+      # each to recompile), which a PR rebuilds anyway whenever it changes
+      # pkg/hub or anything pkg/hub imports; one cache instead of six saves
+      # about 3.4 GB of the repo's 10 GB cache budget (ptone/scion#4251).
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shards
 
       # SQLite-enabled (no build tag besides the shard's). The Postgres
       # variables are not set here, so the Postgres tests skip, as they did
@@ -773,53 +980,56 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: make vet-hub-shard SHARD="$SHARD"
 
-      # The pkg/hub Postgres tests that live in this shard: the web chat
-      # store tests (own SQL, read SCION_TEST_POSTGRES_DSN), the conduit
-      # stream re-check tests, and the -tags integration tests (project
-      # delete lock order, two-replica scheduled send, membership loss and
-      # test identity concurrency). Every listed test must pass and none
-      # may skip. See the Makefile target's comment.
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why). Here, just before the
+      # one step that uses Postgres, so that a failure to tune it does not
+      # skip the SQLite and no_sqlite shard tests above.
+      - name: Tune CI Postgres
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/postgres-ci-tune
+        with:
+          container: ${{ job.services.postgres.id }}
+
+      # The default-tag pkg/hub Postgres tests that live in this shard: the
+      # web chat store tests (own SQL, read SCION_TEST_POSTGRES_DSN) and the
+      # conduit stream re-check tests. Every listed test must pass and none
+      # may skip. See the Makefile target's comment. The -tags integration
+      # ones run in the hub-shard-postgres-integration jobs below.
       - name: Run pkg/hub shard Postgres tests
         if: ${{ !cancelled() }}
         env:
           SHARD: ${{ matrix.shard }}
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-        run: make test-hub-postgres SHARD="$SHARD"
+        run: make test-hub-postgres-default SHARD="$SHARD"
 
-  # The single, stable check name for the pkg/hub tests (the name the old
-  # single pkg/hub job had, so a required check keeps working). A matrix
-  # job's names include the matrix values, so they are not usable as
-  # required checks. It fails unless every shard succeeded.
-  hub-sqlite-tests:
-    name: pkg/hub SQLite Tests
-    needs: [hub-shard-plan, hub-shard]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check shard results
-        env:
-          PLAN: ${{ needs.hub-shard-plan.result }}
-          RESULT: ${{ needs.hub-shard.result }}
-        run: |
-          if [ "$PLAN" != success ] || [ "$RESULT" != success ]; then
-            echo "::error title=pkg/hub shards::the pkg/hub shard plan (result: $PLAN) or one or more pkg/hub shard jobs (result: $RESULT) did not succeed; see the pkg/hub shard jobs."
-            exit 1
-          fi
+      # The first shard only (see Setup Go). No status function in the if:,
+      # so the implicit success() still keeps a failed shard from saving.
+      - name: Save Go cache
+        if: ${{ matrix.shard == fromJSON(needs.hub-shard-plan.outputs.shards)[0] }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
-  launch-store-postgres-tests:
-    name: T1 Launch Store PostgreSQL Tests
-    runs-on: ubuntu-latest
-    # 90m: the job took ~29-39m on main, but ~57m on a runner 2-3x slower
-    # than usual (GoogleCloudPlatform/scion#2855), where pkg/store/entadapter
-    # hit its old 40m go test timeout. make test-store-postgres now gives
-    # entadapter 60m. The rest of that slow job took ~15m (plus the
-    # storetest and pkg/hub runs the timeout skipped), so 90m keeps the job
-    # limit above the go test limit and a real hang still produces go's
-    # goroutine dump instead of a bare job kill (ptone/scion#3945). The
-    # pkg/hub Postgres tests run in the pkg/hub shard jobs.
-    timeout-minutes: 90
+  # The -tags integration pkg/hub Postgres tests (project delete lock
+  # order, two-replica scheduled send, membership loss and test identity
+  # concurrency) of each shard that holds one. Their binary is a separate
+  # pkg/hub compile (-tags integration has its own TestMain and test
+  # files, so the shard job's binary cannot run them), about 1.5-2.5 min;
+  # in its own job, in parallel with the shard jobs, it is off their
+  # critical path. Every listed test must pass and none may skip
+  # (hack/hubshard/shard.sh postgres). The plan fails if no shard holds
+  # one, so this job always has at least one shard.
+  hub-shard-postgres-integration:
+    name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
+    needs: hub-shard-plan
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.hub-shard-plan.outputs.integration_shards) }}
     services:
       postgres:
         # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
@@ -830,36 +1040,224 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          container: ${{ job.services.postgres.id }}
 
-      # design t1-async-create-v11.md §6, "Postgres in CI": runs
-      # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the full pkg/store/entadapter suite (ptone/scion#2207; see that
-      # Makefile target's comment), which runs unchanged against SQLite (the
-      # default `go test` build) and Postgres (here, via -tags integration)
-      # to prove dialect parity. This job owns every Postgres-specific assertion in
-      # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
-      # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
-      # savepoints. The job also runs the timestamp contract test (last step).
-      - name: Run launch store tests (Postgres-enabled)
+      - name: Setup Go
+        # Restores the shards' shared cache (pkg/hub's dependencies); saves
+        # none, to keep the repo cache budget for the hub-shards cache.
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: hub-shards
+
+      - name: Run pkg/hub shard integration Postgres tests
+        env:
+          SHARD: ${{ matrix.shard }}
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-hub-postgres-integration SHARD="$SHARD"
+
+  # The single, stable check name for the pkg/hub tests (the name the old
+  # single pkg/hub job had, so a required check keeps working). A matrix
+  # job's names include the matrix values, so they are not usable as
+  # required checks. It fails unless every shard job and every shard
+  # integration Postgres job succeeded.
+  hub-sqlite-tests:
+    name: pkg/hub SQLite Tests
+    needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check shard results
+        env:
+          PLAN: ${{ needs.hub-shard-plan.result }}
+          RESULT: ${{ needs.hub-shard.result }}
+          INTEGRATION: ${{ needs.hub-shard-postgres-integration.result }}
+        run: |
+          if [ "$PLAN" != success ] || [ "$RESULT" != success ]; then
+            echo "::error title=pkg/hub shards::the pkg/hub shard plan (result: $PLAN) or one or more pkg/hub shard jobs (result: $RESULT) did not succeed; see the pkg/hub shard jobs."
+            exit 1
+          fi
+          if [ "$INTEGRATION" != success ]; then
+            echo "::error title=pkg/hub shards::one or more pkg/hub shard integration Postgres jobs did not succeed (result: $INTEGRATION); see the pkg/hub shard Postgres (integration) jobs."
+            exit 1
+          fi
+
+  # T1 Launch Store PostgreSQL Tests runs as several parallel jobs; the
+  # job below with the old name only rolls them up. About 70% of the old
+  # single job was pkg/store/entadapter on Postgres (~13 of ~20 min), so
+  # that package's tests are split by name into strategy.job-total parts
+  # (hack/testpart.sh: round-robin over the sorted top-level test names),
+  # one job each, and the other Postgres packages run in one more job.
+  # Every entadapter job checks that the parts together hold every test of
+  # the package exactly once (testpart.sh parity) and that every test of
+  # its part printed a PASS or SKIP line.
+  #
+  # The entadapter jobs. The number of parts is the number of matrix jobs
+  # (strategy.job-total); to change it, change the part list, which must
+  # be 1..N in order (the run step checks part == job-index + 1).
+  launch-store-postgres-entadapter:
+    name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # 90m: the whole entadapter suite took ~29-39m of the old single job on
+    # main, but ~57m on a runner 2-3x slower than usual
+    # (GoogleCloudPlatform/scion#2855), where it hit its old 40m go test
+    # timeout. make test-store-postgres-entadapter gives each part 60m, and
+    # 90m keeps the job limit above the go test limit so a real hang still
+    # produces go's goroutine dump instead of a bare job kill
+    # (ptone/scion#3945).
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2]
+    services:
+      postgres:
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+          --tmpfs /var/lib/postgresql/data
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
+        with:
+          container: ${{ job.services.postgres.id }}
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: t1-entadapter
+
+      # The splitter's own tests (bash only, a second).
+      - name: Test the test splitter (hack/testpart.sh)
+        run: make testpart-selftest
+
+      # The full pkg/store/entadapter suite (ptone/scion#2207; see the
+      # Makefile's test-store-postgres comment), which runs unchanged
+      # against SQLite (the default `go test` build) and Postgres (here, via
+      # -tags integration) to prove dialect parity. This job runs part
+      # matrix.part of strategy.job-total of its top-level tests, with the
+      # same skip checks as the unsplit run. The part must be the job's
+      # own position in the matrix, so a part list that is not 1..N (a
+      # gap would leave a part unrun) fails here.
+      - name: Run entadapter tests (Postgres-enabled, part ${{ matrix.part }}/${{ strategy.job-total }})
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-        run: make test-store-postgres
+          PART: ${{ matrix.part }}
+          PARTS: ${{ strategy.job-total }}
+          JOB_INDEX: ${{ strategy.job-index }}
+        run: |
+          if [ "$PART" != "$((JOB_INDEX + 1))" ]; then
+            echo "::error title=T1 entadapter matrix::matrix.part is $PART but this is matrix job $((JOB_INDEX + 1)) of $PARTS; the part list must be 1..N in order"
+            exit 1
+          fi
+          make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  # The T1 Postgres packages other than pkg/store/entadapter.
+  launch-store-postgres-others:
+    name: T1 Launch Store PostgreSQL Tests (other packages)
+    runs-on: ubuntu-latest
+    # The old single job took ~20m, of which ~7m was this job's part; 45m
+    # leaves room for a runner 2-3x slower than usual.
+    timeout-minutes: 45
+    services:
+      postgres:
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+          --tmpfs /var/lib/postgresql/data
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
+        with:
+          container: ${{ job.services.postgres.id }}
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: t1-others
+
+      # design t1-async-create-v11.md §6, "Postgres in CI": runs
+      # pkg/store/integrationtest (the existing Postgres-only harness), the
+      # storetest group/MembershipCleanup conformance, the pkg/ent/entc and
+      # cmd Postgres tests (see the Makefile's test-store-postgres comment).
+      # With the entadapter jobs above, T1 owns every Postgres-specific
+      # assertion in P1a: the transaction-scoped advisory lock, SKIP LOCKED,
+      # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
+      # savepoints. The job also runs the timestamp contract test (last step).
+      - name: Run launch store tests (Postgres-enabled, without entadapter)
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-store-postgres-others
 
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its
@@ -880,6 +1278,33 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  # The single, stable check name for T1 (the name the old single job had,
+  # so a required check keeps working; matrix job names include the matrix
+  # values). It fails unless every entadapter part and the other-packages
+  # job succeeded: a failed, cancelled or skipped part fails it.
+  launch-store-postgres-tests:
+    name: T1 Launch Store PostgreSQL Tests
+    needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check T1 part results
+        env:
+          ENTADAPTER: ${{ needs.launch-store-postgres-entadapter.result }}
+          OTHERS: ${{ needs.launch-store-postgres-others.result }}
+        run: |
+          if [ "$ENTADAPTER" != success ] || [ "$OTHERS" != success ]; then
+            echo "::error title=T1 Launch Store PostgreSQL Tests::one or more T1 entadapter jobs (result: $ENTADAPTER) or the T1 other-packages job (result: $OTHERS) did not succeed; see the T1 Launch Store PostgreSQL Tests jobs."
+            exit 1
+          fi
+
   workstation-smoke:
     name: Workstation smoke test
     runs-on: ubuntu-latest
@@ -891,10 +1316,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: workstation-smoke
 
       # End-to-end check of the workstation hub path with the default build
       # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
@@ -906,9 +1331,21 @@ jobs:
       - name: Run workstation smoke test
         run: ./hack/workstation-smoke.sh
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    # Bounds a hang only; the runner shutdowns in ptone/scion#4208 were not
+    # timeouts. Passing lint steps took up to ~22 min at the default
+    # concurrency (4); --concurrency=2 below can make that up to ~2x slower
+    # in the worst case, plus checkout and cache restore, so 60 leaves margin
+    # without falling back to the 360-minute default.
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -916,22 +1353,101 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # golangci-lint-action caches only golangci-lint's own analysis cache
+      # (~/.cache/golangci-lint), not GOCACHE, which golangci-lint's
+      # package loading (go list) fills: 4.2 GB on a cold run.
+      # With this cache restored, golangci-lint took 584-776 s on main
+      # (7 runs) against 818-1063 s without it (5 runs), so it stays.
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: lint
 
-      - name: golangci-lint
-        # Bound golangci-lint memory so type-checking the module (pkg/hub in
-        # particular) cannot exhaust the ~16 GB runner, which shows up as
-        # "The runner has received a shutdown signal" (ptone/scion#4208).
-        env:
-          GOGC: '50'
-          GOMEMLIMIT: 8GiB
+      # The action only restores its analysis cache and installs the binary
+      # here (its post step still saves the cache); lint runs in the next
+      # step so that a memory sampler can log alongside it. The version is
+      # pinned so that a new golangci-lint release cannot change memory use
+      # unnoticed; bump it deliberately.
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          args: '--new-from-merge-base=origin/main'
+          version: v2.15.0
+          install-only: true
+
+      # Bound memory in the lint step so it cannot exhaust the ~16 GB
+      # runner, which shows up as "The runner has received a shutdown
+      # signal" with no lint output (ptone/scion#4208). golangci-lint
+      # loads packages through go list -export, which compiles each
+      # package for its export data in a separate compile process. The
+      # memory sampler measured one compile process at ~15 GB, while
+      # golangci-lint itself peaked at 5.6-5.7 GB.
+      # - GOFLAGS -gcflags=<pkg/hub>=-c=1 runs the compiler backend for
+      #   pkg/hub on one worker instead of up to four. This may lower
+      #   that compile's peak by the backend state of up to three
+      #   functions compiled at once; most of its memory is retained IR
+      #   and generated code, which -c does not change, so the effect
+      #   is expected to be modest. The package pattern limits the flag
+      #   to pkg/hub; without one it would apply to every package
+      #   matched by ./..., which golangci-lint loads. golangci-lint
+      #   passes its environment through to go list and sets no
+      #   -gcflags of its own.
+      # - --concurrency=2 (default: CPU count, 4) halves the packages
+      #   golangci-lint analyses at once, lowering its own memory; it
+      #   does not bound the compile processes.
+      # - GOGC=25 sets the heap target to 1.25x the live heap (default
+      #   2x; previously 1.5x), trading GC CPU for a lower peak. The
+      #   compile processes inherit it.
+      # - GOMEMLIMIT=8GiB is a soft limit: the GC runs harder near that
+      #   size but does not cap the heap if the live set is larger.
+      #   Close to the limit it holds the heap there rather than at
+      #   1.25x the live heap.
+      # GOLANGCI_LINT_CACHE is exported because the action sets it only
+      # in its own process; it must match the path the action restores
+      # and saves.
+      # The sampler prints memory and the largest process every 30 s to
+      # the live log, so the last lines before a runner shutdown show
+      # how close memory was to the limit. For a compile process it also
+      # prints the package (-p, read from the response file when the
+      # arguments are passed as @file) and the response file's line
+      # count, which tells a package from its test variant. It prints a
+      # peak summary at the end and does not affect the step's result;
+      # the step exits with golangci-lint's exit code.
+      - name: golangci-lint
+        shell: bash
+        env:
+          GOGC: '25'
+          GOMEMLIMIT: 8GiB
+          GOFLAGS: '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1'
+        run: |
+          export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
+          samples="$RUNNER_TEMP/lint-mem.log"
+          : > "$samples"
+          (
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            while :; do
+              line="$(date -u +%H:%M:%S) $(free -m | awk 'NR==2{printf "used=%s avail=%s total=%s", $3, $7, $2}') top_rss_mb=$(ps -ww -eo rss=,comm=,args= --sort=-rss | awk 'NR==1{p=""; r=""; if ($2=="compile") { for (i=3; i<=NF; i++) { if ($i=="-p" && i<NF) p=$(i+1); else if ($i ~ /^@/ && p=="") { f=substr($i,2); prev=""; n=0; while ((getline l < f) > 0) { n++; if (prev=="-p" && p=="") p=l; prev=l }; close(f); if (n>0) r=",rsp_lines=" n } } } if (p!="" || r!="") p="[" p r "]"; printf "%s%s:%d", $2, p, $1/1024}')"
+              echo "mem: $line"
+              echo "$line" >> "$samples"
+              sleep 30 & nap=$!
+              wait "$nap"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          rc=0
+          golangci-lint run --new-from-merge-base=origin/main --concurrency=2 || rc=$?
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          awk '{split($2,u,"="); split($3,a,"="); if (u[2]>max) max=u[2]; if (min=="" || a[2]<min) min=a[2]; n++}
+            END {if (n==0) print "mem summary: no samples"; else printf "mem summary: %d samples, peak used=%d MB, min avail=%d MB\n", n, max, min}' "$samples" || true
+          exit "$rc"
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   shellcheck:
     name: shellcheck
@@ -1075,10 +1591,30 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: ent-check
+
+      # Fails when go mod tidy would change go.mod or go.sum (ptone/scion#4799),
+      # for example when tidy would drop go.sum lines that the ent generator
+      # needs. Runs before the ent check: go tool ent runs read-only, so a
+      # missing go.sum entry makes go generate fail (ent-check exit 3), and this
+      # step names that problem first. It writes no files. tidy-check exits 3
+      # when go mod tidy itself failed and 1 when the module is not tidy; make
+      # collapses both to exit 2, so the step tells them apart by the target's
+      # "(not drift)" line.
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          set -o pipefail
+          if ! make tidy-check 2>&1 | tee "$RUNNER_TEMP/tidy-check.log"; then
+            if grep -qF 'go mod tidy -diff failed (not drift)' "$RUNNER_TEMP/tidy-check.log"; then
+              echo "::error title=go mod tidy failed (not drift)::go mod tidy -diff failed, so tidiness was NOT checked. The error (module download or resolution) is in the step log above."
+            else
+              echo "::error title=go.mod/go.sum not tidy::go mod tidy would change go.mod or go.sum. Run 'go mod tidy' and commit the result."
+            fi
+            exit 1
+          fi
 
       # Regenerates pkg/ent from pkg/ent/schema and fails on any diff or new
       # untracked file under pkg/ent, or any go.mod/go.sum change
@@ -1087,19 +1623,26 @@ jobs:
       # Test step: generation downloads ent's codegen dependencies.
       - name: Check ent generated code is up to date
         #
-        # ent-check exits 3 when go generate itself failed (schema compile or
-        # module download error) and 1 on drift. make collapses both to exit
-        # 2, so the step tells them apart by the target's "(not drift)" line.
+        # ent-check exits 3 when go generate itself failed (schema compile,
+        # module download error, or a missing go.sum entry) and 1 on drift.
+        # make collapses both to exit 2, so the step tells them apart by the
+        # target's "(not drift)" line.
         run: |
           set -o pipefail
           if ! make ent-check 2>&1 | tee "$RUNNER_TEMP/ent-check.log"; then
             if grep -qF 'go generate ./pkg/ent failed (not drift)' "$RUNNER_TEMP/ent-check.log"; then
-              echo "::error title=ent generation failed (not drift)::go generate ./pkg/ent failed, so drift was NOT checked. The generator error (schema compile or module download) is in the step log above."
+              echo "::error title=ent generation failed (not drift)::go generate ./pkg/ent failed, so drift was NOT checked. The generator error (schema compile, module download, or a missing go.sum entry: run 'make tidy-check') is in the step log above."
             else
               echo "::error title=ent generated code drift::pkg/ent does not match pkg/ent/schema. Run 'go generate ./pkg/ent' and commit the result."
             fi
             exit 1
           fi
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   single-node-vm-deploy-tests:
     name: single-node-vm deploy.sh test harness

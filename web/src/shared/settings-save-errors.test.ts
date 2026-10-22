@@ -247,6 +247,37 @@ describe('classifySettingsError — conflict and Layer-0', () => {
     ]);
   });
 
+  it('reads the keys a 409 saved before the conflict (ptone/scion#4467)', () => {
+    const err = classifySettingsError(409, {
+      error: 'revision_conflict',
+      conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+      applied_keys: ['server.hub.hub_name', '', 7],
+      pending_restart: ['server.hub.public_url'],
+      skipped: [
+        { key: 'server.notifications.slack', reason: 'invalid webhook URL' },
+        { key: 'server.x' },
+        { reason: 'no key' },
+        'junk',
+      ],
+    });
+    expect(err.kind).toBe('conflict');
+    expect(err.appliedKeys).toEqual(['server.hub.hub_name']);
+    expect(err.pendingRestart).toEqual(['server.hub.public_url']);
+    expect(err.skipped).toEqual([
+      { key: 'server.notifications.slack', reason: 'invalid webhook URL' },
+      { key: 'server.x', reason: '' },
+    ]);
+  });
+
+  it('a 409 without saved keys, and other kinds, report none', () => {
+    const conflict = classifySettingsError(409, { error: 'revision_conflict', conflicted: [] });
+    expect(conflict.appliedKeys).toEqual([]);
+    expect(conflict.pendingRestart).toEqual([]);
+    expect(conflict.skipped).toEqual([]);
+    const generic = classifySettingsError(500, { error: 'boom', pending_restart: ['x'] });
+    expect(generic.pendingRestart).toEqual([]);
+  });
+
   it('reads a 422 layer0_rejected with its keys', () => {
     const err = classifySettingsError(422, {
       error: 'layer0_rejected',

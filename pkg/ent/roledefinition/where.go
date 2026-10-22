@@ -71,6 +71,11 @@ func System(v bool) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldSystem, v))
 }
 
+// ConfersMembership applies equality check predicate on the "confers_membership" field. It's identical to ConfersMembershipEQ.
+func ConfersMembership(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldConfersMembership, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldCreated, v))
@@ -79,6 +84,11 @@ func Created(v time.Time) predicate.RoleDefinition {
 // Updated applies equality check predicate on the "updated" field. It's identical to UpdatedEQ.
 func Updated(v time.Time) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldUpdated, v))
+}
+
+// IssuanceID applies equality check predicate on the "issuance_id" field. It's identical to IssuanceIDEQ.
+func IssuanceID(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldIssuanceID, v))
 }
 
 // NameEQ applies the EQ predicate on the "name" field.
@@ -261,6 +271,16 @@ func SystemNEQ(v bool) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldNEQ(FieldSystem, v))
 }
 
+// ConfersMembershipEQ applies the EQ predicate on the "confers_membership" field.
+func ConfersMembershipEQ(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldConfersMembership, v))
+}
+
+// ConfersMembershipNEQ applies the NEQ predicate on the "confers_membership" field.
+func ConfersMembershipNEQ(v bool) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldNEQ(FieldConfersMembership, v))
+}
+
 // CreatedEQ applies the EQ predicate on the "created" field.
 func CreatedEQ(v time.Time) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldEQ(FieldCreated, v))
@@ -339,6 +359,81 @@ func UpdatedLT(v time.Time) predicate.RoleDefinition {
 // UpdatedLTE applies the LTE predicate on the "updated" field.
 func UpdatedLTE(v time.Time) predicate.RoleDefinition {
 	return predicate.RoleDefinition(sql.FieldLTE(FieldUpdated, v))
+}
+
+// IssuanceIDEQ applies the EQ predicate on the "issuance_id" field.
+func IssuanceIDEQ(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDNEQ applies the NEQ predicate on the "issuance_id" field.
+func IssuanceIDNEQ(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldNEQ(FieldIssuanceID, v))
+}
+
+// IssuanceIDIn applies the In predicate on the "issuance_id" field.
+func IssuanceIDIn(vs ...string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDNotIn applies the NotIn predicate on the "issuance_id" field.
+func IssuanceIDNotIn(vs ...string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldNotIn(FieldIssuanceID, vs...))
+}
+
+// IssuanceIDGT applies the GT predicate on the "issuance_id" field.
+func IssuanceIDGT(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldGT(FieldIssuanceID, v))
+}
+
+// IssuanceIDGTE applies the GTE predicate on the "issuance_id" field.
+func IssuanceIDGTE(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldGTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDLT applies the LT predicate on the "issuance_id" field.
+func IssuanceIDLT(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldLT(FieldIssuanceID, v))
+}
+
+// IssuanceIDLTE applies the LTE predicate on the "issuance_id" field.
+func IssuanceIDLTE(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldLTE(FieldIssuanceID, v))
+}
+
+// IssuanceIDContains applies the Contains predicate on the "issuance_id" field.
+func IssuanceIDContains(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldContains(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasPrefix applies the HasPrefix predicate on the "issuance_id" field.
+func IssuanceIDHasPrefix(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldHasPrefix(FieldIssuanceID, v))
+}
+
+// IssuanceIDHasSuffix applies the HasSuffix predicate on the "issuance_id" field.
+func IssuanceIDHasSuffix(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldHasSuffix(FieldIssuanceID, v))
+}
+
+// IssuanceIDIsNil applies the IsNil predicate on the "issuance_id" field.
+func IssuanceIDIsNil() predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldIsNull(FieldIssuanceID))
+}
+
+// IssuanceIDNotNil applies the NotNil predicate on the "issuance_id" field.
+func IssuanceIDNotNil() predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldNotNull(FieldIssuanceID))
+}
+
+// IssuanceIDEqualFold applies the EqualFold predicate on the "issuance_id" field.
+func IssuanceIDEqualFold(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldEqualFold(FieldIssuanceID, v))
+}
+
+// IssuanceIDContainsFold applies the ContainsFold predicate on the "issuance_id" field.
+func IssuanceIDContainsFold(v string) predicate.RoleDefinition {
+	return predicate.RoleDefinition(sql.FieldContainsFold(FieldIssuanceID, v))
 }
 
 // HasRoleBindings applies the HasEdge predicate on the "role_bindings" edge.

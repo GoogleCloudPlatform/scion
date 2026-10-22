@@ -52,6 +52,10 @@ type BuiltInRole struct {
 	ScopeType   string
 	Revision    int
 	Permissions []string
+	// NoMembership marks a role whose bindings do not make the principal
+	// a project member (RoleDefinition.ConfersMembership false). It is
+	// set only on project-visitor.
+	NoMembership bool
 }
 
 // builtInRoleRevisionKey returns the hub-setting key used to track the last
@@ -93,14 +97,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    8, // R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    7, // R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    8, // R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -143,14 +147,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    8, // R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    10, // R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    7, // R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    8, // R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -159,6 +163,18 @@ func BuiltInRoles() []BuiltInRole {
 			ScopeType:   store.RoleScopeProject,
 			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
+		},
+		{
+			// project-visitor: the grant given to a federated account
+			// (ptone/scion#4603). It is not membership (NoMembership), it
+			// is bound only by the store's CreateVisitorRoleBinding, and
+			// it carries no project.read.
+			Name:         store.ProjectRoleVisitor,
+			Description:  "Federated visitor who may message and list the project's agents; not a project member",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectVisitorPermissionIDs(),
+			NoMembership: true,
 		},
 
 		// ── Agent roles (system-scoped, used for agent JWT scope mapping) ─
@@ -202,8 +218,8 @@ func BuiltInRoles() []BuiltInRole {
 // every hub member via the hasAdminView handler pattern.
 func hubMemberPermissionIDs() []string {
 	return []string{
-		// User directory (read-only)
-		// user.list is Reserved: no route checks it (ptone/scion#4229).
+		// User directory (read-only). user.list is not granted: a token
+		// lists users only with user:list, which only super-admin holds.
 		"user.read",
 		// Group directory (read-only)
 		"group.read",
@@ -287,9 +303,14 @@ func projectOwnerPermissionIDs() []string {
 		// Artifacts (pkg/artifacts): read the project's artifacts and
 		// publish new ones homed in the project. Writing to, deleting or
 		// managing grants on an existing artifact belongs to its owner or
-		// an explicit grant, not to project roles (design D7).
+		// an explicit grant, not to project roles (design D7), with one
+		// bounded exception for owners only (R10, design D25):
+		// artifact.steward makes them stewards of the artifacts agents own
+		// in the project (share up to edit, links, expiry, delete; never an
+		// admin grant or a move, and never a user-owned artifact).
 		"artifact.create",
 		"artifact.read",
+		"artifact.steward",
 		// Agent lifecycle and operations — human control-plane permissions.
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
@@ -346,6 +367,9 @@ func projectOwnerPermissionIDs() []string {
 		"project.delete",
 		"project.list",
 		"project.manage",
+		// project.manage_visitors: grant and revoke visitor access for
+		// federated accounts (owners and admins, not members).
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
 		// Project owners hold project.set_messaging_policy; the messaging
@@ -379,6 +403,8 @@ func projectOwnerPermissionIDs() []string {
 // iteration. Compared to project-owner, this excludes:
 //   - All *.delete permissions (admins cannot delete resources)
 //   - agent.set_message_mode (D7: only project owners may unseal none-mode agents)
+//   - artifact.steward (design D25: only owners steward agents' artifacts;
+//     admins keep custodian delete)
 //
 // Agent-self credential permissions (status_update, log_append, token_refresh,
 // identity_token, port_forward, notify) and hub-level operations (project.create,
@@ -429,6 +455,7 @@ func projectAdminPermissionIDs() []string {
 		// Project management (no delete, no hub-level create/clone/register)
 		"project.list",
 		"project.manage",
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
 		"project.update",
@@ -501,6 +528,19 @@ func projectMemberCuratedPermissionIDs() []string {
 		"template.create",
 		"template.list",
 		"template.read",
+	}
+}
+
+// projectVisitorPermissionIDs returns the permission set for the
+// project-visitor role: message the project's agents, and list and read
+// them. It holds no project.read and nothing that creates or changes a
+// resource. Agent list and read responses for a visitor are to be limited
+// to name, slug and status by a later change (ptone/scion#4603).
+func projectVisitorPermissionIDs() []string {
+	return []string{
+		"agent.list",
+		"agent.message",
+		"agent.read",
 	}
 }
 
@@ -700,12 +740,14 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 			return 0, false
 		}
 		// Role does not exist — create it.
+		confers := !role.NoMembership
 		rd := &store.RoleDefinition{
-			Name:        role.Name,
-			Description: role.Description,
-			ScopeType:   role.ScopeType,
-			Permissions: role.Permissions,
-			System:      true,
+			Name:              role.Name,
+			Description:       role.Description,
+			ScopeType:         role.ScopeType,
+			Permissions:       role.Permissions,
+			System:            true,
+			ConfersMembership: &confers,
 		}
 		if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
 			slog.Warn("failed to seed role definition",
@@ -720,7 +762,18 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		return 0, false
 	}
 
-	// Role exists — check if reconciliation is needed.
+	// Role exists. A role that must not confer membership is only ever
+	// created by this seed, so an existing row of that name that is not a
+	// system role, or that confers membership, is a custom role an
+	// operator created first: leave it alone (its bindings stay
+	// membership), and the store refuses visitor grants of it.
+	if role.NoMembership && (!existing.System || existing.ConfersProjectMembership()) {
+		slog.Warn("a role definition with a built-in role's name exists and is not the built-in role; leaving it unchanged",
+			"name", role.Name, "system", existing.System)
+		return 0, false
+	}
+
+	// Check if reconciliation is needed.
 	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
 	if applied.Revision > role.Revision {
 		// Stored revision is higher (a newer build re-revisioned the role):
@@ -814,8 +867,9 @@ func hubAdminPermissionIDs() []string {
 	// Explicit set of permission IDs included in the hub-admin role.
 	// This set is a product decision; changes require architect or sponsor review.
 	included := map[string]bool{
-		// User management (not suspend/promote — those remain super-admin-only)
-		// user.list is Reserved: no route checks it (ptone/scion#4229).
+		// User management (not suspend/promote — those remain super-admin-only).
+		// user.list is not granted: a token lists users only with user:list,
+		// which only super-admin holds.
 		"user.read":   true,
 		"user.update": true,
 		"user.invite": true,
@@ -877,6 +931,10 @@ func hubAdminPermissionIDs() []string {
 		"project.read":   true,
 		"project.list":   true,
 		"project.update": true,
+		// Project visitor grants (ptone/scion#4603). Granting and changing
+		// a grant's window also need every permission of the
+		// project-visitor role on the project (non-amplification).
+		"project.manage_visitors": true,
 		// Skill registries
 		"skill.read":          true,
 		"skill.list":          true,

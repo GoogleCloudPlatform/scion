@@ -422,234 +422,78 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 	}
 }
 
-func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
+// TestPopulateAgentConfig_NoTelemetryWrittenToRecord: create writes no
+// telemetry into the agent record (ptone/scion#4222). Template telemetry is
+// ignored (ptone/scion#4524), and the hub default and the project policy are
+// resolved per dispatch (dispatchTelemetry), so a create without request
+// telemetry leaves InlineConfig.Telemetry nil.
+func TestPopulateAgentConfig_NoTelemetryWrittenToRecord(t *testing.T) {
 	srv, _ := testServer(t)
 
-	project := &store.Project{
-		ID:   "project-telem",
-		Name: "Telemetry Project",
-		Slug: "telemetry-project",
+	hubEnabled := true
+	srv.config.TelemetryConfig = &api.TelemetryConfig{
+		Enabled: &hubEnabled,
+		Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://hub-otel.example.com"},
 	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://otel.example.com",
-			Provider: "gcp",
-		},
-	}
-
+	tmplEnabled := true
 	template := &store.Template{
-		ID:   "tmpl-telem",
-		Slug: "telem-template",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-telem",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold template telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be merged from template")
-	assert.Equal(t, &enabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://otel.example.com", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	assert.Equal(t, "gcp", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Provider)
-}
-
-func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
-	srv, _ := testServer(t)
-
-	project := &store.Project{
-		ID:   "project-telem2",
-		Name: "Telemetry Project 2",
-		Slug: "telemetry-project-2",
-	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://template-otel.example.com",
-		},
-	}
-
-	inlineTelemetry := &api.TelemetryConfig{
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://inline-otel.example.com",
-		},
-	}
-
-	template := &store.Template{
-		ID:   "tmpl-telem2",
-		Slug: "telem-template-2",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID: "agent-telem2",
-		AppliedConfig: &store.AgentAppliedConfig{
-			InlineConfig: &api.ScionConfig{
-				Telemetry: inlineTelemetry,
+		ID:   "tmpl-no-tel",
+		Slug: "no-tel-template",
+		AgentConfig: &api.ScionConfig{
+			Telemetry: &api.TelemetryConfig{
+				Enabled: &tmplEnabled,
+				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://template-otel.example.com"},
 			},
 		},
 	}
+	project := &store.Project{
+		ID:          "project-no-tel",
+		Slug:        "no-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "false"},
+	}
+	agent := &store.Agent{ID: "agent-no-tel", AppliedConfig: &store.AgentAppliedConfig{}}
 
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
-	// Inline telemetry should NOT be overwritten by template telemetry
-	assert.Equal(t, "https://inline-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Explicit inline telemetry should take precedence over template")
+	if agent.AppliedConfig.InlineConfig != nil {
+		assert.Nil(t, agent.AppliedConfig.InlineConfig.Telemetry,
+			"neither template, hub nor project telemetry may be written into the agent record")
+	}
 }
 
-func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
+// TestPopulateAgentConfig_RequesterTelemetryKept: the requester's own inline
+// telemetry is kept as given; nothing (template, hub, project) is merged
+// into it.
+func TestPopulateAgentConfig_RequesterTelemetryKept(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Set hub-level telemetry config
 	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-			Provider: "gcp",
-		},
-	}
-
+	srv.config.TelemetryConfig = &api.TelemetryConfig{Enabled: &hubEnabled}
 	project := &store.Project{
-		ID:   "project-hub-tel",
-		Name: "Hub Telemetry Project",
-		Slug: "hub-telemetry-project",
+		ID:          "project-req-tel",
+		Slug:        "req-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "true"},
 	}
-
+	disabled := false
 	agent := &store.Agent{
-		ID:            "agent-hub-tel",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold hub telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be populated from hub config")
-	assert.Equal(t, &hubEnabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-}
-
-func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
-	}
-
-	tmplEnabled := true
-	template := &store.Template{
-		ID:   "tmpl-hub-tel",
-		Slug: "hub-tel-template",
-		Config: &store.TemplateConfig{
-			Telemetry: &api.TelemetryConfig{
-				Enabled: &tmplEnabled,
-				Cloud: &api.TelemetryCloudConfig{
-					Endpoint: "https://template-otel.example.com",
+		ID: "agent-req-tel",
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Telemetry: &api.TelemetryConfig{
+					Enabled: &disabled,
+					Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://inline-otel.example.com"},
 				},
 			},
 		},
 	}
 
-	project := &store.Project{ID: "project-hub-tel2", Slug: "hub-tel-project-2"}
-
-	agent := &store.Agent{
-		ID:            "agent-hub-tel2",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
-
-	// Template telemetry should win over hub telemetry
-	assert.Equal(t, "https://template-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Template telemetry should take precedence over hub default")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config with enabled=true
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
-	}
-
-	// Project disables telemetry
-	project := &store.Project{
-		ID:   "project-tel-override",
-		Slug: "tel-override-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "false",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-override",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	// Hub cloud config should still be present
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	// But enabled should be overridden by project setting
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.False(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=false should override hub Enabled=true")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// No hub telemetry config, no template — only project sets enabled
-	project := &store.Project{
-		ID:   "project-tel-only",
-		Slug: "tel-only-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "true",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-only",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.True(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=true should create telemetry config with Enabled=true")
+	tel := agent.AppliedConfig.InlineConfig.Telemetry
+	require.NotNil(t, tel)
+	require.NotNil(t, tel.Enabled)
+	assert.False(t, *tel.Enabled, "the project policy is not written over the requester's value")
+	assert.Equal(t, "https://inline-otel.example.com", tel.Cloud.Endpoint)
 }
 
 // TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks tests that creating an agent
@@ -886,9 +730,10 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete project — agents are always cascade-deleted
+	// Delete project with force — live agents are cascade-deleted
+	// (without force the delete is refused, ptone/scion#4811)
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/projects/"+project.ID, nil)
+		"/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
@@ -914,8 +759,9 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 
 	project, _, _ := setupOnlineBrokerAgent(t, s, "project-nodelflag")
 
-	// Delete project without explicit deleteAgents param — agents should still be deleted
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	// Delete project without explicit deleteAgents param — with force,
+	// agents should still be deleted (ptone/scion#4811)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Dispatcher should have been called (cascade delete is always on)
@@ -2401,11 +2247,61 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	_, err = os.Stat(scionDir)
 	assert.NoError(t, err, ".scion directory should exist in cloned workspace")
 
+	// The source repository does not ignore .scion/agents/; the seeded clone
+	// must still pass the provisioning ignore check, without a tracked
+	// .gitignore change.
+	ignored := util.IsIgnored(workspacePath, ".scion/agents/")
+	assert.True(t, ignored, ".scion/agents/ should be git-ignored in the seeded shared workspace")
+	_, err = os.Stat(filepath.Join(workspacePath, ".gitignore"))
+	assert.True(t, os.IsNotExist(err), "seeding should not create a tracked .gitignore")
+
 	// Verify git identity
 	cmd := exec.Command("git", "-C", workspacePath, "config", "user.name")
 	output, err := cmd.Output()
 	require.NoError(t, err)
 	assert.Equal(t, "Scion", strings.TrimSpace(string(output)))
+}
+
+func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// The source repository's tracked .gitignore un-ignores .scion/agents/, so
+	// the seed cannot make agent state ignored and must fail the clone.
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, ".gitignore"), []byte("!.scion/agents/\n"), 0644))
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"add", ".gitignore"},
+		{"commit", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = sourceDir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	project := &store.Project{
+		ID:        "project-clone-unignored",
+		Name:      "Clone Unignored",
+		Slug:      "clone-unignored-" + api.NewUUID()[:8],
+		GitRemote: "local/test/unignored",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode:   store.WorkspaceModeShared,
+			"scion.dev/clone-url":      sourceDir,
+			"scion.dev/default-branch": "master",
+		},
+	}
+	workspacePath, err := hubManagedProjectPath(project.Slug)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
+
+	err = srv.cloneSharedWorkspaceProject(context.Background(), project)
+	require.Error(t, err)
+	assert.Equal(t, "shared workspace clone failed: could not set up the .scion/agents/ ignore rule", err.Error())
+	assert.NotContains(t, err.Error(), workspacePath, "the error reaches API responses and must not name the host path")
+	_, statErr := os.Stat(workspacePath)
+	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up when the ignore rule cannot be set up")
 }
 
 func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {

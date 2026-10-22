@@ -38,19 +38,41 @@ import (
 // Tests for ptone/scion#2675: agent files, worktree and leftover per-agent
 // objects are addressed by name, so a delete or failure cleanup naming one
 // run must leave alone those of a newer run that reuses the name. The
-// owning run is the runId recorded in agent-info.json.
+// owning run is recorded in the agent's host state file (ptone/scion#4771).
 
-// recordRun rewrites the agent's agent-info.json with runID as its owning
-// run ("" writes a legacy file with no runId).
+// recordRun writes the agent's agent-info.json (with no runId) and records
+// runID as its owning run in the host state file, as a start does ("" records
+// none: a legacy agent). It returns the agent-info.json path.
 func recordRun(t *testing.T, scionDir, name, runID string) string {
+	t.Helper()
+	info := writeLegacyAgentInfo(t, scionDir, name, "")
+	if runID != "" {
+		if err := os.MkdirAll(filepath.Join(scionDir, "agents", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := agent.RunOwnerTarget{ProjectPath: scionDir, AgentName: name}
+		if err := agent.RecordRunOwner(target, runID); err != nil {
+			t.Fatalf("RecordRunOwner: %v", err)
+		}
+		if got, err := agent.RecordedRunOwner(target); err != nil || got != runID {
+			t.Fatalf("recorded run = %q, %v; want %q", got, err, runID)
+		}
+	}
+	return info
+}
+
+// writeLegacyAgentInfo rewrites the agent's agent-info.json, with legacyRunID as
+// its runId when not empty (as an older broker recorded it), and returns
+// its path.
+func writeLegacyAgentInfo(t *testing.T, scionDir, name, legacyRunID string) string {
 	t.Helper()
 	home := config.GetAgentHomePath(scionDir, name)
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"name":"` + name + `","phase":"running"`
-	if runID != "" {
-		body += `,"runId":"` + runID + `"`
+	if legacyRunID != "" {
+		body += `,"runId":"` + legacyRunID + `"`
 	}
 	body += "}"
 	info := filepath.Join(home, "agent-info.json")
@@ -386,7 +408,7 @@ func newRealFilesServer(t *testing.T, rt *runtime.MockRuntime) (*Server, string)
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	return New(cfg, agent.NewManager(rt), rt), home
+	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{}), home
 }
 
 func branchExists(t *testing.T, repo, branch string) bool {
@@ -533,7 +555,7 @@ func TestCleanupAbortedLaunch_KeepsFilesOfOtherRun(t *testing.T) {
 		{"files recorded as this run's", "run-a", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			projectDir := t.TempDir()
+			projectDir := filepath.Join(t.TempDir(), ".scion")
 			agentDir := filepath.Join(projectDir, "agents", "agent-x")
 			if err := os.MkdirAll(agentDir, 0o755); err != nil {
 				t.Fatal(err)
@@ -564,21 +586,23 @@ func TestCleanupAbortedLaunch_KeepsFilesOfOtherRun(t *testing.T) {
 	}
 }
 
-// An empty project path resolves the way DeleteAgentFiles resolves it (the
-// broker's working project), so the run check is not skipped for it.
+// An empty project path resolves to the broker's working project (the
+// nearest .scion above the working directory), so the run check is not
+// skipped for it.
 func TestAgentFilesRunOwner_EmptyProjectPathResolvesLikeDelete(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	scionDir := filepath.Join(root, ".scion")
 	recordRun(t, scionDir, "dev", "run-new")
 	t.Chdir(root)
-	if got := agentFilesRunOwner("dev", "", "run-old"); got != "run-new" {
-		t.Errorf("owner = %q, want run-new from the working project", got)
+	target := agent.RunOwnerTarget{AgentName: "dev"}
+	if got, err := agentFilesRunOwner(target, "run-old"); err != nil || got != "run-new" {
+		t.Errorf("owner = %q, %v; want run-new from the working project", got, err)
 	}
-	if got := agentFilesRunOwner("dev", "", "run-new"); got != "" {
-		t.Errorf("owner for the recorded run = %q, want none", got)
+	if got, err := agentFilesRunOwner(target, "run-new"); err != nil || got != "" {
+		t.Errorf("owner for the recorded run = %q, %v; want none", got, err)
 	}
-	if got := agentFilesRunOwner("dev", "", ""); got != "" {
-		t.Errorf("owner without a run = %q, want none", got)
+	if got, err := agentFilesRunOwner(target, ""); err != nil || got != "" {
+		t.Errorf("owner without a run = %q, %v; want none", got, err)
 	}
 }

@@ -27,6 +27,7 @@ package hub
 //	authenticated  — Requires valid user/agent session (via UnifiedAuthMiddleware).
 //	admin          — Requires admin role (inline admin-role guard in handler).
 //	workstation    — Requires workstation mode (requireWorkstation middleware).
+//	workstation-admin — Workstation mode and a hub admin permission check.
 //	broker-hmac    — Authenticated via runtime broker HMAC signature.
 //	webhook        — Authenticated via webhook signature (e.g. GitHub X-Hub-Signature-256).
 //	agent-token    — Authenticated via agent JWT token.
@@ -66,6 +67,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/auth/invite/redeem": "authenticated", // Invite redemption — requires user session
 	"/api/v1/auth/admin-status":  "authenticated", // Admin status check — requires valid session
 	"/api/v1/auth/scopes":        "authenticated", // Auth scopes — requires valid session
+	// User access credential for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
+	"POST /api/v1/auth/federation-token": "authenticated",
 
 	// ── Authorization ──────────────────────────────────────────────────
 	"/api/v1/authz/explain": "authenticated", // Authorization explain — requires valid session
@@ -121,7 +124,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/secrets/": "authenticated", // Secret by key
 
 	// ── Usage ──────────────────────────────────────────────────────────
-	"/api/v1/usage/me": "authenticated", // User usage — requires session
+	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
 
 	// ── Session metrics ────────────────────────────────────────────────
 	"/api/v1/metrics/session/": "authenticated", // Session metrics (DB-backed)
@@ -135,6 +138,10 @@ var routeAuthzManifest = map[string]string{
 	// ── Principal resolution ───────────────────────────────────────────
 	"/api/v1/users/me/groups": "authenticated", // My groups
 	"/api/v1/principals/":     "authenticated", // Principal routes
+
+	// ── Project visitor's own grants ───────────────────────────────────
+	"/api/v1/users/me/visitor-grants": "authenticated", // Own visitor grants (visitor only; 404 for anyone else)
+	"/api/v1/users/me/visitor-dms":    "authenticated", // Own DMs with agents (visitor only; 404 for anyone else)
 
 	// ── User-scoped injected skills ────────────────────────────────────
 	"/api/v1/users/me/injected-skills":  "authenticated", // List/create user injected skills
@@ -200,6 +207,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
+	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -236,6 +244,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
@@ -260,7 +270,7 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Conduit (hub.conduit experiment) ───────────────────────────────
 	"/api/v1/conduit/grant-keys": "authenticated", // GET: public grant verification keys only; any signed-in identity; 404 when the experiment is off
-	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
+	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): conduit sessions; agent JWT (own agent row, agent:port:forward) or runtime broker HMAC (the shared /runtime-brokers/connect verifier; carries broker RPCs); 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
 	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
@@ -296,8 +306,11 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/test-identities/{id}/token":          "authenticated", // Re-issue a test identity token
 	"POST /api/v1/test-identities/{id}/web-login-code": "authenticated", // Mint a test identity web-login code
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/cleanup":             "authenticated", // Issuer-scoped cleanup of expired test identities
+	"GET /api/v1/test-identities/provenance":           "authenticated", // Provenance of one resource
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity
 	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
 	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
 	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)
@@ -322,16 +335,16 @@ var routeAuthzManifest = map[string]string{
 	"/github-app/setup":       "public",  // GitHub App post-install callback — browser redirect
 
 	// ── Workstation-only system endpoints ──────────────────────────────
-	"/api/v1/system/identity":             "workstation", // System identity
-	"/api/v1/system/status":               "workstation", // System status
-	"/api/v1/system/check":                "workstation", // System check
-	"/api/v1/system/runtime":              "workstation", // System runtime
-	"/api/v1/system/init":                 "workstation", // System init
-	"/api/v1/system/images/pull":          "workstation", // Image pull
-	"/api/v1/system/images/build":         "workstation", // Image build
-	"/api/v1/system/apple-dns":            "workstation", // Apple DNS helper
-	"/api/v1/system/registry":             "workstation", // System registry
-	"/api/v1/system/workstation-settings": "workstation", // Workstation settings
+	"/api/v1/system/identity":             "workstation-admin", // System identity
+	"/api/v1/system/status":               "workstation",       // System status
+	"/api/v1/system/check":                "workstation",       // System check
+	"/api/v1/system/runtime":              "workstation",       // System runtime
+	"/api/v1/system/init":                 "workstation",       // System init
+	"/api/v1/system/images/pull":          "workstation",       // Image pull
+	"/api/v1/system/images/build":         "workstation",       // Image build
+	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
+	"/api/v1/system/registry":             "workstation",       // System registry
+	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing

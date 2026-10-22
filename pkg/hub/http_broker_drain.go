@@ -53,15 +53,29 @@ func (s *Server) drainQueuedStopsFromHeartbeat(ctx context.Context, brokerID str
 	if stops, err := report.pendingStops(ctx, s, brokerID); err != nil || len(stops) == 0 {
 		return
 	}
+	s.startHTTPStopDrain(brokerID)
+}
+
+// startHTTPStopDrain starts the stop-only drain for an HTTP-only broker,
+// unless one is already running for it on this node. The drain is tracked
+// broker work (brokerWorkTracker): shutdown joins it before the store
+// closes, and once shutdown has begun it is not started, leaving the rows
+// pending for a later heartbeat (ptone/scion#4869).
+func (s *Server) startHTTPStopDrain(brokerID string) {
 	if _, running := s.httpDrains.LoadOrStore(brokerID, struct{}{}); running {
 		return
 	}
-	go func() {
+	started := s.brokerWork.goTracked(func(workCtx context.Context) {
 		dctx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
 		defer cancel()
+		stop := context.AfterFunc(workCtx, cancel)
+		defer stop()
 		defer s.httpDrains.Delete(brokerID)
 		s.drainBrokerDispatch(dctx, brokerID, func(op string) bool { return op == "stop" })
-	}()
+	})
+	if !started {
+		s.httpDrains.Delete(brokerID)
+	}
 }
 
 // settleQueuedStops confirms queued stops whose container is gone: an agent
@@ -95,7 +109,7 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		if report.present[a.ID] && report.observed[a.ID].state != store.ObservedPresentTerminal {
 			continue // listed, and not terminal: the stop has not taken effect
 		}
-		if t := agentRuntimeTarget(a); t == "" || !complete[t] {
+		if t := settleTarget(a, brokerID, hb); t == "" || !complete[t] {
 			continue
 		}
 		if s.lifecycleOps.active(a.ID) {
@@ -114,24 +128,67 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		if err != nil || !queuedStopStillIntended(cur) || !sameTime(cur.RunIntentAt, a.RunIntentAt) {
 			continue
 		}
-		s.releaseBrokerQuota(ctx, a)
-		// A start can take the agent between the re-read and the release;
-		// its own reserve was a no-op on the reservation just released.
-		// Read once more: if the queued stop is no longer the intent, put
-		// the reservation back without the cap check. The slot was this
-		// agent's when the release ran; as with a restart, a start that
-		// took it in between can leave the broker one over its cap until a
-		// slot frees.
+		// One conditional store write: the reservation is released only if
+		// the run is the one just read and the queued stop is still the
+		// intent at the same RunIntentAt, so a start that claimed the agent
+		// after the re-read keeps the slot. (Tests rely on this being the only
+		// conditional release with neither NoStartKindClaim nor NotCounted:
+		// settleHookStore in queued_stop_settle_race_test.go selects it that
+		// way. Keep it so, or update that selector.)
+		released, err := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
+			ExpectedRunID:         cur.RunID,
+			QueuedStopIntent:      true,
+			QueuedStopRunIntentAt: a.RunIntentAt,
+		})
+		if err != nil {
+			// A store failure, not a condition that did not hold: nothing
+			// was released. Leave the stop queued (no confirmation), so the
+			// next heartbeat settles it again.
+			continue
+		}
+		// Read once more: if the queued stop is no longer the intent, a
+		// start superseded it. Its slot was not freed by the conditional
+		// release above, so the re-assert below is a backstop that writes
+		// only if a release slipped through an unguarded path (counted,
+		// logged and audited, site "settle"). Without the cap check, as
+		// with a restart, a start that took a slipped slot can leave the
+		// broker one over its cap until a slot frees.
 		after, err := s.store.GetAgent(ctx, a.ID)
 		if err != nil {
 			// Unknown: put the reservation back (idempotent). If no start
 			// took the agent, the next settle releases it again.
-			s.reassertBrokerReservation(ctx, a)
+			s.reassertBrokerReservationAt(ctx, a, backstopSiteSettle)
 			s.agentLifecycleLog.Warn("Queued stop: re-reading the agent after the release failed; reservation put back", "agent_id", a.ID, "error", err)
 			continue
 		}
 		if !queuedStopStillIntended(after) || !sameTime(after.RunIntentAt, a.RunIntentAt) {
-			s.reassertBrokerReservation(ctx, after)
+			if queuedStopAppliedElsewhere(after, a.RunIntentAt) {
+				// The drain is applying, or has applied, this same queued
+				// stop: the stop result releases (or released) the slot.
+				// A re-assert would count a container that is gone.
+				s.agentLifecycleLog.Info("Queued stop: the stop result settled it during the release; nothing re-asserted", "agent_id", a.ID)
+				continue
+			}
+			if released && supersededAfter(after.RunIntentAt, a.RunIntentAt) &&
+				(after.RunIntent == store.RunIntentRunning || queuedStopStillIntended(after)) {
+				// The release was proven safe on the locked row (no start
+				// held the slot), and a newer intent written after the
+				// stop's superseded it. A newer start (intent running)
+				// reserves with the cap check; a re-assert here would hand
+				// it an unchecked slot at a full instance. A queued stop
+				// that is intended again at the newer time (a start refused
+				// before anything ran put the stopped intent back,
+				// ptone/scion#5070) is still a stop of the container this
+				// settle saw gone: nothing is re-asserted, and the next
+				// settle confirms it.
+				if after.RunIntent == store.RunIntentRunning {
+					s.agentLifecycleLog.Info("Queued stop: a start superseded it after the release; the start's own reserve decides", "agent_id", a.ID)
+				} else {
+					s.agentLifecycleLog.Info("Queued stop: re-queued after the release; the next settle confirms it", "agent_id", a.ID)
+				}
+				continue
+			}
+			s.reassertBrokerReservationAt(ctx, after, backstopSiteSettle)
 			s.agentLifecycleLog.Info("Queued stop: a start superseded it during the release; reservation kept", "agent_id", a.ID)
 			continue
 		}
@@ -142,16 +199,64 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 			s.agentLifecycleLog.Warn("Queued stop: confirming termination failed", "agent_id", a.ID, "error", err)
 			continue
 		}
-		s.agentLifecycleLog.Info("Queued stop: container confirmed gone; capacity released", "agent_id", a.ID)
+		s.agentLifecycleLog.Info("Queued stop: container confirmed gone", "agent_id", a.ID, "capacity_released", released)
 	}
 }
 
 // queuedStopStillIntended reports whether a's queued stop is still what the
 // agent should do: container status stop_queued, run intent stopped, no
-// start claim, not deleted.
+// start claim, not deleted. See store.QueuedStopStillIntended, which the
+// conditional release evaluates on the locked row.
 func queuedStopStillIntended(a *store.Agent) bool {
-	return a.ContainerStatus == containerStatusStopQueued && a.RunIntent == store.RunIntentStopped &&
-		a.StartClaimID == "" && a.DeletedAt.IsZero()
+	return store.QueuedStopStillIntended(a)
+}
+
+// supersededAfter reports whether a run intent written at at is newer than
+// the queued stop's intent written at stopAt (both set).
+func supersededAfter(at, stopAt *time.Time) bool {
+	return at != nil && stopAt != nil && at.After(*stopAt)
+}
+
+// queuedStopAppliedElsewhere reports whether after shows the queued stop
+// recorded at intentAt being applied, or applied, by the drain rather than
+// superseded: run intent is still stopped at exactly intentAt, no delete
+// holds or removed the row, and either the drain's stop-kind claim is held
+// or the container status is already stopped. The same intent with no claim
+// and a container not recorded stopped keeps the backstop re-assert, so a
+// container that may still run is not left uncounted.
+func queuedStopAppliedElsewhere(after *store.Agent, intentAt *time.Time) bool {
+	return after.RunIntent == store.RunIntentStopped && sameTime(after.RunIntentAt, intentAt) &&
+		after.DeletedAt.IsZero() && !deletionActive(after) &&
+		((after.StartClaimID != "" && after.StartClaimKind == store.StartClaimStop) || after.ContainerStatus == "stopped")
+}
+
+// settleTarget is the inventory target a queued stop of a is settled on:
+// its recorded runtime target. A pinned agent whose target is not recorded
+// yet (it is recorded once two heartbeats confirm it) uses the single
+// target of a report from its own Runtime Broker: a flat instance reports
+// exactly one target. The pin's target ID is the registration descriptor's
+// ID and the inventory's target keys are runtime target keys (for example
+// "docker" or "kubernetes|context=...|namespace=..."), so the two are not
+// compared: the report's broker ID is the agent's own, which is what ties
+// the target to the agent. Otherwise "" (not settled).
+func settleTarget(a *store.Agent, brokerID string, hb *brokerHeartbeatRequest) string {
+	if t := agentRuntimeTarget(a); t != "" {
+		return t
+	}
+	if !a.IsPinned() || a.RuntimeBrokerID != brokerID || hb.Inventory == nil {
+		return ""
+	}
+	only := ""
+	for _, t := range hb.Inventory.Targets {
+		if t.ID == "" || t.ID == only {
+			continue
+		}
+		if only != "" {
+			return "" // more than one target
+		}
+		only = t.ID
+	}
+	return only
 }
 
 // sameTime reports whether two optional times are both unset or equal.

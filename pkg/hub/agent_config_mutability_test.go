@@ -68,6 +68,7 @@ var wantEditTier = map[string]EditTier{
 	"gcp_identity": EditTierPrincipal,
 
 	"projectId":                        EditTierImmutable,
+	"config.agent_plugins":             EditTierImmutable,
 	"template":                         EditTierImmutable,
 	"harnessConfig":                    EditTierImmutable,
 	"runtimeBrokerId":                  EditTierImmutable,
@@ -83,6 +84,8 @@ var wantEditTier = map[string]EditTier{
 	"config.config_dir":                EditTierImmutable,
 	"config.detached":                  EditTierImmutable,
 	"config.hub":                       EditTierImmutable,
+	"config.cleared_fields":            EditTierImmutable,
+	"config.message_mode":              EditTierImmutable,
 }
 
 // wantSessionSensitive lists the keys a resume applies but whose effect on
@@ -97,27 +100,27 @@ var wantSessionSensitive = map[string]bool{
 // before the per-key exceptions in wantDispositionException.
 var wantTierDisposition = map[EditTier]map[state.Phase]EditDisposition{
 	EditTierMetadata: {
-		state.PhaseCreated: EditImmediate, state.PhaseStopped: EditImmediate, state.PhaseError: EditImmediate,
+		state.PhaseCreated: EditImmediate, state.PhaseStopped: EditImmediate, state.PhaseError: EditImmediate, state.PhaseHalted: EditImmediate,
 		state.PhaseSuspended: EditImmediate, state.PhaseRunning: EditImmediate, state.PhaseProvisioning: EditImmediate,
 		state.PhaseCloning: EditImmediate, state.PhaseStarting: EditImmediate, state.PhaseStopping: EditImmediate,
 	},
 	EditTierContainer: {
-		state.PhaseCreated: EditNow, state.PhaseStopped: EditNow, state.PhaseError: EditNow,
+		state.PhaseCreated: EditNow, state.PhaseStopped: EditNow, state.PhaseError: EditNow, state.PhaseHalted: EditNow,
 		state.PhaseSuspended: EditNow, state.PhaseRunning: EditHeld, state.PhaseProvisioning: EditHeld,
 		state.PhaseCloning: EditHeld, state.PhaseStarting: EditHeld, state.PhaseStopping: EditHeld,
 	},
 	EditTierProvision: {
-		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate, state.PhaseHalted: EditReincarnate,
 		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
 		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
 	},
 	EditTierPrincipal: {
-		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate, state.PhaseHalted: EditReincarnate,
 		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
 		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
 	},
 	EditTierImmutable: {
-		state.PhaseCreated: EditLocked, state.PhaseStopped: EditLocked, state.PhaseError: EditLocked,
+		state.PhaseCreated: EditLocked, state.PhaseStopped: EditLocked, state.PhaseError: EditLocked, state.PhaseHalted: EditLocked,
 		state.PhaseSuspended: EditLocked, state.PhaseRunning: EditLocked, state.PhaseProvisioning: EditLocked,
 		state.PhaseCloning: EditLocked, state.PhaseStarting: EditLocked, state.PhaseStopping: EditLocked,
 	},
@@ -184,7 +187,7 @@ func TestScionConfigJSONKey(t *testing.T) {
 func TestAgentEditTable_EveryKeyEveryPhase(t *testing.T) {
 	require.Len(t, agentEditFields, len(wantEditTier), "every table row must have an expected tier, and the reverse")
 	require.Len(t, agentEditFieldByKey, len(agentEditFields), "table keys must be unique")
-	require.Len(t, state.Phases(), 9, "a new phase needs a column in wantTierDisposition")
+	require.Len(t, state.Phases(), 10, "a new phase needs a column in wantTierDisposition")
 
 	for _, f := range agentEditFields {
 		want, ok := wantEditTier[f.Key]
@@ -418,7 +421,7 @@ func TestAgentUpdateDisposition(t *testing.T) {
 			Name: "n", Labels: map[string]string{"a": "1"}, Annotations: map[string]string{}, TaskSummary: "t",
 			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
 		}
-		got := agentUpdateDisposition(before, after, nil, nil, false)
+		got := agentUpdateDisposition(before, after, nil, nil, false, false)
 		for name, l := range map[string][]string{"applied": got.Applied, "held": got.Held, "heldForReincarnate": got.HeldForReincarnate} {
 			require.NotNil(t, l, "%s is an empty list, not null", name)
 			assert.Empty(t, l, name)
@@ -430,10 +433,20 @@ func TestAgentUpdateDisposition(t *testing.T) {
 			Name: "renamed", Labels: map[string]string{"a": "2"}, Annotations: map[string]string{"k": "v"}, TaskSummary: "t2",
 			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}},
 		}
-		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true)
+		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true, false)
 		assert.Equal(t, []string{"annotations", "config.model", "explicitTimezone", "gcp_identity", "labels", "name", "taskSummary"}, got.Applied)
 		assert.Empty(t, got.Held)
 		assert.Equal(t, []string{"config.system_prompt"}, got.HeldForReincarnate)
+	})
+
+	t.Run("a recorded assignment lists gcp_identity on an echo", func(t *testing.T) {
+		assign := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "sa-1"}
+		before := agentPatchSnapshotOf(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: assign}})
+		id := *assign
+		after := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &id}}
+		assert.Equal(t, []string{"gcp_identity"}, agentUpdateDisposition(before, after, nil, nil, false, true).Applied)
+		assert.Empty(t, agentUpdateDisposition(before, after, nil, nil, false, false).Applied,
+			"an echo with no assignment write is in no list")
 	})
 }
 

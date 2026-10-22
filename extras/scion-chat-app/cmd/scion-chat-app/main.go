@@ -193,6 +193,7 @@ func main() {
 		broker,
 		log.With("component", "commands"),
 	)
+	cmdRouter.SetAsyncCreate(cfg.AsyncCreateEnabled())
 
 	// Initialize the platform messenger (Google Chat adapter for now).
 	var messenger chatapp.Messenger
@@ -321,6 +322,12 @@ func main() {
 		if err := gcAdapter.Stop(shutdownCtx); err != nil {
 			log.Error("failed to stop google chat adapter", "error", err)
 		}
+	}
+
+	// Stop following agent launches; pending follow-up posts and deferred
+	// messages are dropped.
+	if err := cmdRouter.Shutdown(shutdownCtx); err != nil {
+		log.Error("failed to stop launch watchers", "error", err)
 	}
 
 	log.Info("scion-chat-app stopped")

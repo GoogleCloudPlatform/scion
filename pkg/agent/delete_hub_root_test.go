@@ -231,3 +231,67 @@ func TestAgentManagerDeleteTarget_UsesHubProjectIDFromContext(t *testing.T) {
 	assertGone(t, "lookup state dir", l.stateDir)
 	assertGone(t, "marker-root agent dir", l.markerDir)
 }
+
+// replaceWithSymlink replaces the directory dir with a symlink to target.
+func replaceWithSymlink(t *testing.T, dir, target string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove %s: %v", dir, err)
+	}
+	mustSymlink(t, target, dir)
+}
+
+// writeSentinel creates dir with a file in it and returns the file's path.
+func writeSentinel(t *testing.T, dir string) string {
+	t.Helper()
+	mustMkdirAll(t, dir)
+	f := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(f, []byte("keep\n"), 0644); err != nil {
+		t.Fatalf("write %s: %v", f, err)
+	}
+	return f
+}
+
+// The Hub project ID state dir passes the agent files guard: when it is a
+// symlink into the project, it is not the agent's own directory, so delete
+// refuses it, and the project's files and the sibling agent's state dir
+// are kept.
+func TestDeleteAgentFilesForHubProject_RefusesSymlinkedHubStateDir(t *testing.T) {
+	const agentName = "worker"
+	l := setupHubRootProject(t, hubRootMarkerID, hubRootHubID, agentName)
+	sibling, err := config.AgentDirForProject(l.projectPath, "other", true, hubRootHubID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustMkdirAll(t, sibling)
+	projectFiles := filepath.Join(filepath.Dir(l.projectPath), "src")
+	sentinel := writeSentinel(t, projectFiles)
+	replaceWithSymlink(t, l.stateDir, projectFiles)
+
+	_, err = DeleteAgentFilesForHubProject(agentName, l.projectPath, hubRootHubID, false)
+	if !errors.Is(err, ErrAgentFilesDeleteRefused) {
+		t.Fatalf("DeleteAgentFilesForHubProject = %v; want an error wrapping ErrAgentFilesDeleteRefused", err)
+	}
+	assertPresent(t, "project file", sentinel)
+	assertPresent(t, "sibling state dir", sibling)
+	if fi, err := os.Lstat(l.stateDir); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("refused state dir link %s: lstat = %v, %v; want the symlink kept", l.stateDir, fi, err)
+	}
+}
+
+// The same holds when the Hub project ID state dir is a symlink to a
+// directory outside every root the delete knows: the guard verifies the
+// state dir, it does not just trust its path.
+func TestDeleteAgentFilesForHubProject_RefusesHubStateDirLinkedOutside(t *testing.T) {
+	const agentName = "worker"
+	l := setupHubRootProject(t, hubRootMarkerID, hubRootHubID, agentName)
+	elsewhere := filepath.Join(filepath.Dir(filepath.Dir(l.projectPath)), "elsewhere")
+	sentinel := writeSentinel(t, elsewhere)
+	replaceWithSymlink(t, l.stateDir, elsewhere)
+
+	_, err := DeleteAgentFilesForHubProject(agentName, l.projectPath, hubRootHubID, false)
+	if !errors.Is(err, ErrAgentFilesDeleteRefused) {
+		t.Fatalf("DeleteAgentFilesForHubProject = %v; want an error wrapping ErrAgentFilesDeleteRefused", err)
+	}
+	assertPresent(t, "file outside every root", sentinel)
+}

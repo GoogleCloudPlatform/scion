@@ -21,21 +21,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -58,7 +62,9 @@ func warnf(format string, args ...interface{}) {
 	if out == nil {
 		out = os.Stderr
 	}
-	_, _ = fmt.Fprintf(out, "Warning: "+format+"\n", args...)
+	// The message can quote an error carrying a hub URL; it is shown
+	// without the URL's user info.
+	_, _ = fmt.Fprintf(out, "Warning: %s\n", config.RedactURLsIn(fmt.Sprintf(format, args...)))
 }
 
 // AgentRef holds both name and ID for an agent.
@@ -205,37 +211,15 @@ type EnsureHubReadyOptions struct {
 	// deterministic answer, such as several matching Hub projects, return
 	// an error instead of picking one.
 	NonInteractive bool
-	// NoHub disables Hub integration for this invocation.
-	NoHub bool
-	// EndpointOverride is the explicit Hub endpoint supplied by the caller.
-	// It takes precedence over project/global settings for this invocation.
+	// EndpointOverride is the Hub endpoint the caller resolved. It takes
+	// precedence over SCION_HUB_ENDPOINT and SCION_HUB_URL; settings are
+	// never read for the endpoint.
 	EndpointOverride string
-	// SkipSync skips agent synchronization check.
-	SkipSync bool
-	// TargetAgent is the agent being operated on. If set, this agent is excluded
-	// from sync requirements since the current operation will change its state.
-	// For delete: the agent won't be required to be registered on Hub first.
-	// For create: the agent won't be required to be removed from Hub first.
-	TargetAgent string
-	// ExcludedAgents extends TargetAgent to support multi-agent operations.
-	// Any excluded agent is filtered from sync gating checks.
-	ExcludedAgents []string
-	// AutoLinkLocal lets the registration step link an unregistered
-	// project without prompting when the endpoint is the local workstation
-	// hub (IsLocalWorkstationEndpoint). It prints one line instead. A
-	// remote hub keeps the prompt, because a link there is visible to other
-	// users.
-	AutoLinkLocal bool
 	// ExplicitProject reports that projectPath came from the --project / -g
 	// or --global flag. Only flag handling sets it: a caller passing a
 	// directory it resolved itself is not an explicit target and keeps
 	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
 	ExplicitProject bool
-	// ExplicitHub reports that the user chose the hub explicitly for this
-	// invocation: the project came from the CLI's current context ('scion
-	// use'), which names a project on a specific hub. A hub project
-	// reference then resolves on that hub without the hub.enabled gate.
-	ExplicitHub bool
 	// HubFromContext reports that the endpoint (EndpointOverride) is the hub
 	// selected with 'scion use', not one given with --hub or found in
 	// settings. For a project already linked to a hub (hub.projectId set)
@@ -243,12 +227,92 @@ type EnsureHubReadyOptions struct {
 	// register it: it returns the "project must be linked" error, so the
 	// context's hub never rewrites the project's link.
 	HubFromContext bool
+	// RecordLink, when set, is called after EnsureHubReady registered or
+	// linked the project at projectPath on the hub at endpoint, with the
+	// ID the hub knows the project by. The CLI uses it to record the link
+	// in its hub list when the hub came from its current context, so the
+	// project keeps resolving to that hub after a hub switch.
+	RecordLink func(endpoint, hubProjectID, projectPath string, isGlobal bool)
+	// SkipProjectLink makes EnsureHubReady return a hub context without
+	// binding the project to the hub: no project_id is generated, nothing is
+	// linked or registered, and the broker's provider path is not updated.
+	// The unlinked, linked-elsewhere and health checks still run. The
+	// registration check, and with it the not-found refusal for a user
+	// access token on a project that is not linked elsewhere, is skipped:
+	// the hub authorizes a global-scope write itself. The returned context
+	// has an empty ProjectID. The CLI sets it for global-scope uploads
+	// (--global), which never read a project ID.
+	SkipProjectLink bool
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
 // settings say it was unlinked from the hub (hub.linked=false, written by
 // 'scion hub unlink').
 var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run 'scion hub link' to re-link it, or manage its agents on the hub with --project <hub-slug>")
+
+// HubNotConfiguredError is returned when a command needs a hub and no hub
+// endpoint is configured (flag, environment or the hub list). It is a type
+// rather than errors.New so the user-facing sentence can keep its capital
+// letter and full stop. Migration is set for a project that still has
+// agents from local-only mode and has never been linked: the message then
+// explains that local-only mode was removed.
+type HubNotConfiguredError struct {
+	Migration bool
+}
+
+func (e *HubNotConfiguredError) Error() string {
+	if e.Migration {
+		return MigrationNotice
+	}
+	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
+}
+
+// ErrHubNotConfigured is the plain HubNotConfiguredError value. Match any
+// HubNotConfiguredError with errors.As, or this value with errors.Is.
+var ErrHubNotConfigured error = &HubNotConfiguredError{}
+
+// Is makes errors.Is(err, ErrHubNotConfigured) true for every
+// HubNotConfiguredError, with or without the migration text.
+func (e *HubNotConfiguredError) Is(target error) bool {
+	_, ok := target.(*HubNotConfiguredError)
+	return ok
+}
+
+// MigrationNotice is shown in place of the plain not-configured error to a
+// user whose project still has agents from local-only mode.
+const MigrationNotice = "Local-only mode has been removed: scion now runs agents through a hub. " +
+	"Run 'scion server start' (the first run opens setup), then rerun this command; " +
+	"this project links automatically and existing agents are imported. " +
+	"See " + LocalModeRemovalDocsURL + "."
+
+// LocalModeRemovalDocsURL is the migration page for the local-only mode
+// removal.
+const LocalModeRemovalDocsURL = "https://googlecloudplatform.github.io/scion/reference/local-mode-removal/"
+
+// LocalServerNotRunningError is returned when the configured endpoint is the
+// local workstation hub and nothing answers there.
+type LocalServerNotRunningError struct {
+	Endpoint string
+	Err      error
+}
+
+func (e *LocalServerNotRunningError) Error() string {
+	return "Local scion server is not running. Start it with 'scion server start'."
+}
+
+func (e *LocalServerNotRunningError) Unwrap() error { return e.Err }
+
+// notConfiguredError returns the HubNotConfiguredError for a project: the
+// migration text when the project was never linked and still has agent
+// directories from local-only mode, the plain one-liner otherwise.
+func notConfiguredError(projectPath string, isGlobal bool) error {
+	if projectPath != "" && ProjectLinkedSetting(projectPath, isGlobal) == nil {
+		if agents, err := GetLocalAgents(projectPath); err == nil && len(agents) > 0 {
+			return &HubNotConfiguredError{Migration: true}
+		}
+	}
+	return &HubNotConfiguredError{}
+}
 
 // ProjectLinkedSetting returns the hub.linked value from the project's own
 // settings, or nil when it is unset. It reads the location
@@ -261,14 +325,8 @@ var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run
 // load reports such errors. The global settings are not merged in, so the
 // global project's value does not leak into other projects.
 func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
-	dirs := []string{projectPath}
-	if !isGlobal {
-		if ext := config.GetProjectConfigDir(projectPath); ext != "" && ext != projectPath {
-			dirs = append(dirs, ext)
-		}
-	}
 	var linked *bool
-	for _, dir := range dirs {
+	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
 		own, err := config.LoadSettingsFromDir(dir)
 		if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
 			continue
@@ -286,40 +344,63 @@ func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
 	return linked != nil && !*linked
 }
 
+// errProjectLinkedElsewhere is errProjectMustBeLinked for a project that was
+// linked to a hub other than the one selected with 'scion use', with a hint
+// to reach its own hub. A repository linked before link entries existed has
+// no link entry naming its hub, so the hub from the context applies to it.
+func errProjectLinkedElsewhere() error {
+	return errors.New(errProjectMustBeLinked().Error() + "\n" +
+		"If it is linked to another hub, pass --hub <name>, or run 'scion hub link --hub <name>' once so this directory stays on that hub.")
+}
+
+// projectWasLinked reports whether the project was linked to a hub: its own
+// settings record hub.linked=true, or it carries an explicit hub project ID
+// that differs from its local project ID (a link made before the link state
+// was recorded). A non-empty hub project ID alone does not count: in the v1
+// settings format a project's own local ID is stored as hub.project_id, so
+// every initialised project has one, linked or not. A link made before the
+// link state was recorded whose hub ID equals the local ID (hub.linked unset)
+// cannot be told apart from a never-linked project, so it is auto-linked on
+// the hub selected with 'scion use' like one.
+func projectWasLinked(projectPath string, isGlobal bool, settings *config.Settings) bool {
+	if linked := ProjectLinkedSetting(projectPath, isGlobal); linked != nil && *linked {
+		return true
+	}
+	hubID := settings.GetHubProjectID()
+	return hubID != "" && hubID != settings.ProjectID
+}
+
 // errProjectMustBeLinked is the error for a project that has to be linked to
 // the hub before the operation.
 func errProjectMustBeLinked() error {
-	msg := "project must be linked to Hub to perform this operation\n\n" +
-		"Link this project: scion hub link"
-	if !config.IsHubManagedAgent() {
-		msg += "\nOr use local-only mode: scion --no-hub <command>"
-	}
-	return errors.New(msg)
+	return errors.New("project must be linked to Hub to perform this operation\n\n" +
+		"Link this project: scion hub link")
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
-// Returns HubContext if Hub is ready, nil if Hub should not be used.
-// This function will:
-// 1. Check --no-hub flag
-// 2. Load settings
-// 3. Check hub.local_only setting
-// 4. Check hub.enabled setting
-// 5. Ensure project_id exists (generate if missing)
-// 6. Check Hub connectivity
-// 7. Check project registration (prompt to register if not)
-// 8. Compare and sync agents (unless SkipSync is true)
+// It never returns a nil HubContext without an error: every agent operation
+// goes through a hub. It will:
+//  1. Resolve a hub project reference (slug, name, UUID, git URL) on the hub
+//  2. Refuse a project directory named with --project that does not
+//     exist (outside a hub-connected context), before any write
+//  3. Refuse a project the user unlinked (ErrProjectUnlinked)
+//  4. Resolve the endpoint (override, then environment); with
+//     none, return a HubNotConfiguredError
+//  5. Ensure project_id exists (generate if missing; not with
+//     SkipProjectLink)
+//  6. Check Hub connectivity; a local workstation endpoint that does not
+//     answer returns LocalServerNotRunningError
+//  7. With SkipProjectLink, return here without a project ID, after
+//     refusing a project linked to another hub (see skipProjectLink)
+//  8. Check project registration: on the local workstation hub an
+//     unregistered project with no name match is linked without a prompt;
+//     otherwise the link prompt (or the matching-projects prompt) is shown.
+//     A project linked here runs the one-release import of agents left
+//     from local-only mode.
+//
+// There is no per-command agent reconcile.
 func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext, error) {
 	debugf("EnsureHubReady: projectPath=%s, opts=%+v", projectPath, opts)
-
-	// Check if --no-hub flag is set
-	if opts.NoHub {
-		if projectPath != "" && IsHubProjectRef(projectPath) {
-			return nil, fmt.Errorf("cannot use --no-hub with a hub project reference (%s): "+
-				"hub project references (slugs, names, git URLs) require hub connectivity", projectPath)
-		}
-		debugf("NoHub flag set, returning nil")
-		return nil, nil
-	}
 
 	// Check if projectPath is a hub project reference (slug, name, UUID, or git URL)
 	if projectPath != "" && IsHubProjectRef(projectPath) {
@@ -330,6 +411,15 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project path: %w", err)
+	}
+
+	// A project directory named with --project must exist. Without this
+	// check a missing directory is created below and registered as a new
+	// project named after its parent directory (ptone/scion#5217). Inside a
+	// hub-connected container nothing is written or registered, so the
+	// check does not apply there.
+	if err := checkExplicitProjectDir(projectPath, resolvedPath, isGlobal, opts.ExplicitProject); err != nil {
+		return nil, err
 	}
 
 	// Clean up stale broker credentials from project settings.
@@ -356,22 +446,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	// Check if hub.local_only is set
-	if settings.IsHubLocalOnly() {
-		return nil, fmt.Errorf("this project is configured for local-only mode (hub.local_only=true)\n\n" +
-			"To perform this operation:\n" +
-			"  - Use --no-hub flag to skip Hub integration\n" +
-			"  - Or set hub.local_only=false to enable Hub sync checks")
-	}
-
-	// Check if hub is explicitly enabled via settings OR if we're inside
-	// a hub-connected container (env vars like SCION_HUB_ENDPOINT are set).
-	// Inside containers, hub.enabled is not written to settings files, but
-	// the hub env vars signal that the Hub API should be used.
+	// Inside a hub-connected container (hub env vars such as
+	// SCION_HUB_ENDPOINT are set) the CLI only queries the Hub API.
 	hubContext := config.IsHubContext()
-	if !settings.IsHubEnabled() && !hubContext {
-		return nil, nil
-	}
 
 	// A project the user unlinked with 'scion hub unlink' stays unlinked:
 	// agent commands refuse instead of using the hub, and the auto-link
@@ -385,28 +462,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, ErrProjectUnlinked
 	}
 
-	// When running inside a hub-connected container, always skip sync checks —
-	// containers cannot register projects or reconcile agents.
-	if hubContext {
-		opts.SkipSync = true
-	}
-
-	// Hub is enabled - from here on, any failure is an error (no silent fallback)
-	endpoint := opts.EndpointOverride
+	// From here on, any failure is an error (no silent fallback).
+	endpoint := resolveEndpoint(opts)
 	if endpoint == "" {
-		endpoint = getEndpoint(settings)
-	}
-	// In hub context, settings loading may not pick up the env var (e.g. if the
-	// project path resolves to a synthetic or tmpfs directory without a settings file
-	// and koanf doesn't populate the pointer struct). Fall back to the env var.
-	if endpoint == "" && hubContext {
-		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
-		if endpoint == "" {
-			endpoint = os.Getenv("SCION_HUB_URL")
-		}
-	}
-	if endpoint == "" {
-		return nil, wrapHubError(endpoint, fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
+		return nil, notConfiguredError(resolvedPath, isGlobal)
 	}
 
 	// Ensure project_id exists.
@@ -422,7 +481,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	if projectID == "" {
 		projectID = settings.ProjectID
 	}
-	if projectID == "" {
+	if projectID == "" && !opts.SkipProjectLink {
 		if hubContext {
 			// Inside a container without a project id env var — we can't
 			// generate and persist a project ID. The Hub client can still be
@@ -431,7 +490,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		} else {
 			// Generate project_id for projects that don't have one
 			projectID = config.GenerateProjectID()
-			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+			if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigProjectIDKey, projectID, isGlobal); err != nil {
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
@@ -453,7 +512,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+		return nil, hubUnreachableError(endpoint, err)
 	}
 
 	// An explicit global target (-g global, -g home, --global) inside a
@@ -503,12 +562,17 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return hubCtx, nil
 	}
 
+	if opts.SkipProjectLink {
+		return skipProjectLink(ctx, hubCtx, opts, resolvedPath, isGlobal, settings)
+	}
+
 	// Check project registration
 	registered, err := isProjectRegistered(ctx, hubCtx)
 	if err != nil {
 		return nil, wrapHubError(hubCtx.Endpoint, err)
 	}
 
+	linkedHere := false
 	if !registered {
 		// A user access token is scoped to one existing project and cannot
 		// register projects, so a 404 here is not "unregistered": the token
@@ -520,9 +584,17 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 		// A project linked to a hub must not be linked again, or registered,
 		// on the hub selected with 'scion use': nothing below runs (no ID or
-		// name match, no auto-link, no prompt, no registration).
-		if opts.HubFromContext && settings.GetHubProjectID() != "" {
-			return nil, errProjectMustBeLinked()
+		// name match, no auto-link, no prompt, no registration). A project
+		// that was never linked is not refused: it goes on to the local
+		// auto-link like any other.
+		if opts.HubFromContext && projectWasLinked(resolvedPath, isGlobal, settings) {
+			return nil, errProjectLinkedElsewhere()
+		}
+
+		// Do not auto-link the global project from a git repository that
+		// is not a scion project.
+		if err := RefuseGlobalFallbackLink(isGlobal, explicitTarget); err != nil {
+			return nil, err
 		}
 
 		// Get project name for the prompt
@@ -575,7 +647,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					case ProjectChoiceLink:
 						// Store the hub project ID separately — don't overwrite
 						// the local project_id.
-						if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
+						if err := config.UpdateSetting(resolvedPath, projectkeys.ConfigHubProjectIDKey, selectedID, isGlobal); err != nil {
 							return nil, fmt.Errorf("failed to save hub project ID: %w", err)
 						}
 						hubCtx.ProjectID = selectedID
@@ -588,9 +660,12 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				}
 			} else {
 				// No matching projects. On the local workstation hub, link
-				// without asking; otherwise ask for confirmation.
-				if opts.AutoLinkLocal && IsLocalWorkstationEndpoint(endpoint) {
-					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+				// without asking; otherwise ask for confirmation. Name
+				// matches (above) keep the matching-projects prompt on
+				// every hub: a silent pick could attach this directory to
+				// another clone's project.
+				if IsLocalWorkstationEndpoint(endpoint) {
+					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, config.RedactURL(endpoint))
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
 					return nil, errProjectMustBeLinked()
 				}
@@ -616,6 +691,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if settings.Hub != nil {
 			hubCtx.BrokerID = settings.Hub.BrokerID
 		}
+		if opts.RecordLink != nil && hubCtx.ProjectID != "" {
+			opts.RecordLink(endpoint, hubCtx.ProjectID, resolvedPath, isGlobal)
+		}
+		linkedHere = true
 	}
 
 	// Ensure the local broker is registered as a provider with the correct local path.
@@ -627,77 +706,208 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		debugf("Warning: failed to ensure provider path: %v", err)
 	}
 
-	// Skip sync if requested
-	if opts.SkipSync {
-		return hubCtx, nil
-	}
-
-	// Compare and sync agents
-	syncResult, err := CompareAgents(context.Background(), hubCtx)
-	if err != nil {
-		return nil, wrapHubError(endpoint, fmt.Errorf("failed to compare agents: %w", err))
-	}
-
-	// If we're operating on a specific agent, exclude it from sync requirements.
-	// This allows operations like delete to proceed without first syncing the
-	// target agent (e.g., you can delete a local-only agent without registering it).
-	excludedAgents := append([]string{}, opts.ExcludedAgents...)
-	if opts.TargetAgent != "" {
-		excludedAgents = append(excludedAgents, opts.TargetAgent)
-	}
-
-	effectiveSyncResult := syncResult
-	if len(excludedAgents) > 0 {
-		effectiveSyncResult = syncResult.ExcludeAgents(excludedAgents)
-	}
-
-	if !effectiveSyncResult.IsInSync() {
-		// Check if there are agents to register but no brokers available
-		if len(effectiveSyncResult.ToRegister) > 0 {
-			hasOnlineBroker, err := checkBrokerAvailability(context.Background(), hubCtx)
-			if err != nil {
-				// Kept at debug: this uses the same provider listing as
-				// ensureProviderPath, so hosts that cannot list providers
-				// would otherwise warn on every command.
-				debugf("Warning: failed to check broker availability: %v", err)
-				// Continue with sync attempt - the error will surface during ExecuteSync
-			} else if !hasOnlineBroker {
-				// No brokers available - print warning and skip sync
-				_, _ = fmt.Fprintln(promptOut)
-				_, _ = fmt.Fprintln(promptOut, "Warning: No runtime brokers are available for this project.")
-				_, _ = fmt.Fprintln(promptOut, "Agent sync cannot be performed without an online broker.")
-				_, _ = fmt.Fprintln(promptOut)
-				_, _ = fmt.Fprintln(promptOut, "Local agents not synced to Hub:")
-				for _, name := range effectiveSyncResult.ToRegister {
-					_, _ = fmt.Fprintf(promptOut, "  + %s\n", name)
-				}
-				_, _ = fmt.Fprintln(promptOut)
-				_, _ = fmt.Fprintln(promptOut, "To sync agents, ensure a runtime broker is running and connected.")
-				_, _ = fmt.Fprintln(promptOut)
-				// Continue without syncing - this allows read operations like list to proceed
-				return hubCtx, nil
-			}
-		}
-
-		if ShowSyncPlan(effectiveSyncResult, opts.AutoConfirm) {
-			if err := ExecuteSync(context.Background(), hubCtx, effectiveSyncResult, opts.AutoConfirm); err != nil {
-				return nil, wrapHubError(endpoint, fmt.Errorf("failed to sync agents: %w", err))
-			}
-		} else {
-			msg := "agents must be synchronized with Hub to perform this operation\n\n" +
-				"Sync agents: scion hub sync"
-			if !config.IsHubManagedAgent() {
-				msg += "\nOr use local-only mode: scion --no-hub <command>"
-			}
-			return nil, errors.New(msg)
-		}
-	} else {
-		// Already in sync — update the watermark and synced agents to keep current
-		UpdateLastSyncedAt(hubCtx.ProjectPath, syncResult.ServerTime)
-		UpdateSyncedAgents(hubCtx.ProjectPath, collectSyncedAgentNames(syncResult))
+	// A project whose link was never recorded (hub.linked unset) gets it
+	// recorded now, after the one-release import of agents left from
+	// local-only mode. A project that was registered before links were
+	// recorded takes the same path; it normally has nothing to import. So
+	// does a linked project whose own settings still turn the hub off (the
+	// removed 'scion hub disable' wrote hub.enabled=false and kept
+	// hub.linked=true): it may hold agents created while it was disabled.
+	if linkedHere || ProjectLinkedSetting(resolvedPath, isGlobal) == nil || len(StaleModeKeys(resolvedPath, isGlobal)) > 0 {
+		finishAutoLink(hubCtx, opts.AutoConfirm)
 	}
 
 	return hubCtx, nil
+}
+
+// checkExplicitProjectDir refuses a project directory named with --project
+// (explicit is true) that does not exist. The global directory and
+// hub-connected contexts are exempt. projectPath is the value as given and
+// resolvedPath the directory it resolved to.
+func checkExplicitProjectDir(projectPath, resolvedPath string, isGlobal, explicit bool) error {
+	if !explicit || isGlobal || config.IsHubContext() {
+		return nil
+	}
+	if info, err := os.Stat(resolvedPath); err == nil && info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("project directory %q (from --project %q) does not exist; pass an existing project directory, or a hub project slug or ID", resolvedPath, projectPath)
+}
+
+// skipProjectLink finishes EnsureHubReady for SkipProjectLink: it returns
+// hubCtx with an empty ProjectID, without linking or registering the
+// project. A project linked to another hub is still refused on the hub
+// selected with 'scion use', as in the link path below, so a refusal never
+// becomes an upload to that hub.
+func skipProjectLink(ctx context.Context, hubCtx *HubContext, opts EnsureHubReadyOptions, resolvedPath string, isGlobal bool, settings *config.Settings) (*HubContext, error) {
+	if opts.HubFromContext && projectWasLinked(resolvedPath, isGlobal, settings) {
+		registered := false
+		if hubCtx.ProjectID != "" {
+			var err error
+			registered, err = isProjectRegistered(ctx, hubCtx)
+			if err != nil {
+				return nil, wrapHubError(hubCtx.Endpoint, err)
+			}
+		}
+		if !registered {
+			if UsesUserAccessToken(hubCtx.CredentialKind) {
+				return nil, ScopedTokenProjectNotFoundError(hubCtx.ProjectID)
+			}
+			return nil, errProjectLinkedElsewhere()
+		}
+	}
+	hubCtx.ProjectID = ""
+	return hubCtx, nil
+}
+
+// hubUnreachableError is the error for a failed health check. For the local
+// workstation endpoint it is LocalServerNotRunningError ("Local scion server
+// is not running..."); for any other endpoint the error names the endpoint
+// and carries the hub-check hint.
+func hubUnreachableError(endpoint string, err error) error {
+	if IsLocalWorkstationEndpoint(endpoint) && !config.IsHubManagedAgent() {
+		return &LocalServerNotRunningError{Endpoint: endpoint, Err: err}
+	}
+	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", config.RedactURL(endpoint), hubclient.HintProxyError(err)))
+}
+
+// LegacyModeIgnoredNotice is printed once, when the link is recorded, to a
+// user whose own project settings still turn the hub off
+// (hub.enabled=false or hub.local_only=true): local-only mode was removed
+// and both are ignored.
+const LegacyModeIgnoredNotice = "Local-only mode has been removed; hub.enabled=false / hub.local_only are ignored."
+
+// projectSettingsDirs lists the directories holding the project's own
+// settings, in the order 'scion hub link' and 'scion hub unlink' resolve
+// them: the in-repo .scion directory, then the external project-configs
+// directory of a git project with split storage, whose values win. For the
+// global project it is the global directory only.
+func projectSettingsDirs(projectPath string, isGlobal bool) []string {
+	dirs := []string{projectPath}
+	if !isGlobal {
+		if ext := config.GetProjectConfigDir(projectPath); ext != "" && ext != projectPath {
+			dirs = append(dirs, ext)
+		}
+	}
+	return dirs
+}
+
+// StaleModeKeys returns the removed mode switches that the project's own
+// settings still set to "off": "hub.enabled" when hub.enabled is false and
+// "hub.local_only" when hub.local_only is true. Only the project's own
+// settings are read (see projectSettingsDirs), so a value in the global
+// settings does not mark other projects. Unreadable files are skipped.
+func StaleModeKeys(projectPath string, isGlobal bool) []string {
+	var enabled, localOnly *bool
+	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
+		own, err := config.LoadSettingsFromDir(dir)
+		if err != nil || own == nil || own.Hub == nil {
+			continue
+		}
+		if own.Hub.Enabled != nil {
+			enabled = own.Hub.Enabled
+		}
+		if own.Hub.LocalOnly != nil {
+			localOnly = own.Hub.LocalOnly
+		}
+	}
+	var keys []string
+	if enabled != nil && !*enabled {
+		keys = append(keys, "hub.enabled")
+	}
+	if localOnly != nil && *localOnly {
+		keys = append(keys, "hub.local_only")
+	}
+	return keys
+}
+
+// ClearStaleModeSettings prints LegacyModeIgnoredNotice to out and clears the
+// stale mode switches in the project's own settings when StaleModeKeys finds
+// any; it reports whether it did. A cleared key is written as the "on"
+// value (hub.enabled=true, hub.local_only=false) rather than deleted, so an
+// older binary reading the same settings uses the hub too. Write failures
+// are warnings.
+func ClearStaleModeSettings(out io.Writer, projectPath string, isGlobal bool) bool {
+	keys := StaleModeKeys(projectPath, isGlobal)
+	if len(keys) == 0 {
+		return false
+	}
+	_, _ = fmt.Fprintln(out, LegacyModeIgnoredNotice)
+	for _, key := range keys {
+		value := "true"
+		if key == "hub.local_only" {
+			value = "false"
+		}
+		if err := config.UpdateSetting(projectPath, key, value, isGlobal); err != nil {
+			warnf("failed to clear %s: %v", key, err)
+		}
+	}
+	return true
+}
+
+// finishAutoLink records hub.linked=true for a project whose link was not
+// recorded yet (or whose own settings still turn the hub off), after
+// importing the agents left in its .scion/agents from local-only mode. This
+// is the one-release migration import: on the local workstation hub it runs
+// without a prompt; on a remote hub the import plan is shown for
+// confirmation. Only registrations are imported; hub agents missing locally
+// are never removed here.
+//
+// Whenever the link is recorded, including after a declined import, the
+// stale mode switches are cleared with a one-time notice
+// (ClearStaleModeSettings) and hub.linked=true is written. When no broker
+// is online, or the import fails, nothing is recorded, so the next command
+// tries again. Failures are warnings: the command itself goes on.
+func finishAutoLink(hubCtx *HubContext, autoConfirm bool) {
+	record := func() {
+		ClearStaleModeSettings(promptOut, hubCtx.ProjectPath, hubCtx.IsGlobal)
+		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.linked", "true", hubCtx.IsGlobal); err != nil {
+			warnf("failed to record the hub link: %v", err)
+		}
+	}
+
+	local, err := GetLocalAgents(hubCtx.ProjectPath)
+	if err != nil || len(local) == 0 {
+		record()
+		return
+	}
+	ctx := context.Background()
+	compared, err := CompareAgents(ctx, hubCtx)
+	if err != nil {
+		warnf("could not check for agents to import: %v", err)
+		return
+	}
+	if len(compared.ToRegister) == 0 {
+		record()
+		return
+	}
+	plan := &SyncResult{ToRegister: compared.ToRegister, ServerTime: compared.ServerTime}
+
+	if online, err := checkBrokerAvailability(ctx, hubCtx); err == nil && !online {
+		_, _ = fmt.Fprintln(promptOut, "Warning: no runtime broker is online for this project, so these agents were not imported yet:")
+		for _, name := range plan.ToRegister {
+			_, _ = fmt.Fprintf(promptOut, "  + %s\n", name)
+		}
+		_, _ = fmt.Fprintln(promptOut, "They are imported on the next command once a broker is online.")
+		return
+	}
+
+	localHub := IsLocalWorkstationEndpoint(hubCtx.Endpoint)
+	_, _ = fmt.Fprintln(promptOut, "Local-only mode has been removed: scion now runs agents through a hub.")
+	if !localHub && !ShowSyncPlan(plan, autoConfirm) {
+		_, _ = fmt.Fprintln(promptOut, "Agents not imported. Import them later with 'scion hub link'.")
+		record()
+		return
+	}
+	_, _ = fmt.Fprintf(promptOut, "Importing %d existing agent(s) (name, template and harness config; history is not imported):\n", len(plan.ToRegister))
+	if err := ExecuteSync(ctx, hubCtx, plan, autoConfirm || localHub); err != nil {
+		warnf("failed to import agents: %v", err)
+		return
+	}
+	_, _ = fmt.Fprintln(promptOut, "Running agents were adopted in place by the broker. Other agents were imported as created, not started; "+
+		"start them with 'scion start <name>' (a suspended agent's harness session is not resumed).")
+	_, _ = fmt.Fprintf(promptOut, "See %s for details.\n", LocalModeRemovalDocsURL)
+	record()
 }
 
 // checkBrokerAvailability checks if there are any online brokers for the project.
@@ -739,24 +949,26 @@ func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(projectPath)
-	if err != nil {
-		warnf("failed to load current state.yaml for watermark update: %v", err)
-		currentState = &config.ProjectState{}
-	}
-
-	if currentState.LastSyncedAt != "" {
-		existingTS, parseErr := time.Parse(time.RFC3339Nano, currentState.LastSyncedAt)
-		if parseErr != nil {
-			warnf("failed to parse existing lastSyncedAt %q: %v", currentState.LastSyncedAt, parseErr)
-		} else if existingTS.After(ts) {
-			ts = existingTS
+	// Read, modify and write under the settings lock, so a concurrent
+	// update from another process is not lost.
+	err := config.UpdateProjectState(projectPath, func(currentState *config.ProjectState, loadErr error) error {
+		if loadErr != nil {
+			warnf("failed to load current state.yaml for watermark update: %v", loadErr)
 		}
-	}
 
-	currentState.LastSyncedAt = ts.UTC().Format(time.RFC3339Nano)
+		if currentState.LastSyncedAt != "" {
+			existingTS, parseErr := time.Parse(time.RFC3339Nano, currentState.LastSyncedAt)
+			if parseErr != nil {
+				warnf("failed to parse existing lastSyncedAt %q: %v", currentState.LastSyncedAt, parseErr)
+			} else if existingTS.After(ts) {
+				ts = existingTS
+			}
+		}
 
-	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
+		currentState.LastSyncedAt = ts.UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if err != nil {
 		warnf("failed to save lastSyncedAt to state.yaml: %v", err)
 	}
 }
@@ -773,12 +985,6 @@ func UpdateSyncedAgents(projectPath string, agents []string) {
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(projectPath)
-	if err != nil {
-		warnf("failed to load state.yaml for synced agents update: %v", err)
-		currentState = &config.ProjectState{}
-	}
-
 	sorted := make([]string, len(agents))
 	copy(sorted, agents)
 	// Sort for deterministic output
@@ -787,9 +993,15 @@ func UpdateSyncedAgents(projectPath string, agents []string) {
 			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
 		}
 	}
-	currentState.SyncedAgents = sorted
 
-	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
+	err := config.UpdateProjectState(projectPath, func(currentState *config.ProjectState, loadErr error) error {
+		if loadErr != nil {
+			warnf("failed to load state.yaml for synced agents update: %v", loadErr)
+		}
+		currentState.SyncedAgents = sorted
+		return nil
+	})
+	if err != nil {
 		warnf("failed to save synced agents to state.yaml: %v", err)
 	}
 }
@@ -803,19 +1015,16 @@ func AddSyncedAgent(projectPath, agentName string) {
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(projectPath)
-	if err != nil {
-		currentState = &config.ProjectState{}
-	}
-
-	for _, name := range currentState.SyncedAgents {
-		if name == agentName {
-			return // already present
+	err := config.UpdateProjectState(projectPath, func(currentState *config.ProjectState, _ error) error {
+		for _, name := range currentState.SyncedAgents {
+			if name == agentName {
+				return config.ErrSkipSave // already present
+			}
 		}
-	}
-	currentState.SyncedAgents = append(currentState.SyncedAgents, agentName)
-
-	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
+		currentState.SyncedAgents = append(currentState.SyncedAgents, agentName)
+		return nil
+	})
+	if err != nil {
 		warnf("failed to add synced agent to state.yaml: %v", err)
 	}
 }
@@ -829,20 +1038,20 @@ func RemoveSyncedAgent(projectPath, agentName string) {
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(projectPath)
-	if err != nil {
-		return
-	}
-
-	filtered := currentState.SyncedAgents[:0]
-	for _, name := range currentState.SyncedAgents {
-		if name != agentName {
-			filtered = append(filtered, name)
+	err := config.UpdateProjectState(projectPath, func(currentState *config.ProjectState, loadErr error) error {
+		if loadErr != nil {
+			return config.ErrSkipSave
 		}
-	}
-	currentState.SyncedAgents = filtered
-
-	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
+		filtered := currentState.SyncedAgents[:0]
+		for _, name := range currentState.SyncedAgents {
+			if name != agentName {
+				filtered = append(filtered, name)
+			}
+		}
+		currentState.SyncedAgents = filtered
+		return nil
+	})
+	if err != nil {
 		warnf("failed to remove synced agent from state.yaml: %v", err)
 	}
 }
@@ -896,7 +1105,9 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 		localAgentMap[name] = true
 	}
 
-	// Parse lastSyncedAt from state.yaml (preferred) or legacy settings (fallback).
+	// Parse lastSyncedAt from state.yaml. A legacy settings file's
+	// hub.lastSyncedAt is not read; migrating the file (scion config migrate,
+	// or any settings write) moves it to state.yaml.
 	var lastSyncedAt time.Time
 	var lastSyncedAtStr string
 
@@ -913,12 +1124,6 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 	previouslySynced := make(map[string]bool, len(projectState.SyncedAgents))
 	for _, name := range projectState.SyncedAgents {
 		previouslySynced[name] = true
-	}
-
-	// Fall back to legacy settings if state.yaml doesn't have it
-	if lastSyncedAtStr == "" && hubCtx.Settings.Hub != nil && hubCtx.Settings.Hub.LastSyncedAt != "" {
-		lastSyncedAtStr = hubCtx.Settings.Hub.LastSyncedAt
-		debugf("lastSyncedAt from legacy settings (hub.lastSyncedAt): %s", lastSyncedAtStr)
 	}
 
 	if lastSyncedAtStr != "" {
@@ -1030,7 +1235,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			if err := containers.removeExited(ctxTimeout, name); err != nil {
 				warnf("could not remove the exited container of agent '%s' (%v); run 'scion stop %s' before 'scion start %s'", name, err, name, name)
 			} else {
-				outcome = "imported as stopped; its exited container was removed"
+				outcome = "imported as created, not started; its exited container was removed"
 			}
 		}
 		debugf("Creating agent: name=%s, projectID=%s, container=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID, cstate)
@@ -1201,12 +1406,11 @@ func (c containerState) importOutcome() string {
 	switch c {
 	case containerRunning:
 		return "running, adopted"
-	case containerExited:
-		return "imported as stopped"
-	case containerAbsent:
-		return "imported as created"
 	default:
-		return "imported, not started"
+		// Exited, absent or unknown: provisioned without starting. The hub
+		// shows such an agent as created (not started); the import line
+		// uses the same words.
+		return "imported as created, not started"
 	}
 }
 
@@ -1481,37 +1685,6 @@ func applyFileTimestampFallback(info *api.AgentInfo, path string) {
 	info.Created = mtime
 }
 
-func saveProjectStateAtomic(projectPath string, state *config.ProjectState) error {
-	statePath := filepath.Join(projectPath, "state.yaml")
-	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(state)
-	if err != nil {
-		return err
-	}
-
-	tmpFile, err := os.CreateTemp(filepath.Dir(statePath), "state.yaml.tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return err
-	}
-	if err := tmpFile.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, statePath)
-}
-
 // isProjectRegistered checks if the project is registered with the Hub.
 // ensureProviderPath checks if the local broker is a provider for the project
 // and ensures its local_path is set. Auto-provide creates provider records without
@@ -1637,6 +1810,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      hubCtx.ProjectPath,
+		Labels:    LinkedProjectLabels(hubCtx.Endpoint, gitRemote),
 		Broker: &hubclient.BrokerInfo{
 			ID:   hubCtx.BrokerID,
 			Name: brokerName,
@@ -1654,14 +1828,25 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	if globalErr != nil {
 		_, _ = fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
 	} else {
-		if resp.BrokerToken != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
-			}
-		}
+		// A broker ID that is not a single path element rejects the
+		// response's broker settings as a whole: neither the token nor the
+		// ID is saved.
+		var brokerIDErr error
 		if resp.Broker != nil && resp.Broker.ID != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+			brokerIDErr = brokercredentials.ValidateBrokerIDPathElement(resp.Broker.ID)
+		}
+		if brokerIDErr != nil {
+			_, _ = fmt.Fprintf(promptOut, "Warning: not saving the broker token or broker ID: %v\n", brokerIDErr)
+		} else {
+			if resp.BrokerToken != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
+				}
+			}
+			if resp.Broker != nil && resp.Broker.ID != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+				}
 			}
 		}
 	}
@@ -1671,23 +1856,21 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	} else {
 		_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub project ID separately if it differs from the local project_id.
-	// Don't overwrite project_id — changing it shifts the external config
-	// directory, orphaning settings.
-	if resp.Project.ID != hubCtx.ProjectID {
-		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
+	// Always store the hub project ID in the project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file. Don't overwrite
+	// project_id: changing it shifts the external config directory,
+	// orphaning settings.
+	if resp.Project.ID != "" {
+		if err := config.UpdateSetting(hubCtx.ProjectPath, projectkeys.ConfigHubProjectIDKey, resp.Project.ID, isGlobal); err != nil {
 			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID
 		}
 	}
-	// Record the link the way 'scion hub link' does, so every path that
-	// links a project (the local auto-link, the link prompt, a matching
-	// project) can be unlinked with 'scion hub unlink'. Registration only
-	// runs after the unlinked check, so this never overrides an unlink.
-	if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.linked", "true", isGlobal); err != nil {
-		_, _ = fmt.Fprintf(promptOut, "Warning: failed to save linked state: %v\n", err)
-	}
+	// hub.linked is recorded by the caller (finishAutoLink) once the
+	// one-release import of local-mode agents has run, so a deferred import
+	// is retried on the next command.
 	if resp.Broker != nil {
 		_, _ = fmt.Fprintf(promptOut, "Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
 	}
@@ -1707,25 +1890,62 @@ func getProjectName(projectPath string, isGlobal bool) string {
 	return config.GetProjectName(projectPath)
 }
 
-// getEndpoint returns the Hub endpoint from settings.
-func getEndpoint(settings *config.Settings) string {
-	if settings.Hub != nil {
-		return settings.Hub.Endpoint
+// resolveEndpoint returns the hub endpoint for EnsureHubReady and hub
+// project references: the caller's EndpointOverride (the CLI's resolved
+// hub: --hub, a link entry or the current context), else
+// SCION_HUB_ENDPOINT, else SCION_HUB_URL (inside an agent container the
+// broker sets these). Settings are not read: hub.endpoint is not hub
+// configuration for the CLI.
+func resolveEndpoint(opts EnsureHubReadyOptions) string {
+	if opts.EndpointOverride != "" {
+		return opts.EndpointOverride
 	}
-	return ""
+	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return os.Getenv("SCION_HUB_URL")
 }
 
-// readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
-func readAgentTokenFile() string {
+// agentTokenFileRel is the agent token file's path relative to $HOME.
+var agentTokenFileRel = filepath.Join(".scion", sciontoolhub.TokenFile)
+
+// ReadAgentTokenFile reads the canonical agent token from
+// $HOME/.scion/scion-token through the shared agent token file reader, the
+// same implementation the agent-side hub client uses. The home directory
+// itself is trusted (it may be reached through a linked prefix); below it,
+// a symbolic link, special file, multi-link file or oversized file is
+// refused. It returns "" when HOME is unset, the file is absent, or the
+// file is refused. A refusal prints a warning (warnf) only when something
+// exists at the token path, so a credential file that is present but
+// unusable is not silently ignored, while a host with no token file (even
+// one whose ~/.scion is a link) stays silent.
+func ReadAgentTokenFile() string {
 	home := os.Getenv("HOME")
 	if home == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".scion", "scion-token"))
+	// Trusts HOME as set by the launching environment (the user on a host,
+	// the launcher in an agent). The directories above HOME must not be
+	// writable by this user or any less-trusted user, so HOME itself cannot be
+	// replaced; HOME may be writable. Entries below HOME are opened without
+	// following links.
+	token, err := sciontoolhub.ReadTokenFileUnder(home, agentTokenFileRel)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		// A refusal on the way to the file (for example ~/.scion being a
+		// link) reports ELOOP or ENOTDIR rather than ErrNotExist. Only warn
+		// when something actually exists at the token path; Lstat reads
+		// metadata only and cannot block on a special file. ENOTDIR from
+		// Lstat means ~/.scion is not a directory, so no token can exist.
+		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) || errors.Is(serr, syscall.ENOTDIR) {
+			return ""
+		}
+		warnf("ignoring agent token file: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return token
 }
 
 // createHubClient creates a new Hub client with proper authentication, and
@@ -1747,7 +1967,7 @@ func readAgentTokenFile() string {
 //
 // This is the Hub client builder used by EnsureHubReady and
 // resolveHubProjectRef — i.e. everything that goes through
-// CheckHubAvailability* (cmd/common.go), including `scion list`. It
+// requireHub (cmd/common.go), including `scion list`. It
 // duplicates cmd/hub.go's getHubClient, which implements the identical
 // priority order independently for commands that call it directly instead
 // (`broker`, `clean`, `notifications`, `project`, `doctor`, template sync,
@@ -1769,7 +1989,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
-	if token := readAgentTokenFile(); token != "" {
+	if token := ReadAgentTokenFile(); token != "" {
 		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
@@ -1787,6 +2007,23 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 4. Fallback to auto dev auth
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
+}
+
+// LinkedProjectLabels returns the labels a CLI registration of a local
+// project directory sends to the hub. A git project registered on the local
+// workstation hub is labelled worktree-per-agent, so the co-located broker
+// gives each new agent a git worktree of the user's own checkout instead of
+// a clone. Any other registration (no git remote, or any other hub) sends
+// no labels and keeps the hub's default.
+//
+// The hub stores the label only when the registration creates the project;
+// it is ignored for a project that already exists, and it cannot be added
+// later.
+func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
+	if gitRemote == "" || !IsLocalWorkstationEndpoint(endpoint) {
+		return nil
+	}
+	return map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent}
 }
 
 // IsLocalWorkstationEndpoint reports whether endpoint is the local
@@ -1955,61 +2192,68 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 		return
 	}
 
-	// Parse and check if hub section has these keys
-	var settings map[string]interface{}
-	ext := filepath.Ext(settingsPath)
-	isYAML := ext == ".yaml" || ext == ".yml"
-
-	if isYAML {
-		if err := yaml.Unmarshal(data, &settings); err != nil {
-			warnf("failed to parse project settings YAML: %v", err)
-			return
+	// Re-read, modify and write under the settings lock (the file may have
+	// changed, or been migrated, since the read above).
+	err = config.RewriteSettingsFile(projectPath, func(settingsPath string, data []byte) ([]byte, error) {
+		if version, _ := config.DetectSettingsFormat(data); version != "" {
+			return nil, config.ErrSkipSave
 		}
-	} else {
-		if err := util.UnmarshalJSONC(data, &settings); err != nil {
-			warnf("failed to parse project settings JSON: %v", err)
-			return
+
+		// Parse and check if hub section has these keys
+		var settings map[string]interface{}
+		ext := filepath.Ext(settingsPath)
+		isYAML := ext == ".yaml" || ext == ".yml"
+
+		if isYAML {
+			if err := yaml.Unmarshal(data, &settings); err != nil {
+				warnf("failed to parse project settings YAML: %v", err)
+				return nil, config.ErrSkipSave
+			}
+		} else {
+			if err := util.UnmarshalJSONC(data, &settings); err != nil {
+				warnf("failed to parse project settings JSON: %v", err)
+				return nil, config.ErrSkipSave
+			}
 		}
-	}
 
-	hubSection, ok := settings["hub"].(map[string]interface{})
-	if !ok {
-		return
-	}
-
-	modified := false
-	if _, hasHostId := hubSection["brokerId"]; hasHostId {
-		delete(hubSection, "brokerId")
-		modified = true
-		debugf("Removed stale hub.brokerId from project settings")
-	}
-	if _, hasHostToken := hubSection["brokerToken"]; hasHostToken {
-		delete(hubSection, "brokerToken")
-		modified = true
-		debugf("Removed stale hub.brokerToken from project settings")
-	}
-
-	if !modified {
-		return
-	}
-
-	// Write back the cleaned settings in the same format
-	var newData []byte
-	if isYAML {
-		newData, err = yaml.Marshal(settings)
-		if err != nil {
-			warnf("failed to marshal cleaned settings as YAML: %v", err)
-			return
+		hubSection, ok := settings["hub"].(map[string]interface{})
+		if !ok {
+			return nil, config.ErrSkipSave
 		}
-	} else {
-		newData, err = json.MarshalIndent(settings, "", "  ")
+
+		modified := false
+		if _, hasHostId := hubSection["brokerId"]; hasHostId {
+			delete(hubSection, "brokerId")
+			modified = true
+			debugf("Removed stale hub.brokerId from project settings")
+		}
+		if _, hasHostToken := hubSection["brokerToken"]; hasHostToken {
+			delete(hubSection, "brokerToken")
+			modified = true
+			debugf("Removed stale hub.brokerToken from project settings")
+		}
+
+		if !modified {
+			return nil, config.ErrSkipSave
+		}
+
+		// Write back the cleaned settings in the same format
+		if isYAML {
+			newData, err := yaml.Marshal(settings)
+			if err != nil {
+				warnf("failed to marshal cleaned settings as YAML: %v", err)
+				return nil, config.ErrSkipSave
+			}
+			return newData, nil
+		}
+		newData, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			warnf("failed to marshal cleaned settings as JSON: %v", err)
-			return
+			return nil, config.ErrSkipSave
 		}
-	}
-
-	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		return newData, nil
+	})
+	if err != nil {
 		warnf("failed to write cleaned settings: %v", err)
 	}
 }
@@ -2024,12 +2268,12 @@ const hubGlobalProjectSlug = "global"
 func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
 	if err != nil {
-		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", config.RedactURL(endpoint), err))
 	}
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
 			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
-			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, config.RedactURL(endpoint))
 	}
 	return resp.Projects[0].ID, nil
 }

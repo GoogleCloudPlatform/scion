@@ -52,7 +52,7 @@ The Runtime Broker's heartbeat lists agents on each runtime with its own deadlin
 
 ### Agent-Level Kubernetes Configuration
 
-Per-agent or per-template Kubernetes settings in `~/.scion/settings.yaml`:
+Per-agent Kubernetes settings, in the `kubernetes:` block of an agent's inline config (`--config` or the create request). A template's `kubernetes:` block is ignored with a warning: Kubernetes settings are part of the agent's environment, which comes from settings and profiles.
 
 ```yaml
 kubernetes:
@@ -64,9 +64,7 @@ kubernetes:
                                         # identity mode "assign": a value set
                                         # here directly on the create/start
                                         # request is rejected if it names a
-                                        # different KSA than the mapping; a
-                                        # template-only value is silently
-                                        # overridden by the mapping instead.
+                                        # different KSA than the mapping.
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
   priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
   safeToEvict: false                   # ask the autoscaler not to evict the pod (see below)
@@ -97,13 +95,13 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
 
-1. The agent's or template's `kubernetes:` block.
+1. The agent's `kubernetes:` block (a template's `kubernetes:` block is ignored with a warning).
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
 If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
 
-An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
+An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
 `shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
 
@@ -127,7 +125,7 @@ profiles:
     # shared_dir_storage_class: premium-rwx
 ```
 
-A template or agent can still override this for itself:
+An agent can still override this for itself:
 
 ```yaml
 kubernetes:
@@ -200,7 +198,7 @@ A variable is set only when its limit is set, either in `resources.limits` or in
 
 Setting `GOMAXPROCS` turns off the Go 1.25+ default, which reads the cgroup CPU limit and follows changes to it (for example after an in-place pod resize). In return, images with older Go toolchains also get a value that matches the pod.
 
-A value set in the template or agent `env` always wins, and each variable is checked separately. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
+A value set in the agent's `env` (or any env source other than the template) always wins, and each variable is checked separately. A template's `env` is applied only when nothing else sets the variable, so it does not replace the derived value. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
 
 ```yaml
 env:
@@ -222,7 +220,7 @@ This provides the agent container with an ambient identity, which the underlying
 This is the out-of-band setup that GCP identity mode `passthrough` relies on. To have the Hub choose the GSA for each agent, use [GCP identity mode `assign`](#gcp-identity-mode-assign-workload-identity-mapping) instead.
 
 :::tip[GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION]
-Vertex AI auth also needs a project key (usually `GOOGLE_CLOUD_PROJECT`) and, for harnesses that require one, a region key — `GOOGLE_CLOUD_LOCATION` for most of those, though some (e.g. Claude, Gemini) also accept `CLOUD_ML_REGION` or `GOOGLE_CLOUD_REGION`. Rather than setting these per project, set them once at hub scope:
+Vertex AI auth also needs a project key (usually `GOOGLE_CLOUD_PROJECT`) and, for harnesses that require one, a region key — `GOOGLE_CLOUD_LOCATION` for most of those, though some (e.g. Claude, Gemini) also accept `CLOUD_ML_REGION` or `GOOGLE_CLOUD_REGION` (if several are set, `GOOGLE_CLOUD_LOCATION` wins, then `GOOGLE_CLOUD_REGION`). Rather than setting these per project, set them once at hub scope:
 
 ```bash
 scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
@@ -266,7 +264,7 @@ globalDefault: false
 description: "Priority class for Scion agent pods"
 ```
 
-Then reference it by name, either as a runtime-level default or per template/agent (the per-template value wins if both are set):
+Then reference it by name, either as a runtime-level default or per agent (the per-agent value wins if both are set):
 
 ```yaml
 runtimes:
@@ -306,6 +304,8 @@ When either signal is observed, the agent leaves `running` at once, and its stat
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
 
+**Resume without a saved session.** When you resume or wake an agent whose home is pod-local, the harness has no saved session to continue. If the resume attempt exits with an error status (1 to 127; a harness stopped by a signal does not count) within 30 seconds, the agent prints `scion: no resumable session; starting fresh` and starts the harness fresh instead of exiting. With the `nfs` home backend the session survives, so a failed resume is reported as an error and is not retried fresh.
+
 If the pod disappears between polls before either signal is observed, the Runtime Broker reads the pod's Kubernetes Events and classifies a preemption or eviction recorded there the same way. Only when the Events show neither does the agent fall back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
 
 #### Out-of-memory kills
@@ -324,7 +324,7 @@ metadata:
 
 The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
 
-You can set it on a runtime, on a profile, or on a template or agent:
+You can set it on a runtime, on a profile, or on an agent:
 
 ```yaml
 # settings.yaml — runtime default
@@ -343,18 +343,18 @@ profiles:
 ```
 
 ```yaml
-# template or agent scion-agent.yaml — overrides profile and runtime
+# agent scion-agent.yaml — overrides profile and runtime (ignored in a template)
 kubernetes:
   safeToEvict: false
 ```
 
 Scion uses the first value it finds, in this order:
 
-1. The template or agent `kubernetes.safeToEvict`
+1. The agent's `kubernetes.safeToEvict`
 2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
 3. The `safe_to_evict` on that profile's runtime entry
 
-An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on a template turns the annotation off for that template, even when the runtime sets `false`.
+An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on an agent turns the annotation off for that agent, even when the runtime sets `false`.
 
 Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore it. `scion config validate` warns when it is set on a non-Kubernetes runtime, or on a profile that uses one, and Scion logs a warning at agent start when it is ignored.
 
@@ -449,7 +449,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
-- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the template or the agent's saved config.
+- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's saved config.
 - `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
@@ -602,7 +602,7 @@ Nothing is filtered out: accounts with an `unknown` state are still listed, with
 
 The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
-**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
+**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A template's `kubernetes:` block, `serviceAccountName` included, is ignored.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:
 
@@ -711,16 +711,17 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 Starting an agent pod can take several minutes when the cluster has to add a node first, for example a GKE Autopilot cold start followed by a multi-minute image pull. A synchronous Hub create is bounded by the CLI's 30-second HTTP timeout and the Hub's `write_timeout`, so it is not suited to these starts.
 
-Turn on asynchronous create on the Hub and raise the launch budget above your slowest expected start:
+Turn on asynchronous create on the Hub, the `hub.async_agent_launch` [experiment](/scion/reference/experiments/) in **Admin → Server Config → Experiments** (no restart needed), and raise the launch budget above your slowest expected start:
 
 ```yaml
 server:
   hub:
-    async_agent_launch: true
     launch_timeout: "15m"   # default 5m
 ```
 
-Both keys are read only at Hub startup, so restart the Hub after changing them. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
+`launch_timeout` is read only at Hub startup, so restart the Hub after changing it. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. While the agent's Pod is `Pending` (waiting for a node, pulling its image or running init containers), the Runtime Broker reports the agent as `starting`, not `running`, so the launch stays active until the container starts and `launch_timeout` still applies. An image pull failure (`ErrImagePull` or `ImagePullBackOff`) still ends the launch at once with `image_pull_failed`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
+
+A broker pod that stops during a launch reports it failed with `broker_restarted`. Give broker and combined Hub and broker pods `terminationGracePeriodSeconds: 45` so that report fits in the shutdown. To also recover launches after a crash or a pod replacement, point `server.broker.state_dir` at a persistent local volume. See [Broker restarts during a launch](/scion/reference/server-config/#asynchronous-agent-create).
 
 ## Architecture & Security
 
@@ -756,26 +757,26 @@ On a node that has just scaled up from zero, such as on GKE Autopilot, the API s
 
 ### NFS Workspace Export Requirements
 
-With `workspace_storage.backend: nfs`, each project's workspace is mounted into the agent Pod from the shared volume at the subPath `<subpath_root>/<project-id>/workspace` (`subpath_root` defaults to `projects`). When `shared_dir_storage` is unset or `local`, the project's shared directories are mounted from the same volume at `<subpath_root>/<project-id>/shared-dirs/<name>`. In shared-plain and worktree-per-agent modes, the workspace provisioning init container (and only that container) also mounts the project's provisioning state directory, `<subpath_root>/<project-id>/provision`, at `/scion-provision`. It holds the provisioning sentinel (`.scion-provisioned`) and the per-project provisioning lock, so neither is visible in the workspace. These directories have to exist before the Pod starts. How they get created depends on whether the broker that creates the Pod has the export mounted at `workspace_storage.nfs.mount_root/<share id>`:
+With `workspace_storage.backend: nfs`, each project's workspace is mounted into the agent Pod from the shared volume at the subPath `<subpath_root>/<project-id>/workspace` (`subpath_root` defaults to `projects`). When `shared_dir_storage` is unset or `local`, the project's shared directories are mounted from the same volume at `<subpath_root>/<project-id>/shared-dirs/<name>`. In shared-plain and worktree-per-agent modes, the workspace provisioning init container (and only that container) also mounts the project's provisioning state directory, `<subpath_root>/<project-id>/provision`, at `/scion-provision`. It holds the provisioning sentinel (`.scion-provisioned`) and the per-project provisioning lock, so neither is visible in the workspace. These directories have to exist before the Pod starts. How they get created depends on whether the Runtime Broker that creates the Pod has the export mounted at `workspace_storage.nfs.mount_root/<share id>`:
 
-- **Broker has the export mounted (recommended).** Before it creates the Pod, the broker creates the workspace directory, the provisioning state directory and each of those shared directories itself, the same way it creates shared-directory leaves: missing parent directories get mode `2755`, and each new directory gets mode `2775` (setgid) with a default ACL that gives the group write access. Existing directories and their contents are left as they are. For this to help on exports that map root or all users to an anonymous user, the broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>`. If the broker is not allowed to create a directory (permission denied or a read-only mount, for example a broker that does not run as root where `<subpath_root>/<project-id>` is owned by root), it logs a warning and leaves that directory to the kubelet, as described in the next item. If the path cannot be used at all (a symlink or a regular file where a directory should be, or an export mount path that is not a directory), agent create fails straight away with an error that names the export requirement, rather than timing out while the Pod waits.
-- **Broker does not have the export mounted.** The kubelet creates the directories when the Pod starts. This only works on exports that let root create directories (`no_root_squash`, the Filestore default). On exports that map root to an anonymous user (`root_squash` or `all_squash`), the kubelet's mkdir is denied and the Pod stays in `CreateContainerConfigError` ("failed to create subPath directory for volumeMount workspace"). Mount the export on the broker, or use `no_root_squash`.
+- **Runtime Broker has the export mounted (recommended).** Before it creates the Pod, the Runtime Broker creates the workspace directory, the provisioning state directory and each of those shared directories itself, the same way it creates shared-directory leaves: missing parent directories get mode `2755`, and each new directory gets mode `2775` (setgid) with a default ACL that gives the group write access. Existing directories and their contents are left as they are. For this to help on exports that map root or all users to an anonymous user, the Runtime Broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>`. If the Runtime Broker is not allowed to create a directory (permission denied or a read-only mount, for example a Runtime Broker that does not run as root where `<subpath_root>/<project-id>` is owned by root), it logs a warning and leaves that directory to the kubelet, as described in the next item. If the path cannot be used at all (a symlink or a regular file where a directory should be, or an export mount path that is not a directory), agent create fails straight away with an error that names the export requirement, rather than timing out while the Pod waits.
+- **Runtime Broker does not have the export mounted.** The kubelet creates the directories when the Pod starts. This only works on exports that let root create directories (`no_root_squash`, the Filestore default). On exports that map root to an anonymous user (`root_squash` or `all_squash`), the kubelet's mkdir is denied and the Pod stays in `CreateContainerConfigError` ("failed to create subPath directory for volumeMount workspace"). Mount the export on the Runtime Broker host, or use `no_root_squash`.
 
-When the kubelet created the provisioning state directory, the provisioning init container gives it to the agent runtime uid and `workspace_storage.nfs.gid` with mode `2775`. It does the same to a directory the broker created whenever any other directory of the Pod was left to the kubelet. A broker outside that group can still see whether the sentinel exists. If it cannot write there, it removes a deleted agent's worktree under the legacy workspace-root lock only (see below).
+When the kubelet created the provisioning state directory, the provisioning init container gives it to the agent runtime uid and `workspace_storage.nfs.gid` with mode `2775`. It does the same to a directory the Runtime Broker created whenever any other directory of the Pod was left to the kubelet. A Runtime Broker outside that group can still see whether the sentinel exists. If it cannot write there, it removes a deleted agent's worktree under the legacy workspace-root lock only (see below).
 
 Workspaces provisioned before the provisioning state directory existed have `.scion-provisioned` in the workspace root. It is still honoured, so those workspaces are not provisioned again, and provisioning adds it to the checkout's `.git/info/exclude`. While Pods of a project may still run images with an older `sciontool`, the init container also takes the provisioning lock in the workspace root (`.scion-provision.lock`) before the one in the state directory. That lock is transient and excluded from git, and leftover lock entries are cleaned up on a later provisioning run.
 
-The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any template of the project uses an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
+The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any agent of the project runs an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
 
 - runs the full provisioning step again: an existing clone is reused, but the whole workspace is chowned recursively on every start;
 - writes `.scion-provisioned` back into the workspace root (newer images add it to the git excludes);
 - if it only waits for another Pod's provisioning, times out, because the newer image writes the sentinel in the state directory.
 
-No data is lost in these cases, but to keep the workspace free of provisioning files, update the images of all of a project's templates to a release that includes the provisioning state directory.
+No data is lost in these cases, but to keep the workspace free of provisioning files, make sure every agent of the project runs an image from a release that includes the provisioning state directory.
 
-`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
+`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export.
 
-On exports that map root or all users to an anonymous user, the workspace provisioning init container cannot change file ownership, because the NFS server decides ownership changes. When the broker created all of these directories, or found them already in place with setgid and group write (for example `2775`), the provisioning step tries to set ownership to the agent runtime uid (`1000`) and `workspace_storage.nfs.gid`, logs a warning if that is not allowed, and continues. If any of them already exists without setgid and group write (for example a root-owned `0755` directory left by an earlier kubelet mkdir), or was left to the kubelet, a failed ownership change still stops the Pod; fix that directory's group and mode on the export. Agents get access through the directories' group: set `workspace_storage.nfs.gid` to the group that owns `<subpath_root>/<project-id>` on the export (the agent Pod uses it as its `fsGroup`), so files created under the setgid directories stay writable by the agent.
+On exports that map root or all users to an anonymous user, the workspace provisioning init container cannot change file ownership, because the NFS server decides ownership changes. When the Runtime Broker created all of these directories, or found them already in place with setgid and group write (for example `2775`), the provisioning step tries to set ownership to the agent runtime uid (`1000`) and `workspace_storage.nfs.gid`, logs a warning if that is not allowed, and continues. If any of them already exists without setgid and group write (for example a root-owned `0755` directory left by an earlier kubelet mkdir), or was left to the kubelet, a failed ownership change still stops the Pod; fix that directory's group and mode on the export. Agents get access through the directories' group: set `workspace_storage.nfs.gid` to the group that owns `<subpath_root>/<project-id>` on the export (the agent Pod uses it as its `fsGroup`), so files created under the setgid directories stay writable by the agent.
 
 #### Sharing Modes on the NFS Workspace
 
@@ -803,9 +804,9 @@ Starting an agent in worktree-per-agent mode stops with an error that says what 
 
 These errors name paths relative to the shared checkout, `<subpath_root>/<project-id>/workspace` on the export. If git has no entry for the agent's existing worktree any more (for example after a `git worktree prune` while the directory was missing), the directory is moved aside to `worktrees/.stale-<agent-name>-<suffix>`, with its files, and a new worktree is added. The moved directory's `.git` file is renamed to `.git.moved`, so the directory holds plain files and is no longer a worktree. Remove it once you no longer need its files.
 
-Deleting an agent together with its files removes its worktree through the broker's mount of the export: under the same per-project lock as the provisioning init container, the worktree directory is renamed to `worktrees/.removing-<agent-name>-<suffix>` (its `.git` file renamed to `.git.moved`, as above) and `git worktree prune` drops its entry. Its files are then deleted in the background, without the lock. The broker waits up to 30 seconds for the lock; the steps under it are not cut short, and `git worktree prune` gets up to 2 minutes. A removal that stops partway leaves at most a `.removing-` directory, which does not stop an agent created again with the same name and is deleted by the next removal in that project. The broker must be able to delete files owned by the agents' user (uid 1000) on the export; otherwise each background delete fails with a warning, `.removing-` directories collect in `worktrees/`, and an operator has to remove them. The agent's branch is always kept, whatever the delete's branch option says, so an agent created again with the same name gets a fresh worktree on that branch. If the delete removed nothing, because the agent's files were kept or the export is not mounted on the broker, an agent created again with the same name reuses the existing worktree when the requested branch is the one the worktree is on, or the one it was created with; with another branch it stops with the error above. A failed removal is logged as a warning with the worktree's path and does not fail the delete.
+Deleting an agent together with its files removes its worktree through the broker's mount of the export: under the same per-project lock as the provisioning init container, the worktree directory is renamed to `worktrees/.removing-<agent-name>-<suffix>` (its `.git` file renamed to `.git.moved`, as above) and git's entry for that worktree, and no other, is removed. Its files are then deleted in the background, without the lock. The broker waits up to 30 seconds for the lock; the steps under it are not cut short, and removing the worktree's git entry gets up to 2 minutes. A removal that stops partway leaves at most a `.removing-` directory, which does not stop an agent created again with the same name and is deleted by the next removal in that project. The broker must be able to delete files owned by the agents' user (uid 1000) on the export; otherwise each background delete fails with a warning, `.removing-` directories collect in `worktrees/`, and an operator has to remove them. The agent's branch is always kept, whatever the delete's branch option says, so an agent created again with the same name gets a fresh worktree on that branch. If the delete removed nothing, because the agent's files were kept or the export is not mounted on the broker, an agent created again with the same name reuses the existing worktree when the requested branch is the one the worktree is on, or the one it was created with; with another branch it stops with the error above. A failed removal is logged as a warning with the worktree's path and does not fail the delete.
 
-`git worktree prune` runs in the shared checkout during provisioning and removal, and drops git's entries for worktrees whose directory it cannot find on the export, for example a worktree an agent adds under `/tmp`. To add more worktrees from inside an agent, create them inside the agent's own worktree directory with `git worktree add --relative-paths`.
+Provisioning and removal change only git's entry for the agent's own worktree: before adding the worktree, provisioning removes a stale entry left at that path, and removal removes the entry of the worktree it moved aside. Neither runs `git worktree prune` in the shared checkout, so git's entries for other worktrees, including one an agent adds under `/tmp`, are left as they are. To add more worktrees from inside an agent, create them inside the agent's own worktree directory with `git worktree add --relative-paths`.
 
 With an agent image whose provisioning init container only clones the shared checkout, the agent's worktree directory stays empty, and the agent container clones the repository into it on start. The agent still gets its own checkout, but as a separate clone rather than a worktree of the shared checkout. A later start with a newer image keeps that checkout as it is, and deleting the agent leaves it in place.
 
@@ -844,7 +845,7 @@ A git clone-per-agent workspace on EmptyDir is cloned again from the remote when
   If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual. The Hub's stop-all action (for example **Stop All** in the Web Dashboard) does not run the check, to keep it fast; `scion stop --all` stops each agent on its own and does run it.
 - **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
 
-To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning. The check runs only for agents managed through a Hub; local mode with the Kubernetes runtime does not warn.
+To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning.
 
 ### Persistent Agent Home (NFS)
 
@@ -874,7 +875,7 @@ With [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
 
-**Object names.** A start from the Hub carries a run ID, and the runtime names the agent's Secrets and SecretProviderClass after that run: `scion-run-secret-<pod>-<token>` for the env/file Secret and the SecretProviderClass, and `scion-run-auth-<pod>-<token>` for the `ResolvedAuth` Secret, where `<token>` is derived from the run ID (and a very long pod name is truncated and hashed to fit Kubernetes limits). Two runs of the same agent therefore never share object names, and a new run's start does not delete an earlier run's objects; those are removed by that run's own cleanup or delete, or by an age-based sweep once stale. A start without a run ID (for example a local CLI start) keeps the fixed names `scion-agent-<pod>` and `scion-auth-<pod>`.
+**Object names.** A start from the Hub carries a run ID, and the runtime names the agent's Secrets and SecretProviderClass after that run: `scion-run-secret-<pod>-<token>` for the env/file Secret and the SecretProviderClass, and `scion-run-auth-<pod>-<token>` for the `ResolvedAuth` Secret, where `<token>` is derived from the run ID (and a very long pod name is truncated and hashed to fit Kubernetes limits). Two runs of the same agent therefore never share object names, and a new run's start does not delete an earlier run's objects; those are removed by that run's own cleanup or delete, or by an age-based sweep once stale. A start without a run ID keeps the fixed names `scion-agent-<pod>` and `scion-auth-<pod>`.
 
 :::caution[Upgrade Runtime Brokers with the Hub]
 Runtime Brokers older than the Hub ignore per-run objects. Upgrade your Kubernetes Runtime Brokers together with the Hub.
@@ -915,8 +916,8 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Ephemeral storage (disk) | Supported (requests + limits) |
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
-| PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
-| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on a template/agent) |
+| PriorityClassName | Supported (runtime default and per-agent override; the class must already exist on the cluster) |
+| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on an agent) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |

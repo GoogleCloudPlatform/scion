@@ -106,7 +106,7 @@ func (f *hostFixture) config(t *testing.T, instances ...config.V1RuntimeBrokerIn
 			cfg.BrokerName = ic.Instance.Name
 			cfg.StateDir = t.TempDir()
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
 		},
 	}
 }

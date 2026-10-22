@@ -230,7 +230,7 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 // it hasn't seen before, for tests in other packages (e.g.
 // pkg/runtimebroker) that need to exercise the real memoized-by-config
 // resolution path — pkg/runtime/factory.go's "substrate" case calling
-// NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntime/GetRuntime do in
+// NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntimeWithRecord/GetRuntime do in
 // production — without dialing real ateapi/Kubernetes.
 //
 // Also swaps substrateRuntimes (the memo NewSubstrateRuntime caches built
@@ -541,7 +541,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			// actor and its egress policy so nothing keeps running under
 			// config it never should have received, and fail loudly. See
 			// errBootstrapHijacked's doc comment for the threat model.
-			runtimeLog.Error("substrate: bootstrap hijack detected, deleting actor as a precaution",
+			runtimeLog().Error("substrate: bootstrap hijack detected, deleting actor as a precaution",
 				"atespace", atespace, "actor", actorName)
 			cleanup()
 			return "", fmt.Errorf("substrate: actor %s was bootstrapped by another caller before this broker's request reached it; deleted as a precaution", id)
@@ -561,7 +561,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			// the way it is for bootstrapPathRejectedError.Error()'s plain
 			// fmt.Sprintf (substrate_bootstrap.go), which has no such
 			// built-in quoting.
-			runtimeLog.Error("substrate: bootstrap rejected a file path",
+			runtimeLog().Error("substrate: bootstrap rejected a file path",
 				"atespace", atespace, "actor", actorName, "code", pathErr.code, "path", pathErr.path)
 		}
 		cleanup()

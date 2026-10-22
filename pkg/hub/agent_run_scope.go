@@ -100,8 +100,8 @@ func ParseAgentRunScope(mode, legacyUntil string) (AgentRunScope, error) {
 func (s AgentRunScope) String() string { return s.mode.String() }
 
 // Agent run-scope check outcomes, recorded in logs and metrics only. None
-// of them reaches a client: every refusal is the same response
-// (writeAgentTokenRefused).
+// of them reaches a client: every agent-token refusal, run-scope or not,
+// is the same response (writeAgentTokenRefused).
 const (
 	runScopeOutcomeBound       = "bound"        // token run is the agent's current run
 	runScopeOutcomeUnscoped    = "unscoped"     // token without a run, accepted
@@ -129,9 +129,10 @@ const (
 	runScopeUnavailable
 )
 
-// agentRunReader reads the agent row a token names.
+// agentRunReader reads the run and deletion time of the agent a token
+// names (a narrow primary-key read, not the whole row).
 type agentRunReader interface {
-	GetAgent(ctx context.Context, id string) (*store.Agent, error)
+	GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error)
 }
 
 // agentRunScopeMetrics counts run-scope check outcomes.
@@ -289,7 +290,7 @@ func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenCl
 		if header == "" {
 			return runScopeOutcomeUnscoped, ""
 		}
-		agent, err := c.agents.GetAgent(ctx, claims.Subject)
+		agent, err := c.agents.GetAgentRunState(ctx, claims.Subject)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return runScopeOutcomeUnscoped, ""
@@ -307,7 +308,7 @@ func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenCl
 	if header != "" && header != runID {
 		return runScopeOutcomeHeader, ""
 	}
-	agent, err := c.agents.GetAgent(ctx, claims.Subject)
+	agent, err := c.agents.GetAgentRunState(ctx, claims.Subject)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return runScopeOutcomeAgentGone, ""
@@ -403,11 +404,12 @@ func (c *agentRunScopeChecker) conduitBinding(ctx context.Context, claims *Agent
 	}
 }
 
-// agentTokenRefusedBody is the body of every run-scope refusal.
+// agentTokenRefusedBody is the body of every agent-token refusal.
 const agentTokenRefusedBody = `{"error":{"code":"invalid_token","message":"invalid token"}}` + "\n"
 
-// writeAgentTokenRefused writes the run-scope refusal. It is the same
-// response, byte for byte, whatever the reason.
+// writeAgentTokenRefused writes the agent-token refusal. Every agent-token
+// refusal, whatever the cause, is this response byte for byte; the cause
+// is logged server side only.
 func writeAgentTokenRefused(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("WWW-Authenticate", `Bearer error="invalid_token"`)

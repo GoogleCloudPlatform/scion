@@ -127,9 +127,14 @@ type IntegrationStatus struct {
 }
 
 // IntegrationConfigUpdateRequest is the request body for the PUT config endpoint.
+//
+// Settings is merged key by key into the stored config: a key the body
+// omits keeps its stored value, a key with a string value (including "")
+// replaces it, and a key sent as JSON null is deleted from the stored
+// config, so the plugin's own default applies again (ptone/scion#3913).
 type IntegrationConfigUpdateRequest struct {
-	Settings map[string]string `json:"settings"`
-	Secrets  map[string]string `json:"secrets"`
+	Settings map[string]*string `json:"settings"`
+	Secrets  map[string]string  `json:"secrets"`
 }
 
 // AvailableIntegration represents a plugin that could be installed.
@@ -191,9 +196,6 @@ func lookupKnownPlugin(name string) *KnownPlugin {
 	}
 	return nil
 }
-
-// SettingsWriteMu guards concurrent writes to settings.yaml.
-var SettingsWriteMu sync.Mutex
 
 // pluginBuildMu guards concurrent build operations per plugin name.
 var pluginBuildMu sync.Map
@@ -596,14 +598,24 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			InternalError(w)
 			return
 		}
+		// A stored Postgres row whose config is JSON null loads as a nil
+		// map; start from an empty map so the merge below cannot panic.
+		if existing == nil {
+			existing = make(map[string]string)
+		}
 
 		// Merge new settings into existing, filtering out any secret keys.
+		// A null value deletes the stored key.
 		secretKeys := allSecretConfigKeys(name)
 		for k, v := range req.Settings {
 			if secretKeys[k] {
 				continue
 			}
-			existing[k] = v
+			if v == nil {
+				delete(existing, k)
+				continue
+			}
+			existing[k] = *v
 		}
 
 		if err := provider.Save(ctx, existing); err != nil {
@@ -631,12 +643,10 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the config update.
 	}
-	SettingsWriteMu.Unlock()
 
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
@@ -682,12 +692,10 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the restart.
 	}
-	SettingsWriteMu.Unlock()
 
 	// Resolve the latest config from file + secrets + hub wiring creds.
 	merged := s.resolveIntegrationMergedConfig(r.Context(), mgr, name)
@@ -807,12 +815,10 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the update.
 	}
-	SettingsWriteMu.Unlock()
 
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
@@ -924,12 +930,10 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		slog.Info("Plugin config file already exists, preserving", "plugin", name, "path", resolvedConfigPath)
 	}
 
-	SettingsWriteMu.Lock()
 	err = config.AddPluginToSettings(name, configFilePath)
 	if err == nil {
 		err = config.AddPluginToMessageBrokerTypes(name)
 	}
-	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1027,7 +1031,7 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 			InternalError(w)
 			return
 		}
-		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.config.HubEndpoint); err != nil {
+		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.HubEndpointFor(HubEndpointForChatBridge)); err != nil {
 			slog.Error("Failed to create bridge config template", "plugin", name, "error", err)
 			InternalError(w)
 			return
@@ -1038,13 +1042,11 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 
 	// 3. Register in settings.yaml with self-managed fields and broker type
 	//    in a single read-modify-write cycle.
-	SettingsWriteMu.Lock()
 	err = config.AddSelfManagedPluginWithBrokerType(config.SelfManagedPluginEntry{
 		Name:       name,
 		Address:    "localhost:9090",
 		ConfigFile: adminConfigPath,
 	})
-	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add self-managed plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1231,12 +1233,10 @@ func (s *Server) handleRebuildSelfManaged(w http.ResponseWriter, _ *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(kp.Name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", kp.Name, "error", err)
 		// Non-fatal — continue with the rebuild response.
 	}
-	SettingsWriteMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "rebuilt",
@@ -1543,8 +1543,8 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	creds := make(map[string]string)
 
 	// hub_url: from the server config (same value that startup resolves).
-	if s.config.HubEndpoint != "" {
-		creds["hub_url"] = s.config.HubEndpoint
+	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
+		creds["hub_url"] = hubURL
 	}
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.

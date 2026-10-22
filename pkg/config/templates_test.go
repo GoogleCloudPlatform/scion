@@ -1493,6 +1493,8 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 						Enabled:            boolP(true),
 						InsecureSkipVerify: boolP(false),
 						CAFile:             "/etc/ssl/certs/base-root.pem",
+						CertFile:           "/etc/ssl/certs/base-client.pem",
+						KeyFile:            "/etc/ssl/private/base-client-key.pem",
 					},
 					Batch: &api.TelemetryBatch{
 						MaxSize: 512,
@@ -1528,6 +1530,7 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 					TLS: &api.TelemetryTLS{
 						InsecureSkipVerify: boolP(true),
 						CAFile:             "/etc/ssl/certs/override-root.pem",
+						CertFile:           "/etc/ssl/certs/override-client.pem",
 					},
 					Batch: &api.TelemetryBatch{
 						MaxSize: 256,
@@ -1578,6 +1581,12 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 		}
 		if got.Telemetry.Cloud.TLS.CAFile != "/etc/ssl/certs/override-root.pem" {
 			t.Errorf("expected CAFile override preserved, got %q", got.Telemetry.Cloud.TLS.CAFile)
+		}
+		if got.Telemetry.Cloud.TLS.CertFile != "/etc/ssl/certs/override-client.pem" {
+			t.Errorf("expected CertFile override, got %q", got.Telemetry.Cloud.TLS.CertFile)
+		}
+		if got.Telemetry.Cloud.TLS.KeyFile != "/etc/ssl/private/base-client-key.pem" {
+			t.Errorf("expected KeyFile preserved from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
 		}
 		// Batch max_size overridden, timeout preserved
 		if got.Telemetry.Cloud.Batch.MaxSize != 256 {
@@ -2281,6 +2290,45 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 			}
 			if tpl.Name != "web-dev" {
 				t.Errorf("plain dir: Name = %q, want %q", tpl.Name, "web-dev")
+			}
+		})
+	}
+}
+
+func TestModelSizeAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"small", "small"},
+		{"medium", "medium"},
+		{"large", "large"},
+		{"extra-large", "extra-large"},
+		{"s", "small"},
+		{"m", "medium"},
+		{"l", "large"},
+		{"xl", "extra-large"},
+		{"XL", "extra-large"},
+		{"Large", "large"},
+		{"claude-opus-4-8", ""},
+		{"gpt-6.1-sol", ""},
+		{"x-large", ""},
+		{" large", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := ModelSizeAlias(tt.input); got != tt.want {
+				t.Errorf("ModelSizeAlias(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			// A size is recorded exactly when ResolveModelAlias treats the
+			// value as an alias.
+			resolved := ResolveModelAlias(tt.input, map[string]string{
+				"small": "concrete-s", "medium": "concrete-m", "large": "concrete-l", "extra-large": "concrete-xl",
+			})
+			isAlias := resolved != tt.input && resolved != NormalizeModelAlias(tt.input)
+			if isAlias != (ModelSizeAlias(tt.input) != "") {
+				t.Errorf("ModelSizeAlias(%q) = %q disagrees with ResolveModelAlias -> %q", tt.input, ModelSizeAlias(tt.input), resolved)
 			}
 		})
 	}

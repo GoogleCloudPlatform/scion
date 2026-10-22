@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -73,6 +75,12 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
+		// A sweep shares broker reads among its checks (conduitBrokerMemo).
+		SweepContext: withConduitBrokerMemo,
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -80,6 +88,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 	runCtx, cancel := context.WithCancel(ctx)
 	a.Start(runCtx)
 	s.bindConduitAuthzEvents()
+	s.bindConduitGrantKeyEvents()
+	go s.runConduitGrantKeySettle(runCtx, a.cfg.Clock)
 	stop = func() {
 		cancel()
 		s.conduitAuthz.CompareAndSwap(a, nil)
@@ -116,7 +126,7 @@ func (s *Server) bindConduitAuthzEvents() {
 	var removeListen func()
 	if ln, ok := events.(conduitListenNotifier); ok {
 		removeListen = ln.AddOnListen(func() {
-			a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+			a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 		})
 	}
 	ch, unsubscribe := events.Subscribe(conduitAuthzEventPatterns...)
@@ -142,7 +152,8 @@ func (s *Server) bindConduitAuthzEvents() {
 		go q.receive(ctx, ch)
 		go q.work(ctx, a)
 	}
-	a.Recheck(ctx, conduitAuthzTriggerResync, conduitAuthzMatch{})
+	// A resync is a full pass: like a sweep, it shares broker reads.
+	a.Recheck(withConduitBrokerMemo(ctx), conduitAuthzTriggerResync, conduitAuthzMatch{})
 }
 
 // conduitNotifyMaxPending bounds the distinct pending notify matches; past
@@ -307,80 +318,145 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 	return a.Track(st)
 }
 
-// checkConduitUserStream evaluates whether st's principal still holds the
-// permission its stream kind requires, against current state: the agent
-// row, the user row (active, not deleted) and the same authorization
-// decision admission made. Every read goes to s.store, the primary store
-// (the hub has no read-replica routing).
+// checkConduitUserStream is the in-process entry point of the stream
+// evaluation (design v2.21.40 §3.9, One evaluation, three entry points):
+// it evaluates st's principal against current state with
+// evaluateConduitStream, from what this node recorded at open (the
+// principal, the agent and its project, the kind, origin and port), and
+// adds no decision of its own. Every read goes to s.store, the primary
+// store (the hub has no read-replica routing).
 //
 // A store or authorization lookup failure is unavailable, never denied: a
-// deny is acted on only while the store is reachable.
+// deny is acted on only while the store answers for the agent
+// (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	agent, err := s.store.GetAgent(ctx, st.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzTargetGone, "agent not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "agent lookup failed"
-	case !agent.DeletedAt.IsZero():
-		return conduitAuthzTargetGone, "agent deleted"
-	}
-
-	if verdict, reason := s.conduitUserStatus(ctx, st.Identity, st.UserID); verdict != conduitAuthzAllowed {
-		return verdict, reason
-	}
-
-	action := conduitStreamAction(st.Kind)
-	if action == "" {
-		return conduitAuthzDenied, "unknown stream kind"
-	}
-	if err := s.authorizeConduitAction(ctx, st.Identity, agent, action); err != nil {
-		if errors.Is(err, errConduitAuthzUnavailable) || !s.conduitAuthzStoreReachable(ctx, st) {
-			return conduitAuthzUnavailable, "authorization lookup failed"
-		}
-		return conduitAuthzDenied, "permission no longer held"
-	}
-	if st.Kind == grant.StreamKindTCP {
-		if err := s.authorizeConduitTCPTarget(agent, st.Port); err != nil {
-			return conduitAuthzDenied, "port no longer an authorized target"
-		}
-	}
-	return conduitAuthzAllowed, ""
+	verdict, reason, _ := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
+	return verdict, reason
 }
 
-// conduitUserStatus is the user-status rule of a user principal: a local
-// user (conduitIdentityHasUserRow) whose row is gone or suspended is
-// denied, and a failed lookup is unavailable. Identities without a user row
-// are allowed. It reads no agent, so the tunnel path applies it before the
-// target is resolved.
+// conduitStreamActions returns the actions a user stream requires, in the
+// order they are evaluated: the kind's action (conduitStreamAction), then
+// ActionTunnel for a stream opened through the tunnel path. It returns nil
+// for an unknown kind (denied).
+func conduitStreamActions(kind string, viaTunnel bool) []Action {
+	action := conduitStreamAction(kind)
+	if action == "" {
+		return nil
+	}
+	if viaTunnel {
+		return []Action{action, ActionTunnel}
+	}
+	return []Action{action}
+}
+
+// errConduitPrincipalInactive marks a deny by the user-status rule
+// (conduitUserStatus).
+var errConduitPrincipalInactive = errors.New("conduit principal is not active")
+
+// errConduitUserStatusUnavailable marks a user-status lookup that failed.
+var errConduitUserStatusUnavailable = errors.New("user status")
+
+// conduitUserStreamAuthz is the input to authorizeConduitUserStream.
+type conduitUserStreamAuthz struct {
+	// Identity is the principal that opens (or opened) the stream.
+	Identity Identity
+	// Agent is the agent the stream reaches, as currently stored.
+	Agent *store.Agent
+	// Kind is the grant stream kind.
+	Kind string
+	// ViaTunnel marks a stream opened through the tunnel path.
+	ViaTunnel bool
+	// Port is the agent-local port of a tcp stream.
+	Port int
+	// DeferTCPTarget leaves the tcp port check to the caller. Only the
+	// tunnel open sets it, so that a stopped agent is reported before the
+	// port it no longer exposes. Re-checks never set it.
+	DeferTCPTarget bool
+	// ConfirmDeny, if set, is asked before an action deny is reported;
+	// false makes the decision unavailable instead.
+	ConfirmDeny func() bool
+}
+
+// authorizeConduitUserStream decides a user stream against current state.
+// The tunnel open path and every re-check of an open user stream decide
+// with it, so a re-check evaluates the same authorization as the open:
+// the principal (a user identity, by its id), the user-status rule
+// (conduitUserStatus), every action conduitStreamActions requires, and for
+// tcp the agent-local target port.
+//
+// It returns conduitAuthzAllowed, conduitAuthzDenied or
+// conduitAuthzUnavailable, the re-check's reason, and the cause: a deny by
+// the user-status rule wraps errConduitPrincipalInactive, a user lookup
+// that failed wraps errConduitUserStatusUnavailable, an authorization
+// decision that could not be evaluated wraps errConduitAuthzUnavailable,
+// and a policy deny is the error of the check that denied.
+func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUserStreamAuthz) (conduitAuthzVerdict, string, error) {
+	ident, ok := req.Identity.(UserIdentity)
+	if !ok || isNilIdentity(req.Identity) {
+		return conduitAuthzDenied, "identity may not open streams", fmt.Errorf("%w: identity may not open streams", errConduitForbidden)
+	}
+	switch verdict, reason := s.conduitUserStatus(ctx, req.Identity, ident.ID()); verdict {
+	case conduitAuthzAllowed:
+	case conduitAuthzDenied:
+		return verdict, reason, fmt.Errorf("%w: %s", errConduitPrincipalInactive, reason)
+	default:
+		return verdict, reason, fmt.Errorf("%w: %s", errConduitUserStatusUnavailable, reason)
+	}
+
+	actions := conduitStreamActions(req.Kind, req.ViaTunnel)
+	if len(actions) == 0 {
+		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
+	}
+	authorize := s.authorizeConduitAction
+	if hook := s.conduitAuthorizeActionTestHook; hook != nil {
+		authorize = hook
+	}
+	for _, action := range actions {
+		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {
+			if errors.Is(err, errConduitAuthzUnavailable) {
+				return conduitAuthzUnavailable, "authorization lookup failed", err
+			}
+			if req.ConfirmDeny != nil && !req.ConfirmDeny() {
+				return conduitAuthzUnavailable, "authorization lookup failed", fmt.Errorf("%w: deny not confirmed: %w", errConduitAuthzUnavailable, err)
+			}
+			return conduitAuthzDenied, "permission no longer held", err
+		}
+	}
+	if req.Kind == grant.StreamKindTCP && !req.DeferTCPTarget {
+		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {
+			return conduitAuthzDenied, "port no longer an authorized target", err
+		}
+	}
+	return conduitAuthzAllowed, "", nil
+}
+
+// conduitUserStatus is the user-status rule of a user principal: the
+// account-status rule (checkUserAccount) applied to a local user
+// (conduitIdentityHasUserRow), the development user included. A user whose
+// row is gone or not active is denied, and a failed lookup is unavailable.
+// Identities without a user row are allowed. It reads no agent, so the
+// tunnel path applies it before the target is resolved.
 func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userID string) (conduitAuthzVerdict, string) {
 	if !conduitIdentityHasUserRow(identity) {
 		return conduitAuthzAllowed, ""
 	}
-	u, err := s.store.GetUser(ctx, userID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzDenied, "user not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "user lookup failed"
-	case u.Status == store.UserStatusSuspended:
-		return conduitAuthzDenied, "user suspended"
+	user, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
+	switch refusal := classifyUserAccount(user, err); refusal {
+	case accountAllowed:
+		return conduitAuthzAllowed, ""
+	case accountLookupFault:
+		return conduitAuthzUnavailable, accountRefusalReason(refusal)
+	default:
+		return conduitAuthzDenied, accountRefusalReason(refusal)
 	}
-	return conduitAuthzAllowed, ""
-}
-
-// conduitAuthzStoreReachable confirms the store answers after a deny, so
-// that a deny observed during a store fault is not acted on.
-func (s *Server) conduitAuthzStoreReachable(ctx context.Context, st *conduitUserStream) bool {
-	_, err := s.store.GetAgent(ctx, st.AgentID)
-	return err == nil && ctx.Err() == nil
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose
-// store row decides whether it is still active (suspended or deleted).
+// store row decides whether it is still active. The development user has a
+// row like any other local user and is checked the same way.
 func conduitIdentityHasUserRow(identity Identity) bool {
 	switch identity.(type) {
-	case *AuthenticatedUser, *ScopedUserIdentity:
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
 		return true
 	default:
 		return false

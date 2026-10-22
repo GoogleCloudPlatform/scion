@@ -83,7 +83,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 		ID: relinkAgent, Name: relinkAgent, ContainerID: relinkAgent, ProjectPath: filepath.Join(oldRoot, config.DotScion), Phase: "stopped",
 		Labels: map[string]string{"scion.name": relinkAgent, "scion.project_id": relinkOldID},
 	}}}
-	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	return &relinkFixture{srv: srv, mgr: mgr, root: root, dotScion: dotScion, oldRoot: oldRoot, newRoot: newRoot}
 }
 
@@ -229,6 +229,42 @@ func TestRelink_GitProjectWithoutWorkspacePathConflicts(t *testing.T) {
 	}
 	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
 		t.Fatalf("project-id = %q, %v", id, err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+}
+
+// TestRelink_GitProjectRecordingWorkspacePathNotMoved: a git project whose
+// earlier project config directory records this workspace as
+// workspace_path (as init, hub link and the CLI now write) is still not
+// moved, its project-id file is not rewritten, and the start still gets the
+// 409.
+func TestRelink_GitProjectRecordingWorkspacePathNotMoved(t *testing.T) {
+	f := newRelinkFixture(t)
+	if err := os.Remove(f.dotScion); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(f.dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectID(f.dotScion, relinkOldID); err != nil {
+		t.Fatal(err)
+	}
+	writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), f.root)
+	if err := f.relink(""); err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
+		t.Fatalf("project-id = %q, %v", id, err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+	w := f.start(t)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
+		t.Fatalf("expected 409 identity mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
+		t.Fatalf("project-id after start = %q, %v", id, err)
 	}
 	assertState(t, f.oldRoot)
 	assertAbsent(t, f.newRoot)
@@ -964,10 +1000,12 @@ func TestRelink_CopyPathRemovesReadOnlyOldDir(t *testing.T) {
 	t.Cleanup(func() { _ = removeTreeWritable(f.newRoot) })
 }
 
-// TestRelink_SymlinkedMarkerIsNotFollowed: a project-id marker that is a
-// symlink is replaced by a regular file, and the file it pointed at is not
-// written.
-func TestRelink_SymlinkedMarkerIsNotFollowed(t *testing.T) {
+// TestRelink_GitProjectSymlinkedIDNotTouched: a git project is never
+// re-linked, so a symlinked project-id file is neither written through nor
+// replaced, and nothing moves. (The writer's no-follow handling of a
+// symlinked project-id file is tested directly in
+// TestWriteWorkspaceIdentityNoFollow.)
+func TestRelink_GitProjectSymlinkedIDNotTouched(t *testing.T) {
 	f := newRelinkFixture(t)
 	if err := os.Remove(f.dotScion); err != nil {
 		t.Fatal(err)
@@ -990,13 +1028,11 @@ func TestRelink_SymlinkedMarkerIsNotFollowed(t *testing.T) {
 		t.Fatalf("symlink target written: %q", got)
 	}
 	info, err := os.Lstat(idFile)
-	if err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("project-id is not a regular file: %v, %v", info, err)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("project-id symlink replaced: %v, %v", info, err)
 	}
-	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkNewID {
-		t.Fatalf("project-id = %q, %v", id, err)
-	}
-	assertState(t, f.newRoot)
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
 }
 
 // TestWriteWorkspaceIdentityNoFollow refuses a marker whose directory is a
@@ -1017,6 +1053,35 @@ func TestWriteWorkspaceIdentityNoFollow(t *testing.T) {
 			t.Fatal("expected a refusal")
 		}
 		assertAbsent(t, filepath.Join(realDir, "project-id"))
+	})
+	t.Run("symlinked project-id file", func(t *testing.T) {
+		ws := t.TempDir()
+		dotScion := filepath.Join(ws, config.DotScion)
+		if err := os.MkdirAll(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "outside-id")
+		if err := os.WriteFile(outside, []byte(relinkOldID+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		idFile := filepath.Join(dotScion, "project-id")
+		if err := os.Symlink(outside, idFile); err != nil {
+			t.Fatal(err)
+		}
+		ident := &config.WorkspaceIdentity{ScionPath: dotScion, ID: relinkOldID, Slug: "proj"}
+		if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(outside); string(got) != relinkOldID+"\n" {
+			t.Fatalf("symlink target written: %q", got)
+		}
+		info, err := os.Lstat(idFile)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("project-id is not a regular file: %v, %v", info, err)
+		}
+		if id, err := config.ReadProjectID(dotScion); err != nil || id != relinkNewID {
+			t.Fatalf("project-id = %q, %v", id, err)
+		}
 	})
 	t.Run("symlinked marker file", func(t *testing.T) {
 		ws := t.TempDir()

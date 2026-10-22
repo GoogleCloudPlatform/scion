@@ -1,0 +1,50 @@
+{
+  "profile_map": {},
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.harness_overrides.claude.env",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "profiles fast, slow use target k8s-agents with different harness_overrides.claude.env",
+        "env keys TOKEN (values not shown)",
+        "template"
+      ]
+    },
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.harness_overrides.claude.image",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "different harness_overrides.claude.image",
+        "fast: claude:fast from profiles.fast.harness_overrides.claude.image",
+        "slow: claude:slow from profiles.slow.harness_overrides.claude.image",
+        "ranks above the template image: see ptone/scion#1799",
+        "separate instances on the same target scope"
+      ]
+    },
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.resources",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "different resources",
+        "from profiles.fast.resources",
+        "agent_defaults.resources",
+        "through a template"
+      ]
+    }
+  ]
+}

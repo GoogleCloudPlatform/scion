@@ -52,6 +52,35 @@ func TestCompositeStore_CRUDParity(t *testing.T) {
 	storetest.RunStoreSuite(t, compositeFactory)
 }
 
+// TestCompositeStore_UsageReservation runs the usage reservation
+// conformance check (GetActiveReservation and the typed active-reservation
+// violation) against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_UsageReservation(t *testing.T) {
+	storetest.UsageReservationConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_ReservationRelease runs the conditional reservation
+// release conformance check (ReleaseReservationIfAgent and
+// ReleaseReservationIfScopeBrokerAbsent) on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_ReservationRelease(t *testing.T) {
+	storetest.ReservationReleaseConformance(t, compositeFactory)
+}
+
+// TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released runs on both
+// dialects: a scope ID that cannot be a broker ID is released, with no
+// error.
+func TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentUnparseableScopeConformance(t, compositeFactory)
+}
+
+// TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID: an upper-case
+// spelling of a registered broker's ID keeps the row.
+func TestReleaseIfScopeBrokerAbsent_NonCanonicalScopeID(t *testing.T) {
+	storetest.ReleaseIfScopeBrokerAbsentNonCanonicalScopeConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_GroupDirectParents runs the direct-parent group query
 // conformance check against the CompositeStore on whichever backend
 // compositeFactory selects.
@@ -64,6 +93,15 @@ func TestCompositeStore_GroupDirectParents(t *testing.T) {
 // compositeFactory selects.
 func TestCompositeStore_GroupChildEdgeRemoval(t *testing.T) {
 	storetest.GroupChildEdgeRemovalConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_RuntimeBrokerPresentation runs the fenced
+// presentation-write conformance check (SetRuntimeBrokerPresentation, and
+// the full-row writers that must not touch its columns) on whichever
+// backend compositeFactory selects (SQLite by default, Postgres under -tags
+// integration).
+func TestCompositeStore_RuntimeBrokerPresentation(t *testing.T) {
+	storetest.RuntimeBrokerPresentationConformance(t, compositeFactory)
 }
 
 // TestCompositeStore_RuntimeBrokerCursorPagination is a targeted conformance

@@ -205,7 +205,6 @@ func TestTemplate_JSON_CanonicalKeysOnly(t *testing.T) {
 		Name:      "tmpl",
 		Slug:      "tmpl-slug",
 		Harness:   "claude",
-		Image:     "img",
 		ProjectID: "p-1",
 		Scope:     "project",
 		Status:    "active",
@@ -216,7 +215,7 @@ func TestTemplate_JSON_CanonicalKeysOnly(t *testing.T) {
 	}
 	assertNoLegacyKeys(t, "Template", data)
 	assertExactKeySet(t, "Template", data, []string{
-		"id", "name", "slug", "harness", "image", "scope", "projectId",
+		"id", "name", "slug", "harness", "scope", "projectId",
 		"status", "created", "updated",
 	})
 
@@ -234,7 +233,6 @@ func TestTemplate_JSON_CanonicalKeysOnly(t *testing.T) {
 		Name:    "global-tmpl",
 		Slug:    "global-tmpl-slug",
 		Harness: "claude",
-		Image:   "img",
 		Scope:   "global",
 		Status:  "active",
 	}
@@ -244,7 +242,7 @@ func TestTemplate_JSON_CanonicalKeysOnly(t *testing.T) {
 	}
 	assertNoLegacyKeys(t, "Template (global)", globalData)
 	assertExactKeySet(t, "Template (global)", globalData, []string{
-		"id", "name", "slug", "harness", "image", "scope", "status", "created", "updated",
+		"id", "name", "slug", "harness", "scope", "status", "created", "updated",
 	})
 
 	var rt Template
@@ -347,6 +345,7 @@ func TestNotification_JSON_CanonicalKeysOnly(t *testing.T) {
 	assertExactKeySet(t, "Notification", data, []string{
 		"id", "subscriptionId", "agentId", "projectId", "subscriberType",
 		"subscriberId", "status", "message", "dispatched", "acknowledged", "createdAt",
+		"dispatchAttempts", "dispatchOutcome",
 	})
 
 	var rt Notification

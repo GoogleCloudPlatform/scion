@@ -50,6 +50,28 @@ const brokerCodeRuntimeUnavailable = "runtime_unavailable"
 // relayed runtime_unavailable 503 when the broker gave no usable value.
 const defaultBrokerRuntimeRetryAfter = "30"
 
+// isBrokerReloadUnconfirmed reports whether err is a runtime broker's 502
+// answer with error code reload_unconfirmed: a reset-auth wrote the new
+// credential into the agent container, but the running agent did not
+// confirm the reload (ptone/scion#5460).
+func isBrokerReloadUnconfirmed(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusBadGateway &&
+		se.brokerErrorCode() == api.BrokerErrCodeReloadUnconfirmed
+}
+
+// writeBrokerReloadUnconfirmed writes the hub's 502 reload_unconfirmed answer
+// for err when it is a broker's reload_unconfirmed answer, and reports
+// whether it did. The message is the fixed shared text; the broker's body is
+// not echoed.
+func writeBrokerReloadUnconfirmed(w http.ResponseWriter, err error) bool {
+	if !isBrokerReloadUnconfirmed(err) {
+		return false
+	}
+	writeError(w, http.StatusBadGateway, api.BrokerErrCodeReloadUnconfirmed, api.ReloadUnconfirmedMessage, nil)
+	return true
+}
+
 // isBrokerRuntimeUnavailable reports whether err is a runtime broker's 503
 // answer with error code runtime_unavailable.
 func isBrokerRuntimeUnavailable(err error) bool {
@@ -57,6 +79,29 @@ func isBrokerRuntimeUnavailable(err error) bool {
 	return errors.As(err, &se) && se.StatusCode == http.StatusServiceUnavailable &&
 		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
 }
+
+// isBrokerDraining reports whether err is a runtime broker's 503 answer with
+// error code broker_draining (api.BrokerErrCodeBrokerDraining): the broker
+// is shutting down and refused the request before any start tracker,
+// registration or file work, so it did not act. A start that gets it is
+// released like one refused with runtime_unavailable (startOutcomeOf), so
+// a retry after the broker's Retry-After is not blocked by an unconfirmed
+// claim (design wave 3, Optional-2). The start-failure revoke stays
+// disarmed for it (isConfirmedStartNotActedOnError is not changed).
+func isBrokerDraining(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusServiceUnavailable &&
+		se.brokerErrorCode() == api.BrokerErrCodeBrokerDraining
+}
+
+// defaultBrokerDrainingRetryAfter is the Retry-After the hub sends with a
+// relayed broker_draining 503 when the broker gave no usable value (the
+// broker sends 5).
+const defaultBrokerDrainingRetryAfter = "5"
+
+// brokerDrainingMessage is the hub's client-facing text for a broker's
+// broker_draining answer.
+const brokerDrainingMessage = "The agent's runtime broker is shutting down and did not act on the request; retry shortly"
 
 // isRestartStopTolerable reports whether a restart's stop-leg error means the
 // agent has no running instance on its broker, so the start leg may proceed.
@@ -102,14 +147,23 @@ func brokerRuntimeCauseDetails(err error) map[string]interface{} {
 		return nil
 	}
 	code, _ := se.brokerErrorDetails()["cause"].(string)
-	// The api.IsBrokerRuntimeCause allowlist is the real filter: only its
-	// fixed codes may reach the client. The brokerCodePattern check cannot
-	// reject a code the allowlist accepts today; it is an extra safeguard,
-	// not a replacement, so keep the allowlist.
-	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
+	if code = relayableRuntimeCause(code); code == "" {
 		return nil
 	}
 	return map[string]interface{}{"cause": code}
+}
+
+// relayableRuntimeCause returns code when it is a broker runtime cause the
+// hub may pass to a client (a create's details.cause, or a failed launch
+// report's stored cause), else "". The api.IsBrokerRuntimeCause allowlist is
+// the real filter: only its fixed codes may reach the client. The
+// brokerCodePattern check cannot reject a code the allowlist accepts today;
+// it is an extra safeguard, not a replacement, so keep the allowlist.
+func relayableRuntimeCause(code string) string {
+	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
+		return ""
+	}
+	return code
 }
 
 // writeRestartStopFailed writes the retryable 503 for a restart aborted
@@ -137,7 +191,18 @@ func writeRestartStopFailed(w http.ResponseWriter, stopErr error) {
 // Like the logs relay, the message is the hub's own text rather than the
 // broker's response body, and the broker's Retry-After is used only if it is
 // a positive number of seconds.
+//
+// It relays a broker's broker_draining 503 the same way, under code
+// broker_draining with the hub's own message (isBrokerDraining): the broker
+// is shutting down and did not act, so the request can be retried
+// (ptone/scion#4669, design wave 3 Optional-2). The broker sends it only
+// for creates, starts and restarts, so the other relay sites never see it.
 func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime string) bool {
+	if isBrokerDraining(err) {
+		w.Header().Set("Retry-After", brokerRetryAfter(err, defaultBrokerDrainingRetryAfter))
+		writeError(w, http.StatusServiceUnavailable, api.BrokerErrCodeBrokerDraining, brokerDrainingMessage, nil)
+		return true
+	}
 	if !isBrokerRuntimeUnavailable(err) {
 		return false
 	}
@@ -150,13 +215,19 @@ func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime str
 // runtime_unavailable answer: the broker's value if it is a positive number
 // of seconds, otherwise defaultBrokerRuntimeRetryAfter.
 func brokerRuntimeRetryAfter(err error) string {
+	return brokerRetryAfter(err, defaultBrokerRuntimeRetryAfter)
+}
+
+// brokerRetryAfter is the broker's Retry-After on err if it is a positive
+// number of seconds, otherwise def.
+func brokerRetryAfter(err error, def string) string {
 	var se *brokerStatusError
 	if errors.As(err, &se) {
 		if n, convErr := strconv.Atoi(strings.TrimSpace(se.RetryAfter)); convErr == nil && n > 0 {
 			return strconv.Itoa(n)
 		}
 	}
-	return defaultBrokerRuntimeRetryAfter
+	return def
 }
 
 // brokerRuntimeUnavailableMessage is the hub's client-facing text for a

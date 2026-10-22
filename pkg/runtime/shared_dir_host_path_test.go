@@ -177,8 +177,10 @@ func TestLoadSharedDirStorageSettings(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy format with a shared_dir_storage block fails closed", func(t *testing.T) {
-		// No schema_version: the legacy loader drops the server block.
+	t.Run("legacy format with a shared_dir_storage block is loaded", func(t *testing.T) {
+		// No schema_version: the file is converted at its own layer, which
+		// keeps its server block (ptone/scion#3919), so the operator's
+		// shared_dir_storage applies instead of failing closed.
 		writeGlobalSettings(t, `active_profile: local
 server:
   shared_dir_storage:
@@ -189,11 +191,11 @@ server:
         - id: share
 `)
 		gs, err := LoadSharedDirStorageSettings()
-		if !errors.Is(err, ErrSharedDirStorageUnavailable) {
-			t.Fatalf("err = %v, want ErrSharedDirStorageUnavailable", err)
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
 		}
-		if gs != nil {
-			t.Fatalf("settings = %+v, want nil", gs)
+		if gs == nil || gs.Server == nil || gs.Server.SharedDirStorage == nil || gs.Server.SharedDirStorage.Backend != "nfs" {
+			t.Fatalf("settings = %+v, want the nfs shared_dir_storage block", gs)
 		}
 	})
 

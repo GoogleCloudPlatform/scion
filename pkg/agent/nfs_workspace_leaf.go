@@ -96,32 +96,50 @@ func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.Reso
 // created. An existing directory is left exactly as it is, contents
 // included.
 func ensureNFSAgentWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+	return prepared, err
+}
+
+// ensureNFSAgentWorkspaceLeafClaim is ensureNFSAgentWorkspaceLeaf that also
+// reports whether this call created the agent's directory itself (an
+// atomic claim, not a check before the create): a forced move's start
+// marks only a directory it created (markMoveExportAgentDir).
+func ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
 	if !isNFSWorktreeName(agentName) {
-		return false, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
+		return false, false, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
 	}
-	return ensureNFSWorkspaceLeaves(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+	return ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
 }
 
 // ensureNFSWorkspaceLeaves implements ensureNFSWorkspaceLeaf and, with
 // agentName set, ensureNFSAgentWorkspaceLeaf.
 func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+	return prepared, err
+}
+
+// ensureNFSWorkspaceLeavesClaim is ensureNFSWorkspaceLeaves that also
+// reports, with agentName set, whether this call created the agent's
+// directory.
+func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
 	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
-		return false, nil
+		return false, false, nil
 	}
 
-	rel := resolved.ServerRelativePath
 	if !shareddirs.ValidProjectID(projectID) {
-		return false, fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
+		return false, false, fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
 	}
-	if rel == "" || !filepath.IsLocal(rel) || filepath.Join(resolved.HostBase, rel) != resolved.HostPath {
-		return false, fmt.Errorf("workspace_storage nfs: unexpected workspace path %q under %q", rel, resolved.HostBase)
+	rel, err := nfsWorkspaceRel(resolved)
+	if err != nil {
+		return false, false, err
 	}
 	workspaceLeaf := rel
 	var leaves []string
+	agentDirLeaf := ""
 	if agentName != "" {
-		agentDir, err := runtime.NFSAgentDirSubPath(rel, agentName)
+		agentDir, err := nfsOwnAgentDirRel(resolved, agentName)
 		if err != nil {
-			return false, fmt.Errorf("workspace_storage nfs: %w", err)
+			return false, false, err
 		}
 		workspaceLeaf = filepath.Join(agentDir, provision.AgentWorkspaceDir)
 		// The provisioning init container writes its lock, the branch
@@ -129,6 +147,7 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 		// same group access as the workspace: an intermediate created by
 		// the walk alone would have no group write.
 		leaves = append(leaves, agentDir)
+		agentDirLeaf = agentDir
 	}
 	leaves = append(leaves, workspaceLeaf)
 	if agentName == "" {
@@ -140,7 +159,7 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 		// the init container can take the lock in it.
 		stateLeaf, err := runtime.NFSProvisionStateSubPath(rel, projectID)
 		if err != nil {
-			return false, fmt.Errorf("workspace_storage nfs: %w", err)
+			return false, false, fmt.Errorf("workspace_storage nfs: %w", err)
 		}
 		leaves = append(leaves, stateLeaf)
 	}
@@ -150,7 +169,7 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 			dirs = append(dirs, api.SharedDir{Name: name})
 		}
 		if err := api.ValidateSharedDirs(dirs); err != nil {
-			return false, fmt.Errorf("workspace_storage nfs: shared_dirs: %w", err)
+			return false, false, fmt.Errorf("workspace_storage nfs: shared_dirs: %w", err)
 		}
 		// Same layout as the Kubernetes runtime's nfsSharedDirSubPath:
 		// a sibling "shared-dirs" directory next to the workspace.
@@ -158,7 +177,7 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 		for _, name := range sharedDirNames {
 			leaf := filepath.Join(sharedRoot, name)
 			if got := resolved.SharedDirs[name].ServerRelativePath; got != leaf {
-				return false, fmt.Errorf("workspace_storage nfs: shared dir %q resolves to %q, expected %q next to the workspace", name, got, leaf)
+				return false, false, fmt.Errorf("workspace_storage nfs: shared dir %q resolves to %q, expected %q next to the workspace", name, got, leaf)
 			}
 			leaves = append(leaves, leaf)
 		}
@@ -170,22 +189,25 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the workspace directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
 				"host_base", resolved.HostBase, "sub_path", workspaceLeaf)
-			return false, nil
+			return false, false, nil
 		}
-		return false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
+		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory; %s", resolved.HostBase, nfsWorkspaceExportHint)
+		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory; %s", resolved.HostBase, nfsWorkspaceExportHint)
 	}
 
 	resolvedHostBase, err := filepath.EvalSymlinks(resolved.HostBase)
 	if err != nil {
-		return false, fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
+		return false, false, fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
 	}
 
 	prepared = true
 	for _, leaf := range leaves {
-		ok, err := ensureNFSLeaf(resolvedHostBase, leaf)
+		ok, created, err := ensureNFSLeafClaim(resolvedHostBase, leaf)
+		if created && agentName != "" && leaf == agentDirLeaf {
+			agentDirCreated = true
+		}
 		if err != nil && isNFSLeafPermissionError(err) {
 			// The broker may not be allowed to create the directory even
 			// though the node is, for example a broker that does not run
@@ -199,7 +221,9 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 			continue
 		}
 		if err != nil {
-			return false, fmt.Errorf("workspace_storage nfs: create directory %q on the export mounted at %q: %w; %s",
+			// agentDirCreated is still reported: the caller marks a
+			// directory this call created before it fails.
+			return false, agentDirCreated, fmt.Errorf("workspace_storage nfs: create directory %q on the export mounted at %q: %w; %s",
 				leaf, resolved.HostBase, err, nfsWorkspaceExportHint)
 		}
 		if !ok {
@@ -208,7 +232,7 @@ func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.Re
 			prepared = false
 		}
 	}
-	return prepared, nil
+	return prepared, agentDirCreated, nil
 }
 
 // isNFSLeafPermissionError reports whether err means the broker was not
@@ -222,17 +246,25 @@ func isNFSLeafPermissionError(err error) bool {
 // reports whether the leaf was created now or already carries
 // nfsLeafGroupAccessBits.
 func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSLeafClaim(hostBase, rel)
+	return prepared, err
+}
+
+// ensureNFSLeafClaim is ensureNFSLeaf that also reports whether this call
+// created the leaf directory (shareddirs.EnsureLeaf's own report, not a
+// separate check).
+func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
 	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer func() { _ = shareddirs.CloseFd(leafFd) }()
 	if !existed {
-		return true, nil
+		return true, true, nil
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(leafFd, &st); err != nil {
-		return false, fmt.Errorf("stat existing directory: %w", err)
+		return false, false, fmt.Errorf("stat existing directory: %w", err)
 	}
-	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, nil
+	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, false, nil
 }

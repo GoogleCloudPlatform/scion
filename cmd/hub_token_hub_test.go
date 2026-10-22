@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,26 +32,28 @@ import (
 // cmd/hub_token.go, for test isolation between subtests that set flags via
 // their backing package vars directly.
 type hubTokenTestState struct {
-	home               string
-	projectPath        string
-	tokenOutputJSON    bool
-	tokenCreateName    string
-	tokenCreateProject string
-	tokenCreateScopes  []string
-	tokenCreateExpires string
-	tokenScopesProject string
+	home                string
+	projectPath         string
+	tokenOutputJSON     bool
+	tokenCreateName     string
+	tokenCreateProject  string
+	tokenCreateBoundary string
+	tokenCreateScopes   []string
+	tokenCreateExpires  string
+	tokenScopesProject  string
 }
 
 func saveHubTokenTestState() hubTokenTestState {
 	return hubTokenTestState{
-		home:               os.Getenv("HOME"),
-		projectPath:        projectPath,
-		tokenOutputJSON:    tokenOutputJSON,
-		tokenCreateName:    tokenCreateName,
-		tokenCreateProject: tokenCreateProject,
-		tokenCreateScopes:  tokenCreateScopes,
-		tokenCreateExpires: tokenCreateExpires,
-		tokenScopesProject: tokenScopesProject,
+		home:                os.Getenv("HOME"),
+		projectPath:         projectPath,
+		tokenOutputJSON:     tokenOutputJSON,
+		tokenCreateName:     tokenCreateName,
+		tokenCreateProject:  tokenCreateProject,
+		tokenCreateBoundary: tokenCreateBoundary,
+		tokenCreateScopes:   tokenCreateScopes,
+		tokenCreateExpires:  tokenCreateExpires,
+		tokenScopesProject:  tokenScopesProject,
 	}
 }
 
@@ -60,6 +63,7 @@ func (s hubTokenTestState) restore() {
 	tokenOutputJSON = s.tokenOutputJSON
 	tokenCreateName = s.tokenCreateName
 	tokenCreateProject = s.tokenCreateProject
+	tokenCreateBoundary = s.tokenCreateBoundary
 	tokenCreateScopes = s.tokenCreateScopes
 	tokenCreateExpires = s.tokenCreateExpires
 	tokenScopesProject = s.tokenScopesProject
@@ -301,4 +305,93 @@ func TestPrintScopeTable_AliasIneligibleMembers(t *testing.T) {
 
 	assert.True(t, strings.Contains(out, "agent:manage"))
 	assert.True(t, strings.Contains(out, "agent:delete"))
+}
+
+func TestRunTokenCreate_HubBoundary(t *testing.T) {
+	state := saveHubTokenTestState()
+	t.Cleanup(state.restore)
+
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/tokens":
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.CreateTokenResponse{
+				Token: "synthetic-fixture-value",
+				AccessToken: &hubclient.TokenInfo{
+					ID: "t1", Name: "health-check", Scopes: []string{"hub_health:read", "broker:read"},
+					Boundary: &hubclient.TokenBoundary{Kind: "hub"},
+				},
+			})
+		default:
+			// A hub-boundary token resolves no project.
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setupHubTokenProject(t, server.URL)
+
+	tokenCreateName = "health-check"
+	tokenCreateProject = ""
+	tokenCreateBoundary = "hub"
+	tokenCreateScopes = []string{"hub_health:read,broker:read"}
+	tokenCreateExpires = ""
+	tokenOutputJSON = false
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runTokenCreate(nil, nil)
+	})
+	require.NoError(t, runErr)
+
+	assert.Equal(t, map[string]interface{}{"kind": "hub"}, body["boundary"])
+	_, hasProject := body["projectId"]
+	assert.False(t, hasProject, "a hub-boundary request must not send projectId")
+	assert.Equal(t, []interface{}{"hub_health:read", "broker:read"}, body["scopes"])
+	assert.Contains(t, out, "Boundary:  hub")
+	assert.NotContains(t, out, "Project:")
+}
+
+func TestValidateTokenCreateBoundary(t *testing.T) {
+	tests := []struct {
+		name     string
+		boundary string
+		project  string
+		wantErr  string
+	}{
+		{name: "project boundary with project", boundary: "project", project: "p1"},
+		{name: "empty boundary means project", boundary: "", project: "p1"},
+		{name: "hub boundary without project", boundary: "hub"},
+		{name: "project boundary needs project", boundary: "project", wantErr: "--project is required"},
+		{name: "hub boundary refuses project", boundary: "hub", project: "p1", wantErr: "cannot be used with --boundary hub"},
+		{name: "unknown boundary", boundary: "global", project: "p1", wantErr: "invalid --boundary"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTokenCreateBoundary(tt.boundary, tt.project)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestHubTokenCreateCmd_BoundaryFlag(t *testing.T) {
+	f := hubTokenCreateCmd.Flags().Lookup("boundary")
+	require.NotNil(t, f, "--boundary must be registered on hub token create")
+	assert.Equal(t, "project", f.DefValue)
+	// --project is validated against --boundary in RunE, so cobra must
+	// not require it on its own.
+	p := hubTokenCreateCmd.Flags().Lookup("project")
+	require.NotNil(t, p)
+	_, required := p.Annotations[cobra.BashCompOneRequiredFlag]
+	assert.False(t, required)
 }

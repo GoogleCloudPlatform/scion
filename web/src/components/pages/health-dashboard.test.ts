@@ -774,3 +774,59 @@ describe('scion-page-health-dashboard monitoring dashboard link (ptone/scion#359
     }
   );
 });
+
+describe('scion-page-health-dashboard hub-paused schedules (ptone/scion#5404)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('hands schedules.paused to the attention panel', async () => {
+    const paused = {
+      id: 'sc-p',
+      name: 'weekly',
+      project_id: 'p1',
+      project_slug: 'alpha',
+      event_type: 'message',
+      target: 'worker',
+      reason: 'cron_zone_unsupported',
+      updated_at: null,
+    };
+    const page = await mountPage(
+      summaryBody({
+        attention: [
+          {
+            severity: 'warning',
+            kind: 'schedule',
+            subject: { type: 'schedule', id: 'sc-p', name: 'weekly', project_id: 'p1' },
+            message: 'Scheduled event alpha / weekly was paused by the hub',
+          },
+        ],
+        schedules: {
+          failing: [],
+          total: 0,
+          truncated: false,
+          scan_limited: false,
+          paused: [paused],
+          paused_total: 1,
+          paused_truncated: false,
+          paused_scan_limited: false,
+        },
+      })
+    );
+    const panel = page.shadowRoot!.querySelector('scion-health-attention')!;
+    expect(panel.pausedSchedules).toEqual([paused]);
+    const detail = panel.shadowRoot!.querySelector('.paused-detail')!;
+    expect(detail.textContent).toContain(
+      'Paused by the hub: its cron expression names a time zone, which is not supported'
+    );
+  });
+
+  it('passes null when an older hub sends no paused list', async () => {
+    const page = await mountPage(
+      summaryBody({ schedules: { failing: [], total: 0, truncated: false, scan_limited: false } })
+    );
+    const panel = page.shadowRoot!.querySelector('scion-health-attention')!;
+    expect(panel.pausedSchedules).toBeNull();
+  });
+});

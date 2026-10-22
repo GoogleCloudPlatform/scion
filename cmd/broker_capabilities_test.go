@@ -29,15 +29,19 @@ import (
 )
 
 // heartbeatOnlyCapabilities are the capabilities a heartbeat adds to the
-// static set; they are neither registered nor stored. The heartbeat's value
-// for them is pinned in pkg/runtimebroker
-// (TestHeartbeatCapabilities_StaticSetPlusTemplateTiers).
-var heartbeatOnlyCapabilities = map[string]bool{"TemplateTiers": true}
+// static set that the hub does not store. TemplateTiers is not one: the
+// heartbeat adds it to the static set (pinned in pkg/runtimebroker,
+// TestHeartbeatCapabilities_StaticSetPlusTemplateTiers), and the hub stores
+// it from the heartbeat (store.BrokerCapabilities.TemplateTiers,
+// ptone/scion#4222). Registration leaves it false, the static set's value.
+var heartbeatOnlyCapabilities = map[string]bool{}
 
 // TestCapabilities_RegistrationMatchesHeartbeat: what a broker registers
 // (the embedded registrations' stored capabilities and the capability names
-// a remote registration sends) agrees with its heartbeat on every stored
-// capability, so the stored value never changes at the first heartbeat.
+// a remote registration sends) agrees with the static set the heartbeat
+// builds on, for every stored capability. The capabilities the heartbeat
+// adds to that set (TemplateTiers, and StartsInFlight when it reports starts
+// in flight) are registered false and become true at the first heartbeat.
 // Heartbeat-only capabilities are absent from the static set, the
 // registration names and the stored capabilities.
 func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
@@ -46,7 +50,10 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 		"nil":    nil,
 	} {
 		t.Run(name, func(t *testing.T) {
-			heartbeat := runtimebroker.StaticCapabilities(rt)
+			// The node image registry is registered as the heartbeat
+			// reports it (ptone/scion#3916).
+			t.Setenv("SCION_IMAGE_REGISTRY", "node.example/scion")
+			heartbeat := runtimebroker.StaticCapabilities(rt, "node.example/scion")
 			registered := flatInstanceCapabilities(rt)
 			names := runtimebroker.StaticCapabilityNames(rt)
 
@@ -63,6 +70,11 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 					continue
 				}
 				require.True(t, stored.IsValid(), "store.BrokerCapabilities has no %s", f.Name)
+				if f.Type.Kind() == reflect.String {
+					// A node configuration value, not a capability name.
+					assert.Equal(t, hv.Field(i).String(), stored.String(), "embedded registration and heartbeat disagree on %s", f.Name)
+					continue
+				}
 				assert.Equal(t, hv.Field(i).Bool(), stored.Bool(), "embedded registration and heartbeat disagree on %s", f.Name)
 				if f.Name == "StartsInFlight" {
 					continue // reported with the heartbeat's starts-in-flight list, not a static capability

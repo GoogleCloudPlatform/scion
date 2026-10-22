@@ -26,6 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -40,7 +41,7 @@ import type {
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { isValidTimeZone } from '../../utils/time.js';
-import { normalizeGcpModeForTarget, type GcpModeFields } from '../../shared/gcp-identity-state.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget, orderByAssignStatus } from '../../shared/gcp-sa-assign-status.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import {
@@ -338,13 +339,6 @@ export class ScionPageAgentConfigure extends LitElement {
    * explicit "passthrough" through the Hub's passthrough ownership gate).
    */
   @state() private gcpIdentityUserSet = false;
-  /** An explicit Block pick suspended by the Kubernetes rule; see normalizeGcpModeForTarget. */
-  private gcpUserBlockSuspended = false;
-
-  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
-  private static readonly gcpIdentityK8sHintText =
-    'Block is not supported on the Kubernetes runtime: this agent targets a Kubernetes ' +
-    'broker/profile. Choose Passthrough or Assign Service Account instead.';
 
   /** The agent's own runtime broker, loaded to determine its runtime kind for the GCP Identity picker. */
   @state() private targetBroker: RuntimeBroker | null = null;
@@ -383,11 +377,10 @@ export class ScionPageAgentConfigure extends LitElement {
 
   /**
    * Whether this agent's runtime broker/profile is reliably known to be
-   * Kubernetes. A NEW selection of Block is disabled in that case
-   * (ptone/scion#2328 Phase 2) — an already-stored Block stays selectable as
-   * the displayed value, see render(). Unknown until targetBroker has loaded,
-   * which reads as false — the same "do not guess" default as
-   * agent-create.ts.
+   * Kubernetes. Block is offered there like anywhere else (ptone/scion#4077);
+   * the help text says what it means on Kubernetes. Unknown until
+   * targetBroker has loaded, which reads as false — the same "do not guess"
+   * default as agent-create.ts.
    */
   private get targetRuntimeIsKubernetesOnly(): boolean {
     return isTargetKubernetesOnly(
@@ -398,8 +391,8 @@ export class ScionPageAgentConfigure extends LitElement {
 
   /**
    * Short explanation rendered into the GCP identity select's `help-text`
-   * slot when this agent's target is reliably known to be Kubernetes: block
-   * is disabled for a NEW selection in that case.
+   * slot when this agent's target is reliably known to be Kubernetes: what
+   * Block means there, and, while untouched, which identity is in effect.
    *
    * Rendered as a slotted child of the `<sl-select>` (not a sibling
    * `aria-describedby` reference) because the element that receives focus is
@@ -411,7 +404,7 @@ export class ScionPageAgentConfigure extends LitElement {
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.targetRuntimeIsKubernetesOnly) return nothing;
     if (this.gcpIdentityUserSet) {
-      return html`<div slot="help-text">${ScionPageAgentConfigure.gcpIdentityK8sHintText}</div>`;
+      return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
     }
     // Untouched: name the actual effective identity rather than overclaiming
     // the broker's own default applies — that is only true when this agent
@@ -424,15 +417,32 @@ export class ScionPageAgentConfigure extends LitElement {
             ? 'Passthrough'
             : 'Block';
       return html`<div slot="help-text">
-        ${ScionPageAgentConfigure.gcpIdentityK8sHintText} This agent's current identity is
-        "${modeLabel}", as previously configured; it stays in effect until you change it here.
+        ${KUBERNETES_BLOCK_HINT} This agent's current identity is "${modeLabel}", as previously
+        configured; it stays in effect until you change it here.
       </div>`;
     }
     return html`<div slot="help-text">
-      ${ScionPageAgentConfigure.gcpIdentityK8sHintText} No explicit identity is configured for this
-      agent, so the broker's own Kubernetes default applies automatically; choosing Passthrough or
-      Assign here sends that choice explicitly instead.
+      ${KUBERNETES_BLOCK_HINT} No explicit identity is configured for this agent, so the broker's
+      own Kubernetes default applies automatically; choosing a mode here sends that choice
+      explicitly instead.
     </div>`;
+  }
+
+  /**
+   * The selected mode's description under the GCP identity select. On a
+   * known-Kubernetes target Block is described only by the help-text slot
+   * (KUBERNETES_BLOCK_HINT): the generic Block text ("token requests are
+   * denied") does not hold there.
+   */
+  private renderGcpModeHint(): TemplateResult | typeof nothing {
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) return nothing;
+    const text =
+      this.gcpMetadataMode === 'block'
+        ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+        : this.gcpMetadataMode === 'assign'
+          ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+          : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
+    return html`<div class="hint">${text}</div>`;
   }
 
   private async loadGCPServiceAccounts(): Promise<void> {
@@ -756,15 +766,9 @@ export class ScionPageAgentConfigure extends LitElement {
     super.willUpdate(changedProperties);
     // Re-check whenever the target broker (loaded asynchronously, after
     // populateForm has already read the agent's stored mode) or the mode
-    // itself changes. Unlike agent-create.ts, this does NOT correct away a
-    // value that came from storage (gcpMetadataModeFromStorage) — a stored
-    // "block" is not migrated, same as a project default. The Block option is
-    // always rendered here (merely disabled on a known-Kubernetes target, see
-    // render()), so there is no blank-select case to fix for a stored value;
-    // normalisation exists only to stop this page's own "nothing configured"
-    // placeholder default from looking and acting like an explicit choice.
+    // itself changes; see showPlaceholderForTarget.
     if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
-      this.normalizeGcpModeForTarget();
+      this.showPlaceholderForTarget();
     }
     // The accounts' mapping state is for this agent's broker and profile:
     // ask for it once they are known (ptone/scion#4391).
@@ -781,37 +785,19 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   /**
-   * Keeps the *displayed* gcpMetadataMode correct for this agent's target,
-   * with the shared normalizeGcpModeForTarget (the create page's rules): a
-   * value that came from storage (gcpMetadataModeFromStorage) is never
-   * rewritten, while this page's own "nothing configured" placeholder of
-   * "block" is shown as Passthrough on a known-Kubernetes target, and an
-   * explicit Block picked before the target broker loaded is suspended
-   * (gcpIdentityUserSet cleared), so Save/Start never sends a substituted
-   * value as if the user had picked it.
+   * With nothing stored and nothing picked, shows this page's "nothing
+   * configured" placeholder as the runtime default the broker applies:
+   * Passthrough on a known-Kubernetes target, Block elsewhere. A stored value
+   * (gcpMetadataModeFromStorage) and an explicit pick are never rewritten,
+   * and Block is a valid pick on every target (ptone/scion#4077). The
+   * placeholder is not sent: see buildGCPIdentityPayload.
    */
-  private normalizeGcpModeForTarget(): void {
-    const s: GcpModeFields = {
-      gcpMetadataMode: this.gcpMetadataMode,
-      gcpServiceAccountId: this.gcpServiceAccountId,
-      gcpIdentityUserSet: this.gcpIdentityUserSet,
-      gcpUserBlockSuspended: this.gcpUserBlockSuspended,
-      defaultGcpMetadataMode: 'block',
-      defaultGcpServiceAccountId: '',
-    };
-    if (
-      !normalizeGcpModeForTarget(
-        s,
-        this.targetRuntimeIsKubernetesOnly,
-        this.gcpMetadataModeFromStorage
-      )
-    ) {
-      return;
-    }
-    this.gcpMetadataMode = s.gcpMetadataMode;
-    this.gcpServiceAccountId = s.gcpServiceAccountId;
-    this.gcpIdentityUserSet = s.gcpIdentityUserSet;
-    this.gcpUserBlockSuspended = s.gcpUserBlockSuspended;
+  private showPlaceholderForTarget(): void {
+    if (this.gcpMetadataModeFromStorage || this.gcpIdentityUserSet) return;
+    const mode = this.targetRuntimeIsKubernetesOnly ? 'passthrough' : 'block';
+    if (this.gcpMetadataMode === mode && !this.gcpServiceAccountId) return;
+    this.gcpMetadataMode = mode;
+    this.gcpServiceAccountId = '';
   }
 
   override connectedCallback(): void {
@@ -833,18 +819,14 @@ export class ScionPageAgentConfigure extends LitElement {
     this.error = null;
 
     try {
-      const [agentRes, settingsRes] = await Promise.all([
+      const [agentRes, settings] = await Promise.all([
         apiFetch(`/api/v1/agents/${this.agentId}`),
-        apiFetch('/api/v1/settings/public'),
+        getPublicSettings(),
       ]);
 
-      if (settingsRes.ok) {
-        const data = (await settingsRes.json()) as {
-          telemetryEnabled?: boolean;
-          autoExposePortsEnabled?: boolean;
-        };
-        this.globalTelemetryDefault = data.telemetryEnabled ?? false;
-        this.globalAutoExposePortsDefault = data.autoExposePortsEnabled ?? false;
+      if (settings) {
+        this.globalTelemetryDefault = settings.telemetryEnabled ?? false;
+        this.globalAutoExposePortsDefault = settings.autoExposePortsEnabled ?? false;
       }
 
       if (!agentRes.ok) {
@@ -1203,10 +1185,9 @@ export class ScionPageAgentConfigure extends LitElement {
    * user choice — the same scope as agent-create.ts, not every runtime.
    * Sending an explicit "passthrough" there would hit the Hub's passthrough
    * ownership gate for a request that never asked for passthrough, and a
-   * resave of an untouched stored value must not rewrite it — Kubernetes is
-   * also where the Block option is disabled for a NEW selection, so an
-   * untouched value there is reliably either "nothing configured" or
-   * "stored", never a fresh pick. On every other runtime this method keeps
+   * resave of an untouched stored value must not rewrite it: an untouched
+   * value there is reliably either "nothing configured" or "stored", never a
+   * fresh pick. On every other runtime this method keeps
    * the pre-existing behavior of always sending the current mode/service
    * account explicitly: there is no passthrough-gate or block-migration
    * concern to avoid there, and the request shape for non-Kubernetes agents
@@ -1233,22 +1214,6 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
-      this.saving = false;
-      return;
-    }
-
-    // Transition-only: a resave of an already-stored "block" (gcpIdentityUserSet
-    // false) must succeed — it is refused only when the user actively set
-    // "block" themselves, which the UI itself already prevents (the Block
-    // option is disabled for new selection on a known-Kubernetes target, see
-    // render()). This guard is defense-in-depth, not the primary control.
-    if (
-      this.gcpIdentityUserSet &&
-      this.gcpMetadataMode === 'block' &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
-      this.error =
-        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.saving = false;
       return;
     }
@@ -1302,18 +1267,6 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
-      this.starting = false;
-      return;
-    }
-
-    // Transition-only — see the identical guard in handleSave for why.
-    if (
-      this.gcpIdentityUserSet &&
-      this.gcpMetadataMode === 'block' &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
-      this.error =
-        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.starting = false;
       return;
     }
@@ -1761,33 +1714,19 @@ export class ScionPageAgentConfigure extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
-            this.gcpUserBlockSuspended = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
           }}
         >
-          <sl-option
-            value="block"
-            ?disabled=${this.targetRuntimeIsKubernetesOnly}
-            title=${this.targetRuntimeIsKubernetesOnly
-              ? ScionPageAgentConfigure.gcpIdentityK8sHintText
-              : nothing}
-            >Block</sl-option
-          >
+          <sl-option value="block">Block</sl-option>
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : nothing}
           <sl-option value="passthrough">Passthrough</sl-option>
           ${this.renderKubernetesBlockHint()}
         </sl-select>
-        <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-        </div>
+        ${this.renderGcpModeHint()}
       </div>
 
       ${this.gcpMetadataMode === 'assign'
@@ -1805,7 +1744,6 @@ export class ScionPageAgentConfigure extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
-                        this.gcpUserBlockSuspended = false;
                       }}
                     >
                       ${orderByAssignStatus(this.verifiedGCPServiceAccounts).map((sa) =>

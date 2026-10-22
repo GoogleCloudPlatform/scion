@@ -69,6 +69,12 @@ const (
 	// ActionSetMessagingPolicy covers changing a project's cross-project
 	// inbound messaging policy (project.set_messaging_policy).
 	ActionSetMessagingPolicy Action = "set_messaging_policy"
+	// ActionManageVisitors covers granting, changing and revoking project
+	// visitor access for federated accounts (project.manage_visitors).
+	ActionManageVisitors Action = "manage_visitors"
+	// ActionAdmin covers access constraint administration
+	// (access_constraint.admin).
+	ActionAdmin Action = "admin"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
@@ -158,6 +164,11 @@ const (
 	// the agent the grant is bound to, and the grant issuer is the
 	// authorizing user. Only *DelegatedAgentIdentity classifies to it.
 	PrincipalKindAgentDelegated PrincipalKind = "agent_delegated"
+	// PrincipalKindVisitor classifies a *VisitorIdentity: a user of a
+	// trusted external issuer linked to an active local federated account.
+	// Its ID is that account's local user ID, and NormalizePrincipalType
+	// maps it to the store principal type "user" for binding lookups.
+	PrincipalKindVisitor PrincipalKind = "visitor"
 )
 
 // PrincipalContext identifies the authenticated actor for an authorization request.
@@ -387,6 +398,16 @@ const (
 	// delegated credential. The fine-grained code is in
 	// Decision.AgentDelegation.
 	DeniedByAgentDelegation DeniedBy = "agent_delegation"
+
+	// DeniedByTestAdminPolicy: the test-admin policy refuses the
+	// permission to an admin-kind test identity (decide step 0c).
+	DeniedByTestAdminPolicy DeniedBy = "test_admin_policy"
+)
+
+// Deny reasons of decide step 0c.
+const (
+	testAdminPolicyDenyReason      = "test-admin policy: not available to test identities with admin roles"
+	testAdminPolicyKindErrorReason = "test-admin policy: principal kind could not be read (fail-closed)"
 )
 
 // DenyCause is a structural tag for a subset of deny reasons that callers
@@ -772,6 +793,26 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		permissionID = resolved
 	}
 
+	// ── Account-status gate ──────────────────────────────────────────
+	// A user principal whose account is not active holds no authority from
+	// any binding or relationship. Evaluated before every credential gate
+	// and grant stage so that condition yields one reason
+	// (authz_principal_status.go).
+	if reason, cause := a.principalStatusGate(ctx, principal, credential, permissionID); reason != "" {
+		d := Decision{Allowed: false, Reason: reason, DenyCause: cause}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				DenyReasons:     []string{reason},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+	}
+
 	// ── Step 0: Delivery credential gate (ptone/scion#2228) ───────────
 	// Deliver permissions are admitted only for a delivery credential kind.
 	// The gate precedes every grant stage, so a role binding, synthetic
@@ -821,6 +862,40 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 		if reason != "" {
 			d := Decision{Allowed: false, Reason: reason}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Permission:      permissionID,
+					DenyReasons:     []string{reason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		}
+	}
+
+	// ── Step 0c: Test-admin policy (ptone/scion#4240, admin tier A2) ───
+	// An admin-kind test identity (test_hub_admin, test_super_admin) holds
+	// real hub-admin or super-admin bindings. A permission the test-admin
+	// policy classifies deny (or does not classify) is refused to it here,
+	// before any binding is evaluated, so no role, group or relationship
+	// grant can admit it. The kind is read through kindForPrincipal; a read
+	// error denies. Only user principals are checked, and only while an
+	// admin kind is enabled on this hub (otherwise no admin-kind identity
+	// holds authority: the clamp drops its bindings and the row block
+	// refuses its tokens); a service whose store has no kind cache reads
+	// the kind uncached and cages every admin kind
+	// (principalIsCagedTestAdmin).
+	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
+		if caged, kerr := a.principalIsCagedTestAdmin(ctx, principal.ID); caged {
+			reason := testAdminPolicyDenyReason
+			if kerr != nil {
+				reason = testAdminPolicyKindErrorReason
+			}
+			a.reportTestAdminPolicyDenial(ctx, principal.ID, "permission", permissionID)
+			d := Decision{Allowed: false, Reason: reason, DeniedBy: DeniedByTestAdminPolicy, AlwaysAudit: true}
 			if request.Explain {
 				d.Provenance = &DecisionProvenance{
 					Permission:      permissionID,
@@ -1020,6 +1095,24 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 5b4: Offline test-infra delegation grant (ptone/scion#4240,
+	// phase DL) ─────────────────────────────────────────────────────────
+	// A workload request through an offline delegation acts for a reserved
+	// grantor id that has no bindings. offlineDelegationBinding adds a
+	// request-local hub-scope grant of exactly test_identity.issue, only
+	// when the request's workload delegation state says the offline gate
+	// passed for this request and every id agrees (see its doc comment).
+	// The bearer gate (Step 1) and the frozen ceiling still apply. It
+	// shares no state with the agent synthetic bindings above. The
+	// account-status gate admits this principal's missing users row only
+	// for the same request (offlineGrantorStatusExempt).
+	if principal.Kind == PrincipalKindUser {
+		if cb, role := offlineDelegationBinding(ctx, principal, credential, permissionID); cb != nil {
+			candidates = append(candidates, *cb)
+			roleDefs[role.RoleID] = role
+		}
+	}
+
 	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
 	// #1916) ───────────────────────────────────────────────────────────
 	// The curated hub-member/hub-viewer roles carry skill/template/
@@ -1211,6 +1304,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 				decision.adoptionRemediable = ceilingCause == DenyCauseCeilingUnrecorded && hopNote.adoptable
+			} else if strings.HasSuffix(ceilingReason, "("+descendantReadReasonMarker+")") {
+				// Record in the decision that the ceiling admitted a
+				// descendant status read (authz_launcher_read.go).
+				decision.Reason += " (" + descendantReadReasonMarker + ")"
 			}
 		}
 	}
@@ -1808,7 +1905,7 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			}
 			// agent.read has no agent scope. The launcher status read
 			// (authz_launcher_read.go) admits it for one stored target.
-			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+			if permissionID == permissionAgentRead && descendantStatusReadHolds(agent, resource, ActionRead, permissionID) {
 				return true
 			}
 			_, ok := allowed[permissionID]
@@ -2139,7 +2236,7 @@ func isRecognizedPrincipalKind(kind PrincipalKind) bool {
 	switch kind {
 	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
 		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev,
-		PrincipalKindAgentDelegated:
+		PrincipalKindAgentDelegated, PrincipalKindVisitor:
 		return true
 	default:
 		return false
@@ -2305,6 +2402,8 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		principal.Kind = PrincipalKindFederatedAgent
 	case *FederatedServiceIdentity:
 		principal.Kind = PrincipalKindFederatedService
+	case *VisitorIdentity:
+		principal.Kind = PrincipalKindVisitor
 	case *brokerIdentityImpl:
 		principal.Kind = PrincipalKindBroker
 	case *DelegatedAgentIdentity:
@@ -2377,7 +2476,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	case *hubDeliveryIdentity:
 		// No ID: a delivery credential carries no JTI.
 		return CredentialContext{Kind: CredentialKindHubDelivery}
-	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
+	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity, *VisitorIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
 	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
@@ -2687,7 +2786,8 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 }
 
 // activeDirectProjectRoles returns the role names of userID's active
-// (isBindingActive), direct user-principal bindings on projectID, read
+// (isBindingActive), direct user-principal bindings on projectID of roles
+// that confer membership (ConfersProjectMembership), read
 // through st. With clamp set the bindings are passed through the test
 // identity clamps with authz's wiring (clampBindingsForUser), for a store
 // handle outside the authorization service; without it st must be the
@@ -2717,7 +2817,10 @@ func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzS
 		if err != nil {
 			return nil, err
 		}
-		if rd != nil {
+		// Callers decide membership and ownership from these names, so a
+		// role that does not confer membership (project-visitor) is left
+		// out.
+		if rd.ConfersProjectMembership() {
 			roles[rd.Name] = true
 		}
 	}

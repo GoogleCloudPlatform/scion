@@ -154,6 +154,11 @@ deploy_service() {
   # invoker check and expose the service to unauthenticated traffic, defeating
   # the IAP gate. See design doc S2 requirement in
   # .design/projects/single-node/cloudrun-instances-sandboxes.md §4.11.
+  #
+  # --no-cpu-throttling keeps CPU allocated outside requests, which async
+  # agent launches need: the broker finishes a launch in the background after
+  # the create response. SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true asserts this
+  # to the server and silences its startup warning; keep the two together.
   gcloud run deploy "$SERVICE_NAME" \
     --image "$IMAGE" \
     --region "$REGION" \
@@ -170,7 +175,7 @@ deploy_service() {
     --cpu "$CPU" \
     --timeout "$TIMEOUT" \
     --set-secrets "/run/secrets/settings.yaml=${settings_secret}:latest,SCION_SERVER_SESSION_SECRET=${session_secret}:latest" \
-    --set-env-vars "HOME=/home/scion,SCION_REQUIRE_STABLE_SIGNING_KEY=true"
+    --set-env-vars "HOME=/home/scion,SCION_REQUIRE_STABLE_SIGNING_KEY=true,SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true"
 }
 
 command -v gcloud >/dev/null || die "gcloud CLI not found"
@@ -294,11 +299,11 @@ fi
 
 SETTINGS_SECRET="${SERVICE_NAME}-settings"
 SESSION_SECRET_NAME="${SERVICE_NAME}-session-secret"
-SESSION_SECRET="${SCION_SESSION_SECRET:-$(openssl rand -hex 32)}"
+SESSION_SECRET_VALUE="${SCION_SESSION_SECRET:-$(openssl rand -hex 32)}"
 
 log "Rendering production settings for ${PUBLIC_URL}"
 ensure_secret "$SETTINGS_SECRET" "$(render_settings "$PUBLIC_URL")"
-ensure_secret "$SESSION_SECRET_NAME" "$SESSION_SECRET"
+ensure_secret "$SESSION_SECRET_NAME" "$SESSION_SECRET_VALUE"
 
 log "Deploying Cloud Run service ${SERVICE_NAME}"
 deploy_service "$SETTINGS_SECRET" "$SESSION_SECRET_NAME"

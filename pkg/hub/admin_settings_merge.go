@@ -29,22 +29,71 @@ import (
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
-// rawServerObject returns the server member of a PUT body, or nil when
-// the body has none, or it is not a JSON object. The top-level key is
-// resolved by sentStructFields over ServerConfigUpdateRequest, the same
-// rule the request decode and the server sections use, so "Server" or
-// "SERVER" select the same value as "server".
+// rawServerObject is rawRequestObject for the Server field.
 func rawServerObject(rawBody []byte) json.RawMessage {
+	return rawRequestObject(rawBody, "Server")
+}
+
+// rawRequestObject returns the member of a PUT body that decodes into the
+// ServerConfigUpdateRequest field named field (for example "Server" or
+// "Telemetry"), or nil when the body has none, or it is not a JSON object.
+// The top-level key is resolved by sentStructFields over
+// ServerConfigUpdateRequest, the same rule the request decode and the
+// server sections use, so "Server" or "SERVER" select the same value as
+// "server".
+func rawRequestObject(rawBody []byte, field string) json.RawMessage {
 	sent, ok := sentStructFields(reflect.TypeOf(ServerConfigUpdateRequest{}), rawBody)
 	if !ok {
 		return nil
 	}
 	for _, sf := range sent {
-		if sf.field.Name == "Server" && isJSONObject(sf.val) {
+		if sf.field.Name == field && isJSONObject(sf.val) {
 			return sf.val
 		}
 	}
 	return nil
+}
+
+// mergeSettingsSection deep-merges a top-level struct section update (for
+// example telemetry) into raw[key] (file-mode PUT), with the rules of
+// mergeServerSettings: a field the body omits keeps its stored value, at
+// every depth of nested structs; a sent field replaces it; an explicit
+// null, or a zero value the typed encoding leaves out, clears it; maps
+// with free-form keys and lists are replaced as a whole. These are the
+// semantics of the DB-mode merge (mergeSectionOnCurrent). When nothing is
+// left in the section, raw[key] is removed.
+//
+// rawSection is the request body's object for the section and decides
+// which fields were sent; values come from incoming, a struct or a pointer
+// to one. A nil rawSection is derived from incoming, so its zero-valued
+// fields count as omitted.
+func mergeSettingsSection(raw map[string]interface{}, key string, incoming interface{}, rawSection json.RawMessage) {
+	t, ok := structTypeOf(reflect.TypeOf(incoming))
+	if !ok {
+		return
+	}
+	if len(rawSection) == 0 {
+		b, err := json.Marshal(incoming)
+		if err != nil {
+			return
+		}
+		rawSection = b
+	}
+	sent, ok := sentStructFields(t, rawSection)
+	if !ok {
+		return
+	}
+	typed, _ := marshalToMap(incoming).(map[string]interface{})
+	existing, _ := raw[key].(map[string]interface{})
+	if existing == nil {
+		existing = make(map[string]interface{})
+	}
+	mergeSettingsStruct(existing, t, sent, typed)
+	if len(existing) == 0 {
+		delete(raw, key)
+		return
+	}
+	raw[key] = existing
 }
 
 // mergeServerSettings deep-merges a server config update into the server

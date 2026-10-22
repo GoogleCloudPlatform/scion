@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,12 +60,23 @@ const tunnelSweep = 30 * time.Second
 
 func newTunnelFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *tunnelFixture {
 	t.Helper()
-	tf := &tunnelFixture{relayClock: clock.NewFake(time.Now()), dials: make(chan net.Conn, 16)}
+	return newTunnelFixtureServer(t, nil, mods...)
+}
+
+// newTunnelFixtureServer is newTunnelFixture with srvMod applied to the
+// server before it starts serving (newRelayFixtureServer).
+func newTunnelFixtureServer(t *testing.T, srvMod func(*Server), mods ...func(*ConduitRelayOptions)) *tunnelFixture {
+	t.Helper()
+	tf := &tunnelFixture{dials: make(chan net.Conn, 16)}
 	all := append([]func(*ConduitRelayOptions){func(o *ConduitRelayOptions) {
-		o.Clock = tf.relayClock
+		// The relay fixture's fake clock, which starts at the clock grants
+		// are minted on (newRelayFixtureServer).
+		fc, ok := o.Clock.(*clock.Fake)
+		require.True(t, ok, "the relay fixture runs on a fake clock")
+		tf.relayClock = fc
 		o.AuthzRecheckInterval = tunnelSweep
 	}}, mods...)
-	tf.ptyConduitFixture = newPTYConduitFixture(t, all...)
+	tf.ptyConduitFixture = newPTYConduitFixtureServer(t, srvMod, all...)
 	tf.launched = tf.exposePort(t, tf.launched, 3000)
 	return tf
 }
@@ -586,6 +598,77 @@ func TestConduitTunnel_RevokedUserClosed4401(t *testing.T) {
 	require.Eventually(t, func() bool { return a.Len() == 0 }, 10*time.Second, 20*time.Millisecond)
 }
 
+// TestConduitTunnel_TrackedStreamMarked: the tunnel open path tracks its
+// stream with the tunnel marker, so its re-checks also require
+// ActionTunnel.
+func TestConduitTunnel_TrackedStreamMarked(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "tracked")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	a.mu.Lock()
+	var tracked []*conduitUserStream
+	for s := range a.streams {
+		tracked = append(tracked, s)
+	}
+	a.mu.Unlock()
+	require.Len(t, tracked, 1)
+	assert.Equal(t, grant.StreamKindTCP, tracked[0].Kind)
+	assert.Equal(t, 3000, tracked[0].Port)
+	assert.True(t, tracked[0].ViaTunnel)
+}
+
+// TestConduitTunnel_CrossNodeHasRenewalSender: a tunnel whose agent session
+// is held by another relay, to an agent that advertises stream_renewal.v2
+// (its open grant carries authz_until), is tracked with the stream's own
+// renewer, which sends renewals across the internal hop to the owner
+// relay (design v2.21.36 §3.5, the renewal driver).
+func TestConduitTunnel_CrossNodeHasRenewalSender(t *testing.T) {
+	tf := newTunnelFixture(t)
+	hubB := tf.startPeerRelay(t, "hub-b")
+	tf.startAgent(t, hubB, tf.launched)
+	recs := tf.agentSessions(t)
+	require.Len(t, recs, 1)
+	require.Equal(t, "hub-b", recs[0].RelayInstanceID)
+	c := tf.ownerClient(t)
+
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	agentConn := <-tf.dials
+	defer func() { _ = agentConn.Close() }()
+	roundTrip(t, st, "across nodes")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	tracked := soleTrackedStream(t, a)
+	assert.True(t, tracked.ViaTunnel)
+	assert.False(t, tracked.AuthzUntil.IsZero(), "the v2 agent's grant carries a deadline")
+	assert.NotNil(t, tracked.Renew, "renewals cross the hop to hub-b")
+	assert.Equal(t, recs[0].SessionID, tracked.TargetSessionID, "renewals name the target-side session")
+}
+
+// TestConduitTunnel_LocalSessionHasRenewalSender: the tunnel open path
+// attaches the shared renewal sender when this node holds the agent's
+// session, for every tunnel kind it tracks (tcp shown; ssh is covered by
+// TestConduitTunnelAuthz_IntervalRenewalNoticeDelivered).
+func TestConduitTunnel_LocalSessionHasRenewalSender(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "local")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	tracked := soleTrackedStream(t, a)
+	require.NotNil(t, tracked.Renew, "the agent's session is local: a notice sender is set")
+	assert.NoError(t, tracked.Renew(nil), "the notice is sent on the agent's session")
+	roundTrip(t, st, "after notice")
+}
+
 // TestConduitTunnel_SharedSession: two tunnels to two agents share one
 // user session; revoking one leaves the other open and the session up.
 func TestConduitTunnel_SharedSession(t *testing.T) {
@@ -659,11 +742,27 @@ func TestConduitTunnel_GoAwayDrain(t *testing.T) {
 	assert.Equal(t, conduit.ErrDraining.Error(), r.body, "the bare session-layer answer")
 	assert.Empty(t, r.err.Code, "no error code: the session layer answers before the tunnel handler")
 	roundTrip(t, st, "during the drain")
-	tf.relayClock.Advance(drain / 2)
-	roundTrip(t, st, "half way through the drain")
 
+	// The relay clock moves in steps shorter than the session's per-write
+	// deadline (conduit.DefaultWriteWait), which also runs on the relay
+	// clock: one jump of WriteWait or more fires the write timer of a
+	// frame the relay is still writing (an echo, a window update) and
+	// ends the session mid-drain (ptone/scion#5209). Steps of WriteWait/2
+	// with a round trip between them let every in-flight write finish,
+	// so no write is in flight across two steps (one WriteWait).
 	// The session's timers run on the relay clock.
-	tf.relayClock.Advance(drain / 2)
+	const drainStep = conduit.DefaultWriteWait / 2
+	require.Zero(t, drain%(2*drainStep), "each half of the drain is a whole number of steps")
+	n := int(drain / drainStep)
+	for i := 1; i <= n; i++ {
+		tf.relayClock.Advance(drainStep)
+		switch {
+		case i == n/2:
+			roundTrip(t, st, "half way through the drain")
+		case i < n:
+			roundTrip(t, st, "drain step "+strconv.Itoa(i))
+		}
+	}
 	assert.Equal(t, conduit.CloseRelayRestart, closeCode(t, streamEnd(t, st)), "closed at the drain deadline")
 }
 
@@ -678,6 +777,14 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 	stopped := tf.newAgent(t, "tunnel-stopped")
 	stopped.Phase = string(state.PhaseStopped)
 	require.NoError(t, tf.store.UpdateAgent(ctx, stopped))
+	// A stop clears the agent's exposed ports.
+	stoppedNoPort := tf.newAgent(t, "tunnel-stopped-no-port")
+	stoppedNoPort.Phase = string(state.PhaseStopped)
+	require.NoError(t, tf.store.UpdateAgent(ctx, stoppedNoPort))
+	stoppedNoPort = tf.exposePort(t, stoppedNoPort)
+	require.Empty(t, stoppedNoPort.ExposedPorts)
+	runningNoPort := tf.exposePort(t, tf.newAgent(t, "tunnel-running-no-port"))
+	require.Empty(t, runningNoPort.ExposedPorts)
 
 	offlineBroker := uuid.NewString()
 	require.NoError(t, tf.store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -718,6 +825,12 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 		{"403 kind action before 409", portOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
 		{"403 ActionTunnel before 409", attachOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
 		{"409 for the owner with both", owner, stopped.ID, grant.StreamKindPTY, nil, http.StatusConflict, ErrCodeAgentNotRunning},
+		// The tcp target port is checked after the agent's state: a
+		// stopped agent whose ports were cleared is not running (409) for
+		// a caller with access, and still 403 for one without.
+		{"409 before the port check", owner, stoppedNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusConflict, ErrCodeAgentNotRunning},
+		{"403 before 409 without the port", strangerC, stoppedNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusForbidden, ErrCodeForbidden},
+		{"403 port not exposed on a running agent", owner, runningNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusForbidden, ErrCodeForbidden},
 		{"503 broker unavailable", owner, brokerless.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail},
 		{"503 agent session unavailable", owner, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable},
 	} {
@@ -787,24 +900,80 @@ func TestConduitTunnel_CredentialExpiry(t *testing.T) {
 	assert.Nil(t, c.ls.Err(), "the session stays up")
 }
 
+// TestConduitTunnel_TCPTargetCheckedOnOpen: the port check that runs after
+// the agent's state still decides the open of a running agent: an
+// unexposed port is refused 403 and opens nothing, and once the port is
+// exposed the same request opens a working tunnel.
+func TestConduitTunnel_TCPTargetCheckedOnOpen(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+
+	require.Empty(t, tf.exposePort(t, tf.launched).ExposedPorts)
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusForbidden, r.status, r.body)
+	assert.Equal(t, ErrCodeForbidden, r.err.Code, r.body)
+	select {
+	case <-tf.dials:
+		t.Fatal("a refused tunnel reached the agent")
+	default:
+	}
+
+	tf.exposePort(t, tf.launched, 3000)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	<-tf.dials
+	roundTrip(t, st, "port exposed")
+	assert.Nil(t, c.ls.Err(), "the session stays up")
+}
+
+// TestConduitTunnel_RecheckPortDecisionUnchanged: a re-check of a tracked
+// tcp stream still includes the port check (only the tunnel open defers
+// it): a stopped agent with no exposed port is denied on the port, and
+// the same agent with the port exposed is allowed.
+func TestConduitTunnel_RecheckPortDecisionUnchanged(t *testing.T) {
+	tf := newTunnelFixture(t)
+	ctx := context.Background()
+	a := tf.newAgent(t, "recheck-stopped-no-port")
+	a.Phase = string(state.PhaseStopped)
+	require.NoError(t, tf.store.UpdateAgent(ctx, a))
+	require.Empty(t, tf.exposePort(t, a).ExposedPorts)
+	st := &conduitUserStream{
+		Kind: grant.StreamKindTCP, Identity: tf.owner, UserID: tf.owner.ID(),
+		AgentID: a.ID, ProjectID: a.ProjectID, Port: 3000, ViaTunnel: true,
+	}
+
+	verdict, reason := tf.srv.checkConduitUserStream(ctx, st)
+	assert.Equal(t, conduitAuthzDenied, verdict)
+	assert.Equal(t, "port no longer an authorized target", reason)
+
+	tf.exposePort(t, a, 3000)
+	verdict, reason = tf.srv.checkConduitUserStream(ctx, st)
+	assert.Equal(t, conduitAuthzAllowed, verdict, reason)
+}
+
 // TestConduitTunnel_ErrorTable: the refusal mapping is the closed set of
 // design §3.8 rule 7, and 404 goes only with agent_not_found.
 func TestConduitTunnel_ErrorTable(t *testing.T) {
 	want := map[conduitTunnelFailure][3]any{
-		tunnelInvalidRequest:         {http.StatusBadRequest, "invalid_request", ""},
-		tunnelUnauthorized:           {http.StatusUnauthorized, "unauthorized", ""},
-		tunnelForbidden:              {http.StatusForbidden, "forbidden", ""},
-		tunnelPrincipalInactive:      {http.StatusForbidden, "forbidden", ""},
-		tunnelAgentNotFound:          {http.StatusNotFound, "agent_not_found", ""},
-		tunnelAgentNotRunning:        {http.StatusConflict, "agent_not_running", ""},
-		tunnelRateLimited:            {http.StatusTooManyRequests, "rate_limited", ""},
-		tunnelBrokerUnavailable:      {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
-		tunnelSessionUnavailable:     {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
-		tunnelStreamAuthzUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
-		tunnelRegistryUnavailable:    {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
-		tunnelGrantKeysUnavailable:   {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
-		tunnelConduitNotServing:      {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
-		tunnelInternal:               {http.StatusInternalServerError, "internal_error", ""},
+		tunnelInvalidRequest:           {http.StatusBadRequest, "invalid_request", ""},
+		tunnelUnauthorized:             {http.StatusUnauthorized, "unauthorized", ""},
+		tunnelForbidden:                {http.StatusForbidden, "forbidden", ""},
+		tunnelPrincipalInactive:        {http.StatusForbidden, "forbidden", ""},
+		tunnelAgentNotFound:            {http.StatusNotFound, "agent_not_found", ""},
+		tunnelAgentNotRunning:          {http.StatusConflict, "agent_not_running", ""},
+		tunnelRateLimited:              {http.StatusTooManyRequests, "rate_limited", ""},
+		tunnelBrokerUnavailable:        {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
+		tunnelSessionUnavailable:       {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
+		tunnelStreamAuthzUnavailable:   {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
+		tunnelRegistryUnavailable:      {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
+		tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
+		tunnelConduitNotServing:        {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
+		tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_renewal_unavailable"},
+		tunnelAgentUpgradeRequired:     {http.StatusConflict, "agent_upgrade_required", "stream_renewal_unsupported"},
+		tunnelInternal:                 {http.StatusInternalServerError, "internal_error", ""},
+		tunnelPlacementPinStale:        {http.StatusConflict, "runtime_target_pin_stale", ""},
+		tunnelPlacementBrokerMissing:   {http.StatusConflict, "runtime_broker_missing", ""},
+		tunnelPlacementTargetMismatch:  {http.StatusConflict, "runtime_target_mismatch", ""},
 	}
 	require.Len(t, conduitTunnelFailures, len(want))
 	for f, m := range conduitTunnelFailures {
@@ -977,9 +1146,10 @@ func TestConduitTunnel_UserLookupFaultIs500(t *testing.T) {
 // TestConduitTunnel_UserStatusAgreesWithRecheck: the tunnel request path
 // and the per-stream re-check share one user-status rule
 // (conduitUserStatus). For active, suspended, deleted and unknown users,
-// a scoped token of a suspended user, and an identity without a user row,
-// the request is refused exactly when the re-check denies on user status,
-// with the same cause.
+// a scoped token of a suspended user, and the development user (active and
+// suspended; its row is checked like any other user's), the request is
+// refused exactly when the re-check denies on user status, with the same
+// cause.
 func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
 	f := newConduitFixture(t)
 	ctx := context.Background()
@@ -1006,9 +1176,20 @@ func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
 		{"suspended, scoped token", NewScopedUserIdentity(suspended, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess}), true, "user suspended"},
 		{"deleted", NewAuthenticatedUser(deletedID, "deleted@conduit.test", "D", store.UserRoleMember, "cli"), true, "user not found"},
 		{"unknown", NewAuthenticatedUser(tid("tunnel-ghost"), "ghost@conduit.test", "G", store.UserRoleMember, "cli"), true, "user not found"},
-		{"no user row (dev)", NewDevUser(DevUserConfig{Username: "dev"}), false, ""},
+		{"development user, active", NewDevUser(DevUserConfig{Username: "dev"}), false, ""},
+		{"development user, suspended", NewDevUser(DevUserConfig{Username: "dev"}), true, "user suspended"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "development user, suspended" {
+				dev, err := f.store.GetUser(ctx, DevUserID)
+				require.NoError(t, err)
+				dev.Status = store.UserStatusSuspended
+				require.NoError(t, f.store.UpdateUser(ctx, dev))
+				t.Cleanup(func() {
+					dev.Status = store.UserStatusActive
+					require.NoError(t, f.store.UpdateUser(ctx, dev))
+				})
+			}
 			verdict, reason := f.srv.checkConduitUserStream(ctx, &conduitUserStream{
 				Kind: grant.StreamKindTCP, Identity: tc.ident, UserID: tc.ident.ID(),
 				AgentID: f.agent.ID, ProjectID: f.agent.ProjectID, Port: 3000,

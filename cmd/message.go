@@ -30,14 +30,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/spf13/cobra"
 )
 
@@ -98,8 +97,8 @@ var messageCmd = &cobra.Command{
 Recipients:
   <agent-name>       Send to an agent (default, same as agent:<name>)
   agent:<name>       Send to an agent explicitly
-  user:<name>        Send to a user's inbox (Hub mode only)
-  group[a,b,...]     Send to multiple recipients (Hub mode only)
+  user:<name>        Send to a user's inbox
+  group[a,b,...]     Send to multiple recipients
   @<agent-name>      Send to an agent's conversation (preferred)
   @<email>           Send to a user by email (global DM)
   conv:<uuid>        Send to a conversation by ID
@@ -232,6 +231,11 @@ Examples:
 		if err != nil {
 			return err
 		}
+		// ptone/scion#5132: rewrite "@agent:<slug>" mentions to "@<slug>"
+		// before sending, so the body renders by convention and the
+		// mention extraction below (which reads this same body) resolves
+		// the slug. Code spans and quoted lines are left unchanged.
+		message = messages.RewriteAgentMentions(message)
 
 		// Ensure we have a message body
 		if message == "" && len(msgArtifacts) == 0 {
@@ -362,7 +366,7 @@ Examples:
 		if convRef != nil && convRef.Kind == messaging.RefConversation &&
 			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			ownProjectSlug := os.Getenv("SCION_PROJECT")
-			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 				(ownProjectID != "" && projectPath == ownProjectID)
 			if !isSameProject {
@@ -370,63 +374,20 @@ Examples:
 			}
 		}
 
-		// Check if Hub should be used
-		var hubCtx *HubContext
-		if convRef != nil {
-			// Conversation references require Hub mode for resolution
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if len(groupRecipients) > 0 {
-			// Group recipients: skip sync (multiple recipients, no single agent)
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if userRecipient != "" {
-			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else if crossProjectTarget != "" {
-			// Cross-project: set up hub from agent's own project
-			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
-		} else {
-			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(senderProjectPath, agentName, true)
-		}
+		// Every send goes through the hub. A cross-project send sets up the
+		// hub from the sending agent's own project.
+		hubCtx, err := requireHub(senderProjectPath)
 		if err != nil {
 			return err
 		}
 
-		// Conversation references require Hub mode
-		if convRef != nil && hubCtx == nil {
-			return fmt.Errorf("conversation references require Hub mode (use 'scion hub enable' first)")
-		}
-
-		// Group recipients require Hub mode
-		if len(groupRecipients) > 0 && hubCtx == nil {
-			return fmt.Errorf("group[] recipients require Hub mode (use 'scion hub enable' first)")
-		}
-
-		// User recipients require Hub mode
-		if userRecipient != "" && hubCtx == nil {
-			return fmt.Errorf("sending messages to users requires Hub mode (use 'scion hub enable' first)")
-		}
-
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
-			if hubCtx == nil {
-				return fmt.Errorf("scheduled messages require Hub mode (use 'scion hub enable' first)")
-			}
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
 		}
 
-		// --notify requires Hub mode
-		if msgNotify && hubCtx == nil {
-			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --cc requires Hub mode
-		if len(parsedCC) > 0 && hubCtx == nil {
-			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// Stage attachments to shared volume (after Hub mode confirmed)
-		if len(msgAttach) > 0 && hubCtx != nil {
+		// Stage attachments to shared volume
+		if len(msgAttach) > 0 {
 			staged, err := stageAttachments(msgAttach)
 			if err != nil {
 				return fmt.Errorf("attachment staging failed: %w", err)
@@ -437,7 +398,7 @@ Examples:
 		// Cross-project agent addressing: intercept @agent and bare agent
 		// names BEFORE the generic convRef dispatch. When crossProjectTarget
 		// is set, both forms route through the cross-project send path.
-		if hubCtx != nil && crossProjectTarget != "" {
+		if crossProjectTarget != "" {
 			if convRef != nil && convRef.Kind == messaging.RefAgent {
 				return sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, message, msgInterrupt, msgWake, msgAttach)
 			}
@@ -461,41 +422,7 @@ Examples:
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
 		}
 
-		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
-		}
-
-		// --wake requires Hub mode
-		if msgWake {
-			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --artifact requires Hub mode: references are resolved by the Hub.
-		if len(msgArtifactRefs) > 0 {
-			return fmt.Errorf("--artifact requires Hub mode (use 'scion hub enable' first)")
-		}
-
-		// --attach requires Hub mode: attachments are delivered through Hub
-		// storage, while local mode writes plain text to the agent terminal
-		// and cannot transfer files.
-		if len(msgAttach) > 0 {
-			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
-		}
-
-		// Local mode — structured messages are only available in Hub mode,
-		// so local mode continues to use plain text delivery.
-		ctx := context.Background()
-
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-		defer mgr.Close()
-
-		fmt.Printf("Sending message to agent '%s'...\n", agentName)
-		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
-			return err
-		}
-
-		return nil
+		return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 	},
 }
 
@@ -894,6 +821,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// Mention outcomes first, so the confirmation is the last line.
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -1032,6 +960,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	if result != nil {
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
@@ -1655,12 +1584,9 @@ var messageChannelsCmd = &cobra.Command{
 	Long:  "Lists the registered message broker channels that can be targeted with --channel.",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
-		}
-		if hubCtx == nil {
-			return fmt.Errorf("listing message channels requires Hub mode (use 'scion hub enable' first)")
 		}
 		if !isJSONOutput() {
 			PrintUsingHub(hubCtx.Endpoint)
@@ -1760,6 +1686,23 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// printNoAgentWoken prints one line to stderr when the hub reports that a
+// group post reached no agent.
+func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
+	if isJSONOutput() || result == nil || !result.NoAgentWoken {
+		return
+	}
+	if d := result.DefaultAgentResult; d != nil {
+		if d.Slug == "" {
+			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", d.Status)
+		} else {
+			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, d.Status)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
 }
 
 // printMentionResults prints one line per mention result to stderr,
@@ -1960,7 +1903,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; when an agent sends the message, attachments the hub cannot read are reported as warnings after it is sent (human sends do not report these yet).")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.

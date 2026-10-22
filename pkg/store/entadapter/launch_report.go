@@ -184,7 +184,7 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 				SetStateVersion(current.StateVersion + 1)
-			applySucceededAgentInfo(upd, r)
+			applySucceededAgentInfo(upd, current, r)
 			updated, err := upd.Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, false, mapError(err)
@@ -201,18 +201,32 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 		// Refine: a failed report when the stored reason is timed_out/lost
 		// and the phase is error (the reaper got there first) — the Hub has
 		// just confirmed the agent never ran, so the broker must clean up.
+		// For a start-kind launch the reaper can leave either phase: a
+		// deadline or staleness reap writes its failure phase
+		// (failureEndPhase, stopped for a restart or a stopped prior), and a
+		// wind-down reap leaves an error row in error (ptone/scion#4669).
+		// For a create launch both are error. A wind-down reap of a row the
+		// user stopped also leaves stopped, with launch_error
+		// launch_stopped; that is not the reaper's failure end, so it gets
+		// 409 as a create launch (and the report before the reap) does.
+		phase := state.Phase(current.Phase)
+		reaperFailureEnd := phase == state.PhaseError ||
+			(phase == failureEndPhase(current) && current.LaunchError != store.LaunchErrorLaunchStopped)
 		if r.State == store.LaunchReportStateFailed &&
 			(current.LaunchEndReason == store.LaunchEndReasonTimedOut || current.LaunchEndReason == store.LaunchEndReasonLost) &&
-			state.Phase(current.Phase) == state.PhaseError {
+			reaperFailureEnd {
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {
-				upd.SetLaunchError(r.ErrorCode)
+				// The cause qualifies this code, so it is written with
+				// it; otherwise the reaper's code stands, with no cause.
+				upd.SetLaunchError(r.ErrorCode).SetLaunchCause(r.Cause)
 			}
 			msg := formatFailureMessage(r.Step, r.Message)
 			if msg != "" {
 				upd.SetMessage(msg)
 			}
+			withFailedReportStep(upd, r)
 			updated, err := upd.Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, false, mapError(err)
@@ -242,8 +256,9 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			upd.SetLaunchOwner(ownerToSet)
 		}
 		if r.State == store.LaunchReportStateSucceeded {
-			applySucceededAgentInfo(upd, r)
+			applySucceededAgentInfo(upd, current, r)
 			upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonSucceeded)
+			withStartEndClearsMemory(upd, current)
 			updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, mapError(err)
@@ -253,13 +268,14 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// Non-terminal or failed: end the launch as running_observed. The
 		// broker does not clean up on `completed` (§3.8.2).
 		upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
+		withStartEndClearsMemory(upd, current)
 		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonRunningObserved, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
 		return store.LaunchReportAnswer{Result: store.LaunchReportResultCompleted, Changed: true}, updated, nil
 
-	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended, state.PhaseHalted:
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetLaunchLastReportAt(now).
 			SetLaunchState(store.LaunchStateEnded).
@@ -267,6 +283,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchError(store.LaunchErrorLaunchStopped).
 			SetMessage("stopped during launch").
 			SetStateVersion(current.StateVersion + 1)
+		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -281,10 +298,12 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// a phase=running write ends a launch automatically, so this row can
 		// carry phase=error while its launch is still active).
 		newLaunchError := current.LaunchError
+		newLaunchCause := current.LaunchCause
 		newMessage := current.Message
 		if r.State == store.LaunchReportStateFailed {
 			if r.ErrorCode != "" {
 				newLaunchError = r.ErrorCode
+				newLaunchCause = r.Cause
 			} else if newLaunchError == "" {
 				// Design §3.3: launch_error must not stay empty on this
 				// launch-ending write. current.LaunchError may already be
@@ -303,8 +322,17 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchError(newLaunchError).
+			SetLaunchCause(newLaunchCause).
 			SetMessage(newMessage).
 			SetStateVersion(current.StateVersion + 1)
+		if r.State == store.LaunchReportStateFailed {
+			withFailedReportStep(upd, r)
+		}
+		// A start-kind launch ends by its own failure rule even though
+		// another writer moved the row to error first (ptone/scion#4669):
+		// a restart ends stopped, a start restores a stopped prior or
+		// remembers a suspended/created/provisioning/halted one.
+		withStartFailureEnd(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -314,7 +342,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		}
 		if r.State == store.LaunchReportStateFailed {
 			// The agent never ran: the broker must clean up.
-			if err := releaseBrokerQuotaTx(ctx, ltx.client, current.ID, now); err != nil {
+			if err := releaseBrokerQuotaTx(ctx, ltx.client, current, now); err != nil {
 				return store.LaunchReportAnswer{}, nil, err
 			}
 			return store.LaunchReportAnswer{Result: store.LaunchReportResultApplied, Changed: true}, updated, nil
@@ -335,12 +363,18 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		// Bypasses seq.
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetPhase(string(state.PhaseRunning)).
+			// The first running write: the exit fields describe the
+			// previous run, as in UpdateAgentStatus (ptone/scion#5384).
+			ClearExitCode().
+			SetExitReason("").
 			SetLaunchError("").
+			SetLaunchCause("").
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
-		applySucceededAgentInfo(upd, r)
+		applySucceededAgentInfo(upd, current, r)
+		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -365,10 +399,15 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetPhase(string(state.PhaseError)).
 			SetMessage(msg).
 			SetLaunchError(errorCode).
+			SetLaunchCause(r.Cause).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
+		withFailedReportStep(upd, r)
+		// A start-kind launch ends in its failure phase (stopped for a
+		// restart or a stopped prior) with its resume memory.
+		withStartFailureEnd(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -376,7 +415,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
 		}
-		if err := releaseBrokerQuotaTx(ctx, ltx.client, current.ID, now); err != nil {
+		if err := releaseBrokerQuotaTx(ctx, ltx.client, current, now); err != nil {
 			return store.LaunchReportAnswer{}, nil, err
 		}
 		return store.LaunchReportAnswer{Result: store.LaunchReportResultApplied, Changed: true}, updated, nil
@@ -436,18 +475,54 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 	}
 }
 
-// applySucceededAgentInfo applies the subset of a succeeded broker report's
-// agent info that P1a supports (design §3.7 steps 5/6: "apply Agent as
-// applyBrokerResponse does" / "apply agent info without changing the
-// phase"). Fuller broker-response application (the complete RemoteAgentInfo
-// echo) is P1b-1 wire-plumbing territory.
-func applySucceededAgentInfo(upd *ent.AgentUpdateOne, r store.LaunchReport) {
-	if r.Runtime != "" {
-		upd.SetRuntime(r.Runtime)
+// applySucceededAgentInfo applies a succeeded broker report's agent info
+// (design §3.7 steps 5/6: "apply Agent as applyBrokerResponse does" / "apply
+// agent info without changing the phase"). The broker-resolved config goes
+// through store.ApplyBrokerAgentConfig, the helper a synchronous dispatch
+// uses, so both paths record the same template, harness config and auth,
+// image, profile and runtime (ptone/scion#4818). current is the row read in
+// the launch transaction. Its applied_config is read as entAgentToStore reads
+// it (a sanitised config is used), and a row whose applied_config is empty
+// (no AppliedConfig, as on the sync path) or not valid JSON keeps it
+// untouched.
+func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
+	a := store.Agent{
+		Template:              current.Template,
+		Runtime:               current.Runtime,
+		PinnedRuntimeTargetID: derefString(current.PinnedRuntimeTargetID),
+	}
+	if current.AppliedConfig != "" {
+		// A non-nil config with an error is the sanitised config, which
+		// entAgentToStore also uses; nil means not valid JSON.
+		a.AppliedConfig, _ = parseAppliedConfig(current.AppliedConfig)
+	}
+	store.ApplyBrokerAgentConfig(&a, r.AgentConfig)
+	if a.Template != current.Template {
+		upd.SetTemplate(a.Template)
+	}
+	if a.Runtime != current.Runtime {
+		upd.SetRuntime(a.Runtime)
+	}
+	if a.AppliedConfig != nil {
+		if raw := marshalAppliedConfig(a.AppliedConfig); raw != "" && raw != current.AppliedConfig {
+			upd.SetAppliedConfig(raw)
+			upd.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
+		}
 	}
 	if r.RuntimeState != "" {
 		upd.SetRuntimeState(r.RuntimeState)
 	}
+}
+
+// withFailedReportStep adds to u, a write that applies a failed report, the
+// report's step as the launch's step, so clients can show where the launch
+// failed (design wave 3 E-d, ptone/scion#4670). A report without a step
+// leaves the last recorded step, the furthest one the launch reached.
+func withFailedReportStep(u *ent.AgentUpdateOne, r store.LaunchReport) *ent.AgentUpdateOne {
+	if r.Step == "" {
+		return u
+	}
+	return u.SetLaunchStep(r.Step)
 }
 
 // formatFailureMessage builds the "<step>: <message>" form design §3.7 uses

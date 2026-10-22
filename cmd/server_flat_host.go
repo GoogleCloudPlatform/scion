@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -64,6 +65,13 @@ func flatHostMode(cfg *config.GlobalConfig, s store.Store) brokerhost.Mode {
 	return brokerhost.ModeRemote
 }
 
+// flatDefaultKubernetesClient builds the client of a Kubernetes instance
+// with no kubeconfig: the default loading rules, then the in-cluster config.
+// cmd's tests replace it with a constructor that has no in-cluster fallback
+// (TestMain), so a test never uses the service account of the pod it runs in
+// (ptone/scion#5088).
+var flatDefaultKubernetesClient = k8s.NewClientWithContext
+
 // newFlatInstanceRuntime builds an instance's runtime from its own explicit
 // configuration, never from Runtime Broker Profile resolution or a change to
 // process-wide settings (KUBECONFIG, HOME, cwd, current context).
@@ -91,13 +99,14 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 			// rules and no in-cluster fallback.
 			client, err = k8s.NewClientFromKubeconfigFile(t.Kubeconfig, t.Context)
 		} else {
-			client, err = k8s.NewClientWithContext("", t.Context)
+			client, err = flatDefaultKubernetesClient("", t.Context)
 		}
 		if err != nil {
 			return nil, err // a configuration error: the file, its parse or its context
 		}
-		rt, err := runtime.NewKubernetesRuntimeFromClient(client, config.V1RuntimeConfig{
-			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
+		// The instance's own GKE mode and default priority class apply;
+		// cross-namespace listing never does (one cluster and namespace).
+		rt, err := runtime.NewKubernetesRuntimeFromClient(client, t.KubernetesRuntimeConfig())
 		if err != nil {
 			// The connection check failed: the cluster cannot be identified.
 			return nil, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the API server is unreachable or the request failed; "+
@@ -195,6 +204,7 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		AutoProvide:      a.autoProvide,
 		Capabilities:     flatInstanceCapabilities(c.Runtime),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+		HostIdentity:     hostObservationPtr(detectHostGCPIdentity(ctx)),
 	})
 	if err != nil {
 		a.reportedMu.Lock()
@@ -307,6 +317,10 @@ type flatHostParams struct {
 	messageLogger  *slog.Logger
 	wg             *sync.WaitGroup
 	errCh          chan error
+	// shutdownContext bounds the host's shutdown by the broker phase of
+	// the process's graceful shutdown (ptone/scion#5054); nil: unbounded
+	// beyond the host's own ShutdownTimeout.
+	shutdownContext func() (context.Context, context.CancelFunc)
 }
 
 // startFlatRuntimeBrokerHost hosts the configured flat instances. A
@@ -319,7 +333,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
 	}
 
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
 		vsBroker = versionedSettings.Server.Broker
@@ -364,6 +378,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			log.Printf("WARNING: %s", warning)
 		}
 	}
+	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
+	}
 
 	var activator brokerhost.Activator
 	if mode == brokerhost.ModeColocated {
@@ -405,7 +422,8 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
-		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime)
+		// A flat instance has no settings-v1 runtime entry: zero record.
+		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{})
 		if p.requestLogger != nil {
 			srv.SetRequestLogger(p.requestLogger)
 		}
@@ -433,6 +451,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			ReadTimeout:  cfg.RuntimeBroker.ReadTimeout,
 			WriteTimeout: cfg.RuntimeBroker.WriteTimeout,
 		},
+		ShutdownContext: p.shutdownContext,
 	})
 	if err != nil {
 		return err
@@ -464,7 +483,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			}
 		}
 		for _, a := range active {
-			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name)
+			presenter := newFlatColocatedPresenter(p.hubSrv, a.Context.Identity.RuntimeBrokerID, a.Context.Identity.RuntimeTarget.ID,
+				a.Context.Instance, time.Now().UnixNano())
+			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name, presenter)
 		}
 	}
 
@@ -697,29 +718,136 @@ func flatHostHealth(ctx context.Context, host *brokerhost.Host) interface{} {
 	return map[string]interface{}{"ready": host.Ready(), "instances": host.Status()}
 }
 
+// colocatedSettingsOverlayEnabled reports whether a co-located broker reads
+// the Hub's stored runtimes, profiles, harness_configs and image_registry
+// through the global settings overlay: true for every DB-backed Hub, SQLite
+// or Postgres (ptone/scion#3906). The driver list must track the store-open
+// driver switch in initStore (server_foreground.go): a driver added there
+// and not here would silently get no overlay.
+func colocatedSettingsOverlayEnabled(cfg *config.GlobalConfig, hubSrv *hub.Server) bool {
+	if hubSrv == nil || cfg == nil {
+		return false
+	}
+	switch cfg.Database.Driver {
+	case "sqlite", "postgres":
+		return true
+	}
+	return false
+}
+
 // installColocatedSettingsOverlay installs the global settings overlay for a
-// co-located Hub with a Postgres database, as startRuntimeBroker does for
-// the legacy broker. Flat instances never read profiles or runtimes from it.
-func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Server) {
-	if hubSrv == nil || cfg.Database.Driver != "postgres" {
-		return
+// co-located DB-backed Hub, so that the broker's config.LoadEffectiveSettings
+// calls pick up the stored runtimes, profiles, harness_configs and the hub's
+// image_registry layers instead of only the settings file. It seeds
+// the overlay from the current operational settings snapshot so stored
+// values apply from the first dispatch; later changes arrive through
+// hub.ApplySnapshot. Flat instances never read profiles or runtimes from it.
+// It reports whether the overlay was installed.
+func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Server) bool {
+	if !colocatedSettingsOverlayEnabled(cfg, hubSrv) {
+		return false
 	}
 	overlay := config.NewSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The startup ApplySnapshot ran before this install, so the
+		// image_registry layers are fed here too (ptone/scion#3916).
+		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())
+		log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
+			len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
+	} else {
+		log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
+	}
+	return true
+}
+
+// enableColocatedProfileReferences enables built-in profile retention on the
+// installed settings overlay for the legacy co-located broker
+// (ptone/scion#5113): it counts the references the broker's agents and
+// projects hold (or, if that fails, retains conservatively), and loads the
+// settings once so the retention WARN appears at startup. A no-op when no
+// overlay is installed or no legacy co-located broker is registered (a flat
+// host, or a failed registration): the overlay then behaves as before.
+func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
+	overlay := config.GetGlobalSettingsOverlay()
+	if overlay == nil || hubSrv == nil {
+		return
+	}
+	brokerID := hubSrv.LegacyColocatedBrokerID()
+	if brokerID == "" {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		log.Printf("Built-in profile retention not enabled: the global settings directory cannot be resolved: %v", err)
+		return
+	}
+	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
+	_, _, _ = config.LoadEffectiveSettings(globalDir)
+}
+
+// flatColocatedPresenter publishes a co-located flat instance's FC4-a
+// presentation (contract-appendix-p3.md FC4-a, ptone/scion#3282). A co-located
+// connection sends no HTTP heartbeat, so the internal heartbeat loop
+// publishes it through the Hub's one writer,
+// hub.Server.ApplyRuntimeTargetPresentation (write rules 2-4 and the
+// Hub-computed hash; rule 1, broker credentials on the request, does not
+// apply to this in-process caller). The presentation is computed once, the
+// epoch is fixed for the process life and the sequence grows per tick, as
+// on the HTTP path.
+type flatColocatedPresenter struct {
+	hub          *hub.Server
+	brokerID     string
+	targetID     string
+	presentation api.RuntimeTargetPresentation
+	epoch        int64
+	seq          int64
+}
+
+// newFlatColocatedPresenter returns the presenter for one co-located flat
+// instance, or nil without a Hub.
+func newFlatColocatedPresenter(hubSrv *hub.Server, brokerID, targetID string, inst config.V1RuntimeBrokerInstanceConfig, epoch int64) *flatColocatedPresenter {
+	if hubSrv == nil {
+		return nil
+	}
+	return &flatColocatedPresenter{
+		hub:          hubSrv,
+		brokerID:     brokerID,
+		targetID:     targetID,
+		presentation: config.PresentInstance(inst).API(),
+		epoch:        epoch,
 	}
 }
 
+// publish sends the presentation with the next sequence. It is called from
+// one goroutine only (the instance's heartbeat loop).
+func (p *flatColocatedPresenter) publish(ctx context.Context, now time.Time) (hub.PresentationResult, error) {
+	p.seq++
+	pres := p.presentation
+	return p.hub.ApplyRuntimeTargetPresentation(ctx, p.brokerID, p.targetID, &pres, p.epoch, p.seq, now)
+}
+
+// flatColocatedHeartbeatInterval is the co-located internal heartbeat
+// period. Tests shorten it.
+var flatColocatedHeartbeatInterval = 30 * time.Second
+
+// controlChannelState reports whether an instance's control channel is up
+// (*runtimebroker.Server).
+type controlChannelState interface {
+	IsControlChannelConnected() bool
+}
+
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
-// active instance: every 30s it writes the instance's status from its own
-// control channel state.
-func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv *runtimebroker.Server, brokerID, brokerName string) {
+// active instance: every flatColocatedHeartbeatInterval it writes the
+// instance's status from its own control channel state, then publishes its
+// presentation (presenter, when not nil).
+func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv controlChannelState, brokerID, brokerName string, presenter *flatColocatedPresenter) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(flatColocatedHeartbeatInterval)
 		defer ticker.Stop()
 		prevOnline := srv.IsControlChannelConnected()
 		for {
@@ -740,7 +868,19 @@ func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s stor
 				if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, status); err != nil {
 					log.Printf("Warning: failed to update internal heartbeat for %s: %v", brokerName, err)
 				}
+				if presenter != nil {
+					if _, err := presenter.publish(ctx, time.Now()); err != nil {
+						log.Printf("Warning: failed to publish the runtime target presentation for %s: %v", brokerName, err)
+					}
+				}
 			}
 		}
 	}()
+}
+
+// hostObservationPtr returns the detection's observation for
+// EmbeddedFlatRegistrationOptions.HostIdentity.
+func hostObservationPtr(d hostDetection) *store.HostIdentityObservation {
+	obs := d.Observation()
+	return &obs
 }

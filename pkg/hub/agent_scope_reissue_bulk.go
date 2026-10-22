@@ -112,6 +112,9 @@ type ScopeReissueBulkAgent struct {
 	RoleAfter   string   `json:"role_after,omitempty"`
 	OpID        string   `json:"op_id,omitempty"`
 	DispatchErr string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
 }
 
 // ScopeReissueBulkRef names an agent in a result list.
@@ -412,6 +415,7 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 		out.DispatchErr = resp.DispatchError
 	default:
 		out.Outcome = "changed"
+		out.ReloadUnconfirmed = resp.ReloadUnconfirmed
 	}
 	return out
 }
@@ -419,6 +423,11 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 // reissueBulkCause is the cause reported for a refused agent.
 func reissueBulkCause(ctx context.Context, err error, agentID, batchOpID string) string {
 	var issueErr *agentTokenIssueError
+	if refusal, ok := placementRefusalOf(err); ok {
+		// Refused before the commit: the agent's saved placement is
+		// inconsistent.
+		return refusal.Code
+	}
 	switch {
 	case errors.As(err, &issueErr):
 		if issueErr.Lookup {

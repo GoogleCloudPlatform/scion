@@ -38,11 +38,43 @@ import (
 // GroupStore implements store.GroupStore using Ent ORM.
 type GroupStore struct {
 	client *ent.Client
+	// now is the clock membership expiry (group_memberships.expires_at)
+	// is evaluated against; tests replace it. A GroupStore built without
+	// NewGroupStore uses time.Now.
+	now func() time.Time
 }
 
 // NewGroupStore creates a new Ent-backed GroupStore.
 func NewGroupStore(client *ent.Client) *GroupStore {
-	return &GroupStore{client: client}
+	return &GroupStore{client: client, now: time.Now}
+}
+
+// clock returns the store's current time.
+func (s *GroupStore) clock() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
+}
+
+// groupMembershipActiveAt reports whether m is in force at now: it has no
+// expiry, or now is before it (the role binding rule: ExpiresAt is
+// exclusive). An expired membership confers nothing and is not read as a
+// membership by any read of this store (admin tier A3).
+func groupMembershipActiveAt(m *ent.GroupMembership, now time.Time) bool {
+	return m != nil && (m.ExpiresAt == nil || now.Before(*m.ExpiresAt))
+}
+
+// activeMemberships returns the memberships in ms that are in force now.
+func (s *GroupStore) activeMemberships(ms []*ent.GroupMembership) []*ent.GroupMembership {
+	now := s.clock()
+	out := make([]*ent.GroupMembership, 0, len(ms))
+	for _, m := range ms {
+		if groupMembershipActiveAt(m, now) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // parseUUID parses a string UUID, returning store.ErrInvalidInput on failure.
@@ -131,10 +163,12 @@ func entGroupToStore(g *ent.Group) *store.Group {
 // entMembershipToStore converts an Ent GroupMembership entity to a store.GroupMember model.
 func entMembershipToStore(m *ent.GroupMembership) store.GroupMember {
 	gm := store.GroupMember{
-		GroupID: m.GroupID.String(),
-		Role:    string(m.Role),
-		AddedAt: m.AddedAt,
-		AddedBy: m.AddedBy,
+		GroupID:    m.GroupID.String(),
+		Role:       string(m.Role),
+		AddedAt:    m.AddedAt,
+		AddedBy:    m.AddedBy,
+		ExpiresAt:  m.ExpiresAt,
+		IssuanceID: m.IssuanceID,
 	}
 	if m.UserID != nil {
 		gm.MemberType = store.GroupMemberTypeUser
@@ -203,6 +237,17 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 		parentUID, err := parseUUID(g.ParentID)
 		if err != nil {
 			return err
+		}
+		// Grant shaping (admin tier A3): the child-group edge has no
+		// expiry, so under an admin-kind test identity the new group must
+		// carry that identity's provenance stamp; its purge then removes
+		// the group and the edge together.
+		shaping, err := grantShapingFor(ctx, s.client, g.CreatedBy)
+		if err != nil {
+			return err
+		}
+		if shaping != nil && g.Fixture.RootID != shaping.IdentityID {
+			return store.ErrTestAdminGrantRefused
 		}
 		create.AddParentGroupIDs(parentUID)
 	}
@@ -443,30 +488,71 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
+	// Grant shaping (admin tier A3): a membership added for an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID; one added by such an identity without the shaping is
+	// refused.
+	shaping, err := grantShapingFor(ctx, s.client, member.AddedBy)
+	if err != nil {
+		return err
+	}
+	expiresAt := member.ExpiresAt
+	if shaping != nil {
+		expiresAt = shaping.ClampExpiry(member.ExpiresAt)
+	}
+	if expiresAt != nil {
+		utc := expiresAt.UTC()
+		expiresAt = &utc
+	}
+
 	switch member.MemberType {
 	case store.GroupMemberTypeUser:
+		// A federated account is never a group member (including the
+		// canonical hub-members group).
+		federated, err := isFederatedUser(ctx, s.client, memberUID)
+		if err != nil {
+			return err
+		}
+		if federated {
+			return store.ErrFederatedAccountRefused
+		}
+		// An expired membership is no membership: it is replaced.
+		if err := s.deleteExpiredMembership(ctx, groupmembership.GroupIDEQ(groupUID), groupmembership.UserIDEQ(memberUID)); err != nil {
+			return err
+		}
 		create := s.client.GroupMembership.Create().
 			SetGroupID(groupUID).
 			SetUserID(memberUID).
 			SetRole(groupmembership.Role(member.Role)).
-			SetAddedBy(member.AddedBy)
+			SetAddedBy(member.AddedBy).
+			SetNillableExpiresAt(expiresAt).
+			SetNillableIssuanceID(issuanceStamp(shaping))
 		m, err := create.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
 		member.AddedAt = m.AddedAt
+		member.ExpiresAt = m.ExpiresAt
+		member.IssuanceID = m.IssuanceID
 
 	case store.GroupMemberTypeAgent:
+		if err := s.deleteExpiredMembership(ctx, groupmembership.GroupIDEQ(groupUID), groupmembership.AgentIDEQ(memberUID)); err != nil {
+			return err
+		}
 		create := s.client.GroupMembership.Create().
 			SetGroupID(groupUID).
 			SetAgentID(memberUID).
 			SetRole(groupmembership.Role(member.Role)).
-			SetAddedBy(member.AddedBy)
+			SetAddedBy(member.AddedBy).
+			SetNillableExpiresAt(expiresAt).
+			SetNillableIssuanceID(issuanceStamp(shaping))
 		m, err := create.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
 		member.AddedAt = m.AddedAt
+		member.ExpiresAt = m.ExpiresAt
+		member.IssuanceID = m.IssuanceID
 
 	case store.GroupMemberTypeGroup:
 		// Project members groups are system-managed and cannot be nested
@@ -479,6 +565,14 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 		}
 		if store.IsProjectMembersGroup(entGroupToStore(child)) {
 			return fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, member.MemberID)
+		}
+		// A child-group edge has no expiry. An admin-kind test identity
+		// nests only a group it created itself (stamped with it as the
+		// provenance root), which its purge removes together with the
+		// edge; nesting any other group could not be bounded by its
+		// expiry.
+		if shaping != nil && (child.FixtureRootID == nil || child.FixtureRootID.String() != shaping.IdentityID) {
+			return store.ErrTestAdminGrantRefused
 		}
 		// Group nesting uses the child_groups M2M edge
 		_, err = s.client.Group.UpdateOneID(groupUID).
@@ -565,6 +659,10 @@ func (s *GroupStore) RemoveGroupMember(ctx context.Context, groupID, memberType,
 }
 
 // UpdateGroupMemberRole updates the role of an existing group member.
+//
+// An admin-kind test identity changes the role only of a membership it
+// added (the same issuance); any other change could not be bounded by its
+// expiry and is refused with store.ErrTestAdminGrantRefused.
 func (s *GroupStore) UpdateGroupMemberRole(ctx context.Context, groupID, memberType, memberID, newRole string) error {
 	groupUID, err := parseUUID(groupID)
 	if err != nil {
@@ -574,6 +672,30 @@ func (s *GroupStore) UpdateGroupMemberRole(ctx context.Context, groupID, memberT
 	memberUID, err := parseUUID(memberID)
 	if err != nil {
 		return err
+	}
+
+	shaping, err := grantShapingFor(ctx, s.client)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		var member predicate.GroupMembership
+		switch memberType {
+		case store.GroupMemberTypeUser:
+			member = groupmembership.UserIDEQ(memberUID)
+		case store.GroupMemberTypeAgent:
+			member = groupmembership.AgentIDEQ(memberUID)
+		default:
+			return fmt.Errorf("%w: unsupported member type %q for role update", store.ErrInvalidInput, memberType)
+		}
+		m, err := s.client.GroupMembership.Query().
+			Where(groupmembership.GroupIDEQ(groupUID), member).Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if !shapedByIssuance(shaping, m.IssuanceID) {
+			return store.ErrTestAdminGrantRefused
+		}
 	}
 
 	switch memberType {
@@ -664,7 +786,7 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 		return nil, err
 	}
 
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		members = append(members, entMembershipToStore(m))
 	}
 
@@ -704,7 +826,7 @@ func (s *GroupStore) GetUserGroups(ctx context.Context, userID string) ([]store.
 	}
 
 	members := make([]store.GroupMember, 0, len(memberships))
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		members = append(members, entMembershipToStore(m))
 	}
 
@@ -733,6 +855,9 @@ func (s *GroupStore) GetGroupMembership(ctx context.Context, groupID, memberType
 		if err != nil {
 			return nil, mapError(err)
 		}
+		if !groupMembershipActiveAt(m, s.clock()) {
+			return nil, store.ErrNotFound
+		}
 		gm := entMembershipToStore(m)
 		return &gm, nil
 
@@ -744,6 +869,9 @@ func (s *GroupStore) GetGroupMembership(ctx context.Context, groupID, memberType
 			).Only(ctx)
 		if err != nil {
 			return nil, mapError(err)
+		}
+		if !groupMembershipActiveAt(m, s.clock()) {
+			return nil, store.ErrNotFound
 		}
 		gm := entMembershipToStore(m)
 		return &gm, nil
@@ -827,42 +955,34 @@ SELECT 1 FROM descendants WHERE id = %s LIMIT 1`, p1, p2)
 }
 
 // GetEffectiveGroups returns all groups a user belongs to, including
-// transitive memberships through nested groups. It uses a single recursive
-// CTE: the seed selects direct group memberships from the group_memberships
-// table, and the recursive step walks the parent_groups edge upward.
+// transitive memberships through nested groups. The seed is the user's
+// direct memberships that are in force (an expired membership, admin tier
+// A3, seeds nothing); a recursive CTE then walks the parent_groups edge
+// upward (walkEffectiveGroups).
 func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	drv := s.client.Driver()
-	p1 := sqlUUIDPh(drv.Dialect(), 1)
-
-	query := fmt.Sprintf(`WITH RECURSIVE effective(id) AS (
-    SELECT group_id AS id FROM group_memberships WHERE user_id = %s
-    UNION
-    SELECT gc.group_id FROM group_child_groups gc
-    JOIN effective e ON gc.parent_group_id = e.id
-)
-SELECT id FROM effective`, p1)
-
-	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	ids, err := scanUUIDRows(rows)
+	memberships, err := s.client.GroupMembership.Query().
+		Where(groupmembership.UserIDEQ(uid)).
+		All(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]string, len(ids))
-	for i, id := range ids {
-		result[i] = id.String()
+	seen := make(map[uuid.UUID]struct{}, len(memberships))
+	seedIDs := make([]uuid.UUID, 0, len(memberships))
+	for _, m := range s.activeMemberships(memberships) {
+		if _, ok := seen[m.GroupID]; !ok {
+			seen[m.GroupID] = struct{}{}
+			seedIDs = append(seedIDs, m.GroupID)
+		}
 	}
-	return result, nil
+	if len(seedIDs) == 0 {
+		return []string{}, nil
+	}
+	return s.walkEffectiveGroups(ctx, seedIDs)
 }
 
 // GetParentGroups returns all ancestor groups of the given group — groups that
@@ -1027,7 +1147,7 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range memberships {
+	for _, m := range s.activeMemberships(memberships) {
 		seedIDs = append(seedIDs, m.GroupID)
 	}
 
@@ -1060,6 +1180,13 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 	}
 
 	// 3. Walk parent_groups upward via recursive CTE from all seed IDs.
+	return s.walkEffectiveGroups(ctx, seedIDs)
+}
+
+// walkEffectiveGroups returns seedIDs and every group that transitively
+// contains one of them, through one recursive CTE that walks the
+// parent_groups edge upward. seedIDs must not be empty.
+func (s *GroupStore) walkEffectiveGroups(ctx context.Context, seedIDs []uuid.UUID) ([]string, error) {
 	drv := s.client.Driver()
 	d := drv.Dialect()
 
@@ -1110,18 +1237,18 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 		return 0, err
 	}
 
-	count, err := s.client.GroupMembership.Query().
+	memberships, err := s.client.GroupMembership.Query().
 		Where(
 			groupmembership.GroupIDEQ(groupUID),
 			groupmembership.RoleEQ(groupmembership.Role(role)),
 			liveGroupMembership(),
 		).
-		Count(ctx)
+		All(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	return count, nil
+	return len(s.activeMemberships(memberships)), nil
 }
 
 // liveGroupMembership matches membership rows that still reference a user or
@@ -1280,4 +1407,25 @@ func sqlUUIDPh(d string, pos int) string {
 		return p + "::uuid"
 	}
 	return p
+}
+
+// deleteExpiredMembership removes the membership row matching preds when it
+// has expired, so a member can be added again: an expired membership is no
+// membership (admin tier A3), but its row still holds the (group, member)
+// unique key until the test identity purge removes it.
+func (s *GroupStore) deleteExpiredMembership(ctx context.Context, preds ...predicate.GroupMembership) error {
+	m, err := s.client.GroupMembership.Query().Where(preds...).Only(ctx)
+	if ent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return mapError(err)
+	}
+	if groupMembershipActiveAt(m, s.clock()) {
+		return nil
+	}
+	if err := s.client.GroupMembership.DeleteOneID(m.ID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }

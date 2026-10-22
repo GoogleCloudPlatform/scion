@@ -220,11 +220,12 @@ func TestReprovision_CloneMode_WorkspaceAndHomeSurvive(t *testing.T) {
 	}
 }
 
-// TestReprovision_HarnessConfigImageBumpReplacesFrozenImage pins the whole
-// reason reincarnate exists: a plain restart (Provision, via GetAgent) keeps
-// scion-agent.json frozen at whatever image generation N resolved, but
-// Reprovision replaces it with the current harness-config image.
-func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
+// TestReprovision_HarnessConfigImageNotPersisted: the harness-config image
+// is an environment value, so neither provisioning nor reprovisioning
+// freezes it into scion-agent.json (ptone/scion#4561); Start resolves it
+// from the current harness-config on every start. Reprovision reports the
+// current (bumped) harness-config image.
+func TestReprovision_HarnessConfigImageNotPersisted(t *testing.T) {
 	scionDir, globalScionDir := reprovisionSetup(t)
 	agentName := "img-agent"
 	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
@@ -242,8 +243,8 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 		_ = json.Unmarshal(b, &c)
 		return c.Image
 	}
-	if got := read(); got != "test-image:latest" {
-		t.Fatalf("gen N image = %q", got)
+	if got := read(); got != "" {
+		t.Fatalf("gen N persisted image = %q, want none", got)
 	}
 	_ = os.WriteFile(filepath.Join(globalScionDir, "harness-configs", "generic", "config.yaml"),
 		[]byte("harness: generic\nimage: test-image:v2\n"), 0644)
@@ -252,8 +253,8 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 	if _, err := mgr.Provision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if got := read(); got != "test-image:latest" {
-		t.Fatalf("plain Provision (restart) must keep the frozen image; got %q", got)
+	if got := read(); got != "" {
+		t.Fatalf("plain Provision (restart) persisted image = %q, want none", got)
 	}
 	// The restart above went through GetAgent, which clears and recreates an
 	// empty workspace dir for git-clone mode so sciontool performs a fresh
@@ -265,11 +266,15 @@ func TestReprovision_HarnessConfigImageBumpReplacesFrozenImage(t *testing.T) {
 	// only needs a real .git directory to be present.
 	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
 
-	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc}); err != nil {
+	reCfg, err := mgr.Reprovision(context.Background(), api.StartOptions{Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc})
+	if err != nil {
 		t.Fatalf("Reprovision: %v", err)
 	}
-	if got := read(); got != "test-image:v2" {
-		t.Fatalf("after Reprovision image = %q, want test-image:v2", got)
+	if reCfg == nil || reCfg.Image != "test-image:v2" {
+		t.Fatalf("Reprovision reported config = %+v, want image test-image:v2", reCfg)
+	}
+	if got := read(); got != "" {
+		t.Fatalf("after Reprovision persisted image = %q, want none", got)
 	}
 }
 
@@ -420,6 +425,152 @@ func TestReprovision_StoppedContainer_Proceeds(t *testing.T) {
 	}
 }
 
+// reprovisionProjectScopeRun provisions a clone-per-agent agent and runs
+// Reprovision against a mock runtime holding containers. The mock applies
+// the List label filter the way a real runtime does, so a lookup that
+// narrows by label sees only the entries a runtime would return.
+func reprovisionProjectScopeRun(t *testing.T, agentName, hubProjectID string, env map[string]string, containers func(scionDir string) []api.AgentInfo) error {
+	t.Helper()
+	scionDir, _ := reprovisionSetup(t)
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	ctx := api.ContextWithGitClone(context.Background(), gc)
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
+	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
+
+	entries := containers(scionDir)
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			var out []api.AgentInfo
+			for _, a := range entries {
+				if runtime.LabelsMatchFilter(a.Labels, filter) {
+					out = append(out, a)
+				}
+			}
+			return out, nil
+		},
+	}
+	_, err := NewManager(mockRT).Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+		HubProjectID: hubProjectID, Env: env,
+	})
+	return err
+}
+
+// reprovisionTestProjectName returns the project name Reprovision derives
+// for scionDir.
+func reprovisionTestProjectName(t *testing.T, scionDir string) string {
+	t.Helper()
+	projectDir, err := config.GetResolvedProjectDir(scionDir)
+	if err != nil {
+		t.Fatalf("resolve project dir: %v", err)
+	}
+	return config.GetProjectName(projectDir)
+}
+
+// TestReprovision_SameNameInOtherProject_Proceeds (ptone/scion#5510): agent
+// names are unique only within a project, so a running container with the
+// same name in another project must not make Reprovision refuse, while a
+// running container in the agent's own project still must. Covered for a
+// hub dispatch (project ID labels) and a local request (project name
+// labels, no hub project ID). The hub ID is covered both as HubProjectID
+// and as the Env SCION_PROJECT_ID fallback alone.
+func TestReprovision_SameNameInOtherProject_Proceeds(t *testing.T) {
+	const agentName = "ceo"
+	for _, tc := range []struct {
+		name         string
+		hubProjectID string
+		env          map[string]string
+		own, other   func(scionDir string) map[string]string
+	}{
+		{
+			name:         "hub",
+			hubProjectID: "project-own",
+			own: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-own"}
+			},
+			other: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-other"}
+			},
+		},
+		{
+			name: "hub_env_only",
+			env:  map[string]string{"SCION_PROJECT_ID": "project-own"},
+			own: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-own"}
+			},
+			other: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project_id": "project-other"}
+			},
+		},
+		{
+			name: "local",
+			own: func(scionDir string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project": reprovisionTestProjectName(t, scionDir)}
+			},
+			other: func(string) map[string]string {
+				return map[string]string{"scion.name": agentName, "scion.project": "some-other-project"}
+			},
+		},
+	} {
+		for _, ownPhase := range []string{"stopped", "running"} {
+			wantRefuse := ownPhase == "running"
+			t.Run(tc.name+"/own_"+ownPhase, func(t *testing.T) {
+				err := reprovisionProjectScopeRun(t, agentName, tc.hubProjectID, tc.env, func(scionDir string) []api.AgentInfo {
+					return []api.AgentInfo{
+						{Name: agentName, Phase: ownPhase, Labels: tc.own(scionDir)},
+						{Name: agentName, Phase: "running", Labels: tc.other(scionDir)},
+					}
+				})
+				if wantRefuse {
+					if !errors.Is(err, ErrReprovisionRefused) {
+						t.Fatalf("expected ErrReprovisionRefused for the agent's own running container, got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Reprovision must not be refused by a same-named agent in another project: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestReprovision_OwnContainerWithoutProjectLabel_Refused (ptone/scion#5510):
+// the project scoping must not fail open. The agent's own running container
+// whose project ID is known only from the runtime entry (not from the
+// canonical label) still refuses, alongside another project's container.
+func TestReprovision_OwnContainerWithoutProjectLabel_Refused(t *testing.T) {
+	const agentName = "ceo"
+	err := reprovisionProjectScopeRun(t, agentName, "project-own", nil, func(string) []api.AgentInfo {
+		return []api.AgentInfo{
+			{Name: agentName, Phase: "running", ProjectID: "project-own", Labels: map[string]string{"scion.name": agentName}},
+			{Name: agentName, Phase: "stopped", Labels: map[string]string{"scion.name": agentName, "scion.project_id": "project-other"}},
+		}
+	})
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused for the agent's own running container without a project label, got %v", err)
+	}
+}
+
+// TestReprovision_RunningContainerNoProjectInfo_Refused (ptone/scion#5510):
+// a running same-named entry with no project information at all cannot be
+// told apart from the agent's own container, so a project-scoped
+// Reprovision refuses it (fail closed).
+func TestReprovision_RunningContainerNoProjectInfo_Refused(t *testing.T) {
+	const agentName = "ceo"
+	err := reprovisionProjectScopeRun(t, agentName, "project-own", nil, func(string) []api.AgentInfo {
+		return []api.AgentInfo{
+			{Name: agentName, Phase: "running", Labels: map[string]string{"scion.name": agentName}},
+		}
+	})
+	if !errors.Is(err, ErrReprovisionRefused) {
+		t.Fatalf("expected ErrReprovisionRefused for a running entry with no project info, got %v", err)
+	}
+}
+
 // =============================================================================
 // Design §3.4 Amendment A23: explicit-mount (shared-workspace / hub-managed)
 // =============================================================================
@@ -486,7 +637,7 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	}
 
 	// A real content change between provision and reprovision (R4): bump the
-	// harness-config image, as TestReprovision_HarnessConfigImageBumpReplacesFrozenImage
+	// harness-config image, as TestReprovision_HarnessConfigImageNotPersisted
 	// does, and delete home/agent-info.json so its re-appearance proves
 	// re-rendering rather than "it was already there from the initial
 	// provision".
@@ -507,10 +658,11 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	gitDirBefore := snapshotTree(t, filepath.Join(sharedCheckout, ".git"))
 
 	mgr := NewManager(&runtime.MockRuntime{})
-	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+	reCfg, err := mgr.Reprovision(context.Background(), api.StartOptions{
 		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true,
 		Workspace: sharedCheckout, SharedWorkspace: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Reprovision: %v", err)
 	}
 	checkoutAfter := snapshotTree(t, sharedCheckout)
@@ -532,8 +684,13 @@ func TestReprovision_ExplicitMount_CheckoutByteIdenticalAndSiblingUntouched(t *t
 	if err := json.Unmarshal(cfgData, &cfg); err != nil {
 		t.Fatalf("failed to parse scion-agent.json: %v", err)
 	}
-	if cfg.Image != "test-image:v2" {
-		t.Fatalf("expected the bumped harness-config image to be re-rendered into scion-agent.json, got %q", cfg.Image)
+	// The bumped harness-config image is re-resolved (and reported), but,
+	// as an environment value, not persisted (ptone/scion#4561).
+	if reCfg == nil || reCfg.Image != "test-image:v2" {
+		t.Fatalf("expected Reprovision to report the bumped harness-config image, got %+v", reCfg)
+	}
+	if cfg.Image != "" {
+		t.Fatalf("scion-agent.json persisted image %q, want none", cfg.Image)
 	}
 	if _, err := os.Stat(agentInfoPath); err != nil {
 		t.Fatalf("expected agent-info.json (deleted before Reprovision) to be re-rendered: %v", err)

@@ -563,7 +563,13 @@ type LifecycleResponse struct {
 // body is the agent plus an optional warnings list; a body that cannot be
 // decoded is ignored, since the action itself succeeded.
 func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*LifecycleResponse, error) {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, nil, nil)
+	return s.lifecycleWithBody(ctx, agentID, action, nil)
+}
+
+// lifecycleWithBody is lifecycle with a request body; a nil reqBody posts
+// none.
+func (s *agentService) lifecycleWithBody(ctx context.Context, agentID, action string, reqBody interface{}) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, reqBody, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -584,6 +590,52 @@ func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*
 		}
 	}
 	return out, nil
+}
+
+// LifecycleStartOptions is the optional body of a start or restart.
+type LifecycleStartOptions struct {
+	// AcceptAsyncLaunch opts in to a non-blocking start or restart. A Hub
+	// that has async start enabled may then answer as soon as the broker
+	// accepts the start, with the agent in a pre-running phase and an
+	// active Launch; the client follows the launch with WaitForLaunch. A
+	// Hub that does not support or enable it ignores the field and answers
+	// synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+}
+
+// LifecycleOptionsStarter starts or restarts an agent with options. It is a
+// separate interface so AgentService implementations outside this package
+// are not affected; the client's agent service implements it.
+type LifecycleOptionsStarter interface {
+	// StartWithOptions is Start with a request body. Zero options post no
+	// body, exactly like Start. It never asks for a force-resume.
+	StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+	// RestartWithOptions is Restart with a request body. Zero options post
+	// no body, exactly like Restart.
+	RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+}
+
+var _ LifecycleOptionsStarter = (*agentService)(nil)
+
+// StartWithOptions starts a stopped agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "start", lifecycleStartBody(opts))
+}
+
+// RestartWithOptions restarts an agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "restart", lifecycleStartBody(opts))
+}
+
+// lifecycleStartBody returns the body for opts: nil (no body) for zero
+// options, so a plain start or restart is unchanged on the wire.
+func lifecycleStartBody(opts LifecycleStartOptions) interface{} {
+	if opts == (LifecycleStartOptions{}) {
+		return nil
+	}
+	return opts
 }
 
 // ResetAuth injects a fresh token into a running agent without restarting.
@@ -636,7 +688,10 @@ type ScopeReissueResult struct {
 	CredentialsRevoked int                       `json:"credentials_revoked"`
 	Dispatched         bool                      `json:"dispatched"`
 	DispatchError      string                    `json:"dispatch_error,omitempty"`
-	Message            string                    `json:"message"`
+	// ReloadUnconfirmed is set when the new credential was delivered but
+	// the running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
+	Message           string `json:"message"`
 }
 
 // ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
@@ -672,6 +727,9 @@ type ScopeReissueBulkAgent struct {
 	RoleAfter     string   `json:"role_after,omitempty"`
 	OpID          string   `json:"op_id,omitempty"`
 	DispatchError string   `json:"dispatch_error,omitempty"`
+	// ReloadUnconfirmed is set on a "changed" agent whose new credential
+	// was delivered but whose running agent did not confirm the reload.
+	ReloadUnconfirmed string `json:"reload_unconfirmed,omitempty"`
 }
 
 // ScopeReissueBulkRef names an agent in a bulk result list.
@@ -935,6 +993,16 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// DefaultAgentResult reports the delivery of a group post to the
+	// conversation's default agent. Set only for a group post that
+	// @mentioned no agent, in a conversation with a default agent.
+	DefaultAgentResult *messages.MentionResult `json:"default_agent_result,omitempty"`
+	// WokenAgents lists the agents a group post reached, through
+	// @mentions or the conversation's default agent.
+	WokenAgents []string `json:"woken_agents,omitempty"`
+	// NoAgentWoken is true when a group post reached no agent. Always
+	// false for other sends, and on hubs that predate this field.
+	NoAgentWoken bool `json:"no_agent_woken,omitempty"`
 	// ArtifactWarning is set when artifact references the message named
 	// were not attached. Empty on hubs that predate this field.
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
@@ -1199,6 +1267,11 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is recreated on the
+	// target and the agent's local state is given up. A hub that predates
+	// it ignores it; MoveVerdict.TransferMode tells a client the hub knows it.
+	ForceMove bool `json:"forceMove,omitempty"`
 	// SharedDirBackends changes the recorded shared-dir storage backend of
 	// the named shared dirs (dir name to "nfs" or "local"). Only the
 	// agent's record changes; the data is copied by the operator.
@@ -1237,12 +1310,17 @@ type ReincarnateAgentResponse struct {
 	TargetBrokerID string `json:"targetBrokerId,omitempty"`
 	// MoveVerdict is the move eligibility verdict of a dry-run move.
 	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+	// TransferMode is how an accepted cross-broker move carries the
+	// workspace: "export" or "recreate" (a forced move). Empty for a plain
+	// reincarnation and from a hub that predates forced moves.
+	TransferMode string `json:"transferMode,omitempty"`
 }
 
 // MoveVerdict is the hub's eligibility verdict for moving an agent to
 // another broker. A refused request carries it in the error details under
 // "verdict". Checks lists every check in evaluation order, each passed,
-// failed or not_evaluated.
+// failed, not_evaluated or (for a forced move) waived; treat any other
+// value as not passed.
 type MoveVerdict struct {
 	Eligible     bool          `json:"eligible"`
 	SourceBroker MoveBrokerRef `json:"sourceBroker"`
@@ -1250,6 +1328,21 @@ type MoveVerdict struct {
 	Profile      string        `json:"profile,omitempty"`
 	RuntimeType  string        `json:"runtimeType,omitempty"`
 	Checks       []MoveCheck   `json:"checks"`
+	// TransferMode is how the workspace reaches the target of an eligible
+	// move: "export" (carried through a shared NFS export) or "recreate"
+	// (provisioned fresh; local state is lost). A hub that predates
+	// --force never sets it.
+	TransferMode string `json:"transferMode,omitempty"`
+	// Consequences lists what an eligible move keeps, carries, recreates
+	// and loses.
+	Consequences []MoveConsequence `json:"consequences,omitempty"`
+}
+
+// MoveConsequence is one item a move keeps, carries, recreates or loses.
+type MoveConsequence struct {
+	Kind string `json:"kind"` // kept | carried | recreated | lost
+	Item string `json:"item"` // stable key, e.g. "identity", "workspace"
+	Text string `json:"text"`
 }
 
 // MoveBrokerRef identifies a broker in a MoveVerdict.

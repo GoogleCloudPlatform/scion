@@ -332,6 +332,9 @@ func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPSe
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
 	}
+	if filter.EmailFold != "" {
+		preds = append(preds, gcpserviceaccount.EmailEqualFold(filter.EmailFold))
+	}
 	if filter.Managed != nil {
 		preds = append(preds, gcpserviceaccount.ManagedEQ(*filter.Managed))
 	}
@@ -637,6 +640,15 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 	}
 	if err := token.ValidateBoundary(); err != nil {
 		return err
+	}
+
+	// A federated account holds no user access credential.
+	federated, err := isFederatedUser(ctx, s.client, userUID)
+	if err != nil {
+		return err
+	}
+	if federated {
+		return store.ErrFederatedAccountRefused
 	}
 
 	if token.Created.IsZero() {

@@ -362,6 +362,13 @@ func (st *stream) CloseWrite() error {
 // Resizes implements Resizable.
 func (st *stream) Resizes() <-chan WindowSize { return st.resizes }
 
+// Renew implements StreamRenewer: it sends AuthRefresh{stream_id,
+// credential} on the stream's session. It is meant for streams this side
+// opened toward a target.
+func (st *stream) Renew(credential []byte) error {
+	return st.s.RefreshAuth(credential, st.id)
+}
+
 // deliverResize records an inbound StreamResize (reader goroutine). It
 // never blocks: an undelivered older size is replaced.
 func (st *stream) deliverResize(cols, rows uint32) {

@@ -20,7 +20,7 @@ Every chart is grouped by the `service_instance_id` label, so each Hub replica g
 
 ## Prerequisites
 
-1. **Hub metrics export is on.** The Hub exports metrics when `server.hub.gcp_project_id` (`SCION_SERVER_HUB_GCPPROJECTID`) is set. The startup log then contains `Hub OTel metrics export enabled`. The metric groups can be turned off one by one with `SCION_METRICS_DB_POOL`, `SCION_METRICS_DB_NOTIFY` and `SCION_METRICS_DISPATCH`. A disabled group shows as empty charts.
+1. **Hub metrics export is on.** The Hub exports metrics when [`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability) is `true`. If that switch is unset, it exports when `server.hub.gcp_project_id` (`SCION_SERVER_HUB_GCPPROJECTID`) is set. The startup log then contains `Hub metrics export: on`, followed by the export project. The metric groups can be turned off one by one with `SCION_METRICS_DB_POOL`, `SCION_METRICS_DB_NOTIFY` and `SCION_METRICS_DISPATCH`. A disabled group shows as empty charts.
 2. **The Hub can write metrics.** The Hub's service account needs `roles/monitoring.metricWriter` on that project.
 3. **You can create dashboards.** Importing needs `roles/monitoring.dashboardEditor` (or an equivalent role) on the project.
 
@@ -36,7 +36,7 @@ gcloud monitoring dashboards create \
   --config-from-file=deploy/monitoring/dashboards/scion-hub.json
 ```
 
-Replace `PROJECT_ID` with the project in `server.hub.gcp_project_id`. The command prints the new dashboard's resource name (`projects/…/dashboards/DASHBOARD_ID`). Open it in the Google Cloud console under **Monitoring > Dashboards > Scion Hub**.
+Replace `PROJECT_ID` with the Hub's export project. The **Server Config** page shows it under **Hub Observability Export**, and the startup log line `Hub metrics export: on (project: ...)` names it. The command prints the new dashboard's resource name (`projects/…/dashboards/DASHBOARD_ID`). Open it in the Google Cloud console under **Monitoring > Dashboards > Scion Hub**.
 
 To find the dashboard later:
 

@@ -111,6 +111,16 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// kubernetesBlockServiceAccountSchema mirrors kubernetes_block_service_account
+// in settings-v1.schema.json: empty, or a Kubernetes ServiceAccount name.
+func kubernetesBlockServiceAccountSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":      "string",
+		"pattern":   `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+		"maxLength": 253,
+	}
+}
+
 // profileCloneDepthSchema returns profileConfig.clone_depth from the
 // settings schema $defs, so the profiles section validates clone_depth
 // with the same rule as settings-v1.schema.json. It returns nil when the
@@ -182,6 +192,7 @@ func init() {
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
+				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
 				"telemetry.hub", "telemetry.hub.enabled", "telemetry.hub.report_interval",
 				"telemetry.local", "telemetry.local.enabled", "telemetry.local.file", "telemetry.local.console",
@@ -217,6 +228,15 @@ func init() {
 				"server.hub.gcp_iam_deny_unknown_policy",
 			},
 			New: func() any { return &GCPIAMSettings{} },
+		},
+		{
+			// hub_observability holds the switches for the hub's own
+			// metrics and trace export. The exporters are created once at
+			// startup, so both keys apply after a restart.
+			Name:            "hub_observability",
+			KoanfPaths:      []string{config.HubMetricsEnabledKey, config.HubTracingEnabledKey},
+			New:             func() any { return &HubObservabilitySettings{} },
+			RestartRequired: []string{config.HubMetricsEnabledKey, config.HubTracingEnabledKey},
 		},
 		{
 			Name: "agent_secrets",
@@ -305,10 +325,15 @@ func init() {
 		},
 		{
 			// harness_configs is a map-of-objects section, same pattern as runtimes.
-			Name:            "harness_configs",
-			KoanfPaths:      []string{"harness_configs"},
-			New:             func() any { m := make(HarnessConfigsSettings); return &m },
-			NestedDurations: []string{"harness_configs.*.provisioner.timeout"},
+			Name:       "harness_configs",
+			KoanfPaths: []string{"harness_configs"},
+			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{
+				"harness_configs.*.provisioner.timeout",
+				"harness_configs.*.ready.settle",
+				"harness_configs.*.ready.timeout",
+				"harness_configs.*.delivery.extra_submit_delay",
+			},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml
@@ -534,6 +559,9 @@ func compileSchemas() {
 		// so the section schema and the settings file schema cannot drift
 		// apart (the $defs are attached to every section at compile time).
 		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
+		// hub_observability is derived from settings-v1.schema.json
+		// (server.hub.observability) like the sections above.
+		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
 		// gcp_iam schema is hand-written -- the keys have no definition in
@@ -680,7 +708,6 @@ func compileSchemas() {
 					"default_template":       map[string]interface{}{"type": "string"},
 					"default_harness_config": map[string]interface{}{"type": "string"},
 					"image_registry":         map[string]interface{}{"type": "string"},
-					"env":                    map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 					"volumes":                map[string]interface{}{"type": "array"},
 					"resources":              map[string]interface{}{"type": "object"},
 					"harness_overrides": map[string]interface{}{
@@ -710,7 +737,15 @@ func compileSchemas() {
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
+					// GCP identity "block" on Kubernetes.
+					"kubernetes_block_service_account": kubernetesBlockServiceAccountSchema(),
 				},
+				// Each property is a V1ProfileConfig field (pinned by
+				// TestProfilesSectionSchema_MatchesProfileConfig). A key the
+				// struct has no field for would pass validation and then be
+				// dropped on decode, as profiles.<name>.env was
+				// (ptone/scion#3048).
+				"additionalProperties": false,
 			},
 		},
 		// harness_configs: map-of-objects — keys are harness config names,

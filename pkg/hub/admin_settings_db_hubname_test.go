@@ -48,7 +48,7 @@ func newHubNameDBServer(t *testing.T, bootstrapHubName string) (*Server, *fakeHu
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
 
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
 	return srv, fakeStore, ops
 }
@@ -280,9 +280,9 @@ func TestApplySnapshot_HubNameAppliedOnlyOnChange(t *testing.T) {
 	assert.NotContains(t, appliedKeys(ApplySnapshot(running, Layer1Snapshot{})), "hub_name")
 }
 
-// On a seeded (non-managed) endpoints row, fields this
-// node overrides by env are not carried into the shared row; without the
-// env override they are carried.
+// On a seeded (non-managed) endpoints row, fields this node overrides by
+// env are not carried into the shared row, and neither is the bootstrap
+// material (hub_name, public_url, image_registry).
 func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
 	seeded := json.RawMessage(`{"public_url":"https://seed.example.com","image_registry":"seed.example.com","hub_name":"seed-hub"}`)
 	newSrv := func(envK map[string]interface{}) (*Server, *fakeHubSettingStore, *OperationalSettings) {
@@ -300,13 +300,14 @@ func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
 		return srv, fakeStore, ops
 	}
 
-	// No env override: public_url and image_registry carry forward; the
-	// seeded hub_name does not (it is bootstrap material).
+	// No env override: the seeded hub_name, public_url and image_registry
+	// are not carried either: they are bootstrap material, stored only when
+	// an admin sets them (ptone/scion#3905, ptone/scion#3916).
 	srv, fakeStore, ops := newSrv(nil)
 	rr := putHubNameServerConfigDB(t, srv, ops, `{"server":{"hub":{"hub_name":"new-hub"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	row, _ := endpointsRow(t, fakeStore)
-	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://seed.example.com", ImageRegistry: "seed.example.com", HubName: "new-hub"}, row)
+	assert.Equal(t, opsettings.EndpointsSettings{HubName: "new-hub"}, row)
 
 	// Both keys env-overridden on this node: neither is carried.
 	srv, fakeStore, ops = newSrv(map[string]interface{}{
@@ -319,8 +320,8 @@ func TestServerConfigDB_Endpoints_SeededBaseEnvGuard(t *testing.T) {
 	assert.Equal(t, opsettings.EndpointsSettings{HubName: "new-hub"}, row)
 }
 
-// With no endpoints row, the base is the effective
-// (bootstrap) public_url and image_registry.
+// With no endpoints row, nothing from the bootstrap (public_url, hub_name,
+// image_registry) is written; a changed image_registry is.
 func TestServerConfigDB_Endpoints_NoRowBaseFromSnapshot(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := newFileKoanf(t, map[string]interface{}{
@@ -336,8 +337,8 @@ func TestServerConfigDB_Endpoints_NoRowBaseFromSnapshot(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	row, origin := endpointsRow(t, fakeStore)
 	assert.Equal(t, "managed", origin)
-	assert.Equal(t, opsettings.EndpointsSettings{PublicURL: "https://boot.example.com", ImageRegistry: "admin.example.com"}, row,
-		"bootstrap public_url carries forward; the bootstrap hub_name is not written")
+	assert.Equal(t, opsettings.EndpointsSettings{ImageRegistry: "admin.example.com"}, row,
+		"neither the bootstrap public_url nor the bootstrap hub_name is written (ptone/scion#3905)")
 }
 
 // endpointsRaceStore simulates another replica writing the endpoints row

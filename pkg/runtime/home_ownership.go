@@ -346,7 +346,7 @@ func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHome
 	// A helper left behind for this home (the agent runtime died while it
 	// ran) is removed before a new one starts.
 	removeLeftoverAgentHomeRepairHelpers(ctx, command, h.homeKey)
-	runtimeLog.Warn("Repairing agent home ownership with a one-shot helper",
+	runtimeLog().Warn("Repairing agent home ownership with a one-shot helper",
 		"home", req.HomeDir, "uid", req.UID, "gid", req.GID, "image", req.Image, "helper", name)
 	runCtx, cancel := context.WithTimeout(ctx, agentHomeRepairTimeout)
 	defer cancel()
@@ -358,7 +358,7 @@ func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHome
 	defer cleanupCancel()
 	removal := "was removed"
 	if _, rmErr := runSimpleCommand(cleanupCtx, command, "rm", "-f", name); rmErr != nil {
-		runtimeLog.Warn("Could not remove the agent home ownership repair helper", "helper", name, "error", rmErr)
+		runtimeLog().Warn("Could not remove the agent home ownership repair helper", "helper", name, "error", rmErr)
 		removal = fmt.Sprintf("its removal failed (%v)", rmErr)
 	}
 	if ctxErr := runCtx.Err(); ctxErr != nil {
@@ -383,7 +383,7 @@ func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey 
 	defer cancel()
 	out, err := runSimpleCommand(sweepCtx, command, "ps", "-aq", "--no-trunc", "--filter", "label="+agentHomeRepairLabel(homeKey))
 	if err != nil {
-		runtimeLog.Warn("Could not list leftover agent home ownership repair helpers", "error", err)
+		runtimeLog().Warn("Could not list leftover agent home ownership repair helpers", "error", err)
 		return
 	}
 	var ids, rejected []string
@@ -400,15 +400,15 @@ func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey 
 		for i, tok := range first {
 			quoted[i] = truncateForMessage(tok, 64)
 		}
-		runtimeLog.Warn("Ignoring unexpected leftover agent home ownership repair helper ids",
+		runtimeLog().Warn("Ignoring unexpected leftover agent home ownership repair helper ids",
 			"count", len(rejected), "first", quoted)
 	}
 	if len(ids) == 0 {
 		return
 	}
-	runtimeLog.Warn("Removing leftover agent home ownership repair helpers", "count", len(ids))
+	runtimeLog().Warn("Removing leftover agent home ownership repair helpers", "count", len(ids))
 	if _, err := runSimpleCommand(sweepCtx, command, append([]string{"rm", "-f"}, ids...)...); err != nil {
-		runtimeLog.Warn("Could not remove leftover agent home ownership repair helpers", "error", err)
+		runtimeLog().Warn("Could not remove leftover agent home ownership repair helpers", "error", err)
 	}
 }
 

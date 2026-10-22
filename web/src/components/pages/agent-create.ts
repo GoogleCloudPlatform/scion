@@ -29,7 +29,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template } from '../../shared/types.js';
+import type {
+  AgentLaunch,
+  AgentPhase,
+  Project,
+  RuntimeBroker,
+  Template,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -40,10 +46,10 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-import { isSharedWorkspace } from '../../shared/types.js';
+import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
-import { defaultTriggersHint } from '../../shared/notification-triggers.js';
+import { AGENT_CREATE_TRIGGERS, defaultTriggersHint } from '../../shared/notification-triggers.js';
 import {
   resolveInheritedPlaceholders,
   type AgentConfigPlaceholder,
@@ -54,9 +60,11 @@ import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
 import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
-import type { AgentOtherInlineConfig, ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
+import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
 
@@ -81,7 +89,12 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private name = '';
   @state() private projectId = '';
   @state() private templateId = '';
-  @state() private harness = 'antigravity';
+  /**
+   * The harness config the user picked; '' leaves it to the hub's order
+   * (project, then template default_harness_config, then hub), shown as
+   * the picker's placeholder. Only a pick is sent (ptone/scion#3914).
+   */
+  @state() private harness = '';
   @state() private customHarness = '';
   @state() private brokerId = '';
   @state() private profile = '';
@@ -120,8 +133,9 @@ export class ScionPageAgentCreate extends LitElement {
 
   /**
    * Whether the currently selected broker/profile combination is reliably
-   * known to resolve to a Kubernetes runtime. Block is not offered in that
-   * case. This deliberately does not guess: with no broker selected, no
+   * known to resolve to a Kubernetes runtime. The GCP identity hint then says
+   * what Block means there, and the service accounts' mapping state is asked
+   * for that target. This deliberately does not guess: with no broker selected, no
    * matching profile, or (with no profile chosen) a broker whose available
    * profiles mix runtime types, this is false.
    */
@@ -154,12 +168,6 @@ export class ScionPageAgentCreate extends LitElement {
       projectSettings: this.projectSettings,
       hubSettings: this.hubSettings,
     });
-  }
-
-  /** Template-supplied inline config the form does not edit, shown read-only. */
-  private get otherInlineConfig(): AgentOtherInlineConfig | null {
-    const kubernetes = this.selectedTemplate?.config?.kubernetes;
-    return kubernetes ? { config: { kubernetes }, source: 'from the template' } : null;
   }
 
   private get form(): ScionAgentConfigForm | null {
@@ -389,11 +397,10 @@ export class ScionPageAgentCreate extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    // Block is not offered for a Kubernetes runtime target. Hand the GCP
-    // identity state the current target whenever the broker/profile
-    // selection or the broker list changes; it corrects the displayed mode
-    // (normalizeGcpModeForTarget) in the same update cycle. Whether an
-    // explicit identity is sent is gated separately by gcpIdentityUserSet.
+    // Hand the GCP identity state the current target whenever the
+    // broker/profile selection or the broker list changes: its hint
+    // describes Block on a Kubernetes target. Whether an explicit identity
+    // is sent is gated separately by gcpIdentityUserSet.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
@@ -437,7 +444,7 @@ export class ScionPageAgentCreate extends LitElement {
       }
       const tmplUrl = `/api/v1/templates?${tmplParams.toString()}`;
 
-      const [projectsRes, brokersRes, templates, settingsRes, harnessConfigsRes] =
+      const [projectsRes, brokersRes, templates, publicSettings, harnessConfigsRes] =
         await Promise.all([
           // Not `mine=true`: on the server that resolves to projects where the
           // caller holds the project-owner role specifically, but creating an
@@ -462,7 +469,7 @@ export class ScionPageAgentCreate extends LitElement {
               return [] as Template[];
             }
           ),
-          fetch('/api/v1/settings/public', { credentials: 'include' }),
+          getPublicSettings(),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
 
@@ -479,8 +486,8 @@ export class ScionPageAgentCreate extends LitElement {
 
       this.templates = templates;
 
-      if (settingsRes.ok) {
-        this.hubSettings = (await settingsRes.json()) as HubPublicDefaults;
+      if (publicSettings) {
+        this.hubSettings = publicSettings;
       }
 
       if (harnessConfigsRes.ok) {
@@ -609,7 +616,9 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Select the default template and harness config for the current project.
+   * Select the default template for the current project. The harness config
+   * is not pre-filled: the hub resolves it when the user leaves it unset,
+   * and the picker shows that inherited value as its placeholder.
    */
   private async selectDefaultTemplate(): Promise<void> {
     const isStale = this.projectLoadGuard();
@@ -617,50 +626,15 @@ export class ScionPageAgentCreate extends LitElement {
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
     if (isStale()) return;
-    const harnessDefault =
-      settings?.defaultHarnessConfig || this.hubSettings.defaultHarnessConfig || 'claude';
 
-    const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
-      t.defaultHarnessConfig || t.harness || harnessDefault;
-
-    let templateResolved = false;
-    if (settings?.defaultTemplate) {
-      const match = visible.find(
-        (t) => t.name === settings.defaultTemplate || t.slug === settings.defaultTemplate
-      );
-      if (match) {
-        this.templateId = match.id;
-        this.setHarnessFromValue(harnessFor(match));
-        templateResolved = true;
-      }
-    }
-
-    // Hub-level default template fallback: try before the generic 'default' slug.
-    const hubDefaultTemplate = this.hubSettings.defaultTemplate ?? '';
-    if (!templateResolved && hubDefaultTemplate) {
-      const hubMatch = visible.find(
-        (t) => t.name === hubDefaultTemplate || t.slug === hubDefaultTemplate
-      );
-      if (hubMatch) {
-        this.templateId = hubMatch.id;
-        this.setHarnessFromValue(harnessFor(hubMatch));
-        templateResolved = true;
-      }
-    }
-
-    if (!templateResolved) {
-      const fallback = visible.find((t) => t.slug === 'default' || t.name === 'default');
-      if (fallback) {
-        this.templateId = fallback.id;
-        this.setHarnessFromValue(harnessFor(fallback));
-      } else if (visible.length > 0) {
-        this.templateId = visible[0].id;
-        this.setHarnessFromValue(harnessFor(visible[0]));
-      } else {
-        this.templateId = '';
-        this.setHarnessFromValue(harnessDefault);
-      }
-    }
+    const byRef = (ref: string) => visible.find((t) => t.name === ref || t.slug === ref);
+    const match =
+      (settings?.defaultTemplate ? byRef(settings.defaultTemplate) : undefined) ??
+      // Hub-level default template fallback: try before the generic 'default' slug.
+      (this.hubSettings.defaultTemplate ? byRef(this.hubSettings.defaultTemplate) : undefined) ??
+      visible.find((t) => t.slug === 'default' || t.name === 'default') ??
+      visible[0];
+    this.templateId = match?.id ?? '';
   }
 
   private autoSelectProfile(): void {
@@ -701,10 +675,26 @@ export class ScionPageAgentCreate extends LitElement {
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
+        this.dropUnavailableHarnessPick();
       }
     } catch (err) {
       console.error('Failed to load harness configs:', err);
     }
+  }
+
+  /**
+   * Clears a picked harness config the reloaded list no longer offers (for
+   * example a project-scoped config of the previous project). Kept, it would
+   * be sent while the picker shows the inherited placeholder. A custom
+   * ("Other...") name is the user's own and is kept.
+   */
+  private dropUnavailableHarnessPick(): void {
+    if (!this.harness || this.harness === '__other__') return;
+    const names: readonly string[] =
+      this.harnessConfigs.length > 0
+        ? this.harnessConfigs.map((hc) => hc.name)
+        : KNOWN_HARNESS_NAMES;
+    if (!names.includes(this.harness)) this.harness = '';
   }
 
   /**
@@ -771,36 +761,23 @@ export class ScionPageAgentCreate extends LitElement {
   private onTemplateChange(e: Event): void {
     const select = e.target as HTMLElement & { value: string };
     this.templateId = select.value;
-
-    const template = this.templates.find((t) => t.id === this.templateId);
-    const configName = template?.defaultHarnessConfig || template?.harness;
-    if (configName) {
-      this.setHarnessFromValue(configName);
-    }
-  }
-
-  private setHarnessFromValue(value: string): void {
-    const knownNames = this.harnessConfigs.map((hc) => hc.name);
-    const available: readonly string[] = knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
-
-    if (available.includes(value)) {
-      this.harness = value;
-      this.customHarness = '';
-    } else {
-      this.harness = '__other__';
-      this.customHarness = value;
-    }
   }
 
   /** Resolved harness config name for submission */
   private get resolvedHarness(): string {
-    return this.harness === '__other__' ? this.customHarness : this.harness;
+    return this.harness === '__other__' ? this.customHarness.trim() : this.harness;
   }
 
-  /** Hint text when the selected harness matches or differs from the template's default */
+  /** Placeholder for the harness picker: the inherited harness config, when known. */
+  private get harnessPlaceholder(): string {
+    const p = this.placeholders.harnessConfig;
+    return p?.value ? `${p.value} (${p.source})` : 'Inherited';
+  }
+
+  /** Hint text when a picked harness matches or differs from the template's default */
   private get templateHarnessHint(): string {
-    const template = this.templates.find((t) => t.id === this.templateId);
-    const configName = template?.defaultHarnessConfig || template?.harness;
+    if (!this.resolvedHarness) return '';
+    const configName = this.selectedTemplate?.defaultHarnessConfig;
     if (!configName) return '';
 
     if (configName === this.resolvedHarness) {
@@ -823,6 +800,12 @@ export class ScionPageAgentCreate extends LitElement {
     }
     if (!this.projectId) {
       this.error = 'Please select a project.';
+      return;
+    }
+    // "Other..." needs a name; without one the form would quietly submit
+    // the inherited harness config instead.
+    if (this.harness === '__other__' && !this.customHarness.trim()) {
+      this.error = 'Enter a custom harness config name, or pick another harness config.';
       return;
     }
 
@@ -849,11 +832,16 @@ export class ScionPageAgentCreate extends LitElement {
       const body: Record<string, unknown> = {
         name: this.slugify(this.name),
         projectId: this.projectId,
-        harnessConfig: this.resolvedHarness,
         notify: this.notify,
+        // Take the hub's async launch path when it has it on (the
+        // hub.async_agent_launch experiment); a hub with it off ignores this
+        // and answers synchronously as before.
+        acceptAsyncLaunch: true,
       };
 
       if (this.templateId) body.template = this.templateId;
+      // Only a picked harness config; unset, the hub applies its own order.
+      if (this.resolvedHarness) body.harnessConfig = this.resolvedHarness;
       if (this.brokerId) body.runtimeBrokerId = this.brokerId;
       if (this.profile) body.profile = this.profile;
       if (this.task.trim()) body.task = this.task.trim();
@@ -891,9 +879,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       const result = (await response.json()) as {
-        agent?: { id: string; status?: string; phase?: string };
+        agent?: { id: string; status?: string; phase?: AgentPhase; launch?: AgentLaunch };
         id?: string;
+        warnings?: string[];
       };
+      // The hub's create warnings (for example, a token issued without
+      // the artifact scopes); the toast stack outlives the navigation. The
+      // start response may repeat one; `shownWarnings` toasts it once.
+      const shownWarnings = new Set<string>();
+      showResponseWarnings(result, shownWarnings);
       const agent = result.agent;
       const agentId = agent?.id || result.id;
 
@@ -902,9 +896,14 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       // Start the agent unless the create response shows it already started.
+      // An async launch the hub accepted is the hub's to finish: while it
+      // runs, and after it failed (the hub refuses that start with 409
+      // agent_create_incomplete), the agent page shows its progress or
+      // failure instead.
       const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
       const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-      if (!alreadyStarted) {
+      const hubLaunch = !!agent && (isAgentLaunching(agent) || isIncompleteCreate(agent));
+      if (!alreadyStarted && !hubLaunch) {
         // The agent exists, so a failed start, including a rejected fetch,
         // is reported and its page still opens, where the user can start
         // it again without creating a second agent. The toast stack
@@ -918,6 +917,8 @@ export class ScionPageAgentCreate extends LitElement {
           if (!startResp.ok) {
             const fallback = `HTTP ${startResp.status}`;
             startError = (await parseApiError(startResp, fallback)).message;
+          } else {
+            await showResponseBodyWarnings(startResp, shownWarnings);
           }
         } catch (startErr) {
           startError =
@@ -1019,7 +1020,6 @@ export class ScionPageAgentCreate extends LitElement {
             mode="create"
             .placeholders=${this.placeholders}
             .gcpIdentity=${this.gcp}
-            .otherInlineConfig=${this.otherInlineConfig}
             ?branchAvailable=${!!this.selectedProject?.gitRemote &&
             !isSharedWorkspace(this.selectedProject)}
             ?disabled=${this.submitting}
@@ -1131,10 +1131,11 @@ export class ScionPageAgentCreate extends LitElement {
         <label for="harness">Harness Config</label>
         <sl-select
           id="harness"
-          placeholder="Select a harness..."
+          placeholder=${this.harnessPlaceholder}
+          clearable
           .value=${this.harness}
           @sl-change=${(e: Event) => {
-            this.harness = (e.target as HTMLElement & { value: string }).value;
+            this.harness = (e.target as HTMLElement & { value: string }).value ?? '';
             if (this.harness !== '__other__') {
               this.customHarness = '';
             }
@@ -1157,7 +1158,7 @@ export class ScionPageAgentCreate extends LitElement {
         <div class="hint">
           ${this.templateHarnessHint
             ? this.templateHarnessHint
-            : 'The LLM harness configuration to use.'}
+            : 'The LLM harness configuration to use. Leave unset to inherit it.'}
         </div>
       </div>
 
@@ -1252,7 +1253,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip content=${defaultTriggersHint()} hoist>
+        <sl-tooltip content=${defaultTriggersHint(AGENT_CREATE_TRIGGERS)} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>

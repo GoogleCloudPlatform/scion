@@ -48,9 +48,23 @@ func (s *Server) startClaimReaperHandler() func(ctx context.Context) {
 }
 
 // reaperBrokerView is what the reaper reads once per broker per tick.
+// deleted is set, with no broker and no inventory, only when the broker row
+// is confirmed gone (store.ErrNotFound): its unconfirmed claims are released
+// (reapUnconfirmedStartClaim). Everywhere else a deleted view is treated as
+// no view (usableView).
 type reaperBrokerView struct {
-	broker *store.RuntimeBroker
-	inv    map[string]time.Time
+	broker  *store.RuntimeBroker
+	inv     map[string]time.Time
+	deleted bool
+}
+
+// usableView returns view, or nil when there is none or its broker is
+// deleted.
+func usableView(view *reaperBrokerView) *reaperBrokerView {
+	if view == nil || view.deleted {
+		return nil
+	}
+	return view
 }
 
 func (s *Server) reapStartClaims(ctx context.Context) {
@@ -92,9 +106,10 @@ func (s *Server) reaperBrokerView(ctx context.Context, brokerID string) *reaperB
 	}
 	b, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("Start claim reaper: reading the broker failed; its claims are kept this round", "broker_id", brokerID, "error", err)
+		if errors.Is(err, store.ErrNotFound) {
+			return &reaperBrokerView{deleted: true}
 		}
+		slog.Warn("Start claim reaper: reading the broker failed; its claims are kept this round", "broker_id", brokerID, "error", err)
 		return nil
 	}
 	rows, err := s.store.ListBrokerTargetInventory(ctx, brokerID)
@@ -113,10 +128,12 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 	if a.LaunchState == store.LaunchStateActive {
 		return // the launch owns liveness and settles the claim when it ends
 	}
-	if a.StartClaimKind == store.StartClaimCreate && a.StartClaimLaunchID != "" && a.StartClaimLaunchID == a.LaunchID {
+	if claimPairsWithEndedLaunch(a) {
 		if changed, err := s.store.SettleEndedLaunchClaim(ctx, a.ID, a.StartClaimID); err != nil || changed {
 			if err != nil {
 				slog.Warn("Start claim reaper: settling the claim of an ended launch failed", "agent_id", a.ID, "claim_id", a.StartClaimID, "error", err)
+			} else {
+				s.releaseSlotIfIdle(ctx, a.ID)
 			}
 			return
 		}
@@ -130,6 +147,27 @@ func (s *Server) reapStartClaim(ctx context.Context, a *store.Agent, now time.Ti
 		}
 	case store.StartClaimUnconfirmed:
 		s.reapUnconfirmedStartClaim(ctx, a, now, holds, view, obs)
+	}
+}
+
+// claimPairsWithEndedLaunch reports whether a's start claim is linked to
+// a's launch and is the claim kind that launch settles: a create launch
+// its create claim, a start launch its user claim, a restart launch its
+// restart claim (the store's pairing, ptone/scion#4669). The launch has
+// ended (the caller checked), so the reaper settles the claim by the
+// launch's end, as the launch's terminal write would have. Only create
+// launches exist until asynchronous start ships.
+func claimPairsWithEndedLaunch(a *store.Agent) bool {
+	if a.StartClaimLaunchID == "" || a.StartClaimLaunchID != a.LaunchID {
+		return false
+	}
+	switch a.LaunchKind {
+	case store.LaunchKindStart:
+		return a.StartClaimKind == store.StartClaimUser
+	case store.LaunchKindRestart:
+		return a.StartClaimKind == store.StartClaimRestart
+	default:
+		return a.StartClaimKind == store.StartClaimCreate
 	}
 }
 
@@ -155,7 +193,19 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 		} else if ok {
 			s.claimStops.Delete(a.ID)
 			slog.Info("Start claim reaper: released an unconfirmed start claim", "agent_id", a.ID, "kind", a.StartClaimKind, "reason", why)
+			s.releaseSlotIfIdle(ctx, a.ID)
 		}
+	}
+	if view != nil && view.deleted {
+		// The agent's Runtime Broker is confirmed deregistered: no report
+		// can show this start's outcome any more. Release the unconfirmed
+		// claim (of any kind), audited. A live claim never reaches here: it
+		// is demoted on lease expiry first. The slot is normally freed by
+		// the sweep's deregistered-scope pass: the agent row still reads a
+		// counted phase, so the releaseSlotIfIdle that follows the release
+		// frees it only for an agent already at rest.
+		s.releaseClaimOfDeregisteredBroker(ctx, a)
+		return
 	}
 	if view == nil || a.StartClaimUnconfirmedAt == nil {
 		return
@@ -183,6 +233,10 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 	inFlight := obs.InFlight
 	gone := obs.State == store.ObservedAbsent || obs.State == store.ObservedPresentTerminal
 	if gone && !inFlight && !obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
+		// Revoked before the release, while the claim still refuses
+		// other starts, so the revoke cannot reach a newer start's
+		// credential.
+		s.revokeUnconfirmedCreateCredential(ctx, a)
 		release("runtime shows nothing running")
 		if a.Phase == string(state.PhaseCreated) && a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil {
 			s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, provisionedStartNotCompletedMessage)
@@ -192,6 +246,49 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 	if exp, ok := holds.HoldExpiry(a); ok && !now.Before(exp) && (obs.State == store.ObservedPresentRunning || inFlight) {
 		s.stopUnconfirmedStart(ctx, a.ID, a.StartClaimID)
 	}
+}
+
+// releaseClaimOfDeregisteredBroker releases a's unconfirmed claim because
+// its Runtime Broker is confirmed deregistered, with an audit event.
+func (s *Server) releaseClaimOfDeregisteredBroker(ctx context.Context, a *store.Agent) {
+	ok, err := s.store.ReleaseUnconfirmedStart(ctx, a.ID, a.StartClaimID)
+	if err != nil {
+		slog.Warn("Start claim reaper: release failed", "agent_id", a.ID, "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	s.claimStops.Delete(a.ID)
+	slog.Warn("Start claim reaper: start claim released: Runtime Broker deregistered; runtime state unknown",
+		"agent_id", a.ID, "runtime_broker_id", a.RuntimeBrokerID, "claim_id", a.StartClaimID, "kind", a.StartClaimKind)
+	s.writeCapacityAudit(ctx, auditStartClaimBrokerDeregistered, a.ID, capacityAuditSummary{
+		Reason:          "start claim released: Runtime Broker " + a.RuntimeBrokerID + " deregistered; runtime state unknown",
+		RuntimeBrokerID: a.RuntimeBrokerID,
+		ClaimID:         a.StartClaimID,
+		ClaimKind:       string(a.StartClaimKind),
+	})
+	s.releaseSlotIfIdle(ctx, a.ID)
+}
+
+// revokeUnconfirmedCreateCredential revokes the credential of a create
+// whose start claim a is about to be released because nothing came up. A
+// create whose dispatch outcome was unknown kept its credential for a
+// start that might still come up (keepUnknownOutcomeStart); nothing did,
+// so it is revoked, as a failed create or a delete would
+// (ptone/scion#4817). It acts only on a create claim, and only while that
+// same claim (a.StartClaimID) is still held unconfirmed: while it is, no
+// other start can claim the agent and mint a credential, so the revoke
+// reaches only this create's.
+func (s *Server) revokeUnconfirmedCreateCredential(ctx context.Context, a *store.Agent) {
+	if a.StartClaimKind != store.StartClaimCreate || a.StartClaimID == "" {
+		return
+	}
+	cur, err := s.store.GetAgent(ctx, a.ID)
+	if err != nil || cur.StartClaimID != a.StartClaimID || cur.StartClaimState != store.StartClaimUnconfirmed {
+		return
+	}
+	revokeAgentCredentialsBestEffort(ctx, s.store, a.ID, agentCredentialRevokeReasonCreateFailed)
 }
 
 // reaperTarget is the target the reaper reads an agent's observation on:
@@ -324,6 +421,7 @@ func (s *Server) reapProvisionedStartsLeftRunning(ctx context.Context, now time.
 			view = s.reaperBrokerView(ctx, a.RuntimeBrokerID)
 			views[a.RuntimeBrokerID] = view
 		}
+		view = usableView(view)
 		o, ok := obs[a.ID]
 		if view == nil || !ok || o.Target == "" || o.Target != reaperTarget(a, view) || !observationFresh(o, view.inv, now) {
 			continue

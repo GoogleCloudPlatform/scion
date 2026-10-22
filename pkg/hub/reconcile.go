@@ -70,6 +70,15 @@ func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only 
 		if only != nil && !only(d.Op) {
 			continue
 		}
+		// Once hub shutdown has begun, claim nothing more: the broker's
+		// tunnel is about to close, so a claimed row would only fail.
+		// Unclaimed rows stay pending and drain on the next connect
+		// (ptone/scion#4869).
+		if s.brokerWork.closing() {
+			s.agentLifecycleLog.Info("reconcile: hub is shutting down; leaving the remaining dispatches pending",
+				"brokerID", brokerID, "remaining", len(dispatches)-i)
+			return
+		}
 		claimed, err := s.store.ClaimBrokerDispatch(ctx, d.ID, s.instanceID)
 		if err != nil {
 			s.agentLifecycleLog.Error("reconcile: claim dispatch failed", "id", d.ID, "error", err)
@@ -98,6 +107,26 @@ func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only 
 			"correlation_id", d.CorrelationID,
 			"executor_kind", dispatchExecutor.Kind,
 			"executor_id", dispatchExecutor.ID,
+		}
+		// Placement guard (requirePinnedPlacement): a pinned agent's row
+		// is executed only on the Runtime Broker it is pinned to, and only
+		// while its saved placement is consistent. A refused row is
+		// settled failed with placement_conflict and nothing is
+		// dispatched; a queued stop's stop_queued state and the agent's
+		// reservation are left as they are.
+		if refusal := s.drainPlacementRefusal(ctx, d); refusal != nil {
+			s.agentLifecycleLog.Warn("reconcile: dispatch refused, agent placement is inconsistent; not dispatched",
+				append(initiatorLogArgs, "agent_id", d.AgentID, "broker_id", d.BrokerID, "error", refusal)...)
+			if err := s.store.FailBrokerDispatch(ctx, d.ID, drainPlacementConflictCode+": "+refusal.Error(), dispatchFailureResult(refusal)); err != nil {
+				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
+			}
+			if rec := s.dispatchMetrics; rec != nil {
+				rec.IncFailed(ctx, 1, opAttr)
+			}
+			if s.events != nil {
+				s.events.PublishDispatchDone(ctx, d.ID)
+			}
+			continue
 		}
 		result, execErr := s.execDispatch(dispatchCtx, d)
 		if execErr != nil {
@@ -131,6 +160,41 @@ func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only 
 		}
 	}
 
+}
+
+// drainPlacementConflictCode prefixes the error of a dispatch row the drain
+// refused for the agent's placement (drainPlacementRefusal).
+const drainPlacementConflictCode = "placement_conflict"
+
+// drainPlacementRefusal is the drain loop's placement guard for row d: for
+// a pinned agent, requirePinnedPlacement, and the row must have been queued
+// for the agent's own Runtime Broker (rows are drained per Runtime Broker
+// but executed against the agent's current one). It returns the refusal,
+// or nil to execute the row. Rows of unpinned agents, rows with no agent,
+// and rows whose agent row is gone or cannot be read now are left to their
+// executor and the dispatcher's own placement backstop (which refuses an
+// unpinned agent on a flat Runtime Broker with the executor's
+// "dispatch <op>: ..." error, not a placement_conflict row).
+func (s *Server) drainPlacementRefusal(ctx context.Context, d store.BrokerDispatch) *PlacementConflictError {
+	if d.AgentID == "" {
+		return nil
+	}
+	agent, err := s.store.GetAgent(ctx, d.AgentID)
+	if err != nil || !agent.IsPinned() {
+		return nil
+	}
+	if _, err := requirePinnedPlacement(ctx, s.store, agent); err != nil {
+		var pc *PlacementConflictError
+		if errors.As(err, &pc) {
+			return pc
+		}
+		return nil
+	}
+	if d.BrokerID != agent.RuntimeBrokerID {
+		return placementConflict(stalePinRefusal(agent,
+			fmt.Sprintf("the queued dispatch names Runtime Broker %s", d.BrokerID)))
+	}
+	return nil
 }
 
 // executeDispatch runs a claimed dispatch intent's op via the LOCAL broker
@@ -187,6 +251,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	}
 	var task string
 	var resume bool
+	var opts StartDispatchOptions
 	if d.Args != "" {
 		args, err := UnmarshalStartArgs(d.Args)
 		if err != nil {
@@ -194,12 +259,23 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		}
 		task = args.Task
 		resume = args.Resume
+		opts.Async = args.Async
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+	// A dispatcher that takes start options gets the intent's options (and
+	// may return an accepted launch); any other runs the synchronous start
+	// (ptone/scion#4669). Both calls stay in this function, which the
+	// call-site and run-intent guards list.
+	var res *StartDispatchResult
+	if od, ok := dispatcher.(startOptionsDispatcher); ok {
+		res, err = od.DispatchAgentStartWithOptions(ctx, agent, task, resume, opts)
+	} else {
+		err = dispatcher.DispatchAgentStart(ctx, agent, task, resume)
+	}
+	if err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, res.AcceptedLaunch()), nil
 }
 
 // lifecycleDispatchResult is the result a completed start or restart row
@@ -208,10 +284,13 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 // otherwise never see, and whether a delete won after the broker start
 // landed. The requester answers 409 delete_in_progress from its own re-read;
 // DeleteWon only ends its wait for a success phase that will not come.
-func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings) string {
+// launch is the asynchronous launch the start was accepted as, or nil for a
+// synchronous start (ptone/scion#4669); it also ends the requester's wait.
+func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings, launch *LaunchAccepted) string {
 	return marshalLifecycleResult(LifecycleDispatchResult{
 		Warnings:  warns.Warnings(),
 		DeleteWon: s.deleteWonAfterLanding(ctx, agentID),
+		Launch:    launch,
 	})
 }
 
@@ -346,7 +425,7 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, nil), nil
 }
 
 func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
@@ -363,6 +442,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		// that records its target is still sent from the intent alone
 		// (ptone/scion#3665); any other intent fails, as before.
 		if target, ok := deleteIntentTargetAgent(d, args); ok {
+			s.pinRowlessDeleteTarget(ctx, target)
 			agent, err = target, nil
 		}
 	}
@@ -384,6 +464,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		claim = args.Claim
 		intentNotAfter = args.NotAfter
 		applyDeleteIntentRuns(agent, args)
+		if args.PurgeRetained {
+			ctx = withPurgeRetained(ctx)
+		}
 	}
 	// A delete engine's intent applies only while the claim it was created
 	// under is still the row's current claim, live or failed in_doubt (see
@@ -462,6 +545,24 @@ func deleteIntentTargetAgent(d store.BrokerDispatch, args *DeleteDispatchArgs) (
 	}, true
 }
 
+// pinRowlessDeleteTarget gives a rowless delete target
+// (deleteIntentTargetAgent) the pin of its Runtime Broker when that row is
+// flat. The intent names exactly that Runtime Broker (d.BrokerID), and a
+// flat Runtime Broker serves one runtime target that never changes, so
+// this is the agent's saved placement, not a guess; without it the
+// dispatcher's placement backstop would read the target as an unpinned
+// agent on a flat row and refuse it. Any read failure leaves the target
+// unpinned, and the backstop decides.
+func (s *Server) pinRowlessDeleteTarget(ctx context.Context, agent *store.Agent) {
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil || !broker.IsFlat() {
+		return
+	}
+	agent.PinnedRuntimeBrokerID = broker.ID
+	agent.PinnedRuntimeTargetID = broker.RuntimeTarget.ID
+	agent.PinnedRuntimeTargetType = broker.RuntimeTarget.Type
+}
+
 // logStaleClaimlessDelete records a claimless delete intent that was not
 // acted on because its notAfter passed (ptone/scion#3674), found stale by
 // the executing hub or by the broker. Its runtime entries stay on the
@@ -529,7 +630,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		env = args.Env
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes (ptone/scion#4817).
+	finalized, err := dispatcher.DispatchFinalizeEnv(withKeepCredentialOnUnknownOutcome(ctx), agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
@@ -550,7 +655,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes, and the requester revokes when it rolls back
+	// (ptone/scion#4817).
+	created, err := dispatcher.DispatchAgentCreateWithGather(withKeepCredentialOnUnknownOutcome(ctx), agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}

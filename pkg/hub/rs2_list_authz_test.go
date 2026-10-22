@@ -644,7 +644,7 @@ func TestRS2_ScopedUATListRestriction(t *testing.T) {
 
 	// Create a UAT scoped to projA only.
 	// Use project:read — project-member does not hold project:manage under A2.
-	uatKey := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+	uatKey := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "project:list"})
 
 	// Make request with UAT.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/projects", nil)

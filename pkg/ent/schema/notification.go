@@ -56,6 +56,20 @@ func (Notification) Fields() []ent.Field {
 			Default(false),
 		field.Bool("acknowledged").
 			Default(false),
+		// dispatch_attempts counts delivery attempts made for an
+		// agent-targeted notification (primary dispatch and sweep or
+		// broker-connect retries). Rows written before the column existed
+		// read 0: their attempts were not recorded.
+		field.Int("dispatch_attempts").
+			NonNegative().
+			Default(0),
+		// dispatch_outcome is the terminal delivery outcome: "delivered" or
+		// "failed" (given up; see store.NotificationOutcomeFailed). Empty
+		// means no outcome is recorded: the notification is pending or in
+		// flight, or the row predates the column, in which case the
+		// dispatched flag keeps its old meaning.
+		field.String("dispatch_outcome").
+			Default(""),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

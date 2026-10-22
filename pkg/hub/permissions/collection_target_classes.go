@@ -94,16 +94,16 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"project.create": {TargetClassKindHubResource}, "project.read": {},
 	"project.update": {}, "project.delete": {}, "project.manage": {},
 	"project.register": {}, "project.set_messaging_policy": {}, "project.clone": {},
-	"project.list": {TargetClassKindHubResource},
+	"project.manage_visitors": {}, "project.list": {TargetClassKindHubResource},
 
 	// artifact.* — create is CapabilityScope (publish into a project);
 	// read is also collection-level, because the artifact list route
 	// (/api/v1/artifacts?mine=1) is classified artifact.read and checks
-	// each listed artifact against its home project. update/delete/manage
-	// always target an existing artifact.
+	// each listed artifact against its home project. update/delete/manage/
+	// steward always target an existing artifact.
 	"artifact.create": {TargetClassKindProjectScoped},
 	"artifact.read":   {TargetClassKindProjectScoped},
-	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {},
+	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {}, "artifact.steward": {},
 
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete are CapabilityResource (always an existing skill).
@@ -264,6 +264,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions — always the holder's own existing records,
 	// never a collection-level target.
 	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
+	"federation_token.mint": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

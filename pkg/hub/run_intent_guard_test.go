@@ -34,6 +34,8 @@ var lifecycleDispatchMethods = map[string]bool{
 	"DispatchAgentCreate":           true,
 	"DispatchAgentCreateWithGather": true,
 	"DispatchAgentProvision":        true,
+	// The start-options entry point (ptone/scion#4669) is a start.
+	"DispatchAgentStartWithOptions": true,
 }
 
 // How a function that calls a lifecycle dispatch method keeps the agent's
@@ -97,6 +99,11 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// claimed it: the row is gone, or the delete engine records the stopped
 	// intent itself (ptone/scion#3055).
 	"HTTPAgentDispatcher.compensateLandedRun": {kind: intentUnchanged},
+	// The retained-files purge sends a delete for a soft-deleted agent,
+	// then purges the record right after. It is not a run transition: a
+	// soft-deleted row cannot take a running intent, and the readers of
+	// run intent skip soft-deleted rows (ptone/scion#4744).
+	"Server.settleRetainedFiles": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a
@@ -141,10 +148,12 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	t.Helper()
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards DispatchAgent lifecycle callers, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards DispatchAgent lifecycle callers, which identity.go and identity_credential.go do not contain.
-	files, err := filepath.Glob("*.go")
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards DispatchAgent lifecycle callers.
+	files, err := globGuardScanDirs(".", "*.go")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
 	}
@@ -157,15 +166,23 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		if f.Name.Name != "hub" {
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
 			continue
+		}
+		// Functions of a guardScanSubdirs package are keyed by its slash
+		// path ("maintenance/Name"), so they cannot shadow a pkg/hub
+		// function of the same name.
+		prefix := ""
+		if rel != "." {
+			prefix = filepath.ToSlash(rel) + "/"
 		}
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
-			funcs[funcDeclKey(fd)] = selectorCallNames(fd)
+			funcs[prefix+funcDeclKey(fd)] = selectorCallNames(fd)
 		}
 	}
 	if len(funcs) == 0 {

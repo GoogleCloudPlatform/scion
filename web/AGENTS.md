@@ -53,6 +53,7 @@ Note: The Vite dev server only serves client assets. API calls and SSE require t
 | `npm run dev` | Start Vite dev server with hot reload |
 | `npm run build` | Build client assets for production |
 | `npm run build:dev` | Build client assets in development mode |
+| `npm run test:move-sourcemaps` | Test `scripts/move-sourcemaps.mjs`, which the builds run to move source maps from `dist/client` (embedded and served) to `dist/sourcemaps` (not served) |
 | `npm run lint` | Check for linting errors |
 | `npm run lint:fix` | Auto-fix linting errors |
 | `npm run format` | Format code with Prettier |
@@ -337,9 +338,9 @@ When using the Chrome DevTools MCP tools (`take_screenshot`, `take_snapshot`, `c
    ss -tlnp | grep 8080  # verify it's listening
    ```
 
-3. **Capture the dev token** from the server startup output. It appears as:
-   ```
-   Dev token: scion_dev_<hex>
+3. **Load the dev token from its file.** Startup output shows the dev token file path instead of its value, as a command you can run:
+   ```bash
+   export SCION_DEV_TOKEN=$(cat '/home/user/.scion/dev-token')
    ```
 
 4. **Build assets before starting the server**: Run `npm install && npm run build` in `web/` first. The server serves from `web/dist/client`.

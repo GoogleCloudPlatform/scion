@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"strconv"
@@ -42,11 +43,11 @@ func setupProjectsDeleteTest(t *testing.T, confirm bool) *fakeProjectsHub {
 	t.Helper()
 	origHome := os.Getenv("HOME")
 	origProjectPath := projectPath
-	origFormat, origYes, origNonInteractive := outputFormat, autoConfirm, nonInteractive
+	origFormat, origYes, origNonInteractive, origForce := outputFormat, autoConfirm, nonInteractive, hubProjectsDeleteForce
 	t.Cleanup(func() {
 		_ = os.Setenv("HOME", origHome)
 		projectPath = origProjectPath
-		outputFormat, autoConfirm, nonInteractive = origFormat, origYes, origNonInteractive
+		outputFormat, autoConfirm, nonInteractive, hubProjectsDeleteForce = origFormat, origYes, origNonInteractive, origForce
 	})
 
 	hub := &fakeProjectsHub{projects: []hubclient.Project{
@@ -63,7 +64,7 @@ func setupProjectsDeleteTest(t *testing.T, confirm bool) *fakeProjectsHub {
 	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
 	projectPath = setupEnvProject(t, tmpHome, srv.URL)
 
-	outputFormat, autoConfirm, nonInteractive = "", confirm, false
+	outputFormat, autoConfirm, nonInteractive, hubProjectsDeleteForce = "", confirm, false, false
 	return hub
 }
 
@@ -225,4 +226,59 @@ func TestRunHubProjectsInfoDelete_EmptyArg(t *testing.T) {
 			assert.Empty(t, hub.deletes, "delete calls")
 		})
 	}
+}
+
+// TestRunHubProjectsDelete_AgentsRemain covers ptone/scion#4811: without
+// --force the hub's 409 refusal is printed with the remaining agents and
+// the --force hint; with --force the delete is sent with force=true.
+func TestRunHubProjectsDelete_AgentsRemain(t *testing.T) {
+	t.Run("refused without force", func(t *testing.T) {
+		hub := setupProjectsDeleteTest(t, true)
+		hub.agentsRemain = true
+
+		err := runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "worker (a-1), delete failed")
+		assert.Contains(t, err.Error(), "... and more")
+		assert.Contains(t, err.Error(), "--force")
+		assert.Empty(t, hub.deletes)
+	})
+
+	t.Run("refused without force, JSON output", func(t *testing.T) {
+		hub := setupProjectsDeleteTest(t, true)
+		hub.agentsRemain = true
+		outputFormat = "json"
+
+		var err error
+		out := captureStdout(t, func() {
+			err = runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA})
+		})
+		require.Error(t, err)
+		assert.True(t, isReportedInJSON(err), "the refusal is reported in the JSON document")
+		var got ActionResult
+		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+		assert.Equal(t, "error", got.Status)
+		assert.Equal(t, deleteTestIDA, got.Details["projectId"])
+		assert.Equal(t, true, got.Details["truncated"])
+		agents, ok := got.Details["agents"].([]interface{})
+		require.True(t, ok, "details.agents is a list: %v", got.Details)
+		require.Len(t, agents, 1)
+		agent, _ := agents[0].(map[string]interface{})
+		assert.Equal(t, "a-1", agent["id"])
+		assert.Equal(t, "worker", agent["slug"])
+		assert.Equal(t, "failed", agent["deletionState"])
+		assert.Empty(t, hub.deletes)
+	})
+
+	t.Run("force deletes", func(t *testing.T) {
+		hub := setupProjectsDeleteTest(t, true)
+		hub.agentsRemain = true
+		hubProjectsDeleteForce = true
+
+		require.NoError(t, runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA}))
+		assert.Equal(t, []string{deleteTestIDA}, hub.deletes)
+		reqs := hub.recorded()
+		require.NotEmpty(t, reqs)
+		assert.Equal(t, "/api/v1/projects/"+deleteTestIDA+"?force=true", reqs[len(reqs)-1])
+	})
 }

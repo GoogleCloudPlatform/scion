@@ -72,14 +72,10 @@ given: review the summary first, then apply.`,
 			return fmt.Errorf("--all is a dry run unless --apply is given; --dry-run is not used with --all")
 		}
 
-		hubCtx, err := CheckHubAvailability(projectPath)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("reset-auth requires Hub connectivity (hub not configured)")
-		}
-
 		if resetAuthAll {
 			return reissueScopesAllViaHub(hubCtx, resetAuthApply)
 		}
@@ -132,6 +128,7 @@ func reissueScopesAllViaHub(hubCtx *HubContext, apply bool) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to re-issue scopes via Hub: %w", err))
 	}
+	reloadUnconfirmed := 0
 	for _, a := range res.Agents {
 		if a.Outcome == "noop" {
 			continue
@@ -153,13 +150,17 @@ func reissueScopesAllViaHub(hubCtx *HubContext, apply bool) error {
 		if a.DispatchError != "" {
 			statusf("  token not delivered: %s\n", a.DispatchError)
 		}
+		if a.ReloadUnconfirmed != "" {
+			reloadUnconfirmed++
+			statusf("  reload unconfirmed: %s\n", a.ReloadUnconfirmed)
+		}
 	}
 	verb := "would change"
 	if !res.DryRun {
 		verb = "changed"
 	}
-	statusf("%d agents: %d %s, %d unchanged, %d refused, %d token not delivered\n",
-		res.Total, len(res.Succeeded), verb, len(res.Noop), len(res.Refused), len(res.PushFailed))
+	statusf("%d agents: %d %s, %d unchanged, %d refused, %d token not delivered, %d reload unconfirmed\n",
+		res.Total, len(res.Succeeded), verb, len(res.Noop), len(res.Refused), len(res.PushFailed), reloadUnconfirmed)
 	if res.DryRun {
 		statusf("Dry run: nothing was changed. Re-run with --apply to apply.\n")
 	}
@@ -171,6 +172,9 @@ func reissueScopesAllViaHub(hubCtx *HubContext, apply bool) error {
 	}
 	if len(res.PushFailed) > 0 {
 		return fmt.Errorf("%d agents did not receive their new token; run reset-auth for each", len(res.PushFailed))
+	}
+	if reloadUnconfirmed > 0 {
+		return fmt.Errorf("%d agents received their new token but did not confirm the reload; if one keeps failing to authenticate, restart it", reloadUnconfirmed)
 	}
 	return nil
 }
@@ -205,6 +209,9 @@ func reissueScopesViaHub(hubCtx *HubContext, agentName string, dryRun bool) erro
 	printScopeReissueResult(res)
 	if res.DispatchError != "" {
 		return fmt.Errorf("scopes re-issued, but the new token was not delivered: %s", res.DispatchError)
+	}
+	if res.ReloadUnconfirmed != "" {
+		return fmt.Errorf("scopes re-issued: %s", res.ReloadUnconfirmed)
 	}
 	return nil
 }

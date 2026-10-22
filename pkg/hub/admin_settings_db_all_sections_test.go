@@ -57,8 +57,8 @@ var layer1RoundTripSamples = map[string]string{
 	"server.hub.soft_delete_retain_files":      `true`,
 	"server.hub.start_claim_lease_ttl":         `"60s"`,
 	"server.hub.start_max_duration":            `"15m"`,
-	"server.hub.start_unconfirmed_hold":        `"14m"`,
-	"server.hub.start_create_unconfirmed_hold": `"4m"`,
+	"server.hub.start_unconfirmed_hold":        `"18m"`,
+	"server.hub.start_create_unconfirmed_hold": `"16m30s"`,
 	// telemetry (deep-merged)
 	"telemetry.enabled":                        `true`,
 	"telemetry.cloud":                          `{"endpoint":"otel.example.com:4317"}`,
@@ -71,6 +71,8 @@ var layer1RoundTripSamples = map[string]string{
 	"telemetry.cloud.tls.enabled":              `true`,
 	"telemetry.cloud.tls.insecure_skip_verify": `false`,
 	"telemetry.cloud.tls.ca_file":              `"/etc/ca.pem"`,
+	"telemetry.cloud.tls.cert_file":            `"/etc/client.pem"`,
+	"telemetry.cloud.tls.key_file":             `"/etc/client-key.pem"`,
 	"telemetry.cloud.batch":                    `{"max_size":256}`,
 	"telemetry.cloud.batch.max_size":           `256`,
 	"telemetry.cloud.batch.timeout":            `"10s"`,
@@ -98,6 +100,9 @@ var layer1RoundTripSamples = map[string]string{
 	"auto_expose_ports.enabled":     `true`,
 	"quotas.enforce_broker_quotas":  `false`,
 	"agent_secrets.user_scope_only": `true`,
+	// hub_observability
+	"server.hub.observability.metrics_enabled": `true`,
+	"server.hub.observability.tracing_enabled": `false`,
 	// agent_defaults
 	"default_template":                        `"tmpl-a"`,
 	"default_harness_config":                  `"hc-a"`,
@@ -157,6 +162,27 @@ var layer1RoundTripNoCompanion = map[string]bool{
 	"default_gcp_identity_service_account_id": true, // must name a stored, verified service account
 	"default_gcp_identity_mode":               true, // checked together with a stored service account
 	"server.hub.hub_name":                     true, // a sent value equal to the effective name is an echo
+}
+
+// layer1RoundTripPairs lists sample keys that are stored and cleared together
+// with a partner key, because one without the other is invalid: a save that
+// leaves telemetry.cloud.tls with only cert_file or only key_file is refused
+// (telemetryTLSSaveErrors). The partner shares the parent object.
+var layer1RoundTripPairs = map[string]string{
+	"telemetry.cloud.tls.cert_file": "telemetry.cloud.tls.key_file",
+	"telemetry.cloud.tls.key_file":  "telemetry.cloud.tls.cert_file",
+}
+
+// pairMembers returns the JSON object holding the last element of pathA
+// with valueA and the last element of pathB with valueB.
+func pairMembers(t *testing.T, pathA, pathB []string, valueA, valueB string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]json.RawMessage{
+		pathA[len(pathA)-1]: json.RawMessage(valueA),
+		pathB[len(pathB)-1]: json.RawMessage(valueB),
+	})
+	require.NoError(t, err)
+	return string(b)
 }
 
 // mapSections are the opsettings sections whose document is one map.
@@ -312,10 +338,26 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 			t.Run(koanf, func(t *testing.T) {
 				t.Setenv("HOME", t.TempDir())
 				f := layer1FieldFor(t, sec.Name, koanf)
-				srv, fake, ops := newTestDBServer(t)
+				// Clearing a saved public URL is recorded before it is
+				// written, and not made without the record
+				// (ptone/scion#3905), so that save needs an audit store.
+				var audit *settingsAuditStore
+				var st store.Store
+				if koanf == config.PublicURLKey {
+					audit = &settingsAuditStore{}
+					st = audit
+				}
+				srv, fake, ops := newTestDBServerWithStore(t, st)
 
 				seed := sample
-				if f.docPath != nil {
+				partner, paired := layer1RoundTripPairs[koanf]
+				var pf layer1Field
+				switch {
+				case paired:
+					pf = layer1FieldFor(t, sec.Name, partner)
+					seed = nestJSON(t, f.docPath[:len(f.docPath)-1],
+						pairMembers(t, f.docPath, pf.docPath, sample, layer1RoundTripSamples[partner]))
+				case f.docPath != nil:
 					seed = nestJSON(t, f.docPath, sample)
 				}
 				fake.seedWithOrigin(sec.Name, json.RawMessage(seed), "managed")
@@ -333,8 +375,13 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				require.True(t, ok, "omitting %s must keep it; row %s after %s", koanf, row.Value, body)
 				assert.Equal(t, want, got, "omitting %s must keep its value", koanf)
 
-				// Explicit null: cleared.
+				// Explicit null: cleared. A paired key is cleared with its
+				// partner, the only clear that leaves a valid value.
 				body = nestJSON(t, f.bodyPath, `null`)
+				if paired {
+					body = nestJSON(t, f.bodyPath[:len(f.bodyPath)-1],
+						pairMembers(t, f.bodyPath, pf.bodyPath, `null`, `null`))
+				}
 				rr = putLayer1(t, srv, ops, sec.Name, body)
 				require.Equal(t, http.StatusOK, rr.Code, "clear body %s: %s", body, rr.Body.String())
 				row = storedRow(fake, sec.Name)
@@ -346,6 +393,16 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				}
 				_, ok = valueAtPath(doc, f.docPath)
 				assert.False(t, ok, "an explicit null must clear %s; row %s", koanf, row.Value)
+				if paired {
+					_, ok = valueAtPath(doc, pf.docPath)
+					assert.False(t, ok, "an explicit null must clear %s with %s; row %s", partner, koanf, row.Value)
+				}
+				if audit != nil {
+					recs := audit.records()
+					require.Len(t, recs, 1, "only the clear changes the stored public URL")
+					assert.Equal(t, want, recs[0].BeforeSummary)
+					assert.Empty(t, recs[0].AfterSummary)
+				}
 			})
 		}
 	}
@@ -354,6 +411,9 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 	}
 	for k := range layer1RoundTripExempt {
 		assert.True(t, covered[k], "layer1RoundTripExempt has %s, which is not a registry key", k)
+	}
+	for k, partner := range layer1RoundTripPairs {
+		assert.True(t, covered[k] && covered[partner], "layer1RoundTripPairs has %s / %s, which is not a registry key pair", k, partner)
 	}
 }
 
@@ -434,6 +494,7 @@ func TestPutServerConfigDB_MergedSections_ConcurrentWrite409(t *testing.T) {
 		{"auto_expose_ports", `{"enabled":true}`, `{"enabled":false}`, `{"auto_expose_ports": {"enabled": null}}`},
 		{"quotas", `{"enforce_broker_quotas":true}`, `{"enforce_broker_quotas":false}`, `{"quotas": {"enforce_broker_quotas": null}}`},
 		{"agent_secrets", `{"user_scope_only":true}`, `{"user_scope_only":false}`, `{"agent_secrets": {"user_scope_only": null}}`},
+		{"hub_observability", `{"metrics_enabled":true}`, `{"metrics_enabled":false}`, `{"server": {"hub": {"observability": {"metrics_enabled": null}}}}`},
 		{"notifications", `{"notification_channels":[{"type":"slack","params":{"channel":"#a"}}]}`, `{"notification_channels":[{"type":"slack","params":{"channel":"#b"}}]}`, `{"server": {"notification_channels": []}}`},
 		{"project_defaults", `{"default_scratchpad":true}`, `{"default_scratchpad":false}`, `{"default_scratchpad": null}`},
 	} {
@@ -602,9 +663,9 @@ func TestPutServerConfigDB_UnchangedSeededRowIsAdopted(t *testing.T) {
 }
 
 // An access save on a hub with no access row starts from the effective
-// snapshot values, and endpoints from the effective public_url and
-// image_registry, as their builders did before the move to the shared
-// helper.
+// snapshot values. An endpoints save with no row carries neither the
+// bootstrap public_url nor the bootstrap image_registry (ptone/scion#3905,
+// ptone/scion#3916).
 func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fake := newFakeHubSettingStore()
@@ -613,14 +674,14 @@ func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 		"image_registry":                "file.example.com",
 	})
 	ops := NewOperationalSettings(fake, fileK, emptyKoanf())
-	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, ""), store: &settingsAuditStore{}}
 	srv.SetOperationalSettings(ops)
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"user_access_mode":"invite"},"hub":{"public_url":"https://hub.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, decodeJSONValue(t, []byte(`{"default_user_role":"viewer","user_access_mode":"invite"}`)),
 		decodeJSONValue(t, storedRow(fake, "access").Value))
-	assert.Equal(t, decodeJSONValue(t, []byte(`{"image_registry":"file.example.com","public_url":"https://hub.example.com"}`)),
+	assert.Equal(t, decodeJSONValue(t, []byte(`{"public_url":"https://hub.example.com"}`)),
 		decodeJSONValue(t, storedRow(fake, "endpoints").Value))
 }
 
@@ -932,6 +993,8 @@ func TestTelemetryCloudFields_Known(t *testing.T) {
 		"tls.enabled":              "*bool",
 		"tls.insecure_skip_verify": "*bool",
 		"tls.ca_file":              "string",
+		"tls.cert_file":            "string",
+		"tls.key_file":             "string",
 		"batch":                    "*config.V1TelemetryBatchConfig",
 		"batch.max_size":           "int",
 		"batch.timeout":            "string",
@@ -954,11 +1017,12 @@ func TestTelemetryCloudFields_Known(t *testing.T) {
 	assert.Equal(t, known, got, "telemetry.cloud members changed: check that \"\", null and {} still mean unset for each new member (telemetryCloudUnchanged), then update this list")
 }
 
-// File mode replaces the telemetry object whole, so a masked header is
-// kept only when the cloud object written, apart from headers, equals the
-// stored one: an exact echo keeps; a partial or empty tls, a case-variant
-// clear and a changed or cleared endpoint are rejected; "" for a member
-// GET omitted keeps.
+// File mode merges telemetry key by key, as DB mode does, so a masked
+// header is kept only when the cloud object written (the stored object
+// merged with the request), apart from headers, equals the stored one: an
+// exact echo, an omitted, partial or empty tls (the stored tls members are
+// kept) and "" for a member GET omitted keep; a case-variant clear and a
+// changed or cleared endpoint are rejected.
 func TestPutServerConfig_FileMode_TelemetryMaskedHeaderCloudRule(t *testing.T) {
 	const stored = `schema_version: "1"
 telemetry:
@@ -977,9 +1041,9 @@ telemetry:
 		{"exact echo", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
 		{"empty string for a member GET omitted", `"endpoint":"otel.example.com:4317","protocol":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
 		{"case-variant nested clear", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"CA_FILE":""}`, http.StatusBadRequest},
-		{"partial tls", `"endpoint":"otel.example.com:4317","tls":{"enabled":true}`, http.StatusBadRequest},
-		{"empty tls", `"endpoint":"otel.example.com:4317","tls":{}`, http.StatusBadRequest},
-		{"omitted tls", `"endpoint":"otel.example.com:4317"`, http.StatusBadRequest},
+		{"partial tls", `"endpoint":"otel.example.com:4317","tls":{"enabled":true}`, http.StatusOK},
+		{"empty tls", `"endpoint":"otel.example.com:4317","tls":{}`, http.StatusOK},
+		{"omitted tls", `"endpoint":"otel.example.com:4317"`, http.StatusOK},
 		{"changed endpoint", `"endpoint":"other.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
 		{"cleared endpoint", `"endpoint":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
 	} {
@@ -1002,9 +1066,61 @@ telemetry:
 			require.NotNil(t, vs.Telemetry)
 			require.NotNil(t, vs.Telemetry.Cloud)
 			assert.Equal(t, map[string]string{"x-api-key": "real-key"}, vs.Telemetry.Cloud.Headers)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+			assert.True(t, *vs.Telemetry.Cloud.TLS.Enabled)
 			assert.Equal(t, "/etc/ca.pem", vs.Telemetry.Cloud.TLS.CAFile)
 		})
 	}
+}
+
+// maskedHeaderOmittedTLSBody echoes a masked header with the stored
+// endpoint and leaves out the stored cloud.tls. Both modes merge
+// telemetry, so the cloud object written is unchanged and the stored
+// header and tls are kept (the DB-mode and file-mode pair below).
+const maskedHeaderOmittedTLSBody = `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`
+
+func TestPutServerConfigDB_TelemetryMaskedHeaderOmittedTLSKeeps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("telemetry", json.RawMessage(`{"cloud":{"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"real-key"}}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, maskedHeaderOmittedTLSBody)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, decodeJSONValue(t, []byte(`{"cloud":{"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"real-key"}}}`)),
+		decodeJSONValue(t, storedRow(fake, "telemetry").Value))
+}
+
+func TestPutServerConfig_FileMode_TelemetryMaskedHeaderOmittedTLSKeeps(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`schema_version: "1"
+telemetry:
+  cloud:
+    endpoint: otel.example.com:4317
+    tls:
+      enabled: true
+      ca_file: /etc/ca.pem
+    headers:
+      x-api-key: real-key
+`), 0600))
+	rr := httptest.NewRecorder()
+	(&Server{}).handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", maskedHeaderOmittedTLSBody))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var vs config.VersionedSettings
+	require.NoError(t, yamlv3.Unmarshal(data, &vs))
+	require.NotNil(t, vs.Telemetry)
+	require.NotNil(t, vs.Telemetry.Cloud)
+	assert.Equal(t, "otel.example.com:4317", vs.Telemetry.Cloud.Endpoint)
+	assert.Equal(t, map[string]string{"x-api-key": "real-key"}, vs.Telemetry.Cloud.Headers)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+	assert.True(t, *vs.Telemetry.Cloud.TLS.Enabled)
+	assert.Equal(t, "/etc/ca.pem", vs.Telemetry.Cloud.TLS.CAFile)
 }
 
 func TestTelemetryCloudUnchanged(t *testing.T) {
@@ -1134,7 +1250,7 @@ func TestSystemRegistry_UnchangedManagedRowNotRewritten(t *testing.T) {
 // env value into the written row.
 func TestPutServerConfigDB_EndpointsSeededRowEnvPinnedMonitoringURLNotCarried(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	srv, fake, ops := newTestDBServer(t)
+	srv, fake, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 	ops.envOverrides = map[string]bool{config.MonitoringDashboardURLKey: true}
 	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://old.example.com","monitoring_dashboard_url":"https://env.example.com/d"}`), "seeded")
 	_, err := ops.Refresh(context.Background())

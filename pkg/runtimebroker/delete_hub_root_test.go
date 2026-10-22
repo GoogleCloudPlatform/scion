@@ -181,7 +181,7 @@ func TestDeleteAgent_PassesRequestProjectIDAsHubProjectID(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	srv := New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
 	scionDir, _, agentDir, _ := makeGitHubProject(t, home, "proj-b", scopeProjB, "dev", "run-cur")
 	entries = []api.AgentInfo{withRun(labelled("dev", "cid-cur", scopeProjB, scionDir), "run-cur")}

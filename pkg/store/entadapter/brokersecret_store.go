@@ -191,11 +191,12 @@ func (s *BrokerSecretStore) DeleteBrokerSecret(ctx context.Context, brokerID str
 // entJoinTokenToStore converts an Ent BrokerJoinToken to a store model.
 func entJoinTokenToStore(t *ent.BrokerJoinToken) *store.BrokerJoinToken {
 	return &store.BrokerJoinToken{
-		BrokerID:  t.ID.String(),
-		TokenHash: t.TokenHash,
-		ExpiresAt: t.ExpiresAt,
-		CreatedAt: t.Created,
-		CreatedBy: t.CreatedBy,
+		BrokerID:   t.ID.String(),
+		TokenHash:  t.TokenHash,
+		ExpiresAt:  t.ExpiresAt,
+		CreatedAt:  t.Created,
+		CreatedBy:  t.CreatedBy,
+		IssuanceID: t.IssuanceID,
 	}
 }
 
@@ -212,13 +213,17 @@ func (s *BrokerSecretStore) CreateJoinToken(ctx context.Context, token *store.Br
 	if token.CreatedAt.IsZero() {
 		token.CreatedAt = time.Now()
 	}
+	if err := shapeJoinToken(ctx, s.client, token); err != nil {
+		return err
+	}
 
 	create := s.client.BrokerJoinToken.Create().
 		SetID(uid).
 		SetTokenHash(token.TokenHash).
 		SetExpiresAt(token.ExpiresAt).
 		SetCreatedBy(token.CreatedBy).
-		SetCreated(token.CreatedAt)
+		SetCreated(token.CreatedAt).
+		SetNillableIssuanceID(token.IssuanceID)
 
 	if _, err := create.Save(ctx); err != nil {
 		return mapError(err)
@@ -262,24 +267,59 @@ func (s *BrokerSecretStore) UpsertJoinToken(ctx context.Context, token *store.Br
 	return replaced, nil
 }
 
-func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, token *store.BrokerJoinToken) (bool, error) {
-	replaced, err := client.BrokerJoinToken.Query().
-		Where(brokerjointoken.IDEQ(uid)).
-		Exist(ctx)
+// shapeJoinToken applies grant shaping (admin tier A3) to a join token
+// about to be stored: minted by an admin-kind test identity, it expires no
+// later than the identity and carries its issuance ID; any other token
+// carries no issuance ID.
+func shapeJoinToken(ctx context.Context, client *ent.Client, token *store.BrokerJoinToken) error {
+	shaping, err := grantShapingFor(ctx, client, token.CreatedBy)
 	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		token.ExpiresAt = *shaping.ClampExpiry(&token.ExpiresAt)
+	}
+	token.IssuanceID = issuanceStamp(shaping)
+	return nil
+}
+
+func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, token *store.BrokerJoinToken) (bool, error) {
+	if err := shapeJoinToken(ctx, client, token); err != nil {
+		return false, err
+	}
+	existing, err := client.BrokerJoinToken.Query().
+		Where(brokerjointoken.IDEQ(uid)).
+		Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
 		return false, mapError(err)
 	}
-	// ResolveWithNewValues replaces every column, including created and
-	// created_by, so a re-minted token records its own mint time and minter.
+	replaced := existing != nil
+	// issuance_id is Immutable (admin tier A3): the upsert below never
+	// writes it. A re-mint whose stamp differs from the stored row's
+	// removes that row first, so the token inserted carries its own stamp.
+	if existing != nil && !sameIssuanceStamp(existing.IssuanceID, token.IssuanceID) {
+		if err := client.BrokerJoinToken.DeleteOneID(uid).Exec(ctx); err != nil && !ent.IsNotFound(err) {
+			return false, mapError(err)
+		}
+	}
+	// The conflict update replaces every column except issuance_id,
+	// including created and created_by, so a re-minted token records its
+	// own mint time and minter.
 	err = client.BrokerJoinToken.Create().
 		SetID(uid).
 		SetTokenHash(token.TokenHash).
 		SetExpiresAt(token.ExpiresAt).
 		SetCreatedBy(token.CreatedBy).
 		SetCreated(token.CreatedAt).
+		SetNillableIssuanceID(token.IssuanceID).
 		OnConflict(
 			entsql.ConflictColumns(brokerjointoken.FieldID),
-			entsql.ResolveWithNewValues(),
+			entsql.ResolveWith(func(u *entsql.UpdateSet) {
+				u.SetExcluded(brokerjointoken.FieldTokenHash)
+				u.SetExcluded(brokerjointoken.FieldExpiresAt)
+				u.SetExcluded(brokerjointoken.FieldCreatedBy)
+				u.SetExcluded(brokerjointoken.FieldCreated)
+			}),
 		).
 		Exec(ctx)
 	if err != nil {
@@ -385,4 +425,13 @@ func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) (int, er
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// sameIssuanceStamp reports whether two issuance stamps are equal (both
+// nil, or the same ID).
+func sameIssuanceStamp(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

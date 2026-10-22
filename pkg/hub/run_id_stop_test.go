@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -80,6 +81,62 @@ func TestStopAgentQuery_RunID(t *testing.T) {
 	q, _ = url.ParseQuery(stopAgentQuery(withRecordedRuntime(context.Background(), "kubernetes"), "p1", "run-1"))
 	if q.Get("runId") != "run-1" || q.Get("projectId") != "p1" || len(q) != 3 {
 		t.Errorf("recorded runtime query %v, want projectId, runId and the recorded runtime", q)
+	}
+}
+
+// The dispatcher sends the hub's agent ID on stop and delete (both
+// transports build their query from stopAgentQuery / deleteAgentQuery), so
+// the broker can leave alone the in-flight start of a newer agent recreated
+// under the same name (ptone/scion#2632).
+func TestDispatchAgentStopAndDelete_SendAgentID(t *testing.T) {
+	ctx := context.Background()
+	f := newRunIDFixture(t, "agentid-stop")
+	want := api.AgentIDQueryParam + "=" + url.QueryEscape(f.agent.ID)
+
+	if err := f.dispatcher.DispatchAgentStop(ctx, f.agent); err != nil {
+		t.Fatalf("DispatchAgentStop: %v", err)
+	}
+	if got := f.client.lastStopAgentIDQuery; got != want {
+		t.Errorf("stop agent ID query = %q, want %q", got, want)
+	}
+	if err := f.dispatcher.DispatchAgentDelete(ctx, f.agent, false, false, false, time.Time{}); err != nil {
+		t.Fatalf("DispatchAgentDelete: %v", err)
+	}
+	if got := f.client.lastDeleteAgentIDQuery; got != want {
+		t.Errorf("delete agent ID query = %q, want %q", got, want)
+	}
+}
+
+func TestStopAndDeleteAgentQuery_AgentID(t *testing.T) {
+	ctx := withDispatchAgentID(context.Background(), "agent a&b")
+	q, err := url.ParseQuery(stopAgentQuery(ctx, "p1", "run-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Get(api.AgentIDQueryParam) != "agent a&b" || q.Get("runId") != "run-1" || q.Get("projectId") != "p1" {
+		t.Errorf("stop query %v, want projectId, runId and agentId", q)
+	}
+	if got := stopAgentQuery(ctx, "", ""); got != api.AgentIDQueryParam+"=agent+a%26b" {
+		t.Errorf("stop query with only an agent ID = %q", got)
+	}
+	q, err = url.ParseQuery(deleteAgentQuery(ctx, "p1", DeleteAgentOptions{RunID: "run-1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Get(api.AgentIDQueryParam) != "agent a&b" || q.Get("runId") != "run-1" {
+		t.Errorf("delete query %v, want runId and agentId", q)
+	}
+	// No agent ID on the context: nothing is sent and the broker matches
+	// by name, as before.
+	for _, raw := range []string{
+		stopAgentQuery(context.Background(), "p1", "run-1"),
+		deleteAgentQuery(context.Background(), "p1", DeleteAgentOptions{}),
+		stopAgentQuery(withDispatchAgentID(context.Background(), ""), "p1", ""),
+	} {
+		q, _ := url.ParseQuery(raw)
+		if q.Has(api.AgentIDQueryParam) {
+			t.Errorf("agentId sent without an agent ID: %q", raw)
+		}
 	}
 }
 
@@ -223,7 +280,7 @@ func stopE2EBroker(t *testing.T) (*runLabelManager, string) {
 	cfg := runtimebroker.DefaultServerConfig()
 	cfg.BrokerID = "e2e-broker"
 	cfg.BrokerName = "e2e-broker"
-	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	httpSrv := httptest.NewServer(brokerSrv.Handler())
 	t.Cleanup(httpSrv.Close)
 	return mgr, httpSrv.URL

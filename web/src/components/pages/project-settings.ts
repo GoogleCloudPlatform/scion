@@ -39,12 +39,14 @@ import type {
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
@@ -65,6 +67,7 @@ import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -315,7 +318,7 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private messagingPolicySuccess: string | null = null;
 
-  private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopBrokerRelativeTimeTick: (() => void) | null = null;
 
   static override styles = css`
     :host {
@@ -881,10 +884,8 @@ export class ScionPageProjectSettings extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.brokerRelativeTimeInterval) {
-      clearInterval(this.brokerRelativeTimeInterval);
-      this.brokerRelativeTimeInterval = null;
-    }
+    this.stopBrokerRelativeTimeTick?.();
+    this.stopBrokerRelativeTimeTick = null;
   }
 
   private async loadProject(skipGitHubCheck = false): Promise<void> {
@@ -1302,14 +1303,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
   private async loadHubTelemetryDefaultFallback(): Promise<void> {
-    try {
-      const response = await apiFetch('/api/v1/settings/public');
-      if (response.ok) {
-        const data = (await response.json()) as { telemetryEnabled?: boolean };
-        this.hubTelemetryDefault = data.telemetryEnabled ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to load hub telemetry default:', err);
+    const settings = await getPublicSettings();
+    if (settings) {
+      this.hubTelemetryDefault = settings.telemetryEnabled ?? false;
     }
   }
 
@@ -1387,16 +1383,10 @@ export class ScionPageProjectSettings extends LitElement {
     return this.brokers.every((b) => isBrokerKubernetesOnly(b));
   }
 
-  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
-  private static readonly gcpIdentityK8sHintText =
-    'Block is not supported on the Kubernetes runtime: this project’s runtime brokers are ' +
-    'Kubernetes. Choose Passthrough or Assign Service Account instead.';
-
   /**
    * Short explanation rendered into the GCP identity select's `help-text`
    * slot when this project's linked brokers are reliably Kubernetes-only:
-   * block is disabled in that case (existing stored "block" values still
-   * display; the server rejects saving a new one).
+   * what a Block default means there (ptone/scion#4077).
    *
    * Rendered as a slotted child of the `<sl-select>` (not a sibling
    * `aria-describedby` reference) because the element that receives focus is
@@ -1407,7 +1397,26 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.projectIsKubernetesOnly) return nothing;
-    return html`<div slot="help-text">${ScionPageProjectSettings.gcpIdentityK8sHintText}</div>`;
+    return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
+  }
+
+  /**
+   * The default picker's field help. On a Kubernetes-bound project the
+   * generic "Block prevents access" does not hold (the pod's service account
+   * can still get a federated token), so Block is left to the help-text slot
+   * (KUBERNETES_BLOCK_HINT).
+   */
+  private get gcpIdentityFieldHelp(): string {
+    if (this.projectIsKubernetesOnly) {
+      return (
+        'Controls the GCP identity of new agents. "Passthrough" allows host identity, "Assign" ' +
+        'binds a specific service account, and "Block" works as described above.'
+      );
+    }
+    return (
+      'Controls GCP metadata server access for new agents. "Block" prevents access, ' +
+      '"Passthrough" allows host identity, "Assign" binds a specific service account.'
+    );
   }
 
   /**
@@ -1431,13 +1440,12 @@ export class ScionPageProjectSettings extends LitElement {
           ? String(saEntry.hubValue)
           : '';
       // No service account configured: the consumption-side ladder falls
-      // through to "Block" the same way an unverified one does, which this
-      // project's Kubernetes runtime rejects at dispatch.
+      // through to "Block" the same way an unverified one does; the
+      // help-text slot says what Block means on Kubernetes.
       if (!saID && this.projectIsKubernetesOnly) {
         return html`<span class="field-help"
           >Inherited from hub: the hub default is "Assign", but no service account is configured, so
-          it falls back to "Block" — rejected at dispatch for this project's Kubernetes runtime. Set
-          a project-level default of Passthrough or Assign Service Account.</span
+          it falls back to "Block".</span
         >`;
       }
       const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
@@ -1469,13 +1477,6 @@ export class ScionPageProjectSettings extends LitElement {
       return html`<span class="field-help"
         >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
         on other brokers get "Block".</span
-      >`;
-    }
-    if (mode.hubValue === 'block' && this.projectIsKubernetesOnly) {
-      return html`<span class="field-help"
-        >Inherited from hub: the hub default is "Block", but this project's runtime brokers are
-        Kubernetes, which rejects it at dispatch. Set a project-level default of Passthrough or
-        Assign Service Account.</span
       >`;
     }
     return nothing;
@@ -1541,6 +1542,12 @@ export class ScionPageProjectSettings extends LitElement {
     } else {
       this.gcpServiceAccounts = [...this.gcpServiceAccounts, account];
     }
+  }
+
+  /** A failed save's message, announced to screen readers (role="alert"). */
+  private renderSettingsError(): TemplateResult | typeof nothing {
+    if (!this.settingsError) return nothing;
+    return html`<span class="config-status error" role="alert">${this.settingsError}</span>`;
   }
 
   private async handleSaveConfig(): Promise<void> {
@@ -1633,7 +1640,7 @@ export class ScionPageProjectSettings extends LitElement {
     if (
       !event?.altKey &&
       !(await showConfirm(
-        `Are you sure you want to delete "${projectName}"?\n\nAll agents in this project will be stopped and deleted.\n\nThis action cannot be undone.`
+        `Are you sure you want to delete "${projectName}"?\n\nThe Hub refuses to delete a project that still has agents; delete its agents first.\n\nThis action cannot be undone.`
       ))
     ) {
       return;
@@ -1720,8 +1727,8 @@ export class ScionPageProjectSettings extends LitElement {
                 <div class="delete-info">
                   <h3>Delete this project</h3>
                   <p>
-                    Permanently remove this project, its configuration, and all agents. All running
-                    agents will be stopped and deleted. This action cannot be undone.
+                    Permanently remove this project and its configuration. A project that still has
+                    agents cannot be deleted; delete its agents first. This action cannot be undone.
                   </p>
                 </div>
                 <div class="delete-actions">
@@ -2491,23 +2498,12 @@ export class ScionPageProjectSettings extends LitElement {
                         : 'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option
-                    value="block"
-                    ?disabled=${this.projectIsKubernetesOnly}
-                    title=${this.projectIsKubernetesOnly
-                      ? ScionPageProjectSettings.gcpIdentityK8sHintText
-                      : nothing}
-                    >Block</sl-option
-                  >
+                  <sl-option value="block">Block</sl-option>
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
                   ${this.renderKubernetesBlockHint()}
                 </sl-select>
-                <span class="field-help"
-                  >Controls GCP metadata server access for new agents. "Block" prevents access,
-                  "Passthrough" allows host identity, "Assign" binds a specific service
-                  account.</span
-                >
+                <span class="field-help">${this.gcpIdentityFieldHelp}</span>
                 ${this.renderInheritedGCPIdentityHint()}
               </div>
 
@@ -2776,9 +2772,7 @@ export class ScionPageProjectSettings extends LitElement {
         ${canEdit && this.activeConfigTab !== 'brokers'
           ? html`
               <div class="config-actions">
-                ${this.settingsError
-                  ? html`<span class="config-status error">${this.settingsError}</span>`
-                  : ''}
+                ${this.renderSettingsError()}
                 ${this.settingsSuccess
                   ? html`<span class="config-status success">${this.settingsSuccess}</span>`
                   : ''}
@@ -3029,9 +3023,10 @@ export class ScionPageProjectSettings extends LitElement {
       const data = (await response.json()) as { brokers: RuntimeBrokerWithProvider[] };
       this.brokers = data.brokers || [];
 
-      // Start relative time refresh if we have brokers
-      if (this.brokers.length > 0 && !this.brokerRelativeTimeInterval) {
-        this.brokerRelativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+      // Start relative time refresh if we have brokers. The fetch can resolve
+      // after the page was disconnected; do not start a timer nobody stops.
+      if (this.isConnected && this.brokers.length > 0 && !this.stopBrokerRelativeTimeTick) {
+        this.stopBrokerRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
       }
     } catch (err) {
       console.error('Failed to load brokers:', err);

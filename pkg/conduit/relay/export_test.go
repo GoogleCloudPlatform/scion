@@ -24,6 +24,13 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// DeleteBackoffForTest and MaxDeleteBackoffForTest are deleteRow's first
+// retry delay and its cap, so tests can wait for the exact backoff timer.
+const (
+	DeleteBackoffForTest    = defaultDeleteBackoff
+	MaxDeleteBackoffForTest = maxDeleteBackoff
+)
+
 // Test-only access to internals for the external test package.
 
 // localEntryForTest waits (bounded) for sessionID to be registered, as
@@ -79,6 +86,11 @@ func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h 
 // Serve right after the session became visible as ready.
 func (r *Relay) SetAfterReadyHookForTest(h func()) { r.testHookAfterReady = h }
 
+// SetAfterDoneHookForTest installs h, which runs in Serve with the session
+// id once a session has ended, before it leaves the relay's session set.
+// Set it before the relay serves sessions.
+func (r *Relay) SetAfterDoneHookForTest(h func(sessionID string)) { r.testHookAfterDone = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 
@@ -100,3 +112,21 @@ var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Po
 
 // ServingForTest reports whether the relay is still serving.
 func (r *Relay) ServingForTest() bool { return r.serving() }
+
+// SetBeforeIncarnationCloseHookForTest installs the close-once seam: h runs
+// in CloseOlderIncarnationSessions after the sessions were marked and
+// counted, before any is closed. Set it before the relay serves sessions.
+func (r *Relay) SetBeforeIncarnationCloseHookForTest(h func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.testHookBeforeIncarnationClose = h
+}
+
+// SetAfterBrokerAdmissionHookForTest installs h, which runs with the
+// session id when a broker session's admission step has finished. Set it
+// before the relay serves sessions.
+func (r *Relay) SetAfterBrokerAdmissionHookForTest(h func(sessionID string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.testHookAfterBrokerAdmission = h
+}

@@ -19,9 +19,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,6 +39,9 @@ func TestDispatchAgentDeleteLocalOnly_SendsLocalOnly(t *testing.T) {
 	assert.True(t, client.lastDeleteOpts.deleteFiles)
 	assert.False(t, client.lastDeleteOpts.removeBranch)
 	assert.Equal(t, "run-1", client.lastDeleteOpts.runID)
+	// The hub's agent ID rides along (ptone/scion#2632), so the broker's
+	// launch cancel leaves a different agent's start of the name alone.
+	assert.Equal(t, api.AgentIDQueryParam+"="+url.QueryEscape(agent.ID), client.lastDeleteAgentIDQuery)
 }
 
 // A broker without AgentMove would ignore localOnly and delete the shared
@@ -58,13 +63,13 @@ func TestDispatchAgentDeleteLocalOnly_RefusesBrokerWithoutAgentMove(t *testing.T
 // The move's provision carries the expected NFS workspace to the broker.
 func TestDispatchAgentProvisionForMove_CarriesExpectedWorkspace(t *testing.T) {
 	d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{AgentMove: true})
-	require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir"))
+	require.NoError(t, d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", ""))
 	require.NotNil(t, client.lastCreateReq)
 	assert.True(t, client.lastCreateReq.ProvisionOnly)
 	assert.False(t, client.lastCreateReq.Reprovision)
 	assert.Equal(t, "agent-dir", client.lastCreateReq.ExpectExistingNFSWorkspace)
 
-	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "")
+	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "", "")
 	require.Error(t, err)
 }
 
@@ -78,7 +83,7 @@ func TestDeleteAgentQuery_LocalOnly(t *testing.T) {
 // provision an empty one, so the move's provision is never sent to it.
 func TestDispatchAgentProvisionForMove_RefusesBrokerWithoutAgentMove(t *testing.T) {
 	d, client, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{Reprovision: true})
-	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir")
+	err := d.DispatchAgentProvisionForMove(context.Background(), agent, "agent-dir", "")
 	require.True(t, errors.Is(err, errBrokerLacksAgentMove), "err = %v", err)
 	assert.Nil(t, client.lastCreateReq, "nothing may be sent")
 }

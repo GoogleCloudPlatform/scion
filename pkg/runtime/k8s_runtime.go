@@ -32,6 +32,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -75,6 +76,13 @@ type KubernetesRuntime struct {
 	// real exec transport.
 	execProbe execProbeFunc
 
+	// podReadyPollInterval and podReadyTimeout, when non-zero, replace
+	// waitForPodReady's 2s poll interval and 10 min budget. Zero (the
+	// default from NewKubernetesRuntime) keeps the defaults; tests shorten
+	// them so a scripted pod-status sequence runs quickly.
+	podReadyPollInterval time.Duration
+	podReadyTimeout      time.Duration
+
 	// podExec, when set, replaces execInPod's exec transport. Tests use it
 	// to record the in-pod commands Run issues without a real API server.
 	podExec func(ctx context.Context, namespace, podName string, cmd []string) (string, error)
@@ -83,10 +91,10 @@ type KubernetesRuntime struct {
 	// (syncToPod). Tests use it to observe the order of the start steps.
 	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
-	// syncTransfer, when set, replaces the copies Sync performs (toPod is
-	// true for broker to pod). Tests use it to observe which paths Sync
-	// transfers.
-	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool) error
+	// syncTransfer, when set, replaces the copies Sync and the start's
+	// workspace sync perform (toPod is true for broker to pod). Tests use it
+	// to observe which paths they transfer, and what they leave out.
+	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool, excludes []string) error
 
 	// nowFn and sinceFn, when set, replace time.Now and time.Since for the
 	// per-run object sweep and the start's verify trigger (see
@@ -217,7 +225,7 @@ func (r *KubernetesRuntime) syncWithRetry(ctx context.Context, op func() error) 
 	for attempt := 0; attempt <= syncMaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second // 1s, 2s, 4s
-			runtimeLog.Warn("Sync attempt failed, retrying",
+			runtimeLog().Warn("Sync attempt failed, retrying",
 				"attempt", attempt, "max_retries", syncMaxRetries,
 				"backoff", backoff, "error", lastErr)
 			select {
@@ -404,7 +412,7 @@ func (r *KubernetesRuntime) execReadyWithRetry(ctx context.Context, op func() er
 	for attempt := 0; ; attempt++ {
 		lastErr = op()
 		if lastErr == nil {
-			runtimeLog.Info("Pod exec tunnel ready",
+			runtimeLog().Info("Pod exec tunnel ready",
 				logFields("attempts", attempt+1, "elapsed_ms", clock.now().Sub(start).Milliseconds())...)
 			return nil
 		}
@@ -437,7 +445,7 @@ func (r *KubernetesRuntime) execReadyWithRetry(ctx context.Context, op func() er
 		if remaining := execReadyMaxWait - elapsed; backoff > remaining {
 			backoff = remaining
 		}
-		runtimeLog.Warn("Pod exec tunnel not ready, retrying",
+		runtimeLog().Warn("Pod exec tunnel not ready, retrying",
 			logFields("attempt", attempt+1, "backoff", backoff, "elapsed_ms", elapsed.Milliseconds(), "error", lastErr)...)
 		if err := clock.sleep(ctx, backoff); err != nil {
 			return err
@@ -491,7 +499,7 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 	for k, v := range labels {
 		if descriptiveLabels[k] {
 			if errs := k8svalidation.IsValidLabelValue(v); len(errs) > 0 {
-				runtimeLog.Warn("Dropping descriptive label with a value that is not a valid Kubernetes label value",
+				runtimeLog().Warn("Dropping descriptive label with a value that is not a valid Kubernetes label value",
 					"agent", agentName, "label", k, "value", v, "reason", strings.Join(errs, "; "))
 				continue
 			}
@@ -534,6 +542,13 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	//     pod, since nothing will ever record it as a running agent. Other
 	//     failures after the pod exists keep it, as before, so its status and
 	//     logs stay available until the agent is deleted.
+	//   On the broker's synchronous create path, ctx does not follow the
+	//   hub's request once the start has begun (runtimebroker
+	//   syncStart.bind): the request ending does not make it done, so a cold
+	//   start still pulling its image is removed here only by a stop, delete
+	//   or newer start of the agent, broker shutdown, or the broker's bound
+	//   (ptone/scion#4817). The start and restart handlers for an existing
+	//   agent still run under the request.
 	// The cleanup runs on a fresh context because ctx may already be done.
 	// cleanupArmed is set just before the first object is created, so early
 	// validation failures make no API calls.
@@ -784,7 +799,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 	}
 
-	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
+	runtimeLog().Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
 	// The pod create's checkpoint can block for as long as the launch
@@ -805,7 +820,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	writeK8sRuntimeDebugFile(config, namespace, pod)
 
-	runtimeLog.Info("Creating pod", "agent", config.Name, "namespace", namespace, "image", config.Image, "phase", "pod-create")
+	runtimeLog().Info("Creating pod", "agent", config.Name, "namespace", namespace, "image", config.Image, "phase", "pod-create")
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
 	if r.since(firstCreateAt) >= verifyAfter {
 		if err := r.verifyStartObjects(ctx, startObjects); err != nil {
@@ -825,12 +840,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	podCreated = true
 	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
-	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
+	runtimeLog().Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
 	// Wait for Ready
-	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
-	if err := r.waitForPodReady(ctx, namespace, createdPod.Name); err != nil {
+	runtimeLog().Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
+	if err := r.waitForPodReady(ctx, namespace, createdPod.Name, hooks); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -840,7 +855,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// function creates — local or NFS backend, fresh create or a restart's
 	// stop-then-create — so placing it here once covers all of them. See
 	// waitForExecReady's doc comment for why Running alone is insufficient.
-	runtimeLog.Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
+	runtimeLog().Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
 	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
 		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
 	}
@@ -848,7 +863,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// NFS-home pods: home-prepare chose how this start fills the home.
 	homeMode := ""
 	if nfsHomeStart {
-		out, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeModeCommand)
+		out, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeModeCommand, config.Name, "home-prepare")
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to read %s: %w", k8sHomeModeFile, err)
 		}
@@ -856,9 +871,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if err != nil {
 			return createdPod.Name, err
 		}
-		runtimeLog.Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
+		runtimeLog().Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
 		if config.HomeDir != "" {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername))); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername)), config.Name, "home-prepare"); err != nil {
 				return createdPod.Name, fmt.Errorf("agent home check failed: %w", err)
 			}
 		}
@@ -866,7 +881,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 
 	if config.HomeDir != "" {
 		destHome := util.GetHomeDir(config.UnixUsername)
-		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
+		runtimeLog().Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
+		hooks.progress(api.LaunchStepHomeSync)
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
 		// NFS-home pods: the sync never writes over a link target, and the
@@ -900,11 +916,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 			// recursive chown over it is not needed and could not change
 			// files the export maps to another owner.
 		} else if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
-			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
+			runtimeLog().Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
 		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
-			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
+			runtimeLog().Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
-		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
+		runtimeLog().Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
 			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	}
 
@@ -914,7 +930,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if nfsHomeStart && config.HomeDir != "" {
 		secretsSrc := filepath.Join(config.HomeDir, harnessBundleSecretsRel)
 		if st, err := os.Lstat(secretsSrc); err == nil && st.IsDir() {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand, config.Name, "harness-secrets"); err != nil {
 				return createdPod.Name, fmt.Errorf("failed to create the in-memory harness secrets directory: %w", err)
 			}
 			err = r.syncWithRetry(ctx, func() error {
@@ -962,12 +978,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// for both backends — they carry agent dotfiles and secrets, not workspace code.
 	nfsProvisioned := nfsInitContainerInjected(config)
 	if config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsProvisioned) {
-		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
+		runtimeLog().Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
+		hooks.progress(api.LaunchStepWorkspaceSync)
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		workspaceSyncStart := time.Now()
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
-		})
+		err = r.syncWorkspaceToPod(ctx, namespace, createdPod, config.Workspace)
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
@@ -977,29 +992,30 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// would build an owner:group spec of ":" -- refused outright rather
 		// than run chown with no actual target user.
 		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, "/workspace"); !ok {
-			runtimeLog.Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
+			runtimeLog().Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
 		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
-			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
+			runtimeLog().Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
-		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
+		runtimeLog().Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
 			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	} else if config.WorkspaceBackendName == "nfs" && nfsProvisioned {
-		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
+		runtimeLog().Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
 			"agent", config.Name, "phase", "workspace-sync-skip")
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
 	// so it's safe to launch sciontool init → tmux → harness. The gate loop
 	// in the pod command polls for this marker file (see buildPod for details).
-	runtimeLog.Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
+	runtimeLog().Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
+	hooks.progress(api.LaunchStepStartupGate)
 	gateStart := time.Now()
-	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}, config.Name, "startup-gate"); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
-	runtimeLog.Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
+	runtimeLog().Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
 		"elapsed_ms", time.Since(gateStart).Milliseconds())
 
-	runtimeLog.Info("Agent started successfully", "agent", createdPod.Name, "namespace", namespace, "phase", "complete")
+	runtimeLog().Info("Agent started successfully", "agent", createdPod.Name, "namespace", namespace, "phase", "complete")
 	fmt.Printf("Agent '%s' started successfully.\n", createdPod.Name)
 	return createdPod.Name, nil
 }
@@ -1015,14 +1031,14 @@ func writeK8sRuntimeDebugFile(config RunConfig, namespace string, pod *corev1.Po
 
 	podJSON, err := json.MarshalIndent(pod, "", "  ")
 	if err != nil {
-		runtimeLog.Debug("Failed to marshal pod spec for debug file", "error", err)
+		runtimeLog().Debug("Failed to marshal pod spec for debug file", "error", err)
 		return
 	}
 
 	content := fmt.Sprintf("# kubectl apply -f - <<'EOF'\n%s\n# EOF\n#\n# Equivalent:\n# kubectl apply -n %s -f <this-file's-json-content>\n", string(podJSON), namespace)
 
 	if err := os.WriteFile(debugPath, []byte(content), 0644); err != nil {
-		runtimeLog.Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
+		runtimeLog().Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
 	}
 }
 
@@ -1159,7 +1175,7 @@ func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]st
 	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
 	for _, s := range secrets {
 		if (s.Type == "environment" && s.Target == transportauth.EnvTransportToken) || s.Name == transportCredentialSecretKey {
-			runtimeLog.Warn("Dropping resolved secret that conflicts with the hub transport credential",
+			runtimeLog().Warn("Dropping resolved secret that conflicts with the hub transport credential",
 				"secret", s.Name, "target", s.Target, "source", s.Source)
 			continue
 		}
@@ -1220,7 +1236,7 @@ func divertGitCredential(env []string, secrets []api.ResolvedSecret) ([]string, 
 	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
 	for _, s := range secrets {
 		if (s.Type == "environment" && s.Target == provision.GitTokenEnv) || s.Name == gitCredentialSecretKey {
-			runtimeLog.Info("Using the git token from the dispatch env instead of a resolved secret with the same target",
+			runtimeLog().Info("Using the git token from the dispatch env instead of a resolved secret with the same target",
 				"secret", s.Name, "target", s.Target, "source", s.Source)
 			continue
 		}
@@ -1507,7 +1523,7 @@ func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, 
 	}
 	for _, name := range secretNames {
 		if err := r.Client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			runtimeLog.Warn("Failed to delete per-agent Secret during cleanup",
+			runtimeLog().Warn("Failed to delete per-agent Secret during cleanup",
 				"kind", "Secret", "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
@@ -1517,7 +1533,7 @@ func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, 
 	if r.GKEMode {
 		spcName := fmt.Sprintf("scion-agent-%s", agentName)
 		if err := r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Delete(ctx, spcName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			runtimeLog.Warn("Failed to delete per-agent SecretProviderClass during cleanup",
+			runtimeLog().Warn("Failed to delete per-agent SecretProviderClass during cleanup",
 				"kind", "SecretProviderClass", "name", spcName, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
@@ -1685,11 +1701,11 @@ func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, a
 			}
 			switch {
 			case runID != "" && objRun == runID:
-				runtimeLog.Info("Removing a per-run object of the named run while another run's pod holds the name",
+				runtimeLog().Info("Removing a per-run object of the named run while another run's pod holds the name",
 					"kind", kind, "name", objectName, "namespace", ns, "run_id", runID, "pod_run_id", pod.Labels[api.LabelRunID])
 				return true, nil
 			case staleOther:
-				runtimeLog.Info("Removing a stale per-run object of another run",
+				runtimeLog().Info("Removing a stale per-run object of another run",
 					"kind", kind, "name", objectName, "namespace", ns, "object_run_id", objRun, "run_id", runID,
 					"created", obj.GetCreationTimestamp().UTC().Format(time.RFC3339),
 					"deadline_offset", obj.GetAnnotations()[annotationStartDeadlineOffset])
@@ -1726,7 +1742,7 @@ func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, a
 				Preconditions: k8sUIDPrecondition(s.UID),
 			})
 			if k8serrors.IsConflict(err) {
-				runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+				runtimeLog().Info("Left a per-agent object recreated under the same name since it was listed",
 					"kind", "Secret", "name", s.Name, "agent", agentName, "namespace", s.Namespace, "run_id", runID)
 				continue
 			}
@@ -1734,7 +1750,7 @@ func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, a
 				errs = append(errs, fmt.Errorf("failed to delete Secret %s/%s: %w", s.Namespace, s.Name, err))
 				continue
 			}
-			runtimeLog.Info("Removed per-agent object left after its pod was deleted",
+			runtimeLog().Info("Removed per-agent object left after its pod was deleted",
 				"kind", "Secret", "name", s.Name, "agent", agentName, "namespace", s.Namespace)
 		}
 	}
@@ -1761,7 +1777,7 @@ func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, a
 					Preconditions: k8sUIDPrecondition(spc.GetUID()),
 				})
 				if k8serrors.IsConflict(err) {
-					runtimeLog.Info("Left a per-agent object recreated under the same name since it was listed",
+					runtimeLog().Info("Left a per-agent object recreated under the same name since it was listed",
 						"kind", "SecretProviderClass", "name", name, "agent", agentName, "namespace", ns, "run_id", runID)
 					continue
 				}
@@ -1769,7 +1785,7 @@ func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, a
 					errs = append(errs, fmt.Errorf("failed to delete SecretProviderClass %s/%s: %w", ns, name, err))
 					continue
 				}
-				runtimeLog.Info("Removed per-agent object left after its pod was deleted",
+				runtimeLog().Info("Removed per-agent object left after its pod was deleted",
 					"kind", "SecretProviderClass", "name", name, "agent", agentName, "namespace", ns)
 			}
 		}
@@ -1941,7 +1957,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 			}
 		}
 		if len(sharedDirs) == 0 {
-			runtimeLog.Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
+			runtimeLog().Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
 				"shared_dir_count", len(config.SharedDirs))
 			return nil
 		}
@@ -1950,7 +1966,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
 	// no separate PVCs needed (design §5.3).
 	if !sharedDirsHaveOwnClaims(config) {
-		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
+		runtimeLog().Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
 			"shared_dir_count", len(sharedDirs))
 		return nil
 	}
@@ -2007,7 +2023,7 @@ func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested str
 	if pvc.Status.Phase == corev1.ClaimPending {
 		args = append(args, "phase", string(pvc.Status.Phase))
 	}
-	runtimeLog.Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
+	runtimeLog().Warn("Reusing existing shared-dir PVC whose storage class differs from the requested class; existing claims are not changed", args...)
 }
 
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
@@ -2023,7 +2039,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
-		runtimeLog.Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
 		warnOnStorageClassMismatch(existing, storageClass)
 		return nil
 	}
@@ -2059,7 +2075,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		pvc.Spec.StorageClassName = &storageClass
 	}
 
-	runtimeLog.Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
+	runtimeLog().Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
 	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("failed to create project RWX PVC %q: %w", pvcName, err)
 	}
@@ -2555,6 +2571,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
 	}
+	// Keep the in-project agents root of a shared /workspace mount out of
+	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
+	// agent-dir layouts do not mount the shared workspace at /workspace.
+	podVolumes := []corev1.Volume{workspaceVolume}
+	agentsExcluded := false
+	if !nfsAgentDir && !nfsWorktree {
+		var maskTarget string
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "")
+		if maskTarget != "" {
+			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
+			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
+		}
+	}
 
 	// NFS-home pods: the home volume and mount, and the home init
 	// containers (k8s_nfs_home.go).
@@ -2576,7 +2605,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: withHomeStorageAnnotation(config.Annotations, nfsHome),
+			Annotations: withWorkspaceAgentsAnnotation(withHomeStorageAnnotation(config.Annotations, nfsHome), agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -2599,7 +2628,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					VolumeMounts: agentVolumeMounts,
 				},
 			},
-			Volumes:       []corev1.Volume{workspaceVolume},
+			Volumes:       podVolumes,
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
@@ -2793,6 +2822,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Env:             initEnv,
 			VolumeMounts:    initVolumeMounts,
 			SecurityContext: initSecurityContext,
+			// As on the home init containers: when provisioning fails
+			// without writing a termination message, the kubelet uses the
+			// tail of the container log, so the create error can say why.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 	}
@@ -2980,7 +3013,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			if volType == "" {
 				volType = "local"
 			}
-			runtimeLog.Warn("Volume type not supported on Kubernetes runtime, skipping",
+			runtimeLog().Warn("Volume type not supported on Kubernetes runtime, skipping",
 				"type", volType, "source", v.Source, "target", v.Target)
 		}
 	}
@@ -2994,14 +3027,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if config.Kubernetes != nil {
+		// Validate the merged placement values before they reach the pod
+		// spec; the rules match the API server's, so only values that pod
+		// creation would reject fail here.
+		if err := validateKubernetesPlacement(config.Kubernetes); err != nil {
+			return nil, err
+		}
 		if config.Kubernetes.ServiceAccountName != "" {
 			pod.Spec.ServiceAccountName = config.Kubernetes.ServiceAccountName
 		}
 		if config.Kubernetes.RuntimeClassName != "" {
-			pod.Spec.RuntimeClassName = &config.Kubernetes.RuntimeClassName
+			// Copy the value so the pod spec does not point into the
+			// caller's configuration.
+			runtimeClassName := config.Kubernetes.RuntimeClassName
+			pod.Spec.RuntimeClassName = &runtimeClassName
 		}
 		if len(config.Kubernetes.NodeSelector) > 0 {
-			pod.Spec.NodeSelector = config.Kubernetes.NodeSelector
+			// Copy the map so later changes to the pod spec never reach
+			// the caller's configuration.
+			pod.Spec.NodeSelector = maps.Clone(config.Kubernetes.NodeSelector)
 		}
 		if len(config.Kubernetes.Tolerations) > 0 {
 			for _, t := range config.Kubernetes.Tolerations {
@@ -3048,7 +3092,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			annotations = make(map[string]string, 1)
 		}
 		if prev, ok := annotations[annotationSafeToEvict]; ok && prev != "false" {
-			runtimeLog.Debug("buildPod: safeToEvict=false replaces the annotation from config", "pod", config.Name, "annotation", annotationSafeToEvict, "previous", prev)
+			runtimeLog().Debug("buildPod: safeToEvict=false replaces the annotation from config", "pod", config.Name, "annotation", annotationSafeToEvict, "previous", prev)
 		}
 		annotations[annotationSafeToEvict] = "false"
 		pod.Annotations = annotations
@@ -3072,6 +3116,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 // Autopilot, requests extended run duration for the pod.
 const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
+// maxInitTerminationMessage bounds how much of an init container's
+// termination message goes into a launch error.
+const maxInitTerminationMessage = 1024
+
+// boundedTerminationMessage returns msg trimmed of surrounding whitespace
+// and, when longer than maxInitTerminationMessage bytes, only its tail,
+// cut at a rune boundary and marked with a leading "...". With
+// FallbackToLogsOnError the message can be the container's log tail, and
+// the last lines carry the error.
+func boundedTerminationMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if len(msg) <= maxInitTerminationMessage {
+		return msg
+	}
+	tail := msg[len(msg)-maxInitTerminationMessage:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "..." + strings.TrimSpace(tail)
+}
+
 // classifyTerminalWaitingReason turns a terminal (non-retryable)
 // ContainerStateWaiting reason into an error, or returns nil if reason is
 // not one of the terminal reasons. initContainerName should be the empty
@@ -3079,7 +3144,36 @@ const annotationSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 // containers — the resulting error names the init container so it can be
 // told apart from the main container in logs. Shared by the init-container
 // and main-container checks in waitForPodReady so their wording can't drift.
+//
+// The error is a *LaunchFailure (design wave 3 §3 E-d) carrying the launch
+// code and step for reason, with Reason set to the Kubernetes reason alone;
+// its text is the plain error's. Any terminal reason of an init container
+// is init_container_failed.
 func classifyTerminalWaitingReason(podName, initContainerName, reason, message string) error {
+	err := terminalWaitingReasonError(podName, initContainerName, reason, message)
+	if err == nil {
+		return nil
+	}
+	if initContainerName != "" {
+		return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, reason, err)
+	}
+	switch reason {
+	case "ImagePullBackOff", "ErrImagePull":
+		return newLaunchFailure(api.LaunchCodeImagePullFailed, api.LaunchStepContainerCreate, reason, err)
+	case "InvalidImageName":
+		return newLaunchFailure(api.LaunchCodeInvalidImage, api.LaunchStepContainerCreate, reason, err)
+	case "CreateContainerConfigError":
+		return newLaunchFailure(api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, reason, err)
+	case "CrashLoopBackOff":
+		return newLaunchFailure(api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, reason, err)
+	default:
+		return err
+	}
+}
+
+// terminalWaitingReasonError is classifyTerminalWaitingReason's plain error
+// text.
+func terminalWaitingReasonError(podName, initContainerName, reason, message string) error {
 	container := fmt.Sprintf("pod %q", podName)
 	if initContainerName != "" {
 		container = fmt.Sprintf("init container %q in pod %q", initContainerName, podName)
@@ -3099,6 +3193,86 @@ func classifyTerminalWaitingReason(podName, initContainerName, reason, message s
 	default:
 		return nil
 	}
+}
+
+// podLaunchStep derives the launch step (an api.LaunchStep* value) of a pod
+// that is not yet ready from its status alone (design wave 3 §3 E-c; no
+// Events are read). gke selects awaiting_capacity for an unschedulable pod,
+// which GKE provisions capacity for. An unscheduled pod is in scheduling
+// whatever its container statuses say, and a main container waiting for any
+// reason (image pull or volume mount alike) is in container_create. A
+// running main container is in container_start: waitForPodReady returns on
+// that poll, and its step covers Run's exec-tunnel wait that follows.
+func podLaunchStep(pod *corev1.Pod, gke bool) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == agentContainerName && cs.State.Running != nil {
+			return api.LaunchStepContainerStart
+		}
+	}
+	scheduled := false
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.PodScheduled {
+			continue
+		}
+		if cond.Status == corev1.ConditionTrue {
+			scheduled = true
+		} else if cond.Reason == corev1.PodReasonUnschedulable && gke {
+			return api.LaunchStepAwaitingCapacity
+		}
+	}
+	if !scheduled {
+		return api.LaunchStepScheduling
+	}
+	for _, ics := range pod.Status.InitContainerStatuses {
+		if ics.State.Waiting != nil || ics.State.Running != nil {
+			return api.LaunchStepInitContainers
+		}
+	}
+	return api.LaunchStepContainerCreate
+}
+
+// podDisruptionReason returns the Kubernetes reason a pod is being removed
+// by the cluster: the pod status reason "Evicted" (kubelet node-pressure
+// eviction) or the reason of a true DisruptionTarget condition (e.g.
+// PreemptionByScheduler, TerminationByKubelet, EvictionByEvictionAPI). It
+// returns "" when neither is present. Unlike k8sDisruptionExitReason it
+// keeps the Kubernetes enum, for LaunchFailure.Reason.
+func podDisruptionReason(pod *corev1.Pod) string {
+	if pod.Status.Reason == "Evicted" {
+		return pod.Status.Reason
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.DisruptionTarget && cond.Status == corev1.ConditionTrue {
+			return cond.Reason
+		}
+	}
+	return ""
+}
+
+// podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
+// pod is being deleted, or nil. Only the deletion timestamp makes it
+// terminal: Kubernetes can clear a DisruptionTarget condition whose
+// disruption did not go ahead, so the condition only supplies the reason.
+// The text names the Kubernetes reason only, never the condition's message.
+func podDisruptedError(pod *corev1.Pod, podName, step string) error {
+	if pod.DeletionTimestamp == nil {
+		return nil
+	}
+	if reason := podDisruptionReason(pod); reason != "" {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
+			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
+		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
+}
+
+// failStep is the step a waitForPodReady failure is reported in: the last
+// step seen, or scheduling when no poll has completed yet.
+func failStep(lastStep string) string {
+	if lastStep == "" {
+		return api.LaunchStepScheduling
+	}
+	return lastStep
 }
 
 // podTimingUnavailable marks a podLifecycleTimings field as not computable,
@@ -3202,29 +3376,74 @@ func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecy
 	if t.containerStartedMs != podTimingUnavailable {
 		attrs = append(attrs, "container_started_ms", t.containerStartedMs)
 	}
-	runtimeLog.Info("Pod ready", attrs...)
+	runtimeLog().Info("Pod ready", attrs...)
 }
 
-func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
+// waitForPodReady polls the pod until its main container runs. hooks
+// receives a progress step (podLaunchStep) each time the step changes.
+// Terminal failures are *LaunchFailure errors; so is the end of its own time
+// budget while ctx is still live (launch_timeout, in the last step seen).
+func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string, hooks launchHooks) error {
 	waitStart := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
+	parentCtx := ctx
+	timeout := r.podReadyTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute // GKE Autopilot can be slow
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(2 * time.Second)
+	pollInterval := r.podReadyPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	lastStatus := ""
+	lastStep := ""
 	autopilotWaitLogged := false
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err())
+			err := fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err())
+			if parentCtx.Err() == nil {
+				// Our own budget ran out, not the caller's.
+				return newLaunchFailure(api.LaunchCodeLaunchTimeout, failStep(lastStep), "", err)
+			}
+			return err
 		case <-ticker.C:
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
+				if ctx.Err() != nil && parentCtx.Err() == nil {
+					// Our own budget ran out during the Get (the deadline
+					// and a tick can coincide): the same timeout as above.
+					return newLaunchFailure(api.LaunchCodeLaunchTimeout, failStep(lastStep), "",
+						fmt.Errorf("timed out waiting for pod to be ready: %w", ctx.Err()))
+				}
+				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
+					// The pod was removed (preempted, evicted or deleted)
+					// before it became ready.
+					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
+				}
 				return err
+			}
+
+			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
+				lastStep = step
+				hooks.progress(step)
+			}
+
+			// A pod being deleted never becomes usable: fail now rather than
+			// wait for it to disappear. A pod already in a terminal phase
+			// keeps its error text below.
+			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
+					runtimeLog().Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
+					return err
+				}
 			}
 
 			// F-111 review (tf-lead): init container failures (most notably
@@ -3237,15 +3456,17 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			// immediately instead.
 			for _, ics := range pod.Status.InitContainerStatuses {
 				if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
-					runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+					runtimeLog().Error("Init container failed", "pod", podName, "container", ics.Name,
 						"exitCode", ics.State.Terminated.ExitCode, "reason", ics.State.Terminated.Reason,
 						"message", ics.State.Terminated.Message, "phase", "init-container")
-					return fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
-						ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message)
+					return newLaunchFailure(api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, ics.State.Terminated.Reason,
+						fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
+							ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason,
+							boundedTerminationMessage(ics.State.Terminated.Message)))
 				}
 				if ics.State.Waiting != nil {
 					if err := classifyTerminalWaitingReason(podName, ics.Name, ics.State.Waiting.Reason, ics.State.Waiting.Message); err != nil {
-						runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+						runtimeLog().Error("Init container failed", "pod", podName, "container", ics.Name,
 							"reason", ics.State.Waiting.Reason, "message", ics.State.Waiting.Message, "phase", "init-container")
 						return err
 					}
@@ -3277,23 +3498,24 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				message := containerStatus.State.Waiting.Message
 				switch reason {
 				case "ImagePullBackOff", "ErrImagePull":
-					runtimeLog.Error("Image pull failed", "pod", podName, "reason", reason, "message", message, "phase", "image-pull")
+					runtimeLog().Error("Image pull failed", "pod", podName, "reason", reason, "message", message, "phase", "image-pull")
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "InvalidImageName":
-					runtimeLog.Error("Invalid image name", "pod", podName, "message", message, "phase", "image-pull")
+					runtimeLog().Error("Invalid image name", "pod", podName, "message", message, "phase", "image-pull")
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CreateContainerConfigError":
-					runtimeLog.Error("Container config error", "pod", podName, "message", message, "phase", "container-config")
+					runtimeLog().Error("Container config error", "pod", podName, "message", message, "phase", "container-config")
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "CrashLoopBackOff":
-					runtimeLog.Error("Container crash loop", "pod", podName, "message", message, "phase", "crash-loop")
+					runtimeLog().Error("Container crash loop", "pod", podName, "message", message, "phase", "crash-loop")
 					return classifyTerminalWaitingReason(podName, "", reason, message)
 				case "Unschedulable":
 					if r.isGKEScheduling() {
-						runtimeLog.Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
+						runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", message, "phase", "scheduling")
 					} else {
-						runtimeLog.Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
-						return fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message)
+						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", message, "phase", "scheduling")
+						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, reason,
+							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, message))
 					}
 				}
 			}
@@ -3305,13 +3527,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 						// On GKE Autopilot, Unschedulable is transient — the cluster
 						// will auto-provision nodes. Continue waiting instead of failing.
 						if !autopilotWaitLogged {
-							runtimeLog.Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", cond.Message, "phase", "scheduling")
+							runtimeLog().Info("Pod unschedulable (GKE Autopilot will auto-provision nodes)", "pod", podName, "message", cond.Message, "phase", "scheduling")
 							fmt.Printf("  Waiting for GKE Autopilot to provision node capacity...\n")
 							autopilotWaitLogged = true
 						}
 					} else {
-						runtimeLog.Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
-						return fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message)
+						runtimeLog().Error("Pod unschedulable", "pod", podName, "message", cond.Message, "phase", "scheduling")
+						return newLaunchFailure(api.LaunchCodeUnschedulable, api.LaunchStepScheduling, cond.Reason,
+							fmt.Errorf("pod %q cannot be scheduled: %s — check node selectors, tolerations, and resource availability", podName, cond.Message))
 					}
 				}
 			}
@@ -3325,10 +3548,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				}
 			}
 			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				err := fmt.Errorf("pod terminated with status: %s", pod.Status.Phase)
 				if containerStatus != nil && containerStatus.State.Terminated != nil {
-					return fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
+					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
-				return fmt.Errorf("pod terminated with status: %s", pod.Status.Phase)
+				if reason := podDisruptionReason(pod); reason != "" {
+					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), reason, err)
+				}
+				return err
 			}
 		}
 	}
@@ -3357,6 +3584,17 @@ func syncArchiveCreateArgs(sourcePath string, excludes ...string) []string {
 		args = append(args, "--exclude="+tarLiteralPattern("./"+path.Clean(e)))
 	}
 	return append(args, "-C", sourcePath, ".")
+}
+
+// syncArchiveExtractArgs returns the local tar arguments that extract a
+// workspace archive from a pod into localPath, skipping each exclude
+// (relative to the archive root, as in syncArchiveCreateArgs).
+func syncArchiveExtractArgs(localPath string, excludes ...string) []string {
+	args := []string{"-xz", "-m"}
+	for _, e := range excludes {
+		args = append(args, "--exclude="+tarLiteralPattern("./"+path.Clean(e)))
+	}
+	return append(args, "-C", localPath)
 }
 
 // tarLiteralPattern quotes the tar wildcard characters in p with a backslash so that an
@@ -3461,12 +3699,12 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	}
 
 	fmt.Printf("  Sync to %s complete.\n", destPath)
-	runtimeLog.Info("Sync to pod complete", "pod", podName, "dest", destPath,
+	runtimeLog().Info("Sync to pod complete", "pod", podName, "dest", destPath,
 		"elapsed_ms", time.Since(syncStart).Milliseconds(), "bytes", counted.count)
 	return nil
 }
 
-func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string) error {
+func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string, excludes ...string) error {
 	if err := os.MkdirAll(localPath, 0755); err != nil {
 		return fmt.Errorf("failed to create local workspace directory: %w", err)
 	}
@@ -3501,7 +3739,7 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	}
 
 	// Prepare local tar
-	tarCmd := exec.CommandContext(ctx, "tar", "-xz", "-m", "-C", localPath)
+	tarCmd := exec.CommandContext(ctx, "tar", syncArchiveExtractArgs(localPath, excludes...)...)
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	stdin, err := tarCmd.StdinPipe()
 	if err != nil {
@@ -3621,7 +3859,7 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 	selector := metav1.ListOptions{LabelSelector: labelStartID + "=" + startID}
 	warn := func(kind, name string, err error) {
 		if err != nil && !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
-			runtimeLog.Warn("Failed to delete object of an incomplete start",
+			runtimeLog().Warn("Failed to delete object of an incomplete start",
 				"kind", kind, "name", name, "agent", agentName, "namespace", namespace, "error", err)
 		}
 	}
@@ -3653,10 +3891,10 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 		}
 	}
 	if removed > 0 {
-		runtimeLog.Info("Removed objects of an incomplete start",
+		runtimeLog().Info("Removed objects of an incomplete start",
 			"agent", agentName, "namespace", namespace, "count", removed)
 	} else {
-		runtimeLog.Debug("No objects of an incomplete start to remove",
+		runtimeLog().Debug("No objects of an incomplete start to remove",
 			"agent", agentName, "namespace", namespace)
 	}
 }
@@ -3690,7 +3928,7 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 			return fmt.Errorf("%w: failed to delete the previous pod %s: %w", errPreviousPodUnconfirmed, podName, derr)
 		}
 		bound := nfsHomeTerminationBound(pod, hs)
-		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
+		runtimeLog().Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
 		return r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound)
 	}
 	gracePeriod := int64(0)
@@ -3698,7 +3936,7 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 		GracePeriodSeconds: &gracePeriod,
 	})
 	if err != nil && !k8serrors.IsNotFound(err) {
-		runtimeLog.Debug("Failed to clean up stale pod", "pod", podName, "namespace", namespace, "error", err)
+		runtimeLog().Debug("Failed to clean up stale pod", "pod", podName, "namespace", namespace, "error", err)
 	}
 	return nil
 }
@@ -3808,7 +4046,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			agentStatus = string(state.PhaseError)
 		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
 			// Non-terminal pod phases are represented via ContainerStatus and
-			// local agent-info state until the agent exits.
+			// local agent-info state until the agent exits; a Pending pod
+			// reports "starting" (below, after the container status check).
 		}
 
 		// Try to get more detail from container status
@@ -3840,6 +4079,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 				}
 				break
 			}
+		}
+
+		// A Pending pod has not started its agent container yet: it is
+		// waiting to be scheduled (for example for a node scale-up), pulling
+		// images or running init containers. Report it as starting, so
+		// agent.Manager.List does not fall back to agent-info.json's phase,
+		// which Start sets to running before the pod is created; otherwise a
+		// broker heartbeat would report a Pending pod as running and the hub
+		// would end an active launch as observed running (ptone/scion#5365).
+		// A terminated agent container keeps its stopped/error mapping, and a
+		// committed disruption below still overrides this.
+		if agentStatus == "" && p.Status.Phase == corev1.PodPending {
+			agentStatus = string(state.PhaseStarting)
 		}
 
 		// A pod that reached a terminal phase may have gotten there through a
@@ -4203,6 +4455,11 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return fmt.Errorf("direction (to or from) must be specified for tar sync. Example: scion sync to %s", agent.ContainerID)
 	}
 
+	// A pod whose annotation excludes the in-project agents root keeps it
+	// out of both directions: a sync to the pod does not put it in the
+	// agent's view, and a sync from it does not touch the broker's copy.
+	workspaceExcludes := k8sWorkspaceSyncExcludes(agent.Annotations)
+
 	// The home of an NFS-home agent is kept on the export across starts;
 	// it is not copied to or from the broker's copy.
 	if homeDir != "" && homeKeptOnExport(agent.Annotations) {
@@ -4213,7 +4470,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	if direction == SyncFrom {
 		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false, workspaceExcludes)
 		}); err != nil {
 			return err
 		}
@@ -4221,7 +4478,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 			destHome := util.GetHomeDir(username)
 			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
 			if err := r.syncWithRetry(ctx, func() error {
-				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false)
+				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false, nil)
 			}); err != nil {
 				return err
 			}
@@ -4231,7 +4488,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 
 	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
 	if err := r.syncWithRetry(ctx, func() error {
-		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true)
+		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true, workspaceExcludes)
 	}); err != nil {
 		return err
 	}
@@ -4239,7 +4496,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true, nil)
 		}); err != nil {
 			return err
 		}
@@ -4247,16 +4504,25 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	return nil
 }
 
+// syncWorkspaceToPod copies the broker's workspace src into a new pod's
+// /workspace, leaving out what the pod's annotations exclude
+// (k8sWorkspaceSyncExcludes).
+func (r *KubernetesRuntime) syncWorkspaceToPod(ctx context.Context, namespace string, pod *corev1.Pod, src string) error {
+	return r.syncWithRetry(ctx, func() error {
+		return r.syncTransferFn(ctx, namespace, pod.Name, src, "/workspace", true, k8sWorkspaceSyncExcludes(pod.Annotations))
+	})
+}
+
 // syncTransferFn copies src to dest for Sync, from the broker to the pod
 // when toPod is true and back otherwise.
-func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool) error {
+func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool, excludes []string) error {
 	if r.syncTransfer != nil {
-		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod)
+		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod, excludes)
 	}
 	if toPod {
-		return r.syncToPod(ctx, namespace, podName, src, dest)
+		return r.syncToPod(ctx, namespace, podName, src, dest, excludes...)
 	}
-	return r.syncFromPod(ctx, namespace, podName, src, dest)
+	return r.syncFromPod(ctx, namespace, podName, src, dest, excludes...)
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
@@ -4403,11 +4669,11 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 		Stderr: &stderr,
 	})
 	if err != nil {
-		runtimeLog.Debug("exec in pod failed", "pod", podName, "cmd", cmdName,
+		runtimeLog().Debug("exec in pod failed", "pod", podName, "cmd", cmdName,
 			"elapsed_ms", time.Since(execStart).Milliseconds(), "error", err)
 		return stdout.String(), fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr.String())
 	}
-	runtimeLog.Debug("exec in pod complete", "pod", podName, "cmd", cmdName,
+	runtimeLog().Debug("exec in pod complete", "pod", podName, "cmd", cmdName,
 		"elapsed_ms", time.Since(execStart).Milliseconds())
 	return stdout.String(), nil
 }
@@ -4692,4 +4958,87 @@ func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVa
 		ids = append(ids, strconv.FormatInt(gid, 10))
 	}
 	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
+}
+
+// k8sWorkspaceAgentsAnnotation marks a pod whose workspace tar syncs leave
+// the in-project agents root out (ptone/scion#5513). buildPod sets it from
+// k8sWorkspaceAgentsExcluded only; a caller-supplied value is dropped.
+const k8sWorkspaceAgentsAnnotation = "scion.workspace_agents_excluded"
+
+// k8sAgentsMaskVolume names the pod volume that shadows the in-project
+// agents root of an NFS-shared workspace.
+const k8sAgentsMaskVolume = "agents-mask"
+
+// k8sAgentsMaskSizeLimit caps the memory-backed mask volume, which is meant
+// to stay empty (every tar sync leaves the path out). Where the kubelet
+// sizes memory-backed emptyDirs to their limit, writes past it fail with
+// ENOSPC in the container; otherwise the eviction manager evicts the pod
+// once usage exceeds it, and with RestartPolicy Never the agent stops.
+// Docker's tmpfs mask has no limit.
+const k8sAgentsMaskSizeLimit = "1Mi"
+
+// k8sWorkspaceAgentsExcluded decides how a pod that mounts the shared
+// workspace at /workspace keeps the in-project agents root out of the
+// agent's view. excluded: every workspace tar sync leaves the path out,
+// under the same condition as Docker's mask. That is the whole control on
+// the local backend, whose per-pod emptyDir is filled only by the sync.
+// maskTarget: on an NFS-shared workspace, which the pod mounts directly,
+// the path is also shadowed with an empty volume, but only when
+// <workspace>/.scion/agents already exists on the broker's view of the
+// export, so the mount point is never created there.
+func k8sWorkspaceAgentsExcluded(config RunConfig, nfsShared bool) (excluded bool, maskTarget string) {
+	target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", false)
+	if !ok {
+		return false, ""
+	}
+	// Workspace resolved to the repo root above, so checking the agents dir
+	// under it is the requireAgentsDir condition without resolving again.
+	if nfsShared {
+		if isDir(filepath.Join(config.RepoRoot, filepath.FromSlash(sharedWorkspaceAgentsDir))) {
+			maskTarget = target
+		} else {
+			runtimeLog().Debug("Not masking the in-project agents dir: it does not exist", "agent", config.Name)
+		}
+	}
+	return true, maskTarget
+}
+
+// k8sAgentsMaskPodVolume is the pod volume that shadows the in-project
+// agents root: an empty, memory-backed emptyDir, like Docker's tmpfs.
+func k8sAgentsMaskPodVolume() corev1.Volume {
+	limit := resource.MustParse(k8sAgentsMaskSizeLimit)
+	return corev1.Volume{
+		Name: k8sAgentsMaskVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &limit},
+		},
+	}
+}
+
+// withWorkspaceAgentsAnnotation returns annotations with
+// k8sWorkspaceAgentsAnnotation set when excluded is true and removed
+// otherwise. The input map is not modified.
+func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool) map[string]string {
+	if _, has := annotations[k8sWorkspaceAgentsAnnotation]; !excluded && !has {
+		return annotations
+	}
+	out := make(map[string]string, len(annotations)+1)
+	for k, v := range annotations {
+		out[k] = v
+	}
+	delete(out, k8sWorkspaceAgentsAnnotation)
+	if excluded {
+		out[k8sWorkspaceAgentsAnnotation] = "true"
+	}
+	return out
+}
+
+// k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to or
+// from a pod with these annotations leaves out. The annotation records the
+// decision buildPod made, so no RepoRoot is needed.
+func k8sWorkspaceSyncExcludes(annotations map[string]string) []string {
+	if annotations[k8sWorkspaceAgentsAnnotation] == "true" {
+		return []string{sharedWorkspaceAgentsDir}
+	}
+	return nil
 }

@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -181,17 +181,11 @@ func TestReadOptionalStdin(t *testing.T) {
 	})
 }
 
-func copilotDialectPath(t *testing.T) string {
-	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", "..", "harnesses", "copilot", "dialect.yaml")
-}
-
 // TestCopilotPostToolUse_StdinThroughDialect runs a real camelCase
 // postToolUse payload from a stdin pipe through the positional event path
 // and the shipped Copilot dialect into the normalized event.
 func TestCopilotPostToolUse_StdinThroughDialect(t *testing.T) {
-	md, err := dialects.LoadMappingDialect(copilotDialectPath(t))
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
 	require.NoError(t, err)
 
 	r, w, err := os.Pipe()
@@ -215,7 +209,7 @@ func TestCopilotPostToolUse_StdinThroughDialect(t *testing.T) {
 }
 
 func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
-	md, err := dialects.LoadMappingDialect(copilotDialectPath(t))
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
 	require.NoError(t, err)
 
 	parse := func(event, payload string) *hooks.Event {
@@ -278,7 +272,7 @@ func TestProcessHookData_CopilotPositionalPayload(t *testing.T) {
 	scrubScionEnv(t)
 	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 
-	spec, err := os.ReadFile(copilotDialectPath(t))
+	spec, err := os.ReadFile(testutil.HarnessDialectPath(t, "copilot"))
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".scion", "harness"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".scion", "harness", "dialect.yaml"), spec, 0o644))

@@ -70,7 +70,7 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	cfg := runtimebroker.DefaultServerConfig()
 	cfg.BrokerID = "e2e-broker"
 	cfg.BrokerName = "e2e-broker"
-	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	httpSrv := httptest.NewServer(brokerSrv.Handler())
 	defer httpSrv.Close()
 

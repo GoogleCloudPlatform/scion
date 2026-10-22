@@ -90,7 +90,7 @@ const (
 	// seed's --rand-seed does).
 	perfBudgetRandSeed = 42
 	// perfBudgetBaseline names the main commit the baselines were taken on.
-	perfBudgetBaseline = "main d28338a"
+	perfBudgetBaseline = "main d28338a; agent-by-id store calls from ptone/scion#3684"
 )
 
 // perfBudgetCounts is one request's measured counts, or its baseline.
@@ -118,45 +118,53 @@ var perfBudgets = []perfBudget{
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 49199},
+		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 49895}, // was 49199: +696 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		name: "project list, page by ids (25)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&ids=" + strings.Join(f.agentIDs[25:50], ",")
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 43574},
+		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 44272}, // was 43574: +698 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		name: "project list, graph (limit=500)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?limit=500"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 187593},
+		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 190385}, // was 187593: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		name: "global list, first page (fit, stats)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 51157},
+		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 51853}, // was 51157: +696 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		name:     "global list, legacy full",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 195322},
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 198114}, // was 195322: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		name:     "global list, legacy compact",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents?view=compact" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 77638},
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 80430}, // was 77638: +2792 for harnessVendor (ptone/scion#5502), about 28 bytes per row
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
 		name: "agent by id",
 		path: func(f *perfBudgetFixture) string { return "/api/v1/agents/" + f.agentIDs[10] },
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14029},
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (e8c1576a7, #3112). 14475: CI's measurement
+		// with main fb721f16f merged (its #3536 edit rows) plus the TX
+		// config.agent_plugins editability row (ptone/scion#4933). 14680: CI's
+		// measurement with the claude harness's agent_plugins capability row
+		// added (default-claude, ptone/scion#4933 U4).
+		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
+		baseline: perfBudgetCounts{authzStoreCalls: 20, decisions: 10, dbReads: 0, bytes: 14680},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
@@ -165,7 +173,15 @@ var perfBudgets = []perfBudget{
 			return "/api/v1/projects/" + f.project.ID + "/agents/" + f.agentIDs[10]
 		},
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14029},
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (e8c1576a7, #3112). 14475: CI's measurement
+		// with main fb721f16f merged (its #3536 edit rows) plus the TX
+		// config.agent_plugins editability row (ptone/scion#4933). 14680: CI's
+		// measurement with the claude harness's agent_plugins capability row
+		// added (default-claude, ptone/scion#4933 U4).
+		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
+		baseline: perfBudgetCounts{authzStoreCalls: 19, decisions: 10, dbReads: 0, bytes: 14680},
 	},
 }
 

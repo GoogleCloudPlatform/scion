@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -278,8 +279,9 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminRoleBindings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Inline authorization: role_binding.read at hub scope.
-		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
+		// Inline authorization: role_binding.read on the hub-level role
+		// binding records.
+		if !s.authorize(w, r, hubScopedResource("role_binding", "hub"), ActionRead) {
 			return
 		}
 		s.listRoleBindings(w, r)
@@ -343,12 +345,17 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	requireHubAuth := peek.ScopeType != store.RoleScopeProject
 	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
 		// Check if this is a built-in project role.
+		// A missing role is refused by createRoleBinding; any other lookup
+		// error answers 500 before an admission decision.
 		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load role definition", nil)
+			return
+		}
 		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
-		// If role lookup fails, createRoleBinding will handle the error.
 	}
 
 	if requireHubAuth {
@@ -356,7 +363,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 			decision := s.authzService.Decide(r.Context(), AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
-				Resource:   Resource{Type: "role_binding", ID: "hub"},
+				Resource:   hubScopedResource("role_binding", "hub"),
 				Action:     Action("create"),
 				Permission: "role_binding.create",
 			})
@@ -389,9 +396,10 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
-		// Inline authorization: role_binding.read at hub scope.
-		// Structured denial with resource_type + denied_action.
-		if !s.authorize(w, r, Resource{Type: "role_binding", ID: "hub"}, ActionRead) {
+		// Inline authorization: role_binding.read on the hub-level role
+		// binding records. Structured denial with resource_type +
+		// denied_action.
+		if !s.authorize(w, r, hubScopedResource("role_binding", "hub"), ActionRead) {
 			return
 		}
 		s.listBindingsForUser(w, r, userID)
@@ -407,7 +415,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 
 	switch r.Method {
 	case http.MethodDelete:
-		user, ok := s.requireWritePermissionForRoleBinding(w, r, "role_binding.delete", "delete")
+		user, ok := s.authorizeRoleBindingDelete(w, r, id)
 		if !ok {
 			return
 		}
@@ -415,6 +423,40 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 	default:
 		MethodNotAllowed(w, http.MethodDelete)
 	}
+}
+
+// authorizeRoleBindingDelete admits the caller of DELETE
+// /api/v1/admin/role-bindings/{id}. A project-scoped binding is removed
+// under project governance: the project-scope branch runs first, and a
+// caller holding project.manage on the binding's project (a session, or a
+// user access token whose selectors and boundary allow it) goes straight
+// to the project membership service, which applies the governance matrix,
+// the direct-owner rule and last-owner protection. Any other caller of a
+// project-scoped binding, and every caller of a system-scoped, missing or
+// unreadable binding, must hold role_binding.delete at hub scope.
+func (s *Server) authorizeRoleBindingDelete(w http.ResponseWriter, r *http.Request, id string) (UserIdentity, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return nil, false
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		Forbidden(w)
+		return nil, false
+	}
+	if s.authzService == nil {
+		Forbidden(w)
+		return nil, false
+	}
+	binding, err := s.store.GetRoleBinding(ctx, id)
+	if err == nil && binding.ScopeType == store.RoleScopeProject && binding.ScopeID != "" {
+		if s.authzService.CheckAccess(ctx, user, Resource{Type: "project", ID: binding.ScopeID}, ActionManage).Allowed {
+			return user, true
+		}
+	}
+	return s.requireWritePermissionForRoleBinding(w, r, "role_binding.delete", "delete")
 }
 
 // ---------------------------------------------------------------------------
@@ -434,14 +476,25 @@ func (s *Server) handleAdminPermissions(w http.ResponseWriter, r *http.Request) 
 // CRUD: Role Definitions
 // ---------------------------------------------------------------------------
 
+// roleDefinitionHidden reports whether def is left out of the role
+// definition API: a role that does not confer membership (project-visitor)
+// is shown only while the federation.project_visitors experiment is on.
+func (s *Server) roleDefinitionHidden(def *store.RoleDefinition) bool {
+	return def != nil && !def.ConfersProjectMembership() &&
+		!s.experimentEnabled(experiments.FederationProjectVisitors)
+}
+
 func (s *Server) listRoleDefinitions(w http.ResponseWriter, r *http.Request) {
-	defs, err := s.store.ListRoleDefinitions(r.Context())
+	all, err := s.store.ListRoleDefinitions(r.Context())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if defs == nil {
-		defs = []*store.RoleDefinition{}
+	defs := make([]*store.RoleDefinition, 0, len(all))
+	for _, d := range all {
+		if !s.roleDefinitionHidden(d) {
+			defs = append(defs, d)
+		}
 	}
 	writeJSON(w, http.StatusOK, listRoleDefinitionsResponse{
 		Items:      defs,
@@ -457,6 +510,10 @@ func (s *Server) getRoleDefinition(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if s.roleDefinitionHidden(def) {
+		NotFound(w, "Role Definition")
 		return
 	}
 	writeJSON(w, http.StatusOK, def)
@@ -1887,7 +1944,7 @@ func (s *Server) requireWritePermissionForRole(w http.ResponseWriter, r *http.Re
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role", ID: "hub"},
+		Resource:   hubScopedResource("role", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1918,7 +1975,7 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role_binding", ID: "hub"},
+		Resource:   hubScopedResource("role_binding", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})

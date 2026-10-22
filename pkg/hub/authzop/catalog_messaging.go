@@ -328,6 +328,123 @@ var messagingOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
+	// Chat thread groups (ptone/scion#4424):
+	// metadata over a project's group conversations, authorized exactly like
+	// a project group conversation. An agent must belong to the group's
+	// project.
+	{
+		ID:          "project.threadgroup.list",
+		Domain:      "project",
+		Description: "List a project's chat thread groups. Needs project:read on the project; an agent must belong to it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-query",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestThreadGroups_TokenWithoutInboxWriteReadsOnly"},
+			{Package: "pkg/hub", Function: "TestThreadGroups_OtherProjectAgentForbidden"},
+		},
+		Bearer: AdmitOn(BearerTargetProjectQuery, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "project.threadgroup.read",
+		Domain:      "project",
+		Description: "Read a chat thread group. Needs project:read on the group's project; an agent must belong to it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "threadgroup-project",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestThreadGroups_TokenWithoutInboxWriteReadsOnly"},
+			{Package: "pkg/hub", Function: "TestThreadGroups_NonMemberUserForbidden"},
+		},
+		Bearer: AdmitOn(BearerTargetThreadGroupRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "inbox.threadgroup.create",
+		Domain:      "inbox",
+		Description: "Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-body",
+		BasePermission:   "inbox.write",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestThreadGroups_TokenWithoutInboxWriteReadsOnly"},
+			{Package: "pkg/hub", Function: "TestThreadGroups_SameProjectAgentAllButDelete"},
+		},
+		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "inbox.threadgroup.update",
+		Domain:      "inbox",
+		Description: "Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups/{id}/threads", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups/{id}/threads/{conversationId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "threadgroup-project",
+		BasePermission:   "inbox.write",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestThreadGroups_TokenWithoutInboxWriteReadsOnly"},
+			{Package: "pkg/hub", Function: "TestThreadGroups_AddThreadValidation"},
+		},
+		Bearer: AdmitOn(BearerTargetThreadGroupRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "inbox.threadgroup.delete",
+		Domain:      "inbox",
+		Description: "Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/thread-groups/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "threadgroup-project",
+		BasePermission:   "inbox.write",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "inbox.threadgroup.delete",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"thread_group_id"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestThreadGroups_SameProjectAgentAllButDelete"},
+			{Package: "pkg/hub", Function: "TestThreadGroups_TokenWithoutInboxWriteReadsOnly"},
+		},
+		Bearer: AdmitOn(BearerTargetThreadGroupRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
 	{
 		ID:          "agent.message.target.resolve",
 		Domain:      "agent.message",
@@ -525,5 +642,55 @@ var messagingOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestNotificationTemplates_ListedOnlyForReadableProjects"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "project.conversation.gcsobject.read",
+		Domain:      "project",
+		Description: "Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcs/object", Method: "GET", Variant: "project_group"},
+		},
+		// The message named by the query decides the branch: a message of a
+		// project group conversation is read under project.read on the
+		// conversation's project (canReadGroupConversation); the URI must
+		// appear in the message body and the sender must be an agent with
+		// an admissible assigned service account.
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "message-conversation-project",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestGCSObjectToken_ProjectGroupNeedsProjectRead"},
+		},
+		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "web.events.stream",
+		Domain:      "web",
+		Description: "Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointSSE, Pattern: "/events", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "event-subjects",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestWebEventStream_RefusesUserAccessToken"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Each requested subject is authorized for the session user when the stream opens; no single resource permission applies",
+			Scope:  "web event stream",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 }

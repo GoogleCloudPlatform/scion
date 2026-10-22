@@ -67,6 +67,17 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	ensureHubMembership(ctx, s, adminID)
+	// Broker material reads need the owner relationship or broker.update,
+	// and a token carries no broker.update, so the super-admin owns the
+	// fixture broker; its secret sits in the same backend.
+	owned, err := s.SetRuntimeBrokerCreatedByIfEmpty(ctx, ids.runtimeBroker, adminID)
+	require.NoError(t, err)
+	require.True(t, owned, "the fixture broker has no owner before the matrix assigns one")
+	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.brokerSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeRuntimeBroker, ScopeID: ids.runtimeBroker,
+	})
+	require.NoError(t, err)
 
 	other := tid("bdm-other-project")
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: other, Name: "BDM Other", Slug: "bdm-other"}))
@@ -77,6 +88,15 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// addresses the super-admin's records in the fixture project.
 	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
 	ids.userSkillInjection = seedUserSkillInjection(t, ctx, s, adminID)
+	ids.userTemplate, ids.userTemplateDel = seedUserTemplates(t, ctx, s, adminID)
+	// The chat routes likewise address the super-admin's own chat records.
+	ids.chat = seedChatRecords(t, ctx, s, srv.webChatStore, adminID, ids.project, ids.chatTopic, ids.agent, ids.user)
+	// The fixture agent takes messages from any user holding agent.message
+	// on it, so the message action's admitting token reaches delivery.
+	agent, err := s.GetAgent(ctx, ids.agent)
+	require.NoError(t, err)
+	agent.MessageMode = store.MessageModeProject
+	require.NoError(t, s.UpdateAgent(ctx, agent))
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
@@ -210,7 +230,10 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	t.Helper()
 	ep := e.EntryPoint
 	id := string(e.Spec.ID)
-	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	params := m.callerPatternOverrides()[overrideKey{id, ep.Pattern}]
+	if params == nil {
+		params = opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	}
 	if params == nil {
 		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
 	}
@@ -218,7 +241,9 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 		params = patternOverrides(m.ids)[ep.Pattern]
 	}
 	path := substituteLiveInventoryParams(ep.Pattern, params)
-	if q, ok := queryOverrides(m.ids)[ep.Pattern]; ok {
+	if q, ok := bearerMatrixQueryOverrides(m.ids)[overrideKey{id, ep.Pattern}]; ok {
+		path += "?" + q
+	} else if q, ok := queryOverrides(m.ids)[ep.Pattern]; ok {
 		path += "?" + q
 	}
 	var body []byte
@@ -258,7 +283,12 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		// The delegation ceiling applies to the role an agent is granted:
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
-		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		{"agent.lifecycle.create", "/api/v1/agents"}:                      {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		{"agent.lifecycle.create", "/api/v1/projects/{projectId}/agents"}: {"name": "bdm-created-project", "agentRole": "none"},
+		// handleSetMessageMode validates the mode before the authorization
+		// check; the fixture agent is already in project mode.
+		{"agent.setmessagemode", "/api/v1/agents/{id}/set_message_mode"}:                      {"mode": "project"},
+		{"agent.setmessagemode", "/api/v1/projects/{projectId}/agents/{id}/set_message_mode"}: {"mode": "project"},
 		// Inbox writes name the fixture project and agent.
 		{"inbox.conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
 		{"inbox.conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},
@@ -268,9 +298,64 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"projectId": f.project, "scope": "project", "triggerActivities": []string{"COMPLETED"},
 		},
 		{"inbox.notification.subscription.write", "/api/v1/notifications/subscriptions/{id}"}: {"triggerActivities": []string{"FAILED"}},
+		// Thread group create names the fixture project; adding a thread
+		// files the fixture group conversation (removed again by the
+		// following DELETE .../threads/{conversationId} row).
+		{"inbox.threadgroup.create", "/api/v1/thread-groups"}:              {"name": f.inbox.createConversations + "-thread-group", "projectId": f.project},
+		{"inbox.threadgroup.update", "/api/v1/thread-groups/{id}/threads"}: {"conversationId": f.inbox.groupConversation},
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
+		// Explain names a fixture project target; the cross-principal
+		// variant explains for the fixture user.
+		{"user.self.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read",
+		},
+		{"hub.audit.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
+		},
+		// The user PATCH variants change a display name: the fixture user's
+		// for the cross-user variant, the caller's own for the self variant.
+		{"user.update", "/api/v1/users/{id}"}:      {"displayName": "BDM User"},
+		{"user.self.update", "/api/v1/users/{id}"}: {"displayName": "BDM Self"},
+		// Chat writes with bodies the handlers accept.
+		{"chat.prefs.update", "/api/v1/chat/prefs"}:                                    {"visibility_mode": "conversation"},
+		{"chat.thread.create", "/api/v1/chat/spaces/{id}/threads"}:                     {"name": "bdm thread"},
+		{"chat.space.emoji.update", "/api/v1/chat/spaces/{id}/emoji"}:                  {"emoji": "x"},
+		{"chat.conversation.send.topic", "/api/v1/chat/conversations/{id}/messages"}:   {"content": "bdm thread message"},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}: {"content": "bdm agent message"},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:  {"content": "bdm user message"},
+		{"chat.message.edit", "/api/v1/chat/conversations/{id}/messages/{messageId}"}:  {"content": "bdm edited"},
+		{"chat.conversation.markread.topic", "/api/v1/chat/conversations/{id}/read"}:   {"messageId": f.chat.topicMessage},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:      {"messageId": f.chat.dmMessage},
+		{"chat.conversation.mute.topic", "/api/v1/chat/conversations/{id}/mute"}:       {"muted": true},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:          {"muted": true},
+		{"chat.conversation.pin.topic", "/api/v1/chat/conversations/{id}/pin"}:         {"pinned": true},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:            {"pinned": true},
+		{"chat.presence.update", "/api/v1/chat/presence"}:                              {"projectIds": []string{f.project}},
+		{"chat.userprefs.update", "/api/v1/chat/user-prefs"}:                           {"spaceSortMode": "alpha"},
+		// Group create validates the name before the authorization check.
+		{"group.create", "/api/v1/groups"}: {"name": "bdm group create"},
+	}
+}
+
+// callerPatternOverrides holds per-operation path parameters that name the
+// matrix's own super-admin, for entry points told apart by whether the path
+// names the caller's own record.
+func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
+	return map[overrideKey]map[string]string{
+		{"user.self.update", "/api/v1/users/{id}"}: {"id": m.adminID},
+	}
+}
+
+// bearerMatrixQueryOverrides holds per-operation query strings, for
+// entry points that share a pattern and are told apart by the query (the
+// chat search variants).
+func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
+	return map[overrideKey]string{
+		{"chat.search.topic", "/api/v1/chat/search"}:   "q=chat&key=" + f.chatTopic,
+		{"chat.search.project", "/api/v1/chat/search"}: "q=chat&projectId=" + f.project,
+		{"chat.search.dm", "/api/v1/chat/search"}:      "q=chat&key=" + f.chat.dmAgent,
 	}
 }
 
@@ -280,6 +365,13 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		// Streams of the fixture agent and project.
+		"/api/v1/agents/{id}/cloud-logs/stream":                        {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages/stream":                          {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs/stream":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs/stream": {"projectId": f.project, "id": f.agent},
+		"/api/v1/projects/{id}/message-logs/stream":                    {"id": f.project},
 	}
 }
 

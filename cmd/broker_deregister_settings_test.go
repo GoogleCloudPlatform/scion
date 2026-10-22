@@ -297,7 +297,9 @@ func TestRemoveHubConnectionSetting_ReadsUnderLock(t *testing.T) {
 	path := filepath.Join(dir, "settings.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nhub_connections:\n  myhub:\n    endpoint: https://a.example.com\n"), 0644))
 
-	unlock := config.LockSettingsFile()
+	lock, err := config.LockSettingsDir(dir)
+	require.NoError(t, err)
+	unlock := lock.Unlock
 	done := make(chan error, 1)
 	go func() { done <- removeHubConnectionSetting(dir, "myhub") }()
 	// Give a pre-lock read time to happen before the file changes.

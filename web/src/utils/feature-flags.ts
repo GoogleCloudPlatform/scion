@@ -46,7 +46,7 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.terminal_workspace']);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat']);
 
 /**
  * Snapshot of `window.__SCION_FEATURES__` taken the first time
@@ -161,15 +161,15 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 }
 
 /**
- * Persistent terminal workspace flag (ptone/scion#1662, ptone/scion#2217).
- * Default ON. Controlled hub-wide from Admin → Server Config →
- * Experiments; a per-browser localStorage opt-out only applies when the
- * experiments fetch fails or on a signed-out page load.
- */
-export const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
-
-/**
  * Edit agent page (ptone/scion#3952): the Edit button on the agent page and
  * the /agents/{id}/edit route. Default OFF.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
+
+/**
+ * Brokers area (broker UI Option A, slice A1): with the registered
+ * experiment hub.flat_runtime_brokers on, /brokers and /brokers/{id} render
+ * the new Brokers area; with it off, the existing pages. Presentation only:
+ * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
+ */
+export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
