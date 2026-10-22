@@ -229,7 +229,8 @@ this, in order:
    the pipe cannot keep the execution alive.
 
 Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
-**4** when an idle stop raced a job start (above). Before that, **2** for a configuration error (env,
+**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the

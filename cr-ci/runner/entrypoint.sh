@@ -47,7 +47,8 @@
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
 #   0      also when the runner was stopped for its idle timeout (logged as "idle_timeout")
 #   4      the idle stop raced a job start: the SIGTERM cancelled a job that started just
-#          as the deadline passed (logged as "ERROR idle_timeout_raced_job")
+#          as the deadline passed (logged as "ERROR idle_timeout_raced_job"; a 4 without
+#          that line is run.sh's own code)
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
