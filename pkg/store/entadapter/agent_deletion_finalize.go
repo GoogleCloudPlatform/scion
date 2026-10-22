@@ -74,7 +74,7 @@ func (c *CompositeStore) finalizeAgentDeletionOnce(ctx context.Context, uid uuid
 		return 0, false, nil
 	}
 	txStore := c.newTxStore(tx)
-	obs := c.AgentStore.lifecycle.load()
+	obs := c.lifecycle.load()
 
 	hookAgent := current
 	switch mode {

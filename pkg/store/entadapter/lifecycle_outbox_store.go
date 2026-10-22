@@ -74,15 +74,15 @@ func (s *lifecycleObserverSlot) load() store.AgentWriteObserver {
 // the hub type-asserts for it, so store fakes are unaffected.
 func (c *CompositeStore) SetAgentWriteObserver(o store.AgentWriteObserver) {
 	if o == nil {
-		c.AgentStore.lifecycle.p.Store(nil)
+		c.lifecycle.p.Store(nil)
 		return
 	}
-	c.AgentStore.lifecycle.p.Store(&observerBox{o: o})
+	c.lifecycle.p.Store(&observerBox{o: o})
 }
 
 // AgentWriteObserverInstalled reports whether an observer is installed.
 func (c *CompositeStore) AgentWriteObserverInstalled() bool {
-	return c.AgentStore.lifecycle.load() != nil
+	return c.lifecycle.load() != nil
 }
 
 // newTxStore returns a CompositeStore running in tx that shares this
@@ -90,8 +90,8 @@ func (c *CompositeStore) AgentWriteObserverInstalled() bool {
 // that may be observed use it instead of newTxCompositeStore.
 func (c *CompositeStore) newTxStore(tx *ent.Tx) *CompositeStore {
 	txStore := newTxCompositeStore(tx)
-	txStore.AgentStore.lifecycle = c.AgentStore.lifecycle
-	txStore.AgentStore.entTx = tx
+	txStore.lifecycle = c.lifecycle
+	txStore.entTx = tx
 	return txStore
 }
 

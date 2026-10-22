@@ -164,7 +164,7 @@ func checkPlanInvariants(t *testing.T, f Facts, p Plan) {
 		switch e.Transition {
 		case tc.TransitionDeleted:
 			deleted++
-			if !(f.HasBefore && (!f.HasAfter || (f.BeforeLive && f.AfterDeleted))) {
+			if !f.HasBefore || (f.HasAfter && (!f.BeforeLive || !f.AfterDeleted)) {
 				t.Errorf("%s: deleted from a write that neither removes nor deletes the row", desc)
 			}
 			if e.ClosesOpenRun != (f.Cursor.OpenRun != "") {

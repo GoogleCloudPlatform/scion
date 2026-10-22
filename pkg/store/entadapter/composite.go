@@ -458,7 +458,7 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	obs := c.AgentStore.lifecycle.load()
+	obs := c.lifecycle.load()
 	var lifecycleBefore []*ent.Agent
 	if obs != nil && len(agentIDs) > 0 {
 		// The rows are already locked; read them whole for the deleted
@@ -498,7 +498,7 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if obs != nil {
 		now := time.Now()
 		for _, row := range lifecycleBefore {
-			if err := observeAgentWrite(ctx, obs, c.client, c.AgentStore.entTx, store.AgentWrite{
+			if err := observeAgentWrite(ctx, obs, c.client, c.entTx, store.AgentWrite{
 				Op: store.AgentWriteProjectDelete, Before: entAgentToStore(row), Now: now,
 			}); err != nil {
 				return err
@@ -638,7 +638,7 @@ func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff
 // candidates.
 func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
-	obs := c.AgentStore.lifecycle.load()
+	obs := c.lifecycle.load()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
