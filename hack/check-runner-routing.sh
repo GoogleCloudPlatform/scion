@@ -69,10 +69,13 @@ check_file() {
       printf "%s:%d: job %s names a self-hosted runner literally; route it only through the canonical expression:\n    %s\n", file, NR, job, canon
     }
     /uses:[[:space:]]*["\047]?docker:\/\// { dock = 1 }
-    /vars\.SCION_LARGE_RUNNER/ {
+    /^    runs-on:.*vars\.SCION_LARGE_RUNNER/ {
       line = $0; sub(/[[:space:]]+$/, "", line)
       if (line == "    " canon) routed = 1
-      else printf "%s:%d: job %s: a runs-on that reads vars.SCION_LARGE_RUNNER must be exactly:\n    %s\n  got:\n    %s\n", file, NR, job, canon, line
+      else printf "%s:%d: job %s: a runs-on that reads vars.SCION_LARGE_RUNNER must be exactly:\n    %s\n  got:\n%s\n", file, NR, job, canon, line
+    }
+    /vars\.SCION_LARGE_RUNNER/ && !/^    runs-on:/ && !/^    timeout-minutes: \$\{\{ vars\.SCION_LARGE_RUNNER && [0-9]+ \|\| [0-9]+ \}\}[[:space:]]*$/ {
+      printf "%s:%d: job %s reads vars.SCION_LARGE_RUNNER outside runs-on and the timeout-minutes form; only the canonical runs-on and ${{ vars.SCION_LARGE_RUNNER && N || M }} may use it\n", file, NR, job
     }
     /^    [A-Za-z_-]+:/ { inperm = 0 }
     /^    (services|container):/ { k = $0; sub(/^    /, "", k); sub(/:.*/, "", k); svc = (svc == "" ? k ":" : svc " and " k ":") }
