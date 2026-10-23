@@ -59,9 +59,11 @@ func TestComputeContentHash_RenameAndChmod(t *testing.T) {
 		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},
 		{Path: "run.sh", Hash: "sha256:bbb", Mode: "0644"},
 	}
+	// v1 concatenates file hashes in path order, so it does see a rename
+	// that reorders the files; this one keeps the order.
 	renamed := []store.TemplateFile{
 		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},
-		{Path: "bin/run.sh", Hash: "sha256:bbb", Mode: "0644"},
+		{Path: "scripts/run.sh", Hash: "sha256:bbb", Mode: "0644"},
 	}
 	chmodded := []store.TemplateFile{
 		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},

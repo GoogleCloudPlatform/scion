@@ -34,7 +34,7 @@ import (
 
 const casScript = "#!/bin/sh\necho hi\n"
 
-func finalizeTemplate(t *testing.T, srv *Server, tmpl *store.Template, files []store.TemplateFile, expected string) int {
+func finalizeTemplateCode(t *testing.T, srv *Server, tmpl *store.Template, files []store.TemplateFile, expected string) int {
 	t.Helper()
 	rec := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize", "application/json",
 		finalizeBody(t, files, expected))
@@ -84,7 +84,7 @@ func TestTemplateFinalize_RenameAndChmodOnlyCommitsConflict(t *testing.T) {
 			// Writer A commits the rename-only or chmod-only change.
 			next := tt.next()
 			stageObjects(t, srv, tmpl, tt.staged)
-			if code := finalizeTemplate(t, srv, tmpl, next, h0); code != http.StatusOK {
+			if code := finalizeTemplateCode(t, srv, tmpl, next, h0); code != http.StatusOK {
 				t.Fatalf("writer A: status %d, want 200", code)
 			}
 			afterA, err := s.GetTemplate(ctx, tmpl.ID)
@@ -101,7 +101,7 @@ func TestTemplateFinalize_RenameAndChmodOnlyCommitsConflict(t *testing.T) {
 			// Writer B diffed against h0: refused, and the row keeps A's commit.
 			stale := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "b.md": "from writer B"}
 			stageObjects(t, srv, tmpl, stale)
-			if code := finalizeTemplate(t, srv, tmpl, commitManifest(stale), h0); code != http.StatusConflict {
+			if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(stale), h0); code != http.StatusConflict {
 				t.Fatalf("writer B with the pre-%s hash: status %d, want 409", tt.name, code)
 			}
 			got, err := s.GetTemplate(ctx, tmpl.ID)
@@ -148,7 +148,7 @@ func TestTemplateFinalize_V1RowStrictCompare(t *testing.T) {
 
 		next := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "new.md": "new"}
 		stageObjects(t, srv, tmpl, next)
-		if code := finalizeTemplate(t, srv, tmpl, commitManifest(next), h1); code != http.StatusOK {
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), h1); code != http.StatusOK {
 			t.Fatalf("status %d, want 200", code)
 		}
 		got, err := s.GetTemplate(context.Background(), tmpl.ID)
@@ -173,13 +173,13 @@ func TestTemplateFinalize_V1RowStrictCompare(t *testing.T) {
 			t.Fatal("test premise: v1 must not see the rename")
 		}
 		stageObjects(t, srv, tmpl, map[string]string{"bin/run.sh": casScript})
-		if code := finalizeTemplate(t, srv, tmpl, renamed, h1); code != http.StatusOK {
+		if code := finalizeTemplateCode(t, srv, tmpl, renamed, h1); code != http.StatusOK {
 			t.Fatalf("rename: status %d, want 200", code)
 		}
 
 		stale := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "b.md": "stale"}
 		stageObjects(t, srv, tmpl, stale)
-		if code := finalizeTemplate(t, srv, tmpl, commitManifest(stale), h1); code != http.StatusConflict {
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(stale), h1); code != http.StatusConflict {
 			t.Fatalf("stale v1 finalize over a rename: status %d, want 409", code)
 		}
 		got, err := s.GetTemplate(context.Background(), tmpl.ID)
