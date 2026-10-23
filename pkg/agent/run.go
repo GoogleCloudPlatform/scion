@@ -901,6 +901,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// if any (for restaging capture-auth assets after a bundle clear).
 	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
+	// aliasHarness keys the built-in model-alias fallback
+	// (resolveEffectiveModel): the declared harness of the harness-config
+	// this launch resolved, or the stored name when none was resolved (the
+	// harness.New paths, where h is built from that same name).
+	aliasHarness := harnessName
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
 		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
@@ -975,6 +980,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			h = fallback
 		} else {
 			h = resolved.Harness
+			aliasHarness = resolved.Config.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
 			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
@@ -1391,8 +1397,11 @@ authDone:
 		opts.Env["SCION_BROKER_NAME"] = "local"
 	}
 	// Inject harness and model identifiers for telemetry labeling.
-	if _, ok := opts.Env["SCION_HARNESS"]; !ok && harnessName != "" {
-		opts.Env["SCION_HARNESS"] = harnessName
+	// SCION_HARNESS is the harness this launch resolved (ptone/scion#5946),
+	// not the stored name read before resolution; an explicit SCION_HARNESS
+	// already in opts.Env wins (containerHarnessEnv).
+	if v, set := containerHarnessEnv(ctx, opts.Env, launchedHarnessName(h)); set {
+		opts.Env["SCION_HARNESS"] = v
 	}
 	// The resolved ready spec for sciontool init, which records it in the
 	// init-run file for the host's readiness wait. Always written: the
@@ -1407,7 +1416,7 @@ authDone:
 	// env (the hub-resolved model, or an explicit --env) wins over the
 	// broker's own config, so a broker template or harness-config default
 	// cannot override the hub's request > project > template > hub order.
-	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, harnessName)
+	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, aliasHarness)
 	if effectiveModel != "" {
 		if prev := opts.Env["SCION_MODEL"]; prev != "" && prev != effectiveModel {
 			util.Debugf("RunAgent: resolved model alias %q → %q", prev, effectiveModel)
@@ -4036,6 +4045,39 @@ func mergeExtraHosts(a, b []string) []string {
 	return result
 }
 
+// launchedHarnessName is the name of the harness implementation this launch
+// resolved: the harness-config's declared harness for a declarative or
+// container-script harness, an embedded harness's name, or "generic" for the
+// plain Generic implementation. It is the container's SCION_HARNESS
+// (containerHarnessEnv).
+func launchedHarnessName(h api.Harness) string {
+	if h == nil {
+		return ""
+	}
+	return h.Name()
+}
+
+// containerHarnessEnv decides the container's SCION_HARNESS. It returns the
+// value to set and true when env has no SCION_HARNESS and launched is
+// non-empty. An SCION_HARNESS already in env (the caller's env, or the
+// resolved harness-config's env) is an explicit override and is kept; since
+// an intentional parser override cannot be told apart from a stale name,
+// a fixed warning names both harnesses when they differ. sciontool selects
+// its usage-parsing rules and labels usage with this value.
+func containerHarnessEnv(ctx context.Context, env map[string]string, launched string) (string, bool) {
+	if override, ok := env["SCION_HARNESS"]; ok {
+		if override != launched {
+			slog.WarnContext(ctx, "Start: SCION_HARNESS override differs from the launched harness",
+				"override", override, "launched", launched)
+		}
+		return "", false
+	}
+	if launched == "" {
+		return "", false
+	}
+	return launched, true
+}
+
 // resolveEffectiveModel returns the agent's one effective model: SCION_MODEL
 // from the start env when set (the hub-resolved model, or an explicit
 // --env), else the broker's own config model (an agent with no hub-resolved
@@ -4044,7 +4086,10 @@ func mergeExtraHosts(a, b []string) []string {
 // harness-config's model_aliases, else the harness's built-in table
 // (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
 // harness verbatim. An alias neither table resolves is returned in its
-// normalized form (e.g. "large" for "L").
+// normalized form (e.g. "large" for "L"). harnessName is the declared harness
+// of the harness-config this launch resolved (not the stored name, which a
+// harness-config switch leaves stale; ptone/scion#5946); empty means no
+// built-in table.
 //
 // The broker's config model never replaces a SCION_MODEL value, alias or
 // not: that model may be a broker template or harness-config default, which
