@@ -12,13 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-// Producer identity guard (design wp2-producer-identity-v1.3): staged
+// Producer identity guard (design wp2-producer-identity-v1.5 and later): staged
 // lines are provisional, finalized only under a hub this process verified
 // against the pin; a mismatch records a relocation, refuses new appends and
 // holds provisional lines, while already-final lines replay unchanged.
@@ -64,6 +65,16 @@ func copyOutbox(t *testing.T, src *AnalyticsOutbox) *AnalyticsOutbox {
 		t.Fatalf("OpenAnalyticsOutbox(copy): %v", err)
 	}
 	return o
+}
+
+// runConfirmed runs the drainer twice, the second run
+// analyticsRelocationConfirm later, so a differing hub is confirmed.
+func runConfirmed(d *AnalyticsDrainer) {
+	clock := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	d.RunOnce(context.Background())
+	clock = clock.Add(analyticsRelocationConfirm)
+	d.RunOnce(context.Background())
 }
 
 func reopen(t *testing.T, o *AnalyticsOutbox) *AnalyticsOutbox {
@@ -138,7 +149,7 @@ func TestGuardT3FinalLinesReplayUnchanged(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub-A")
 	mustAppend(t, o, draftFor("a", "rid1:r", outboxTestTS), AppendWritten)
-	if _, err := o.Finalize("hub-A"); err != nil {
+	if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
 		t.Fatal(err)
 	}
 	cp := copyOutbox(t, o)
@@ -162,7 +173,7 @@ func TestGuardT4CrossHubCopyRefusesAndHolds(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub-A")
 	mustAppend(t, o, draftFor("a", "rid1:final", outboxTestTS), AppendWritten)
-	if _, err := o.Finalize("hub-A"); err != nil {
+	if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
 		t.Fatal(err)
 	}
 	mustAppend(t, o, draftFor("a", "rid1:staged", outboxTestTS), AppendWritten)
@@ -171,7 +182,7 @@ func TestGuardT4CrossHubCopyRefusesAndHolds(t *testing.T) {
 
 	c := &capture{}
 	d := NewAnalyticsDrainer(cp, c.send, trustedHub("hub-B"))
-	d.RunOnce(context.Background())
+	runConfirmed(d)
 	if got := d.VerifiedHubID(); got != "" {
 		t.Errorf("VerifiedHubID after mismatch = %q, want empty", got)
 	}
@@ -199,7 +210,7 @@ func TestGuardT4CrossHubCopyRefusesAndHolds(t *testing.T) {
 	if s := r.Stats(); !s.Relocated || s.PersistedRelocatedRefused != 1 || s.PersistedHubMismatch != 1 || s.RelocatedRefused != 1 {
 		t.Errorf("stats = %+v", s)
 	}
-	if n, err := r.Finalize("hub-A"); !errors.Is(err, ErrAnalyticsOutboxRelocated) || n != 0 {
+	if n, err := r.finalize(context.Background(), "hub-A"); !errors.Is(err, ErrAnalyticsOutboxRelocated) || n != 0 {
 		t.Errorf("Finalize on relocated outbox = %d, %v", n, err)
 	}
 	if len(stagingLines(t, r)) != 1 || l.PendingBytes == 0 {
@@ -274,7 +285,7 @@ func TestGuardT8UnverifiedHoldsButFinalLinesDrain(t *testing.T) {
 			o := testOutbox(t)
 			_, _ = o.PinHubID("hub-A")
 			mustAppend(t, o, draftFor("a", "rid1:final", outboxTestTS), AppendWritten)
-			if _, err := o.Finalize("hub-A"); err != nil {
+			if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
 				t.Fatal(err)
 			}
 			mustAppend(t, o, draftFor("a", "rid1:held", outboxTestTS), AppendWritten)
@@ -335,20 +346,31 @@ func TestGuardT9TwoDrainersAndConcurrentAppends(t *testing.T) {
 		}(i, h)
 	}
 	dB := NewAnalyticsDrainer(reopen(t, o), cb.send, trustedHub("hub-B"))
-	dB.RunOnce(context.Background())
+	runConfirmed(dB)
 	wg.Wait()
 	close(outcomes)
+	written, refused := 0, 0
 	for got := range outcomes {
-		if got != AppendWritten && got != AppendRefusedRelocated {
+		switch got {
+		case AppendWritten:
+			written++
+		case AppendRefusedRelocated:
+			refused++
+		default:
 			t.Errorf("racing append outcome = %d", got)
 		}
+	}
+	l := ledger(t, o)
+	if int64(refused) != l.RelocatedRefusedTotal || l.LastSeq != 40 || written != len(stagingLines(t, o)) {
+		t.Errorf("accounting: written %d (staged %d), refused %d (ledger %d), last seq %d (want 40)",
+			written, len(stagingLines(t, o)), refused, l.RelocatedRefusedTotal, l.LastSeq)
 	}
 	for _, line := range stagingLines(t, o) {
 		if decodeUsage(t, line).HubID != "" {
 			t.Errorf("staged line stamped: %s", line)
 		}
 	}
-	if n, err := o.Finalize(dA.VerifiedHubID()); !errors.Is(err, ErrAnalyticsOutboxRelocated) || n != 0 {
+	if n, err := o.finalize(context.Background(), dA.VerifiedHubID()); !errors.Is(err, ErrAnalyticsOutboxRelocated) || n != 0 {
 		t.Fatalf("A's stale verification bypassed the relocation: %d, %v", n, err)
 	}
 	dA.RunOnce(context.Background())
@@ -370,7 +392,7 @@ func TestGuardCommitRechecksRelocation(t *testing.T) {
 	if err != nil || len(files) != 1 {
 		t.Fatalf("finalizing files = %v, %v", files, err)
 	}
-	if _, err := reopen(t, o).PinHubID("hub-B"); err != nil {
+	if err := reopen(t, o).recordRelocation("hub-B"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := o.finalizeFile(files[0], "hub-A"); !errors.Is(err, ErrAnalyticsOutboxRelocated) {
@@ -408,7 +430,7 @@ func TestGuardT10LegacyStampedLine(t *testing.T) {
 		if relocated {
 			hub = "hub-B"
 		}
-		NewAnalyticsDrainer(o, c.send, trustedHub(hub)).RunOnce(context.Background())
+		runConfirmed(NewAnalyticsDrainer(o, c.send, trustedHub(hub)))
 		if relocated {
 			if len(c.lines) != 0 || len(stagingLines(t, o)) != 1 {
 				t.Errorf("relocated: legacy line sent %d, staged %d; want held", len(c.lines), len(stagingLines(t, o)))
@@ -457,7 +479,7 @@ func TestGuardRelinkToAnotherHubAsNewAgent(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub-A")
 	mustAppend(t, o, draftFor("agent-old", "rid1:final", outboxTestTS), AppendWritten)
-	if _, err := o.Finalize("hub-A"); err != nil {
+	if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
 		t.Fatal(err)
 	}
 	mustAppend(t, o, draftFor("agent-old", "rid1:staged", outboxTestTS), AppendWritten)
@@ -470,7 +492,7 @@ func TestGuardRelinkToAnotherHubAsNewAgent(t *testing.T) {
 	// Process 1 after re-link: hub B, new agent ID.
 	c := &capture{}
 	d := NewAnalyticsDrainer(o, c.send, trustedHub("hub-B"))
-	d.RunOnce(context.Background())
+	runConfirmed(d)
 	if len(c.lines) != 1 || c.lines[0]+"\n" != string(readyBytes) {
 		t.Fatalf("old final bytes must drain unchanged: %q", c.lines)
 	}
@@ -586,5 +608,229 @@ func TestGuardCrossNamespaceDuplicateSeq(t *testing.T) {
 	}
 	if e1.ProducerNamespace == e2.ProducerNamespace || e1.EventID == e2.EventID {
 		t.Errorf("want distinct keys: (%s,%s) vs (%s,%s)", e1.ProducerNamespace, e1.EventID, e2.ProducerNamespace, e2.EventID)
+	}
+}
+
+// scriptedHub returns the next ID from ids on each resolution (the last
+// one repeats).
+func scriptedHub(ids ...string) HubIDResolver {
+	var mu sync.Mutex
+	i := 0
+	return func(context.Context) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		id := ids[i]
+		if i < len(ids)-1 {
+			i++
+		}
+		return id, nil
+	}
+}
+
+// Debounce (false-positive mitigation, not identity proof): one differing
+// resolution records nothing and publishes nothing; a later agreeing one
+// at least analyticsRelocationConfirm after the first confirms; an equal
+// one in between clears the candidate; a different one restarts it. While
+// unconfirmed, finalize is held and final lines drain unchanged.
+func TestGuardRelocationDebounce(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ids           []string
+		steps         []time.Duration // clock offsets of successive runs
+		wantRelocated string
+		wantVerified  string
+	}{
+		{"single differing read", []string{"hub-B"}, []time.Duration{0}, "", ""},
+		{"agreeing too early", []string{"hub-B", "hub-B"}, []time.Duration{0, analyticsRelocationConfirm - time.Second}, "", ""},
+		{"agreeing after the delay", []string{"hub-B", "hub-B"}, []time.Duration{0, analyticsRelocationConfirm}, "hub-B", ""},
+		{"misroute clears", []string{"hub-B", "hub-A"}, []time.Duration{0, analyticsRelocationConfirm}, "", "hub-A"},
+		{"different hub restarts", []string{"hub-B", "hub-C", "hub-C"}, []time.Duration{0, analyticsRelocationConfirm, analyticsRelocationConfirm}, "", ""},
+		{"restarted then confirmed", []string{"hub-B", "hub-C", "hub-C"}, []time.Duration{0, analyticsRelocationConfirm, 2 * analyticsRelocationConfirm}, "hub-C", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := testOutbox(t)
+			_, _ = o.PinHubID("hub-A")
+			mustAppend(t, o, draftFor("a", "rid1:final", outboxTestTS), AppendWritten)
+			if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
+				t.Fatal(err)
+			}
+			mustAppend(t, o, draftFor("a", "rid1:staged", outboxTestTS), AppendWritten)
+			c := &capture{}
+			d := NewAnalyticsDrainer(o, c.send, scriptedHub(tc.ids...))
+			start := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+			for _, off := range tc.steps {
+				clock := start.Add(off)
+				d.now = func() time.Time { return clock }
+				d.RunOnce(context.Background())
+			}
+			l := ledger(t, o)
+			if l.RelocatedHubID != tc.wantRelocated || d.VerifiedHubID() != tc.wantVerified {
+				t.Fatalf("relocated %q (want %q), verified %q (want %q)", l.RelocatedHubID, tc.wantRelocated, d.VerifiedHubID(), tc.wantVerified)
+			}
+			if tc.wantRelocated == "" && tc.wantVerified == "" && d.ObservedHubID() != "" {
+				t.Errorf("unconfirmed: ObservedHubID = %q, want empty", d.ObservedHubID())
+			}
+			wantSent := 1
+			if tc.wantVerified != "" {
+				wantSent = 2
+			}
+			if len(c.lines) != wantSent {
+				t.Errorf("sent %d, want %d (final line always; provisional only once verified)", len(c.lines), wantSent)
+			}
+		})
+	}
+}
+
+// R2 publication order: ObservedHubID and VerifiedHubID are still empty
+// while PinHubID (and, on a confirmed mismatch, recordRelocation) holds
+// the outbox lock; they are published only afterwards.
+func TestGuardPublicationOrder(t *testing.T) {
+	type seen struct{ observed, verified string }
+	watch := func(o *AnalyticsOutbox, d **AnalyticsDrainer, first int32) (*[]seen, func()) {
+		var mu sync.Mutex
+		var got []seen
+		var n atomic.Int32
+		o.lockAcquiredHook = func() {
+			if n.Add(1) > first {
+				return
+			}
+			mu.Lock()
+			got = append(got, seen{(*d).ObservedHubID(), (*d).VerifiedHubID()})
+			mu.Unlock()
+		}
+		return &got, func() { o.lockAcquiredHook = nil }
+	}
+
+	t.Run("equal hub", func(t *testing.T) {
+		o := testOutbox(t)
+		_, _ = o.PinHubID("hub-A")
+		d := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-A"))
+		got, stop := watch(o, &d, 1) // the first acquisition is PinHubID's
+		d.RunOnce(context.Background())
+		stop()
+		if len(*got) != 1 || (*got)[0] != (seen{}) {
+			t.Fatalf("accessors during PinHubID = %+v, want empty", *got)
+		}
+		if d.ObservedHubID() != "hub-A" || d.VerifiedHubID() != "hub-A" {
+			t.Errorf("after: observed %q verified %q", d.ObservedHubID(), d.VerifiedHubID())
+		}
+	})
+
+	t.Run("confirmed mismatch", func(t *testing.T) {
+		o := testOutbox(t)
+		_, _ = o.PinHubID("hub-A")
+		d := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-B"))
+		clock := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+		d.now = func() time.Time { return clock }
+		d.RunOnce(context.Background()) // candidate
+		clock = clock.Add(analyticsRelocationConfirm)
+		got, stop := watch(o, &d, 2) // PinHubID, then recordRelocation
+		d.RunOnce(context.Background())
+		stop()
+		if len(*got) != 2 || (*got)[0] != (seen{}) || (*got)[1] != (seen{}) {
+			t.Fatalf("accessors during PinHubID/recordRelocation = %+v, want empty", *got)
+		}
+		if d.ObservedHubID() != "hub-B" || d.VerifiedHubID() != "" || ledger(t, o).RelocatedHubID != "hub-B" {
+			t.Errorf("after: observed %q verified %q", d.ObservedHubID(), d.VerifiedHubID())
+		}
+	})
+}
+
+// O2: dead lines are persisted with a successful commit only, so a refused
+// commit (retried later) never counts them twice.
+func TestGuardDeadLettersPersistOnlyWithCommit(t *testing.T) {
+	writeBad := func(o *AnalyticsOutbox) {
+		f, err := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("{\"not\":\"an event\"}\n")
+		_ = f.Close()
+	}
+	// Refused commits: counted zero times, however often retried.
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("a", "rid1:x", outboxTestTS), AppendWritten)
+	writeBad(o)
+	if _, err := o.rotateStaging("hub-A"); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := o.finalizingFiles()
+	if err := o.recordRelocation("hub-B"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := o.finalizeFile(files[0], "hub-A"); !errors.Is(err, ErrAnalyticsOutboxRelocated) {
+			t.Fatalf("finalizeFile = %v", err)
+		}
+	}
+	if l := ledger(t, o); l.DeadLettersTotal != 0 {
+		t.Errorf("refused commits dead-lettered %d lines, want 0", l.DeadLettersTotal)
+	}
+	// A successful commit: counted once.
+	o2 := testOutbox(t)
+	_, _ = o2.PinHubID("hub-A")
+	mustAppend(t, o2, draftFor("a", "rid1:y", outboxTestTS), AppendWritten)
+	writeBad(o2)
+	if n, err := o2.finalize(context.Background(), "hub-A"); err != nil || n != 1 {
+		t.Fatalf("finalize = %d, %v", n, err)
+	}
+	if l := ledger(t, o2); l.DeadLettersTotal != 1 {
+		t.Errorf("dead letters = %d, want 1", l.DeadLettersTotal)
+	}
+}
+
+// F2: the commit never replaces an existing file (the ready number is
+// chosen under the lock, and the link fails with EEXIST).
+func TestGuardCommitNeverReplaces(t *testing.T) {
+	o := testOutbox(t)
+	dst := filepath.Join(o.Dir(), readyName(7))
+	if err := os.WriteFile(dst, []byte("other drainer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := o.writeFileFromCommit(o.Dir(), "ready", func(w io.Writer) error {
+		_, err := w.Write([]byte("mine\n"))
+		return err
+	}, func(link func(string) error) error { return link(dst) })
+	if err == nil {
+		t.Fatal("commit replaced an existing ready file")
+	}
+	if data, _ := os.ReadFile(dst); string(data) != "other drainer\n" {
+		t.Errorf("existing file changed: %q", data)
+	}
+	if tmps, _ := filepath.Glob(filepath.Join(o.Dir(), ".ready.tmp-*")); len(tmps) != 0 {
+		t.Errorf("temp files left: %v", tmps)
+	}
+}
+
+// Debounce: a process that exits with only an unconfirmed candidate
+// leaves no marker and nothing persisted; the next process starts over.
+func TestGuardCandidateDoesNotSurviveExit(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("a", "rid1:staged", outboxTestTS), AppendWritten)
+	d1 := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-B"))
+	clock := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	d1.now = func() time.Time { return clock }
+	d1.RunOnce(context.Background()) // candidate only; then the process exits
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	d1.Stop(ctx)
+	cancel()
+
+	r := reopen(t, o)
+	if l := ledger(t, r); l.RelocatedHubID != "" || l.HubMismatchTotal != 0 {
+		t.Fatalf("candidate persisted: %+v", l)
+	}
+	// The next process: a read past the old candidate's window is a new
+	// first sighting, not a confirmation.
+	d2 := NewAnalyticsDrainer(r, (&capture{}).send, trustedHub("hub-B"))
+	later := clock.Add(analyticsRelocationConfirm)
+	d2.now = func() time.Time { return later }
+	d2.RunOnce(context.Background())
+	if l := ledger(t, r); l.RelocatedHubID != "" || d2.ObservedHubID() != "" {
+		t.Errorf("new process confirmed on its first read: relocated %q observed %q", l.RelocatedHubID, d2.ObservedHubID())
+	}
+	if len(stagingLines(t, r)) != 1 {
+		t.Error("provisional line must stay held while unconfirmed")
 	}
 }
