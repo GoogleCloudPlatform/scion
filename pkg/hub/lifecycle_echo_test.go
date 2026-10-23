@@ -822,6 +822,11 @@ func TestAsyncStartDispatch_BindsLaunchRun(t *testing.T) {
 			require.NotEmpty(t, row.RunID)
 			assert.Equal(t, c.kind, row.LaunchKind)
 			assert.Equal(t, row.RunID, row.LaunchRunID, "the start launch binds its minted run")
+			// The bound run is the run this dispatch sent to the broker, as
+			// for a create (TestDispatchAgentCreate_AsyncBindsLaunchRun).
+			sent := f.client.sent()
+			require.Len(t, sent, 1)
+			assert.Equal(t, sent[0].RunID, row.LaunchRunID, "the start launch binds the run sent to the broker")
 		})
 	}
 }
