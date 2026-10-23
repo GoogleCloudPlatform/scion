@@ -118,3 +118,28 @@ func TestWithWorkspaceProvisionLocks_ExcludesEveryProvisioner(t *testing.T) {
 		}
 	}
 }
+
+// A panic inside the section still releases the locks: the panic reaches
+// the caller, and the next section takes the locks.
+func TestWithWorkspaceProvisionLocks_ReleasesOnPanic(t *testing.T) {
+	withFastFileLockTiming(t)
+	origRetries := fileLockRetries
+	fileLockRetries = 5 // about 100 ms, so a leaked lock fails fast
+	t.Cleanup(func() { fileLockRetries = origRetries })
+	ws := newWorkspaceTree(t)
+
+	func() {
+		defer func() {
+			if r := recover(); r != "section panic" {
+				t.Fatalf("recovered %v, want the section's panic", r)
+			}
+		}()
+		_ = WithWorkspaceProvisionLocks(context.Background(), ws, func(context.Context) error {
+			panic("section panic")
+		})
+	}()
+
+	if err := WithWorkspaceProvisionLocks(context.Background(), ws, func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("locks not released after a panic: %v", err)
+	}
+}
