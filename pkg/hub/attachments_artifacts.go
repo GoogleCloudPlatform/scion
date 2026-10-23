@@ -17,10 +17,14 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Web-chat attachments stored as message-scoped artifacts
@@ -48,16 +52,50 @@ func (s *Server) attachmentArtifactsReady() bool {
 
 // attachmentUploadsToArtifacts reports, for one upload request, whether its
 // files are stored as artifacts: the experiment is on, the artifact service
-// is ready, and the caller is one the service lets read attachments
-// (PermitsMessageRead: a session of a user or the dev user). Otherwise
-// uploads go to the AttachmentStore as before, so a user access token or a
-// federated user keeps uploading, and reading what it uploads, as it did
-// with the experiment off.
+// is ready, and attachmentWriterKind admits the caller. Otherwise uploads
+// go to the AttachmentStore as before, so a federated user keeps uploading,
+// and reading what it uploads, as it did with the experiment off.
 func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 	if !s.experimentEnabled(experiments.AttachmentArtifacts) || !s.attachmentArtifactsReady() {
 		return false
 	}
-	return s.attachmentCallerIsSession(ctx)
+	return s.attachmentWriterKind(ctx) != ""
+}
+
+// attachmentWriterKind answers the write question of attachments stored as
+// artifacts (ptone/scion#4596): may the caller of ctx create such
+// attachments (upload them, and name them on a send)? It returns the
+// principal kind the attachment is owned by, or "" when the caller keeps
+// the AttachmentStore path. It is not a read question: who reads an
+// attachment is the artifact service's decision alone
+// (artifacts.Service.MayReadAttachments and ServeAttachment over
+// artifactHost). Admitted: a session of a user or the dev user, a user
+// access token (as its holder; the routes keep their token checks,
+// ptone/scion#4596 section 9), and an agent that may send (agentMaySend).
+func (s *Server) attachmentWriterKind(ctx context.Context) string {
+	cred, token := inboxCredentialOf(ctx)
+	if cred == inboxCredentialToken {
+		if token != nil && token.ID() != "" {
+			return artifacts.PrincipalKindUser
+		}
+		return ""
+	}
+	if cred == inboxCredentialAgent {
+		if _, ok := s.agentMaySend(ctx); ok {
+			return artifacts.PrincipalKindAgent
+		}
+		return ""
+	}
+	if cred != inboxCredentialSession {
+		return ""
+	}
+	switch id := GetIdentityFromContext(ctx).(type) {
+	case *AuthenticatedUser, *DevUser:
+		if id.ID() != "" {
+			return artifacts.PrincipalKindUser
+		}
+	}
+	return ""
 }
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file
@@ -73,12 +111,15 @@ func (s *Server) attachmentMaxBytes(ctx context.Context, toArtifacts bool) int64
 }
 
 // bindChatAttachments binds each artifact attachment of refs to the stored
-// message messageID, sent by user, under the attachment's row lock, and
-// returns refs without those that could not be bound (one sent meanwhile
-// in another message, for example), so the message never names an
-// attachment it does not hold. AttachmentStore references are returned as
-// they are. A failure is logged with the attachment id only.
-func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, messageID string, refs []AttachmentRef) []AttachmentRef {
+// message messageID, sent by (senderKind, senderID), under the
+// attachment's row lock,
+// recording project as the message's project (bindProject; nil when it
+// could not be derived, and then no attachment is bound). It returns refs
+// without those that could not be bound (one sent meanwhile in another
+// message, for example), so the message never names an attachment it does
+// not hold. AttachmentStore references are returned as they are. A failure
+// is logged with the attachment id only.
+func (s *Server) bindChatAttachments(ctx context.Context, senderKind, senderID, messageID string, project *string, refs []AttachmentRef) []AttachmentRef {
 	if len(refs) == 0 {
 		return refs
 	}
@@ -89,10 +130,15 @@ func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, mes
 			out = append(out, ref)
 			continue
 		}
+		if project == nil {
+			s.messageLog.Error("No message project for the attachment; dropped from the message",
+				"attachment", ref.ID, "message", messageID)
+			continue
+		}
 		if svc == nil {
 			svc = s.attachmentService()
 		}
-		if err := svc.BindAttachment(ctx, ref.ID, artifacts.PrincipalKindUser, user.ID(), messageID); err != nil {
+		if err := svc.BindAttachment(ctx, ref.ID, senderKind, senderID, messageID, *project); err != nil {
 			s.messageLog.Error("Failed to bind attachment to message; dropped from the message",
 				"attachment", ref.ID, "message", messageID, "error", err)
 			continue
@@ -100,6 +146,41 @@ func (s *Server) bindChatAttachments(ctx context.Context, user UserIdentity, mes
 		out = append(out, ref)
 	}
 	return out
+}
+
+// bindProject returns the project to record on the artifact attachments of
+// refs when they are bound to the stored message msg
+// (messageProjectForBind), or nil when it cannot be derived (logged). It
+// derives nothing when refs holds no artifact attachment.
+func (s *Server) bindProject(ctx context.Context, msg *store.Message, refs []AttachmentRef) *string {
+	needed := false
+	for _, ref := range refs {
+		if ref.artifact {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return nil
+	}
+	project, err := s.messageProjectForBind(ctx, msg)
+	if err != nil {
+		s.messageLog.Error("Failed to derive the message project for its attachments", "message", msg.ID, "error", err)
+		return nil
+	}
+	return &project
+}
+
+// newArtifactAttachmentRef returns the reference to artifact attachment
+// info, marked as stored in the artifact service. It is the only place
+// that sets AttachmentRef.artifact (pinned by
+// TestArtifactAttachmentRef_OnlyConstructorSetsFlag): every other
+// reference, in particular one decoded from message metadata, from JSON or
+// built for history, leaves the flag false, so only refs that send
+// validation built from a usable upload reach the chat subjects and the
+// bind step.
+func newArtifactAttachmentRef(info artifacts.AttachmentInfo) AttachmentRef {
+	return AttachmentRef{ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true, sha256: info.SHA256}
 }
 
 // legacyAttachmentRefs returns the AttachmentStore references of refs.
@@ -136,23 +217,29 @@ var errNoAttachmentStaging = errors.New("no attachment staging directory for thi
 
 // mergeArtifactAttachments adds the artifact attachments of the messages
 // in msgIDs to byMessage (the AttachmentStore attachments of history),
-// creating it when needed. A failure is logged and leaves byMessage as it
-// is. The caller has already authorized the history read.
+// creating it when needed. One batched query finds the attachments of the
+// page; then the read decision (MayReadAttachments) is asked once
+// per message that has any, so a page costs one query plus one decision
+// per message with attachments. A failure is logged and leaves byMessage
+// as it is. The caller has already authorized the history read; the
+// decision is asked anyway, so every credential class is decided in one
+// place.
 func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, byMessage map[string][]AttachmentRef) map[string][]AttachmentRef {
 	if len(msgIDs) == 0 || !s.attachmentArtifactsReady() {
 		return byMessage
 	}
-	// Only a caller the artifact service lets read attachments (a session)
-	// sees them listed; user access tokens do not (ptone/scion#4596).
-	if !s.attachmentCallerIsSession(ctx) {
-		return byMessage
-	}
-	found, err := s.attachmentService().MessageAttachments(ctx, msgIDs)
+	svc := s.attachmentService()
+	found, err := svc.MessageAttachments(ctx, msgIDs)
 	if err != nil {
 		s.messageLog.Error("Failed to list message attachments", "error", err)
 		return byMessage
 	}
-	for msgID, list := range found {
+	ctx = withStandingMemo(ctx)
+	for _, msgID := range msgIDs {
+		list := found[msgID]
+		if len(list) == 0 || !svc.MayReadAttachments(ctx, msgID, list[0].MessageProjectID) {
+			continue
+		}
 		if byMessage == nil {
 			byMessage = make(map[string][]AttachmentRef, len(found))
 		}
@@ -163,6 +250,35 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 		}
 	}
 	return byMessage
+}
+
+// filterReadableAttachments returns refs without the artifact attachments
+// of message messageID when the caller of ctx does not read them (the
+// send echo: one decision per send, since every ref belongs to the one
+// message). AttachmentStore references are returned as they are.
+func (s *Server) filterReadableAttachments(ctx context.Context, messageID string, refs []AttachmentRef) []AttachmentRef {
+	hasArtifact := false
+	for _, ref := range refs {
+		if ref.artifact {
+			hasArtifact = true
+			break
+		}
+	}
+	if !hasArtifact {
+		return refs
+	}
+	if s.attachmentArtifactsReady() {
+		svc := s.attachmentService()
+		found, err := svc.MessageAttachments(ctx, []string{messageID})
+		if err == nil && len(found[messageID]) > 0 &&
+			svc.MayReadAttachments(withStandingMemo(ctx), messageID, found[messageID][0].MessageProjectID) {
+			return refs
+		}
+		if err != nil {
+			s.messageLog.Error("Failed to list message attachments for the send echo", "message", messageID, "error", err)
+		}
+	}
+	return legacyAttachmentRefs(refs)
 }
 
 // retireMessageAttachments retires the artifact attachments of message
@@ -177,4 +293,89 @@ func (s *Server) retireMessageAttachments(ctx context.Context, messageID string)
 		!errors.Is(err, artifacts.ErrUnavailable) {
 		s.messageLog.Error("Failed to retire the attachments of a deleted message", "message", messageID, "error", err)
 	}
+}
+
+// messageProjectForBind returns the project recorded on the attachments
+// bound to msg (ptone/scion#4596, design section 1): derived from the
+// stored message row and its conversation, never from a request field.
+//
+//   - group conversation: its project, or "" when it has none;
+//   - direct conversation: the project of its one agent party (""
+//     when that agent row is gone), or "" when it has no agent party or
+//     two;
+//   - no conversation: the topic's project for a topic thread key, ""
+//     for a DM key.
+//
+// Unlike conversationProject it makes no caller-relative peer choice, so
+// the value does not depend on who sends. A lookup failure is returned
+// and the caller binds nothing.
+func (s *Server) messageProjectForBind(ctx context.Context, msg *store.Message) (string, error) {
+	if msg == nil {
+		return "", errors.New("no message")
+	}
+	if msg.ConversationID != "" {
+		conv, err := s.store.GetConversation(ctx, msg.ConversationID)
+		if err != nil {
+			return "", fmt.Errorf("conversation lookup: %w", err)
+		}
+		if conv == nil {
+			return "", fmt.Errorf("conversation lookup: %w", store.ErrNotFound)
+		}
+		if conv.Kind != "direct" {
+			if conv.ProjectID == nil {
+				return "", nil
+			}
+			return *conv.ProjectID, nil
+		}
+		parties, err := dmAgentParties(conv)
+		if err != nil {
+			return "", err
+		}
+		if len(parties) != 1 {
+			return "", nil
+		}
+		agent, err := s.store.GetAgent(ctx, parties[0])
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("agent lookup: %w", err)
+		}
+		return agent.ProjectID, nil
+	}
+	if msg.ThreadID == "" || strings.HasPrefix(msg.ThreadID, "dm:") {
+		return "", nil
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return "", nil
+	}
+	topic, err := wcs.GetTopic(ctx, msg.ThreadID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && topic == nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("topic lookup: %w", err)
+	}
+	return topic.ProjectID, nil
+}
+
+// dmAgentParties returns the agent ids named in the key of direct
+// conversation conv, in key order: none, one or two. It parses the key
+// once and depends on no caller.
+func dmAgentParties(conv *store.Conversation) ([]string, error) {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if kindA == "agent" {
+		out = append(out, idA)
+	}
+	if kindB == "agent" {
+		out = append(out, idB)
+	}
+	return out, nil
 }

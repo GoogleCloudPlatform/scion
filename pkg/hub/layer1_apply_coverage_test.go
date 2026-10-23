@@ -159,6 +159,7 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.cloud.protocol":                 `{"cloud":{"protocol":"http"}}`,
 	"telemetry.cloud.headers":                  `{"cloud":{"headers":{"x-probe":"v"}}}`,
 	"telemetry.cloud.provider":                 `{"cloud":{"provider":"gcp"}}`,
+	"telemetry.cloud.gcp_project_id":           `{"cloud":{"gcp_project_id":"probe-project"}}`,
 	"telemetry.cloud.tls":                      `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.enabled":              `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.insecure_skip_verify": `{"cloud":{"tls":{"insecure_skip_verify":true}}}`,

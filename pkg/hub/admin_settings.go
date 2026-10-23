@@ -569,6 +569,9 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
 		return
 	}
+	if rejectNullFederation(w, rawBody) {
+		return
+	}
 
 	// server.hub.agent_endpoint has no live-reload path (like public_url, it
 	// only takes effect at the next restart), so a malformed value written
@@ -952,9 +955,10 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 }
 
 // applySettingsUpdatesFromBody is applySettingsUpdates with the raw PUT
-// body, whose "server" and "telemetry" objects tell mergeServerSettings
-// and mergeSettingsSection which fields the client sent. A nil rawBody
-// derives that from req.Server and req.Telemetry.
+// body, whose "server", "telemetry" and "federation" objects tell
+// mergeServerSettings and mergeSettingsSection which fields the client
+// sent. A nil rawBody derives that from req.Server, req.Telemetry and
+// req.Federation.
 func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
@@ -1089,7 +1093,15 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			serverMap = make(map[string]interface{})
 			raw["server"] = serverMap
 		}
-		serverMap["federation"] = marshalToMap(req.Federation)
+		// Merged field by field like telemetry, so a key the body omits
+		// keeps its stored value (the DB-mode merge does the same; the
+		// Federation page sends only the fields that changed). Lists such
+		// as trusted_issuers are replaced as a whole; null or a zero value
+		// clears a key.
+		mergeSettingsSection(serverMap, "federation", req.Federation, rawRequestObject(rawBody, "Federation"))
+		if len(serverMap) == 0 {
+			delete(raw, "server")
+		}
 	}
 }
 
@@ -1121,10 +1133,50 @@ func user(u UserIdentity) string {
 // clearing the value by accident (ptone/scion#3898). Shared by the DB-backed
 // and file-mode server-config PUT handlers.
 func rejectInvalidThinkingLevel(w http.ResponseWriter, level *int) bool {
-	if level == nil || (*level >= 1 && *level <= 100) {
+	return rejectInvalidDefaultThinkingLevel(w, "default_thinking_level", level)
+}
+
+// rejectInvalidDefaultThinkingLevel is the default thinking level check
+// shared by the server-config PUT and the project settings PUT
+// (ptone/scion#4052): one rule for every settings default, 1-100, with an
+// explicit null as the only clear. field is the request key named in the
+// message and in details.field.
+func rejectInvalidDefaultThinkingLevel(w http.ResponseWriter, field string, level *int) bool {
+	if level == nil || validDefaultThinkingLevel(*level) {
 		return false
 	}
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-		fmt.Sprintf("invalid default_thinking_level %d: must be between 1 and 100; send null to clear it", *level), nil)
+		fmt.Sprintf("invalid %s %d: must be between 1 and 100; send null to clear it", field, *level),
+		map[string]interface{}{"field": field})
 	return true
+}
+
+// rejectNullFederation writes a 422 and returns true when a server-config
+// PUT sends the top-level federation member as null. A null section used to
+// answer 200 and change nothing (ptone/scion#4326). It is refused rather
+// than read as a clear because a clear is ambiguous (an empty section, or
+// back to the bootstrap value); the section reset route restores the
+// bootstrap value, and explicit field values (false, [], "") clear fields.
+// Shared by the DB-backed and file-mode server-config PUT handlers.
+func rejectNullFederation(w http.ResponseWriter, rawBody []byte) bool {
+	top, err := parseFieldPresence(rawBody)
+	if err != nil {
+		return false // the typed decode reports malformed bodies
+	}
+	if v, sent := top.sentFold("federation"); !sent || !isJSONNull(v) {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"federation cannot be null: to restore the bootstrap federation settings use "+
+			"DELETE /api/v1/admin/server-config/sections/federation (database-backed hubs); "+
+			"to clear individual fields send them explicitly (false, [] or \"\")",
+		map[string]interface{}{"keys": []string{"federation"}})
+	return true
+}
+
+// validDefaultThinkingLevel reports whether n is in the range a settings
+// default thinking level may hold (1-100). An agent's own thinking_level
+// also accepts 0; a default does not, because 0 used to be sent for "unset".
+func validDefaultThinkingLevel(n int) bool {
+	return n >= 1 && n <= 100
 }

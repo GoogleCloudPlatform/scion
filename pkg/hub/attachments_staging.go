@@ -233,7 +233,7 @@ func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) 
 			return "", false
 		}
 	} else if res != nil && res.Path != "" {
-		if res.Backend == "nfs" {
+		if res.onSharedBackend() {
 			if _, alreadyLogged := nfsAttachmentSkipLogged.LoadOrStore(projectID, struct{}{}); !alreadyLogged {
 				s.projectsLogger().InfoContext(ctx, "sharedDirHostPath: chat attachments are not staged into NFS-backed shared dirs",
 					"project_id", projectID, "name", name)

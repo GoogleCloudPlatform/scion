@@ -1891,13 +1891,8 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.workspace.read",
 		Domain:      "project",
-		Description: "Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads",
+		Description: "Read a project's workspace: sync status, cache status, archive and file reads",
 		EntryPoints: []EntryPoint{
-			// The WebDAV handler serves the workspace tree below /dav; {path}
-			// names a workspace file.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "HEAD"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "OPTIONS"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/sync/status", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/archive", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/status", Method: "GET"},
@@ -1918,20 +1913,8 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.workspace.write",
 		Domain:      "project",
-		Description: "Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull",
+		Description: "Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull",
 		EntryPoints: []EntryPoint{
-			// Every WebDAV method other than GET, HEAD and OPTIONS is a
-			// write (projectWorkspaceAction), PROPFIND and POST included.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "PROPPATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "LOCK"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "UNLOCK"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "COPY"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "MOVE"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "PROPFIND"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "DELETE"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav/{path}", Method: "MKCOL"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/notify", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/refresh", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files", Method: "POST"},

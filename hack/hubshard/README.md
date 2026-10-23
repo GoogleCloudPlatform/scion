@@ -85,9 +85,9 @@ with `go/build` itself deciding which file each build compiles:
 - no file uses a declaration from a file of another shard (the shard build
   would fail with `undefined: helperX`), and every blank import reaches
   every shard (see below);
-- the per-shard vets (`-tags no_sqlite` and `-tags 'integration volume_test
-  tzcontract'`) cover every test file the module-wide `make lint` and
-  `make vet-integration` cover;
+- the per-shard vets (`-tags no_sqlite` and `-tags 'integration tzcontract'`)
+  cover every test file the module-wide `make lint` and `make vet-integration`
+  cover;
 - no `.go` file in the repository carries a hubshard tag and no generated
   imports file is committed. A clause left by the old generator (for
   example on a branch that predates this) is stripped with `go run

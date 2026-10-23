@@ -96,6 +96,19 @@ type AgentDMInput struct {
 	// DMs reject non-empty attachments before ingestion.
 	Attachments []string
 
+	// AttachRefs are the attachments stored as artifacts the sender
+	// named by id (attachment_ids), validated by the adapter
+	// (validateAttachmentIDs) and built by newArtifactAttachmentRef. They
+	// are bound to this message once it is stored (ptone/scion#4596). They
+	// carry no host path, so the cross-project path refusal (ptone/scion#1687) does
+	// not apply to them.
+	AttachRefs []AttachmentRef
+
+	// Deliveries, for a copy of another message (a mention copy),
+	// are the bound attachments of that primary message, delivered into the
+	// target's home with this copy. Ignored when AttachRefs is set.
+	Deliveries []messages.AttachmentDelivery
+
 	// Metadata is the message metadata map.
 	Metadata map[string]string
 
@@ -227,6 +240,10 @@ type AgentDMResult struct {
 	// (ptone/scion#3667). The message was still sent; adapters return these
 	// to the sender as an additive response field.
 	AttachmentWarnings []AttachmentWarning
+
+	// BoundAttachments are the artifact attachments bound to the message
+	// (ptone/scion#4596): the references of AttachRefs that bound.
+	BoundAttachments []AttachmentRef
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -521,6 +538,18 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 8. (cont.) Record the admitted artifact references for the web chat.
 	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
+	// 8. (cont.) Bind the attachments stored as artifacts the sender named
+	// to the stored message (ptone/scion#4596), before the SSE publish and
+	// the delivery render, and list what the dispatch delivers: the bound
+	// attachments, or for a copy the primary's.
+	boundAttachments := s.bindChatAttachments(ctx, artifacts.PrincipalKindAgent, input.SenderAgent.ID, msgID,
+		s.bindProject(ctx, storeMsg, input.AttachRefs), input.AttachRefs)
+	if len(input.AttachRefs) > 0 {
+		structuredMsg.AttachmentDeliveries = attachmentDeliveries(msgID, boundAttachments)
+	} else {
+		structuredMsg.AttachmentDeliveries = input.Deliveries
+	}
+
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
 	// CrossProject is derived from agent records by DMAuditEntryFromInput,
@@ -551,12 +580,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...), recordedRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat
 	// v2 and broker-inbound already render their secondary/fan-out
 	// recipients.
+	// The attachments delivered with this message are planned for the
+	// target once, before any render; the dispatcher issues their
+	// capabilities from the plan (ptone/scion#4596).
+	s.applyAttachmentPlan(ctx, input.TargetAgent, structuredMsg)
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -564,6 +597,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			Msg:        structuredMsg,
 			CreatedAt:  storeMsg.CreatedAt,
 			IsMention:  input.Type == messages.TypeMention,
+			Plan:       structuredMsg.AttachmentPlan,
 		})
 	}
 
@@ -579,6 +613,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			RecipientID:        storeMsg.RecipientID,
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
+			BoundAttachments:   boundAttachments,
 		}, nil
 	}
 
@@ -617,6 +652,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 					Msg:        deliverMsg,
 					CreatedAt:  storeMsg.CreatedAt,
 					IsMention:  input.Type == messages.TypeMention,
+					Plan:       deliverMsg.AttachmentPlan,
 				})
 			}
 			dispatchMsg = deliverMsg
@@ -660,6 +696,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				DispatchErr:        dispatchErr,
 				AttachmentWarnings: attachmentWarnings,
 				ArtifactWarning:    artifactWarning,
+				BoundAttachments:   boundAttachments,
 			}, nil
 		}
 
@@ -701,6 +738,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
 			AttachmentWarnings: attachmentWarnings,
 			ArtifactWarning:    artifactWarning,
+			BoundAttachments:   boundAttachments,
 		}, nil
 	}
 	if !dispatched {
@@ -722,6 +760,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if bp := s.GetMessageBrokerProxy(); bp != nil {
 		observerMsg := *structuredMsg
 		observerMsg.ObserverOnly = true
+		observerMsg.AttachmentDeliveries = nil
+		observerMsg.AttachmentPlan = nil
 		observerMsg.ConversationAsserted = false
 		if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
 			sanitizeCrossProjectObserver(&observerMsg)
@@ -758,6 +798,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		RecipientID:        storeMsg.RecipientID,
 		AttachmentWarnings: attachmentWarnings,
 		ArtifactWarning:    artifactWarning,
+		BoundAttachments:   boundAttachments,
 	}, nil
 }
 

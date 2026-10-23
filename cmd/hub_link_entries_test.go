@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,6 +36,15 @@ const (
 	linkEntryTestHubID     = "dir-hub-id"
 	linkEntryTestPinnedHub = "https://pinned.example.com"
 )
+
+// listTestHub adds the hub name at endpoint to the hub list, as 'scion hub
+// add' does.
+func listTestHub(t *testing.T, name, endpoint string) {
+	t.Helper()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub(name, endpoint)
+	}))
+}
 
 // makeLinkedDirProject creates a directory project linked to a hub project
 // (hub.linked and hub.projectId in its settings), with hub.endpoint set to
@@ -114,6 +124,7 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		setupContextTest(t)
 		enableGlobalHubImport(t)
 		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		listTestHub(t, "pinned", linkEntryTestPinnedHub)
 		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
 		settingsFile := filepath.Join(dotScion, "settings.yaml")
 		before, err := os.ReadFile(settingsFile)
@@ -154,6 +165,70 @@ func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
 		c := readTestContext(t)
 		assert.False(t, c.ProjectImported(config.LinkPathForProject(dotScion)))
 	})
+	t.Run("a hub that is not in the hub list: a note, no link", func(t *testing.T) {
+		setupContextTest(t)
+		enableGlobalHubImport(t)
+		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
+		before := readFileT(t, contextFilePath())
+		c := findCommand(t, "list")
+		var stderr bytes.Buffer
+		c.SetErr(&stderr)
+		t.Cleanup(func() { c.SetErr(nil) })
+
+		require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+		assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies")
+		assert.Equal(t, targetSourceContext, hubSource)
+		assert.Equal(t, "Note: this project's settings name the hub "+linkEntryTestPinnedHub+
+			", which is not in your hub list; to use it here, add it with 'scion hub add <name> "+linkEntryTestPinnedHub+
+			"'; to stop using this project's hub setting, run 'scion config unset hub.endpoint' in this project\n", stderr.String())
+		assert.Equal(t, before, readFileT(t, contextFilePath()), "nothing is written")
+		got := readTestContext(t)
+		_, h := got.HubByEndpoint(linkEntryTestPinnedHub)
+		assert.Nil(t, h, "the project's settings add no hub")
+		assert.False(t, got.ProjectImported(config.LinkPathForProject(dotScion)), "the import stays pending")
+
+		// The hint's way out: config unset hub.endpoint in the project stops
+		// the note (and the link).
+		require.NoError(t, configUnsetHubEndpoint(io.Discard, io.Discard, false, dotScion))
+		stderr.Reset()
+		resetContextTargets()
+		require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+		assert.Empty(t, stderr.String(), "no note after config unset hub.endpoint")
+		assert.Equal(t, ctxTestHub, hubEndpoint)
+	})
+	for _, listed := range []bool{true, false} {
+		name := "read-only command, the project's hub not in the hub list: no note, nothing written"
+		if listed {
+			name = "read-only command, the project's hub in the hub list: linked in memory, nothing written"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupContextTest(t)
+			enableGlobalHubImport(t)
+			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			if listed {
+				listTestHub(t, "pinned", linkEntryTestPinnedHub)
+			}
+			makeLinkedDirProject(t, linkEntryTestPinnedHub)
+			before := readFileT(t, contextFilePath())
+			c := findCommand(t, "config", "get")
+			var stderr bytes.Buffer
+			c.SetErr(&stderr)
+			t.Cleanup(func() { c.SetErr(nil) })
+
+			require.NoError(t, resolveInvocationTarget(c, ModeHuman))
+			assert.Empty(t, stderr.String())
+			assert.Equal(t, before, readFileT(t, contextFilePath()), "a read-only command writes nothing")
+			if listed {
+				assert.Equal(t, linkEntryTestPinnedHub, hubEndpoint)
+				assert.Equal(t, targetSourceDirectory, hubSource)
+				assert.Equal(t, "pinned", hubEntryName)
+			} else {
+				assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies")
+				assert.Equal(t, targetSourceContext, hubSource)
+			}
+		})
+	}
 	t.Run("not imported", func(t *testing.T) {
 		setupContextTest(t)
 		saveTestContext(t, ctxTestHub, ctxTestProjectID)
@@ -234,6 +309,9 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 				enableGlobalHubImport(t)
 			}
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
+			if tc.imports && tc.pinned != "" {
+				listTestHub(t, "pinned", tc.pinned)
+			}
 			dotScion := makeLinkedDirProject(t, tc.pinned)
 			if tc.linkEntry {
 				saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
@@ -692,16 +770,16 @@ func TestCompletion_InsideAgentOffersNothing(t *testing.T) {
 	assert.Empty(t, slugs)
 }
 
-// TestDevAuthBanner_NotOnStdout: the dev auth warning goes to stderr, so
-// JSON output on stdout stays parseable.
-func TestDevAuthBanner_NotOnStdout(t *testing.T) {
+// TestDevTokenNote_NotOnStdout: the note that a dev token is not sent to a
+// remote hub goes to stderr, so JSON output on stdout stays parseable.
+func TestDevTokenNote_NotOnStdout(t *testing.T) {
 	setupUseTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 
 	stdout, stderr, err := runScion(t, "use", "--format", "json")
 	require.NoError(t, err)
-	assert.Contains(t, stderr, "Development authentication enabled")
-	assert.NotContains(t, stdout, "WARNING")
+	assert.Contains(t, stderr, "Note: the dev token is used only for a local hub; it is not sent to "+ctxTestHub+".")
+	assert.NotContains(t, stdout, "dev token")
 	var got map[string]interface{}
 	assert.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
 }

@@ -45,6 +45,8 @@ func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Msg = ""
 	msg.Attachments = nil
 	msg.ArtifactRefsAdmitted = false
+	msg.AttachmentDeliveries = nil
+	msg.AttachmentPlan = nil
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
@@ -67,6 +69,14 @@ type OutboundMessageRequest struct {
 	Channel     string            `json:"channel,omitempty"`
 	ThreadID    string            `json:"thread_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+
+	// AttachmentIDs names attachments stored as artifacts that the sending
+	// agent uploaded (POST /api/v1/chat/attachments), by id
+	// (ptone/scion#4596). They are bound to the stored message and
+	// delivered to agent recipients. Attachments keeps meaning hub-local
+	// paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+
 	// ConversationID is an explicit conversation assertion from the caller.
 	// When set, the hub authorizes the agent for this conversation and
 	// persists the message into it, bypassing the DeriveConversationKey
@@ -1206,6 +1216,24 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Attachments stored as artifacts named by id (ptone/scion#4596): the
+	// sender must be an agent that may send; the ids must be its own unsent
+	// uploads; a send that can reach an agent (target, group post or agent
+	// mention) must fit the delivery budget.
+	ctx = withStandingMemo(ctx)
+	reachesAgents := len(req.AttachmentIDs) > 0 && s.agentSendReachesAgents(ctx, agent, outboundTargetAgentID != "",
+		result.ConvResult != nil && result.ConvResult.Kind == "group", req.Msg)
+	artifactAttachments, attachmentMsg, mayAttach := s.validateAgentSendAttachments(ctx, agentIdent, agent,
+		req.AttachmentIDs, req.Attachments, reachesAgents, "outbound-message")
+	if !mayAttach {
+		Forbidden(w)
+		return
+	}
+	if attachmentMsg != "" {
+		ValidationError(w, attachmentMsg, nil)
+		return
+	}
+
 	if outboundTargetAgentID != "" {
 		// Re-read the target agent to get its current mode. The record
 		// from S5 may come from the same request, but using the fresh
@@ -1227,6 +1255,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Type:           req.Type,
 			Urgent:         req.Urgent,
 			Attachments:    req.Attachments,
+			AttachRefs:     artifactAttachments,
 			Metadata:       stripClientAttachmentRefs(req.Metadata),
 			ConversationID: result.ConversationID,
 			ConvResult:     result.ConvResult,
@@ -1253,13 +1282,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// conversation, which is never reused for a mention regardless of
 		// verification, so there is nothing to pass.
 		mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-			Sender:          agent,
-			SenderIdent:     agentIdent,
-			Primary:         freshTarget,
-			Msg:             req.Msg,
-			Type:            req.Type,
-			ParentMessageID: dmResult.MessageID,
-			Channel:         result.Channel,
+			Sender:            agent,
+			SenderIdent:       agentIdent,
+			Primary:           freshTarget,
+			Msg:               req.Msg,
+			Type:              req.Type,
+			ParentMessageID:   dmResult.MessageID,
+			ParentAttachments: dmResult.BoundAttachments,
+			Channel:           result.Channel,
 		})
 		WriteAgentDMResult(w, dmResult, mentionResults)
 		return
@@ -1399,10 +1429,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// and artifacts, and emits the SSE event. It does not dispatch to
 	// channel spokes. Every store and publish call uses storeCtx, so the
 	// caller decides whether request cancellation can cut it short.
+	var boundAttachments []AttachmentRef
+	// stampWatermarks, set on the broker path for a message the handler
+	// stores itself (decision D2), runs the watermark steps of
+	// deliverToUser before the SSE publish.
+	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
 		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
 			return err
 		}
+		// Attachments stored as artifacts are bound now that the row exists
+		// (ptone/scion#4596); one that cannot be bound is left out.
+		boundAttachments = s.bindChatAttachments(storeCtx, artifacts.PrincipalKindAgent, agent.ID, storeMsg.ID,
+			s.bindProject(storeCtx, storeMsg, artifactAttachments), artifactAttachments)
 		// Record mention rows before publish: clients refetch the thread
 		// list and its mention dots on the SSE event.
 		s.recordHumanMentions(storeCtx, req.ThreadID, storeMsg.ID, mentionedHumans)
@@ -1413,8 +1452,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, recordedRefs)
-		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		if stampWatermarks != nil {
+			stampWatermarks(storeCtx, storeMsg)
+		}
+		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
+		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs)
 		return nil
 	}
 
@@ -1453,6 +1496,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			if len(artifactAttachments) > 0 {
+				// Decision D2 (ptone/scion#4596): a message that carries
+				// attachments stored as artifacts is stored by this handler,
+				// so they can be bound to the stored row; deliverToUser then
+				// runs only its post-persist steps (StoredMessageID).
+				stampWatermarks = bp.afterUserMessagePersisted
+				stored, logged := s.storeOutboundBeforeBroker(ctx, w, bp, agent, storeMsg, structuredMsg, storeOutboundRow)
+				if !stored {
+					return
+				}
+				recordLogged = logged
+				break
+			}
 			// Ensure the persisting user-message subscription first, as the
 			// notification path does: it is otherwise only created on agent
 			// lifecycle events.
@@ -1558,6 +1614,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ParentConv:         result.ConvResult,
 		ParentConvVerified: result.Asserted,
 		ParentMessageID:    storeMsg.ID,
+		ParentAttachments:  boundAttachments,
 		Channel:            result.Channel,
 		HumanMembers:       humanMembers,
 	})
@@ -1571,14 +1628,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	var defaultAgentResult *messages.MentionResult
 	if isGroupPost {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
-			Sender:          agent,
-			SenderIdent:     agentIdent,
-			Conv:            result.ConvResult,
-			Msg:             originalMsgForMentions,
-			Type:            req.Type,
-			MentionResults:  mentionResults,
-			ParentMessageID: storeMsg.ID,
-			Channel:         result.Channel,
+			Sender:            agent,
+			SenderIdent:       agentIdent,
+			Conv:              result.ConvResult,
+			Msg:               originalMsgForMentions,
+			Type:              req.Type,
+			MentionResults:    mentionResults,
+			ParentMessageID:   storeMsg.ID,
+			ParentAttachments: boundAttachments,
+			Channel:           result.Channel,
 		})
 	}
 
@@ -1848,6 +1906,12 @@ type MessageRequest struct {
 	// Wake resumes a suspended agent before delivering the message.
 	Wake bool `json:"wake,omitempty"`
 
+	// AttachmentIDs names attachments stored as artifacts that the sender
+	// uploaded, by id (ptone/scion#4596). They are bound to the stored
+	// message and delivered to the agent. StructuredMessage.Attachments
+	// keeps meaning hub-local paths. Refused on group sends.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+
 	// Mentions lists agent slugs to receive mention notifications (max 10).
 	// The primary recipient is automatically excluded from mention fan-out.
 	Mentions []string `json:"mentions,omitempty"`
@@ -2019,6 +2083,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Detect group[] recipient for multi-target fan-out.
 	if structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient) {
+		// attachment_ids are not accepted on a hub group send
+		// (ptone/scion#4596): each attachment binds to one message.
+		if len(req.AttachmentIDs) > 0 {
+			ValidationError(w, "attachment_ids are not accepted on group sends; send to each recipient", nil)
+			return
+		}
 		s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
 		return
 	}
@@ -2065,6 +2135,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// chat integration reference and any row (decideKeyedPostSender).
 	if structuredMsg.ConversationID == "" && !s.decideKeyedPostSender(w, r, structuredMsg, agent) {
 		return
+	}
+
+	// Attachments stored as artifacts named by id (ptone/scion#4596): an
+	// agent sender must pass agentMaySend; a user sender must be one
+	// attachmentWriterKind admits. The ids must be the sender's own unsent
+	// uploads, and the send must fit the delivery budget (the recipient is
+	// an agent).
+	var attachRefs []AttachmentRef
+	if len(req.AttachmentIDs) > 0 {
+		ctx = withStandingMemo(ctx)
+		var paths []string
+		if structuredMsg != nil {
+			paths = structuredMsg.Attachments
+		}
+		refs, msg, ok := s.validateMessageAttachments(ctx, agent, req.AttachmentIDs, paths)
+		if !ok {
+			Forbidden(w)
+			return
+		}
+		if msg != "" {
+			ValidationError(w, msg, nil)
+			return
+		}
+		attachRefs = refs
 	}
 
 	// Old-CLI skew dedup gate. Placed here, before any conversation
@@ -2776,6 +2870,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Urgent:         structuredMsg.Urgent,
 				Interrupt:      req.Interrupt,
 				Attachments:    structuredMsg.Attachments,
+				AttachRefs:     attachRefs,
 				Metadata:       structuredMsg.Metadata,
 				ConversationID: storeMsg.ConversationID,
 				ConvResult:     convResult,
@@ -2834,6 +2929,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ParentConv:         groupConv,
 				ParentConvVerified: groupConvIsExistingReference,
 				ParentMessageID:    dmResult.MessageID,
+				ParentAttachments:  dmResult.BoundAttachments,
 				Channel:            structuredMsg.Channel,
 			})
 
@@ -2876,6 +2972,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
 		var artifactRefs, recordedRefs []artifacts.MessageRef
+		var boundUserAttachments []AttachmentRef
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
 			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
@@ -2897,6 +2994,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+			// Attachments stored as artifacts the user named are bound to the
+			// stored message and delivered into the agent's home
+			// (ptone/scion#4596). An unpersisted message binds nothing.
+			if user := GetUserIdentityFromContext(ctx); user != nil && len(attachRefs) > 0 {
+				boundUserAttachments = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID,
+					s.bindProject(ctx, storeMsg, attachRefs), attachRefs)
+				structuredMsg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, boundUserAttachments)
+			}
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2905,18 +3010,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil, recordedRefs)
+			s.events.PublishUserMessage(ctx, storeMsg, boundUserAttachments, recordedRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
 		// Phase 9b(ii): render the delivery envelope from the persisted row
 		// and conversation result when the envelope switch is ON.
+		// The attachments delivered with this message are planned for the
+		// agent once, before any render (ptone/scion#4596).
+		s.applyAttachmentPlan(ctx, agent, structuredMsg)
 		if s.writeDenyEnabled() && persistedMsgID != "" {
 			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 				MessageID:  storeMsg.ID,
 				ConvResult: convResult,
 				Msg:        structuredMsg,
 				CreatedAt:  storeMsg.CreatedAt,
+				Plan:       structuredMsg.AttachmentPlan,
 			})
 		}
 
@@ -2949,6 +3058,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						ConvResult: convResult,
 						Msg:        deliverMsg,
 						CreatedAt:  storeMsg.CreatedAt,
+						Plan:       deliverMsg.AttachmentPlan,
 					})
 				}
 				dispatchMsg = deliverMsg
@@ -3696,6 +3806,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 type BroadcastMessageRequest struct {
 	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 	Interrupt         bool                        `json:"interrupt,omitempty"`
+	// AttachmentIDs is refused on a broadcast (ptone/scion#4596): an
+	// attachment binds to one message. Declared so the refusal is explicit.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // handleProjectBroadcast handles POST /api/v1/projects/{projectId}/broadcast.
@@ -3763,6 +3876,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	var req BroadcastMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(req.AttachmentIDs) > 0 {
+		ValidationError(w, "attachment_ids are not accepted on broadcasts", nil)
 		return
 	}
 

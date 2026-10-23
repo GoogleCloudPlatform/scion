@@ -48,14 +48,14 @@ type countingHCFetcher struct {
 	err   error
 }
 
-func (f *countingHCFetcher) Get(_ context.Context, _ string) (string, string, error) {
+func (f *countingHCFetcher) Get(_ context.Context, _ string) (string, string, []hubclient.TemplateFile, error) {
 	f.calls.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return "", "", f.err
+		return "", "", nil, f.err
 	}
-	return "hc-id", f.hash, nil
+	return "hc-id", f.hash, nil, nil
 }
 
 func (f *countingHCFetcher) RequestDownloadURLs(context.Context, string) (*hubclient.DownloadResponse, error) {
@@ -430,9 +430,10 @@ func TestStartAgentGate_EvaluatesCurrentHydratedConfig(t *testing.T) {
 }
 
 // restartGateEnv prepares an existing agent "rs-agent" whose container lists
-// projectScion as its project, with saved harness-config "rhc" on disk.
-// Restart carries no harness-config reference, so launch resolves the saved
-// name from the broker's disk; that is what the gate evaluates.
+// projectScion as its project, provisioned with harness-config "rhc"
+// (recorded in its broker-side scion-agent.json). Restart carries no
+// harness-config reference, so launch resolves the recorded name from the
+// broker's disk; that is what the gate evaluates.
 func restartGateEnv(t *testing.T, allow bool, hcYAML string) (*Server, *provisionCapturingManager, string) {
 	t.Helper()
 	srv, mgr, _ := dispatchTestEnv(t, allow)
@@ -444,6 +445,10 @@ func restartGateEnv(t *testing.T, allow bool, hcYAML string) (*Server, *provisio
 	if err := os.WriteFile(filepath.Join(home, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(home), "scion-agent.json"), []byte(`{"harness_config": "rhc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeProvisionedProfile(t, projectScion, "rs-agent", "")
 	mgr.agents = []api.AgentInfo{{Name: "rs-agent", ContainerID: "c-rs", ProjectPath: projectScion, Phase: "stopped"}}
 	return srv, mgr, projectScion
 }
