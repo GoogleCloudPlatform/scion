@@ -857,8 +857,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// unreadable response, a proxy error, a deferred start, or a
 			// broker failure from inside Manager.Start): a gen N+1
 			// container may exist and use the agent's credentials. A
-			// hub-side failure before the request was sent, which the
-			// classifier does not recognise, is conservatively treated as
+			// hub-side failure before the request was sent that the
+			// classifier does not recognise (it does recognise a run not
+			// begun and a hub shutting down) is conservatively treated as
 			// ambiguous too, though no container can exist then. Keep
 			// the pre-ptone/scion#1935 behaviour: no re-render (a refused
 			// re-render would revoke those credentials), and the row stays
@@ -993,7 +994,18 @@ const reincarnationRerenderTimeout = 5 * time.Minute
 // inside Manager.Start reads as definitive, and the re-render (and, if it is
 // refused, the revoke) can run while a container exists. The same fallback
 // shouldRevertRun documents.
+//
+// Two hub-side refusals are definitive too, since both are returned before
+// any start request leaves the hub (ptone/scion#5594): errStartRunNotBegun
+// (the run could not be begun, or the launch not recorded) and
+// ErrHubShuttingDown (the dispatch's shutdown gate, checked when it
+// resolves the broker). A run not begun because a delete holds the row
+// (store.ErrDeleteInProgress) stays ambiguous, as in startDidNotHappen: the
+// delete owns the agent row then, so no rollback or re-render may write it.
 func reincarnationStartLeftNoContainer(err error) bool {
+	if (errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) || errors.Is(err, ErrHubShuttingDown) {
+		return true
+	}
 	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
 }
 
