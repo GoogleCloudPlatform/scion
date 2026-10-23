@@ -266,6 +266,9 @@ func TestDeleteUser_EdgeToUserDelegateSwept(t *testing.T) {
 //   - When the soft delete also deactivated an edge from the deleted user,
 //     the restore is refused (that delegator is not live), and both edges
 //     stay inactive.
+//   - When the soft delete deactivated an edge from a live user, the restore
+//     succeeds and reactivates that edge only; the deleted user's edge stays
+//     delegator_deleted.
 func TestDeleteUser_OtherOwnersSoftDeletedAgentEdgeStaysSwept(t *testing.T) {
 	t.Run("restore without a soft-delete operation", func(t *testing.T) {
 		srv, s, _, _, project := setupDemoPolicyTest(t)
@@ -319,6 +322,36 @@ func TestDeleteUser_OtherOwnersSoftDeletedAgentEdgeStaysSwept(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, e.Active)
 		assert.Equal(t, store.EdgeDeactivationAgentSoftDelete, e.Cause)
+	})
+	t.Run("restore with an edge from a live user", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+		agent := softDeletedAgent(t, s, "erin-gone", project.ID, erin.ID, []string{erin.ID})
+		opID := tid("soft-delete-op")
+		require.NoError(t, s.SetAgentSoftDeleteOpID(ctx, agent.ID, opID))
+		at := agent.DeletedAt
+		owners := &store.DelegationEdge{
+			DelegatorType: store.DelegationPrincipalUser, DelegatorID: erin.ID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: project.ID, Role: "member", Active: false,
+			Deactivation: store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &at, OpID: opID},
+		}
+		require.NoError(t, s.CreateDelegationEdge(ctx, owners))
+		legacy := createUserEdge(t, s, dave.ID, store.DelegationPrincipalAgent, agent.ID, project.ID)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		requireEdgeSwept(t, s, legacy.ID)
+
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		assert.True(t, got.DeletedAt.IsZero(), "the owner's agent is restored")
+		requireEdgeActive(t, s, owners.ID)
+		requireEdgeSwept(t, s, legacy.ID)
 	})
 }
 
@@ -470,8 +503,7 @@ func TestUserDeleteBlockers_RequiresUserDelete(t *testing.T) {
 // agent, so a guard that runs before the blocker check (self-delete, the
 // user.delete decision, last super-admin, admin lockout) must answer with
 // its own status and code, and the blocker check must answer before the
-// last-owner guard. Nothing is deleted
-// in any row.
+// last-owner guard. Nothing is deleted in any row.
 func TestDeleteUser_GuardOrder(t *testing.T) {
 	type setup func(t *testing.T) (srv *Server, s store.Store, actor *store.User, targetID string)
 	rows := []struct {
