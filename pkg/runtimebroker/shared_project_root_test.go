@@ -303,11 +303,13 @@ func TestSharedLayout_TwoBrokersShareMountsNotJournals(t *testing.T) {
 }
 
 // Agent look-ups for delete find a shared project's agent by its state in
-// the external root.
+// the external root (or its pre-move legacy dir), and never fall back to the
+// broker-local scan.
 func TestFindAgentInSharedProject(t *testing.T) {
 	f := newSharedRootFixture(t, true)
-	if got := f.srv.findAgentInSharedProject("a1", sharedRootProjectID); got != "" {
-		t.Fatalf("no agent yet: got %q", got)
+	ctx := context.Background()
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID); !handled || err != nil || got != "" {
+		t.Fatalf("no agent yet: (%q, %v, %v)", got, handled, err)
 	}
 	root, err := config.AgentsRootForProject(f.scionDir, false, sharedRootProjectID)
 	if err != nil {
@@ -316,14 +318,82 @@ func TestFindAgentInSharedProject(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "a1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.findAgentInSharedProject("a1", sharedRootProjectID); got != f.scionDir {
-		t.Fatalf("findAgentInSharedProject = %q, want %q", got, f.scionDir)
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID); !handled || err != nil || got != f.scionDir {
+		t.Fatalf("findAgentInSharedProject = (%q, %v, %v), want %q", got, handled, err, f.scionDir)
 	}
-	if got := f.srv.findAgentInSharedProject("a1", ""); got != "" {
-		t.Errorf("an unscoped look-up must find nothing here, got %q", got)
+	if _, handled, _ := f.srv.findAgentInSharedProject(ctx, "a1", ""); handled {
+		t.Errorf("a look-up without a project ID is not handled here")
 	}
-	if got := f.srv.findAgentInSharedProject("../a1", sharedRootProjectID); got != "" {
-		t.Errorf("a non-element agent name must find nothing, got %q", got)
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "../a1", sharedRootProjectID); !handled || err != nil || got != "" {
+		t.Errorf("a non-element agent name must find nothing: (%q, %v, %v)", got, handled, err)
+	}
+	// A stray in-project agents dir on the share is not agent state.
+	if err := os.MkdirAll(filepath.Join(f.scionDir, "agents", "ghost"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := f.srv.findAgentInSharedProject(ctx, "ghost", sharedRootProjectID); err != nil || got != "" {
+		t.Errorf("an agents dir on the share must not count: (%q, %v)", got, err)
+	}
+}
+
+// When the share is not mounted or the project configuration is missing,
+// mismatched or has no project-slug, the look-up refuses with
+// errDeleteTargetUnknown (no broker-local fallback), and a file delete is
+// not acknowledged as done: the agent's broker-local state stays.
+func TestFindAgentInSharedProject_FailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, f *sharedRootFixture)
+	}{
+		{"share not mounted", func(t *testing.T, f *sharedRootFixture) {
+			if err := os.RemoveAll(f.layout.HostBase); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"configuration missing", func(t *testing.T, f *sharedRootFixture) {
+			if err := os.RemoveAll(f.scionDir); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"configuration of another project", func(t *testing.T, f *sharedRootFixture) {
+			writeSharedSeed(t, f.scionDir, "11111111-2222-3333-4444-555555555555", "web")
+		}},
+		{"no project-slug", func(t *testing.T, f *sharedRootFixture) {
+			if err := os.Remove(filepath.Join(f.scionDir, projectkeys.ProjectSlugFile)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSharedRootFixture(t, true)
+			root, err := config.AgentsRootForProject(f.scionDir, false, sharedRootProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(root, "a1")
+			if err := os.MkdirAll(state, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.prepare(t, f)
+
+			got, handled, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID)
+			if !handled || got != "" || !errors.Is(err, errDeleteTargetUnknown) {
+				t.Fatalf("findAgentInSharedProject = (%q, %v, %v), want errDeleteTargetUnknown", got, handled, err)
+			}
+			if _, err := f.srv.findAgentProjectDir("a1", sharedRootProjectID, ""); !errors.Is(err, errDeleteTargetUnknown) {
+				t.Fatalf("findAgentProjectDir err = %v, want errDeleteTargetUnknown (no broker-local fallback)", err)
+			}
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/a1?projectId="+sharedRootProjectID+"&deleteFiles=true", nil)
+			rec := httptest.NewRecorder()
+			f.srv.Handler().ServeHTTP(rec, req)
+			if rec.Code == http.StatusNotFound || rec.Code < 400 {
+				t.Fatalf("delete = %d %s, want a failure the hub does not record as done", rec.Code, rec.Body.String())
+			}
+			if _, err := os.Stat(state); err != nil {
+				t.Errorf("the agent's broker-local state must stay: %v", err)
+			}
+		})
 	}
 }
 
@@ -684,5 +754,86 @@ func TestMigrateLocalSharedDirs_Preconditions(t *testing.T) {
 	}
 	if _, err := f.srv.migrateLocalSharedDirs(context.Background()); err == nil {
 		t.Fatal("an unmounted share must refuse")
+	}
+}
+
+// A shared workspace with content but no provisioning sentinel (moved in by
+// the project-storage migration, written through the Files tab, or a
+// non-git project) is never overwritten by a workspace bootstrap: the
+// upload is skipped with the warning and every file stays.
+func TestCreateAgent_SharedBootstrapSkipsPopulatedWorkspace(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	ws := filepath.Join(f.root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "migrated.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	downloaded := false
+	w := postSharedBootstrapCreate(t, f, func(context.Context, string, string, string) error {
+		downloaded = true
+		return nil
+	})
+	if w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	if downloaded {
+		t.Fatal("a populated shared workspace must not be downloaded into")
+	}
+	if got, err := os.ReadFile(filepath.Join(ws, "migrated.txt")); err != nil || string(got) != "keep me" {
+		t.Fatalf("workspace content must stay: (%q, %v)", got, err)
+	}
+	var resp CreateAgentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Agent == nil {
+		t.Fatalf("response: %v %s", err, w.Body.String())
+	}
+	found := false
+	for _, warning := range resp.Agent.Warnings {
+		found = found || warning == bootstrapSkippedWarning
+	}
+	if !found {
+		t.Errorf("warnings = %v, want the skipped warning", resp.Agent.Warnings)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "provision", ".scion-provisioned")); !os.IsNotExist(err) {
+		t.Errorf("a skipped bootstrap writes no sentinel (err %v)", err)
+	}
+}
+
+// An existing but empty shared workspace (only lock litter) still gets the
+// upload; content that appears between admission and the provisioning
+// locks also skips the apply.
+func TestSharedBootstrapEmptyAndLateContent(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	ws := filepath.Join(f.root, "workspace")
+	if err := os.MkdirAll(filepath.Join(ws, ".scion-provision.lock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if sharedWorkspaceProvisioned(ws) {
+		t.Fatal("lock litter alone is not content")
+	}
+	w := postSharedBootstrapCreate(t, f, func(ctx context.Context, bucket, prefix, localPath string) error {
+		return os.WriteFile(filepath.Join(localPath, "uploaded.txt"), []byte("x"), 0o644)
+	})
+	if w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(ws, "uploaded.txt")); err != nil {
+		t.Fatalf("an empty shared workspace gets the upload: %v", err)
+	}
+
+	g := newSharedRootFixture(t, true)
+	rel := filepath.Join("projects", sharedRootProjectID, "workspace")
+	gws := filepath.Join(g.layout.HostBase, rel)
+	if err := os.MkdirAll(gws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gws, "late.txt"), []byte("late"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	applied := false
+	skipped, err := g.srv.applySharedBootstrap(context.Background(), gws, rel, func(context.Context) error { applied = true; return nil })
+	if err != nil || !skipped || applied {
+		t.Fatalf("apply over late content = (skipped %v, err %v, applied %v), want skipped", skipped, err, applied)
 	}
 }

@@ -116,6 +116,10 @@ func testDeleteSharedProjectLegacyDir(t *testing.T, hubID string) {
 	}
 }
 
+// sharedRootUUID is the project ID of the shared-root start tests: the
+// shared tree is keyed by canonical project UUIDs.
+const sharedRootUUID = "4f1d2c3b-5a69-4e70-8b91-a2b3c4d5e6f7"
+
 // A hub-managed agent started from a shared project root (the broker's
 // ProjectPath on a shared Layout) mounts the project's workspace on the
 // share, keeps its state and home in the broker-local external root, and
@@ -126,12 +130,12 @@ func TestStart_SharedProjectRoot(t *testing.T) {
 			f := newSharedDirStorageRunFixture(t)
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
-			root := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
+			root := filepath.Join(mountRoot, "share-1", "projects", sharedRootUUID)
 			scionDir := filepath.Join(root, config.DotScion)
 			mustMkdirAll(t, filepath.Join(root, "workspace"))
 			mustMkdirAll(t, scionDir)
 			for name, content := range map[string]string{
-				projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+				projectkeys.ProjectIDFile:   sharedRootUUID + "\n",
 				projectkeys.ProjectSlugFile: "web\n",
 				"settings.yaml":             "schema_version: \"1\"\n",
 			} {
@@ -156,7 +160,7 @@ func TestStart_SharedProjectRoot(t *testing.T) {
 				SharedWorkspace: true,
 				Env: map[string]string{
 					"SCION_AGENT_ID":   "agent-5823",
-					"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+					"SCION_PROJECT_ID": sharedRootUUID,
 				},
 			})
 			if err != nil {
@@ -165,10 +169,10 @@ func TestStart_SharedProjectRoot(t *testing.T) {
 			if rtName == "docker" && cfg.Workspace != filepath.Join(root, "workspace") {
 				t.Errorf("workspace = %q, want the shared workspace %q", cfg.Workspace, filepath.Join(root, "workspace"))
 			}
-			if rtName == "kubernetes" && cfg.NFSSubPath != "projects/"+testNFSWorkspaceProjectID+"/workspace" {
+			if rtName == "kubernetes" && cfg.NFSSubPath != "projects/"+sharedRootUUID+"/workspace" {
 				t.Errorf("NFS subPath = %q", cfg.NFSSubPath)
 			}
-			ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(testNFSWorkspaceProjectID, "-", "")[:8], config.DotScion, "agents", "test-agent")
+			ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(sharedRootUUID, "-", "")[:8], config.DotScion, "agents", "test-agent")
 			if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); err != nil {
 				t.Errorf("agent state should be in the broker-local external root %s: %v", ext, err)
 			}
@@ -199,7 +203,7 @@ func listTree(t *testing.T, dir string) []string {
 
 // An agent started before its project's configuration moved to the shared
 // project root, in a mode whose state stayed in the legacy in-project dir,
-// is found there (read-only look-up). Its workspace is the legacy
+// is found there (look-up fallback). Its workspace is the legacy
 // broker-local project dir (project-scoped), which is never admitted from
 // the legacy tree, so a restart from the shared root is refused by the
 // workspace containment check, cleanly: nothing is provisioned in the
@@ -208,12 +212,12 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
-	root := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
+	root := filepath.Join(mountRoot, "share-1", "projects", sharedRootUUID)
 	mustMkdirAll(t, filepath.Join(root, "workspace"))
 	scionDir := filepath.Join(root, config.DotScion)
 	mustMkdirAll(t, scionDir)
 	for name, content := range map[string]string{
-		projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+		projectkeys.ProjectIDFile:   sharedRootUUID + "\n",
 		projectkeys.ProjectSlugFile: "web\n",
 		"settings.yaml":             "schema_version: \"1\"\n",
 	} {
@@ -225,7 +229,7 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	legacyRoot := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectsDir, "web")
 	legacyScion := filepath.Join(legacyRoot, config.DotScion)
 	mustMkdirAll(t, legacyScion)
-	if err := config.WriteProjectID(legacyScion, testNFSWorkspaceProjectID); err != nil {
+	if err := config.WriteProjectID(legacyScion, sharedRootUUID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(legacyScion, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644); err != nil {
@@ -242,7 +246,7 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 			NoAuth:      true,
 			Env: map[string]string{
 				"SCION_AGENT_ID":   "agent-5823",
-				"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+				"SCION_PROJECT_ID": sharedRootUUID,
 			},
 		})
 		return err
@@ -260,7 +264,7 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "outside the permitted workspace root") {
 		t.Fatalf("restart from the shared root = %v, want the workspace containment refusal", err)
 	}
-	ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(testNFSWorkspaceProjectID, "-", "")[:8], config.DotScion, "agents", "test-agent")
+	ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(sharedRootUUID, "-", "")[:8], config.DotScion, "agents", "test-agent")
 	if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); !os.IsNotExist(err) {
 		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
 	}
@@ -277,12 +281,12 @@ func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
 	// Clone-per-agent keeps a node-local workspace in the agent's own dir
 	// (the shared tree holds only the project configuration here).
 	f.writeGlobalSettings(t, "")
-	root := filepath.Join(t.TempDir(), "share-1", "projects", testNFSWorkspaceProjectID)
+	root := filepath.Join(t.TempDir(), "share-1", "projects", sharedRootUUID)
 	mustMkdirAll(t, filepath.Join(root, "workspace"))
 	scionDir := filepath.Join(root, config.DotScion)
 	mustMkdirAll(t, scionDir)
 	for name, content := range map[string]string{
-		projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+		projectkeys.ProjectIDFile:   sharedRootUUID + "\n",
 		projectkeys.ProjectSlugFile: "web\n",
 		"settings.yaml":             "schema_version: \"1\"\n",
 	} {
@@ -293,7 +297,7 @@ func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
 	legacyRoot := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectsDir, "web")
 	legacyScion := filepath.Join(legacyRoot, config.DotScion)
 	mustMkdirAll(t, legacyScion)
-	if err := config.WriteProjectID(legacyScion, testNFSWorkspaceProjectID); err != nil {
+	if err := config.WriteProjectID(legacyScion, sharedRootUUID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(legacyScion, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644); err != nil {
@@ -315,7 +319,7 @@ func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
 			GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git"},
 			Env: map[string]string{
 				"SCION_AGENT_ID":       "agent-5823",
-				"SCION_PROJECT_ID":     testNFSWorkspaceProjectID,
+				"SCION_PROJECT_ID":     sharedRootUUID,
 				"SCION_WORKSPACE_MODE": "clone-per-agent",
 			},
 		})
@@ -385,5 +389,20 @@ func TestLegacyAgentWorkspaceRoot(t *testing.T) {
 	// An ordinary (local-backend) project has no legacy admission.
 	if got := legacyAgentWorkspaceRoot(legacyScion, "old", legacy, false); got != "" {
 		t.Errorf("local project: got %q, want \"\"", got)
+	}
+}
+
+// On a shared project root the repo-root candidate is the shared layout's
+// project-level workspace (<ProjectRoot>/workspace), whatever the backend
+// places on this host; an ordinary project keeps its own root.
+func TestBrokerProjectRoot_SharedProjectRoot(t *testing.T) {
+	root, _ := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	if got := brokerProjectRoot(nil, scionDir); got != filepath.Join(root, "workspace") {
+		t.Errorf("brokerProjectRoot(shared) = %q, want %q", got, filepath.Join(root, "workspace"))
+	}
+	plain := filepath.Join(t.TempDir(), "proj", config.DotScion)
+	if got := brokerProjectRoot(nil, plain); got != filepath.Dir(plain) {
+		t.Errorf("brokerProjectRoot(plain) = %q, want %q", got, filepath.Dir(plain))
 	}
 }

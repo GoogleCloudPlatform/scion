@@ -35,8 +35,7 @@ the start.
   that directory itself; it is never redirected to an external
   `project-configs` directory. The repository's own `workspace/.scion` is not
   read on shared backends (its use as a lower template tier is deferred to
-  ptone/scion#5923 pending a security review; shared-backend brokers never read
-  it before either).
+  ptone/scion#5923; shared-backend brokers never read it before either).
 - The project name is the hub-written `project-slug`, never the UUID directory
   name.
 - Broker-private state stays broker-local: every agent's state directory is
@@ -48,8 +47,8 @@ the start.
   is keyed by the project root; the broker only records, it writes nothing.
 - Agents provisioned before the move in a non-shared mode keep their state in
   `~/.scion/projects/<slug>/.scion/agents/<name>`; look-ups fall back to it
-  read-only (temporary, retired with ptone/scion#5835) and agent delete removes
-  it. When such an agent has its own agent-scoped workspace in that directory
+  (no new agent is ever provisioned there; temporary, retired with
+  ptone/scion#5835) and agent delete removes it. When such an agent has its own agent-scoped workspace in that directory
   (clone-per-agent, possibly with unpushed work), exactly that agent directory
   is admitted as an extra workspace root until the agent is recreated (logged
   once per agent); a shared or project-scoped workspace is never admitted from
@@ -97,7 +96,10 @@ the share.
 secrets at `<subpath root>/<project>/agents/<slug>/{home-,secrets-}<agent ID>`.
 The Kubernetes NFS home and the Cloud Run agent runtime both resolve through
 them, so both resolve the same path for the same agent; Cloud Run moves from `agents/<agent ID>/{home,secrets}`.
-Homes on nfs take their share and claim from the project storage Layout.
+Homes on nfs take their share and claim from the project storage Layout; a
+recorded nfs home must still be on that share (a home recorded on another
+share of the old list is refused). A Cloud Run agent whose home is still at
+the old location is refused at start until the migration has moved it.
 The project-storage migration's Cloud Run homes step moves existing
 `agents/<agent ID>/{home,secrets}` to the new paths, only for stopped agents
 (a running agent's are reported deferred and move on a later run); it is the
@@ -117,7 +119,7 @@ only code that builds the legacy path.
 ## Follow-ups
 
 - ptone/scion#5923: repository `workspace/.scion` template tier on shared
-  backends (security review first).
+  backends.
 - ptone/scion#5835: remove the legacy in-project agent-state fallback and the
   broker-local legacy trees; broker `deleteProject` still removes only
   broker-local slug trees.

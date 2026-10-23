@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -136,30 +138,61 @@ func isSharedHubProjectRoot(projectPath string) bool {
 	return config.IsSharedProjectConfigDir(filepath.Join(projectPath, config.DotScion))
 }
 
-// findAgentInSharedProject returns the configuration dir
-// (<ProjectRoot>/.scion) of projectID's shared project root when the
-// broker's Layout is shared and the agent has state in it (its external
-// agents root, or its legacy in-project dir from before the move), else "".
-// It only reads the filesystem; a lookup without a project ID finds
-// nothing here (the root is keyed by ID).
-func (s *Server) findAgentInSharedProject(agentName, projectID string) string {
+// findAgentInSharedProject resolves, on the broker's shared Layout, the
+// configuration dir (<ProjectRoot>/.scion) of hub-managed project projectID
+// when agent agentName has state of it on this broker: in the broker-local
+// external agents root, or in its pre-move legacy dir. handled is true for
+// every request on a shared Layout with a project ID; the caller then uses
+// dir and err as the answer and never falls back to the broker-local
+// project scan. It is fail-closed like a dispatch: the share is checked
+// mounted (EnsureShareMounted) and the configuration checked as the
+// project's, with a project-slug (checkSharedProjectConfig); any failure is
+// errDeleteTargetUnknown, so a delete is not acknowledged as done. dir is ""
+// (with no error) only when the checks pass and the agent has no state of
+// the project here.
+func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projectID string) (dir string, handled bool, err error) {
 	layout := s.config.StorageLayout
-	if !layout.Backend.Shared() || projectID == "" || !isSingleCleanPathElement(agentName) {
-		return ""
+	if !layout.Backend.Shared() || projectID == "" {
+		return "", false, nil
+	}
+	if !isSingleCleanPathElement(agentName) {
+		return "", true, nil
 	}
 	root, err := layout.ProjectRoot(projectID)
 	if err != nil {
-		return ""
+		return "", true, fmt.Errorf("%w: resolve project root: %v", errDeleteTargetUnknown, err)
+	}
+	mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
+	defer cancel()
+	if err := s.ensureLayoutShareMounted(mountCtx, layout); err != nil {
+		s.agentLifecycleLog.Error("Agent look-up: project storage share is not mounted on this broker", "agent", agentName,
+			"project_id", projectID, "host_base", layout.HostBase, "error", err)
+		return "", true, fmt.Errorf("%w: project storage share is not mounted", errDeleteTargetUnknown)
+	}
+	if sce := checkSharedProjectConfig(root.HostPath, projectID); sce != nil {
+		s.agentLifecycleLog.Error("Agent look-up: shared project configuration refused", "agent", agentName,
+			"project_id", projectID, "reason", sce.Message)
+		return "", true, fmt.Errorf("%w: %s", errDeleteTargetUnknown, sce.Message)
 	}
 	scionDir := filepath.Join(root.HostPath, config.DotScion)
-	if !config.IsSharedProjectConfigDir(scionDir) {
-		return ""
+	agents, err := config.AgentsRootForProject(scionDir, false, projectID)
+	if err != nil {
+		return "", true, fmt.Errorf("%w: %v", errDeleteTargetUnknown, err)
 	}
-	if hubManagedProjectHasAgent(scionDir, agentName) || config.LegacySharedProjectAgentDir(scionDir, agentName) != "" {
-		return scionDir
+	if _, statErr := os.Lstat(filepath.Join(agents, agentName)); statErr == nil {
+		return scionDir, true, nil
+	} else if !os.IsNotExist(statErr) {
+		return "", true, fmt.Errorf("%w: check agent state: %v", errDeleteTargetUnknown, statErr)
 	}
-	return ""
+	if config.LegacySharedProjectAgentDir(scionDir, agentName) != "" {
+		return scionDir, true, nil
+	}
+	return "", true, nil
 }
+
+// sharedLookupMountTimeout bounds the share mount check of an agent look-up
+// on a request path.
+const sharedLookupMountTimeout = 30 * time.Second
 
 // sharedProjectsWithLocalAgents returns the configuration dirs
 // (<ProjectRoot>/.scion) of the projects on the broker's shared Layout for
@@ -229,18 +262,38 @@ func (s *Server) sharedBootstrapWorkspace(req CreateAgentRequest) (ws, rel strin
 	return r.HostPath, r.RelPath, true, nil
 }
 
-// sharedWorkspaceProvisioned reports whether the shared workspace at ws
-// carries the provisioning sentinel: in the project state directory, or at
-// the workspace root where an older layout kept it.
+// sharedWorkspaceProvisioned reports whether the shared workspace at ws is
+// in use, so a workspace bootstrap (a sync that makes the target match the
+// upload) must never be applied to it: it carries the provisioning sentinel
+// (in the project state directory, or at the workspace root where an older
+// layout kept it), or it holds any entry other than provisioning lock
+// litter (content a migration, the hub or an agent placed there without a
+// sentinel). An unreadable workspace counts as in use.
 func sharedWorkspaceProvisioned(ws string) bool {
-	return provision.SentinelPresent(provision.ProjectStateDir(ws), ws)
+	if provision.SentinelPresent(provision.ProjectStateDir(ws), ws) {
+		return true
+	}
+	entries, err := os.ReadDir(ws)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".scion-provision") {
+			return true
+		}
+	}
+	return false
 }
 
 // applySharedBootstrap applies a workspace bootstrap to the shared
 // workspace at ws (rel below the Layout's host base) under the project's
 // provisioning locks (provision.WithWorkspaceProvisionLocks, the locks every
-// provisioner of the workspace takes): when the workspace already carries
-// the provisioning sentinel it is left alone (skipped); otherwise apply
+// provisioner of the workspace takes): when the workspace is already in use
+// (sharedWorkspaceProvisioned: sentinel, or any content) it is left alone
+// (skipped); otherwise apply
 // places the upload and the sentinel is written, so later provisioners
 // reuse it. The workspace and its state directory are created first with
 // the broker's leaf contract (shareddirs.EnsureLeaf).
@@ -267,6 +320,10 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		}
 		if err := apply(lockCtx); err != nil {
 			return err
+		}
+		// The sentinel is irreversible: never write it under a lost lock.
+		if err := lockCtx.Err(); err != nil {
+			return fmt.Errorf("provisioning lock lost: %w", err)
 		}
 		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
 	})

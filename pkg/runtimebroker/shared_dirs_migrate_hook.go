@@ -79,11 +79,18 @@ func (s *Server) migrateLocalSharedDirs(ctx context.Context) ([]migrate.Result, 
 		if !e.IsDir() {
 			continue
 		}
+		sdRel := filepath.Join(projectkeys.ProjectConfigsDir, e.Name(), "shared-dirs")
 		id, ok := projects[e.Name()]
 		if !ok {
-			continue // not a project on this share (or its identity is not seeded yet)
+			// Not a project on this share, its identity is not seeded yet,
+			// or its slug changed: say so when it holds shared dirs, which
+			// then stay node-local until a later start matches them.
+			if names, err := os.ReadDir(filepath.Join(globalDir, sdRel)); err == nil && len(names) > 0 {
+				slog.Info("Node-local shared dirs not migrated: no project on the shared tree matches this project-configs entry",
+					"entry", e.Name())
+			}
+			continue
 		}
-		sdRel := filepath.Join(projectkeys.ProjectConfigsDir, e.Name(), "shared-dirs")
 		names, err := os.ReadDir(filepath.Join(globalDir, sdRel))
 		if err != nil {
 			continue // no shared dirs kept node-local for this project

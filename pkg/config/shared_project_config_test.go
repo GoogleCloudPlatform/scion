@@ -197,7 +197,7 @@ func TestSharedProjectAgentStateRootStableAcrossSeedMove(t *testing.T) {
 }
 
 // An agent provisioned before the move keeps its in-project state dir under
-// ~/.scion/projects/<slug>/.scion/agents (read-only look-up fallback) until
+// ~/.scion/projects/<slug>/.scion/agents (look-up fallback) until
 // it has a scion-agent.json in the external root.
 func TestSharedProjectLegacyAgentFallback(t *testing.T) {
 	scionDir, home := sharedProjectFixture(t, "web")

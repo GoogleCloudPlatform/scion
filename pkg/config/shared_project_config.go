@@ -16,10 +16,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -51,8 +53,10 @@ import (
 
 // IsSharedProjectConfigDir reports whether projectDir is a shared-backend
 // project configuration directory: a directory named .scion whose parent
-// directory's name is a valid project ID equal to the project-id file
-// inside it. Only the hub's UUID-keyed project tree has that shape.
+// directory's name is a canonical (lowercase) UUID equal to the project-id
+// file inside it. Only the hub's UUID-keyed project tree has that shape;
+// pkg/config has no Layout, so a linked checkout would match only if its
+// directory were named by its own project UUID.
 func IsSharedProjectConfigDir(projectDir string) bool {
 	_, ok := sharedProjectConfigID(projectDir)
 	return ok
@@ -69,7 +73,7 @@ func sharedProjectConfigID(projectDir string) (string, bool) {
 		return "", false
 	}
 	parentName := filepath.Base(filepath.Dir(abs))
-	if ValidateProjectID(parentName) != nil {
+	if !canonicalUUIDPattern.MatchString(parentName) {
 		return "", false
 	}
 	info, err := os.Lstat(abs)
@@ -114,6 +118,10 @@ func SharedProjectSlug(projectDir string) (slug string, ok bool) {
 	return slug, true
 }
 
+// canonicalUUIDPattern is a canonical (lowercase) UUID, the form hub
+// project IDs take and the UUID-keyed shared tree is named by.
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 var sharedProjectSlugWarned sync.Map
 
 // warnSharedProjectSlugOnce logs, once per directory, that a shared
@@ -133,29 +141,45 @@ func warnSharedProjectSlugOnce(projectDir string, err error) {
 
 // sharedProjectExternalAgentsDir returns the broker-local external agents
 // root of a shared project configuration directory:
-// ~/.scion/project-configs/<slug>__<id8>/.scion/agents. ok is false when
-// projectDir is not a shared project configuration directory.
+// ~/.scion/project-configs/<slug>__<id8>/.scion/agents, the slug from the
+// hub-written project-slug. ok is false when projectDir is not a shared
+// project configuration directory. Without a usable project-slug, err is
+// set and dir is the broker-local root with an empty slug
+// (project-configs/__<id8>), which no project's agents use: the state root
+// is never derived from the directory name, and never falls back to the
+// configuration directory on the share. AgentsRootForProject reports the
+// error (ErrAgentStateDirUnavailable).
 func sharedProjectExternalAgentsDir(projectDir string) (dir string, ok bool, err error) {
 	id, isShared := sharedProjectConfigID(projectDir)
 	if !isShared {
 		return "", false, nil
 	}
-	name := GetProjectName(projectDir)
-	marker := &ProjectMarker{ProjectID: id, ProjectName: name, ProjectSlug: name}
+	slug, slugErr := ReadProjectSlug(projectDir)
+	if slugErr != nil {
+		warnSharedProjectSlugOnce(projectDir, slugErr)
+		slug = ""
+	}
+	marker := &ProjectMarker{ProjectID: id, ProjectName: slug, ProjectSlug: slug}
 	ext, err := marker.ExternalProjectPath()
 	if err != nil {
 		return "", true, err
 	}
-	return filepath.Join(ext, "agents"), true, nil
+	dir = filepath.Join(ext, "agents")
+	if slugErr != nil {
+		return dir, true, fmt.Errorf("shared project configuration has no usable project-slug: %w", slugErr)
+	}
+	return dir, true, nil
 }
 
 // LegacySharedProjectAgentDir returns the in-project agent directory an
 // agent of a shared project had before its configuration moved to the
 // project root (ptone/scion#5823): ~/.scion/projects/<slug>/.scion/agents/
 // <name>, when that directory holds a regular scion-agent.json and the
-// legacy .scion directory names the same project. It is a read-only
-// look-up fallback for agents provisioned before the move (temporary;
-// ptone/scion#5835); "" when there is none.
+// legacy .scion directory names the same project. It is a look-up
+// fallback for agents provisioned before the move: no new agent is ever
+// provisioned there (temporary; ptone/scion#5835). Every component below
+// the global dir is checked with Lstat (no symlink is followed). "" when
+// there is none.
 func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 	id, ok := sharedProjectConfigID(projectDir)
 	if !ok || agentName == "" || agentName != filepath.Base(agentName) || agentName == "." || agentName == ".." {
@@ -176,6 +200,11 @@ func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 	if legacyID, err := readProjectIDInDir(legacyScion); err != nil || legacyID != id {
 		return ""
 	}
+	for _, comp := range []string{filepath.Join(globalDir, projectkeys.ProjectsDir), filepath.Join(globalDir, projectkeys.ProjectsDir, slug), filepath.Join(legacyScion, "agents")} {
+		if info, err := os.Lstat(comp); err != nil || !info.IsDir() {
+			return ""
+		}
+	}
 	dir := filepath.Join(legacyScion, "agents", agentName)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return ""
@@ -192,8 +221,16 @@ func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 // directory (LegacySharedProjectAgentDir) if one exists.
 func sharedProjectAgentDir(projectDir, agentName string) (dir string, ok bool, err error) {
 	root, ok, err := sharedProjectExternalAgentsDir(projectDir)
-	if !ok || err != nil {
-		return "", ok, err
+	if !ok {
+		return "", false, nil
+	}
+	if err != nil {
+		// root is the unused empty-slug broker-local root (or "" when the
+		// home directory is unknown); never the share.
+		if root == "" {
+			return "", true, err
+		}
+		return filepath.Join(root, agentName), true, err
 	}
 	ext := filepath.Join(root, agentName)
 	if info, err := os.Lstat(filepath.Join(ext, "scion-agent.json")); err == nil && info.Mode().IsRegular() {

@@ -455,7 +455,9 @@ func GetAgentHomePath(projectDir, agentName string) string {
 func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
 	// A shared project configuration keeps every agent's state in the
 	// broker-local external root, whatever the sharing mode.
-	if root, ok, err := sharedProjectExternalAgentsDir(projectDir); ok && err == nil {
+	if root, ok, _ := sharedProjectExternalAgentsDir(projectDir); ok {
+		// Never the in-project agents root, which is on the share; on an
+		// error root is the unused empty-slug broker-local root.
 		return root
 	}
 	if sharedWorkspace {
@@ -481,7 +483,7 @@ func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
 // <projectDir>/agents/<name>/ — preserving the worktree-relative layout that
 // git's worktree pointers depend on.
 func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
-	if dir, ok, err := sharedProjectAgentDir(projectDir, agentName); ok && err == nil {
+	if dir, ok, _ := sharedProjectAgentDir(projectDir, agentName); ok {
 		return dir
 	}
 	return filepath.Join(SelectAgentsRoot(projectDir, sharedWorkspace), agentName)
@@ -499,7 +501,7 @@ func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
 // external in worktree mode — only home/ does). Otherwise returns the
 // in-project path.
 func ResolveAgentDir(projectDir, agentName string) string {
-	if dir, ok, err := sharedProjectAgentDir(projectDir, agentName); ok && err == nil {
+	if dir, ok, _ := sharedProjectAgentDir(projectDir, agentName); ok {
 		return dir
 	}
 	if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
@@ -632,7 +634,7 @@ func AgentDirForProject(projectDir, agentName string, sharedWorkspace bool, hubP
 	}
 	if IsSharedProjectConfigDir(projectDir) {
 		// An agent provisioned before its project's configuration moved to
-		// the project root keeps its in-project state (read-only fallback).
+		// the project root keeps its in-project state (look-up fallback).
 		if resolved, ok, err := sharedProjectAgentDir(projectDir, agentName); ok && err == nil {
 			return resolved, nil
 		}

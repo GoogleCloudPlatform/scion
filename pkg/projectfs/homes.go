@@ -71,3 +71,8 @@ func (l Layout) agentLeaf(projectID, agent, agentID, prefix string) (Resolved, e
 	}
 	return sl.shared(filepath.Join(ar.RelPath, prefix+agentID), Mount{}), nil
 }
+
+// ProjectWorkspaceDirName is the name of a project's workspace directory
+// below its project root on a shared backend (<ProjectRoot>/workspace, the
+// project-level workspace Resolve gives).
+const ProjectWorkspaceDirName = workspaceDir

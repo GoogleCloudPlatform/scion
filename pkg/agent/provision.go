@@ -133,7 +133,11 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
-		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		// A shared project configuration's in-project agents root is on
+		// the share, in the hub-owned configuration: never a delete target.
+		if !config.IsSharedProjectConfigDir(projectDir) {
+			agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		}
 		if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
 			legacyAgentDir = legacy
 			agentsDirs = append(agentsDirs, filepath.Dir(legacy))

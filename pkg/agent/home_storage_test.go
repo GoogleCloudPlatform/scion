@@ -545,3 +545,14 @@ func TestHomeShareLayout(t *testing.T) {
 		assert.Error(t, err, name)
 	}
 }
+
+// Homes use the one project storage share: a recorded nfs home whose share
+// is no longer that share (only another share of the list) is refused.
+func TestResolveHomeStorage_RecordedShareMustBeProjectShare(t *testing.T) {
+	h := newHSHarness(t)
+	require.NoError(t, writeHomeStorageRecord(h.agentDir, homeStorageRecord{Backend: "nfs", Leaf: "pod", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "trees"}))
+	h.gs.Server.SharedDirStorage.NFS.Shares = []config.V1NFSShare{{ID: "share-2", PVName: "pv-2"}, {ID: "share-1", PVName: "pv-1"}}
+	_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded home share share-1 not configured")
+}

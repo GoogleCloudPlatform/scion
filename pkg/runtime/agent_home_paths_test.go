@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -56,5 +57,34 @@ func TestAgentHomeSameOnKubernetesAndCloudRun(t *testing.T) {
 				t.Fatalf("secrets = %q, want %q", cr.secretsExportPath, want)
 			}
 		})
+	}
+}
+
+// A Cloud Run agent whose home is still at the pre-upgrade location is not
+// started with a new empty home: the start is refused until the migration
+// moved it. A moved or brand-new home starts normally.
+func TestRefuseUnmigratedCloudRunHome(t *testing.T) {
+	const projectID, slug, agentID = "proj-123", "dev", "6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b"
+	hostBase := t.TempDir()
+	hp, err := cloudRunNFSHostPaths(filepath.Join(hostBase, "projects", projectID, "workspace"), "", projectID, slug, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseUnmigratedCloudRunHome(hp, "", projectID, agentID); err != nil {
+		t.Fatalf("a new agent must start: %v", err)
+	}
+	legacy := filepath.Join(hostBase, "projects", projectID, "agents", agentID, "home")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = refuseUnmigratedCloudRunHome(hp, "", projectID, agentID)
+	if err == nil || !strings.Contains(err.Error(), "project-storage-migrate") {
+		t.Fatalf("an unmigrated home must refuse with the remedy, got %v", err)
+	}
+	if err := os.MkdirAll(hp.homeHostPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseUnmigratedCloudRunHome(hp, "", projectID, agentID); err != nil {
+		t.Fatalf("a moved home must start: %v", err)
 	}
 }

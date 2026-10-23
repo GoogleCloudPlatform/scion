@@ -117,6 +117,14 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	in.ProvisionLock = func(ws migrate.Tree, section func(lockCtx context.Context) error) error {
 		return withWorkspaceProvisionLocks(ctx, ws, section)
 	}
+	// Step 5 re-reads an agent's phase right before moving its home.
+	in.AgentStopped = func(lockCtx context.Context, projectID, agentID string) (bool, error) {
+		a, err := s.store.GetAgent(lockCtx, agentID)
+		if err != nil {
+			return false, err
+		}
+		return a.ProjectID == projectID && storageMigrateAgentStopped(a.Phase), nil
+	}
 	if stor := s.GetStorage(); withObjects && stor != nil {
 		hubID := s.HubID()
 		in.Objects = storageObjects{stor}
@@ -156,8 +164,8 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 
 // storageMigrateAgents lists a project's agents for migration step 5 (Cloud
 // Run homes, ptone/scion#5825): each agent's ID and slug, and whether it is
-// stopped (stopped, error or halted: no container holds its home), the only
-// state in which its home is moved.
+// stopped (stopped or halted: no instance holds its home), the only state
+// in which its home is moved.
 func (s *Server) storageMigrateAgents(ctx context.Context, projectID string) ([]migrate.AgentRef, error) {
 	var refs []migrate.AgentRef
 	cursor := ""
@@ -178,10 +186,11 @@ func (s *Server) storageMigrateAgents(ctx context.Context, projectID string) ([]
 }
 
 // storageMigrateAgentStopped reports whether an agent in phase holds no
-// running container, so its home can be moved.
+// running instance, so its home can be moved. An agent in phase error may
+// still have a live instance, so it is not.
 func storageMigrateAgentStopped(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
+	case state.PhaseStopped, state.PhaseHalted:
 		return true
 	}
 	return false

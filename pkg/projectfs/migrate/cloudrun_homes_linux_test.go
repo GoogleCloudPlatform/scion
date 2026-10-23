@@ -73,7 +73,7 @@ var crhAgents = []AgentRef{{ID: crhAgentA, Slug: "dev", Stopped: true}, {ID: crh
 func TestCloudRunHomes_MovesStoppedDefersRunning(t *testing.T) {
 	l, proj := crhLayout(t)
 
-	plan := cloudRunHomes(l, crhProject, crhAgents, Options{DryRun: true})
+	plan := cloudRunHomes(l, crhProject, crhAgents, nil, Options{DryRun: true})
 	for _, r := range plan {
 		if r.Failed() {
 			t.Fatalf("dry run failed: %+v", r)
@@ -83,7 +83,7 @@ func TestCloudRunHomes_MovesStoppedDefersRunning(t *testing.T) {
 		t.Fatal("a dry run must change nothing")
 	}
 
-	res := cloudRunHomes(l, crhProject, crhAgents, Options{})
+	res := cloudRunHomes(l, crhProject, crhAgents, nil, Options{})
 	byTarget := map[string]Result{}
 	for _, r := range res {
 		if r.Failed() {
@@ -111,7 +111,7 @@ func TestCloudRunHomes_MovesStoppedDefersRunning(t *testing.T) {
 		t.Errorf("nothing may be created for the running agent (err %v)", err)
 	}
 
-	again := cloudRunHomes(l, crhProject, []AgentRef{crhAgents[0]}, Options{})
+	again := cloudRunHomes(l, crhProject, []AgentRef{crhAgents[0]}, nil, Options{})
 	for _, r := range again {
 		if r.Moved() || r.Failed() {
 			t.Errorf("second run for the stopped agent: %+v, want no moves", r)
@@ -120,7 +120,7 @@ func TestCloudRunHomes_MovesStoppedDefersRunning(t *testing.T) {
 
 	// Once stopped, the deferred agent moves too.
 	stopped := []AgentRef{{ID: crhAgentB, Slug: "ops", Stopped: true}}
-	for _, r := range cloudRunHomes(l, crhProject, stopped, Options{}) {
+	for _, r := range cloudRunHomes(l, crhProject, stopped, nil, Options{}) {
 		if r.Failed() {
 			t.Fatalf("move after stop failed: %+v", r)
 		}
@@ -136,7 +136,7 @@ func TestCloudRunHomes_NeverOverwrites(t *testing.T) {
 	l, proj := crhLayout(t)
 	target := filepath.Join(proj, "agents", "dev", "home-"+crhAgentA)
 	crhWrite(t, filepath.Join(target, ".bashrc"), "already here")
-	res := cloudRunHomes(l, crhProject, crhAgents[:1], Options{})
+	res := cloudRunHomes(l, crhProject, crhAgents[:1], nil, Options{})
 	var home Result
 	for _, r := range res {
 		if r.Target == target {
@@ -162,7 +162,7 @@ func TestCloudRunHomes_RefusesSymlinksAndBadIDs(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), legacyHome); err != nil {
 		t.Fatal(err)
 	}
-	res := cloudRunHomes(l, crhProject, crhAgents[:1], Options{})
+	res := cloudRunHomes(l, crhProject, crhAgents[:1], nil, Options{})
 	refused := false
 	for _, r := range res {
 		if strings.HasSuffix(r.Source, filepath.Join(crhAgentA, "home")) && r.Failed() && strings.Contains(r.Err.Error(), "symlink") {
@@ -174,24 +174,58 @@ func TestCloudRunHomes_RefusesSymlinksAndBadIDs(t *testing.T) {
 	}
 
 	for _, a := range []AgentRef{{ID: "agent-1", Slug: "dev", Stopped: true}, {ID: "../" + crhAgentA, Slug: "dev", Stopped: true}} {
-		if got := cloudRunHomes(l, crhProject, []AgentRef{a}, Options{}); len(got) != 0 {
+		if got := cloudRunHomes(l, crhProject, []AgentRef{a}, nil, Options{}); len(got) != 0 {
 			t.Errorf("agent ID %q: results %+v, want none", a.ID, got)
 		}
 	}
-	bad := cloudRunHomes(l, crhProject, []AgentRef{{ID: crhAgentA, Slug: "../x", Stopped: true}}, Options{})
+	bad := cloudRunHomes(l, crhProject, []AgentRef{{ID: crhAgentA, Slug: "../x", Stopped: true}}, nil, Options{})
 	if len(bad) != 1 || !bad[0].Failed() {
 		t.Errorf("bad slug: %+v, want one failure", bad)
 	}
 }
 
-// Run wires step 5 for projects on a shared workspace Layout.
+// An agent that starts between the stopped snapshot and its move is
+// deferred: its state is re-read right before the move.
+func TestCloudRunHomes_RecheckDefersStartedAgent(t *testing.T) {
+	l, proj := crhLayout(t)
+	started := func(ctx context.Context, projectID, agentID string) (bool, error) { return false, nil }
+	res := cloudRunHomes(l, crhProject, crhAgents[:1], started, Options{})
+	for _, r := range res {
+		if r.Outcome != OutcomeDeferred {
+			t.Errorf("result %+v, want deferred", r)
+		}
+	}
+	if got := crhRead(t, filepath.Join(proj, "agents", crhAgentA, "home", ".bashrc")); got != "home of "+crhAgentA {
+		t.Errorf("the legacy home must stay, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "agents", "dev")); !os.IsNotExist(err) {
+		t.Errorf("nothing may be created for an agent that started (err %v)", err)
+	}
+}
+
+// Run wires step 5 for projects on a shared workspace Layout, under the
+// project's provisioning lock (the moves see the lock's context) and with
+// the state re-check.
 func TestRun_CloudRunHomesStep(t *testing.T) {
 	l, proj := crhLayout(t)
+	locked, rechecked := 0, 0
+	lockKey := struct{}{}
 	rep, err := Run(context.Background(), HubInput{
 		Workspace:  l,
 		SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal},
 		GlobalDir:  t.TempDir(),
 		Projects:   []ProjectRef{{ID: crhProject, Slug: "web", NoWorkspace: true, Agents: crhAgents[:1]}},
+		ProvisionLock: func(ws Tree, section func(lockCtx context.Context) error) error {
+			locked++
+			return section(context.WithValue(context.Background(), lockKey, true))
+		},
+		AgentStopped: func(ctx context.Context, projectID, agentID string) (bool, error) {
+			rechecked++
+			if ctx.Value(lockKey) == nil {
+				t.Error("the state re-check must run under the provisioning lock")
+			}
+			return true, nil
+		},
 	}, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -201,5 +235,8 @@ func TestRun_CloudRunHomesStep(t *testing.T) {
 	}
 	if got := crhRead(t, filepath.Join(proj, "agents", "dev", "home-"+crhAgentA, ".bashrc")); got != "home of "+crhAgentA {
 		t.Errorf("home via Run = %q", got)
+	}
+	if locked == 0 || rechecked != 1 {
+		t.Errorf("locked %d times, re-checked %d times; want the step under the lock with one re-check", locked, rechecked)
 	}
 }

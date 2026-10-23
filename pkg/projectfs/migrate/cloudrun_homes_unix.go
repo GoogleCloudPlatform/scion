@@ -17,6 +17,7 @@
 package migrate
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -34,16 +35,19 @@ import (
 // run. The emptied legacy agents/<agent ID> directory is removed with the
 // project's legacy trees (ptone/scion#5835).
 
-// legacyCloudRunAgentDir is the retired Cloud Run per-agent directory name
-// below a project root: agents/<agent ID>. This migration step is the only
-// code that builds it, to read the legacy source.
-func legacyCloudRunAgentDir(projectRel, agentID string) string {
+// LegacyCloudRunAgentDir is the retired Cloud Run per-agent directory name
+// below a project root: agents/<agent ID>. Only this migration step and the
+// Cloud Run runtime's refusal to start an agent whose home has not moved yet
+// build it, to read the legacy location.
+func LegacyCloudRunAgentDir(projectRel, agentID string) string {
 	return filepath.Join(projectRel, "agents", agentID)
 }
 
 // cloudRunHomes moves the Cloud Run homes and secrets of a project's agents
-// on the workspace Layout l (step 5).
-func cloudRunHomes(l projectfs.Layout, projectID string, agents []AgentRef, opts Options) []Result {
+// on the workspace Layout l (step 5). recheck, when set, re-reads an agent's
+// stopped state right before its moves (Run passes HubInput.AgentStopped);
+// the caller runs the step under the project's provisioning locks.
+func cloudRunHomes(l projectfs.Layout, projectID string, agents []AgentRef, recheck func(ctx context.Context, projectID, agentID string) (bool, error), opts Options) []Result {
 	// The Cloud Run runtime keeps homes on the workspace share, never on a
 	// transitional shared-dir share.
 	l.SharedDirs = nil
@@ -56,28 +60,52 @@ func cloudRunHomes(l projectfs.Layout, projectID string, agents []AgentRef, opts
 		if !projectfs.ValidAgentID(a.ID) {
 			continue // no Cloud Run home is keyed by anything but a hub agent ID
 		}
+		legacy := LegacyCloudRunAgentDir(root.RelPath, a.ID)
+		sources := []Tree{{Base: l.HostBase, Rel: filepath.Join(legacy, "home")}, {Base: l.HostBase, Rel: filepath.Join(legacy, "secrets")}}
+		present := false
+		for _, src := range sources {
+			k, err := entryKind(src)
+			if err != nil {
+				out = append(out, Result{Step: StepCloudRunHomes, Source: src.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("stat source: %w", err)})
+				present = false
+				break
+			}
+			present = present || k != kindAbsent
+		}
+		if !present {
+			continue // nothing of this agent to move (not a Cloud Run agent)
+		}
 		home, err := l.AgentHome(projectID, a.Slug, a.ID)
 		if err != nil {
-			out = append(out, Result{Step: StepCloudRunHomes, Outcome: OutcomeFailed, Err: fmt.Errorf("agent %s: %w", a.ID, err)})
+			out = append(out, Result{Step: StepCloudRunHomes, Source: sources[0].String(), Outcome: OutcomeFailed, Err: fmt.Errorf("agent %s: %w", a.ID, err)})
 			continue
 		}
 		secrets, err := l.AgentSecrets(projectID, a.Slug, a.ID)
 		if err != nil {
-			out = append(out, Result{Step: StepCloudRunHomes, Outcome: OutcomeFailed, Err: fmt.Errorf("agent %s: %w", a.ID, err)})
+			out = append(out, Result{Step: StepCloudRunHomes, Source: sources[1].String(), Outcome: OutcomeFailed, Err: fmt.Errorf("agent %s: %w", a.ID, err)})
 			continue
 		}
-		legacy := legacyCloudRunAgentDir(root.RelPath, a.ID)
-		for _, mv := range []struct {
-			name   string
-			target projectfs.Resolved
-		}{{"home", home}, {"secrets", secrets}} {
+		stopped := a.Stopped
+		if stopped && recheck != nil && !opts.DryRun {
+			ctx := opts.Context
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			ok, err := recheck(ctx, projectID, a.ID)
+			if err != nil {
+				out = append(out, Result{Step: StepCloudRunHomes, Source: sources[0].String(), Outcome: OutcomeFailed, Err: fmt.Errorf("agent %s: re-read state: %w", a.ID, err)})
+				continue
+			}
+			stopped = ok
+		}
+		for i, target := range []projectfs.Resolved{home, secrets} {
 			spec := Spec{
 				Step:      StepCloudRunHomes,
-				Source:    Tree{Base: l.HostBase, Rel: filepath.Join(legacy, mv.name)},
-				Target:    Tree{Base: l.HostBase, Rel: mv.target.RelPath},
+				Source:    sources[i],
+				Target:    Tree{Base: l.HostBase, Rel: target.RelPath},
 				Normalize: NormalizeNone,
 			}
-			if !a.Stopped {
+			if !stopped {
 				if r := deferIfPresent(spec); r != nil {
 					out = append(out, *r)
 				}

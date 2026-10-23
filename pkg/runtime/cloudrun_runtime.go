@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
@@ -681,6 +682,9 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
 		return nil, err
 	}
+	if err := refuseUnmigratedCloudRunHome(hostPaths, cfg.NFSSubPathRoot, cfg.ProjectID, agentID); err != nil {
+		return nil, err
+	}
 
 	resolved := ResolvedWorkspace{
 		HostPath:           hostPaths.workspaceHostPath,
@@ -858,6 +862,27 @@ func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, slug, agent
 		homeHostPath:       filepath.Join(hostBase, home),
 		secretsHostPath:    filepath.Join(hostBase, secrets),
 	}, nil
+}
+
+// refuseUnmigratedCloudRunHome refuses to start an agent whose home is
+// still at the pre-upgrade Cloud Run location (agents/<agent ID>/home) and
+// not yet at agents/<slug>/home-<agent ID>: starting it would give it a new,
+// empty home that the project-storage migration could then no longer merge
+// into without conflicts (ptone/scion#5825). The migration moves the home of
+// a stopped agent; the agent starts normally afterwards.
+func refuseUnmigratedCloudRunHome(hp *cloudRunNFSHostProvisionPaths, subPathRoot, projectID, agentID string) error {
+	if _, err := os.Lstat(hp.homeHostPath); !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	root, err := config.ResolveSubPathRoot(subPathRoot)
+	if err != nil {
+		return fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+	legacyHome := filepath.Join(hp.hostBase, migrate.LegacyCloudRunAgentDir(filepath.Join(root, projectID), agentID), "home")
+	if _, err := os.Lstat(legacyHome); err == nil {
+		return fmt.Errorf("cloudrun: agent %s has its home at the location used before this version; run the project-storage-migrate maintenance operation (with the agent stopped) before starting it", agentID)
+	}
+	return nil
 }
 
 // cloudRunAgentLeaves returns an agent's home and secrets paths relative to

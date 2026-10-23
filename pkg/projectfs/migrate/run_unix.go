@@ -78,6 +78,10 @@ type HubInput struct {
 	ProvisionLock func(workspace Tree, section func(lockCtx context.Context) error) error
 	// Tracked overrides GitTracked (tests).
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
+	// AgentStopped, when set, re-reads whether an agent is still stopped,
+	// immediately before step 5 moves its home (the ProjectRef snapshot can
+	// be stale by then). An agent that is no longer stopped is deferred.
+	AgentStopped func(ctx context.Context, projectID, agentID string) (bool, error)
 }
 
 // HubReport is one hub's the migration/the object-storage cleanup report.
@@ -211,8 +215,32 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		}
 		pi.ProjectRoot = Tree{Base: root.HostBase, Rel: root.RelPath}
 		if len(ref.Agents) > 0 {
-			layout, agents := in.Workspace, ref.Agents
-			pi.CloudRunHomes = func(opts Options) []Result { return cloudRunHomes(layout, ref.ID, agents, opts) }
+			layout, agents, recheck, projectID := in.Workspace, ref.Agents, in.AgentStopped, ref.ID
+			step := func(opts Options) []Result { return cloudRunHomes(layout, projectID, agents, recheck, opts) }
+			pi.CloudRunHomes = step
+			if in.ProvisionLock != nil {
+				// Step 5 runs under the project's provisioning locks (the
+				// workspace's lock directories exist for every project),
+				// bounded by the locks' context.
+				ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
+				if err != nil {
+					return ProjectInput{}, fmt.Errorf("resolve workspace: %w", err)
+				}
+				lock, wsTree := in.ProvisionLock, Tree{Base: ws.HostBase, Rel: ws.RelPath}
+				pi.CloudRunHomes = func(opts Options) []Result {
+					var out []Result
+					err := lock(wsTree, func(lockCtx context.Context) error {
+						o := opts
+						o.Context = lockCtx
+						out = step(o)
+						return nil
+					})
+					if err != nil {
+						out = append(out, Result{Step: StepCloudRunHomes, Source: wsTree.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("provisioning lock: %w", err)})
+					}
+					return out
+				}
+			}
 		}
 		if in.ProvisionLock != nil && !ref.NoWorkspace {
 			ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))

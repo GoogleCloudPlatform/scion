@@ -3113,6 +3113,12 @@ func boundedCommonGitDir(dir, ceiling string) (string, error) {
 // settings can include a settings file inside the project, which a shared
 // workspace mount exposes.
 func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
+	// A shared project configuration (<ProjectRoot>/.scion): the candidate
+	// is the shared layout's project-level workspace, <ProjectRoot>/workspace,
+	// whatever the backend places on this host.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return filepath.Join(filepath.Dir(filepath.Clean(projectDir)), projectfs.ProjectWorkspaceDirName)
+	}
 	own := projectDir
 	switch {
 	case settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir):

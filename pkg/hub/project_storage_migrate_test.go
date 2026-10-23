@@ -414,3 +414,11 @@ func TestProjectStorageMigrate_CloudRunHomes(t *testing.T) {
 	require.NoError(t, err, log)
 	assert.Contains(t, log, "moves=0")
 }
+
+// Step 5 moves only agents whose instance is gone: an agent in phase error
+// may still have one, and is deferred like a running agent.
+func TestStorageMigrateAgentStopped(t *testing.T) {
+	for phase, want := range map[string]bool{"stopped": true, "halted": true, "error": false, "running": false, "starting": false, "suspended": false, "": false} {
+		assert.Equal(t, want, storageMigrateAgentStopped(phase), phase)
+	}
+}

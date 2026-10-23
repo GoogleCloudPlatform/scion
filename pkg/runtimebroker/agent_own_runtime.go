@@ -332,10 +332,22 @@ func (s *Server) knownAgentProjectDir(id, projectID, projectPathHint string) str
 		return ""
 	}
 	var candidates []string
-	if dir := s.findAgentInSharedProject(id, projectID); dir != "" {
-		candidates = append(candidates, dir)
-	} else if dir, err := findAgentInHubManagedProjects(id, projectID); err == nil && dir != "" {
-		candidates = append(candidates, dir)
+	sharedDir, sharedHandled, sharedErr := "", false, error(nil)
+	if projectPathHint == "" {
+		sharedDir, sharedHandled, sharedErr = s.findAgentInSharedProject(context.Background(), id, projectID)
+	}
+	switch {
+	case sharedHandled && sharedErr != nil:
+		// Fail closed: no fallback to the broker-local projects.
+		return ""
+	case sharedHandled:
+		if sharedDir != "" {
+			candidates = append(candidates, sharedDir)
+		}
+	default:
+		if dir, err := findAgentInHubManagedProjects(id, projectID); err == nil && dir != "" {
+			candidates = append(candidates, dir)
+		}
 	}
 	if dir := linkedProjectAgentDir(projectPathHint, id, projectID); dir != "" {
 		candidates = append(candidates, dir)

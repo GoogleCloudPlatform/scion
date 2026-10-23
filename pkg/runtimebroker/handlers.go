@@ -980,8 +980,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if sharedLayout {
 		req.ProjectPath = sharedProjectPath
 		// A workspace bootstrap is skipped for a shared workspace that was
-		// already provisioned (it carries the provisioning sentinel) when
-		// the create was admitted.
+		// already in use (provisioning sentinel, or any content) when the
+		// create was admitted; applySharedBootstrap checks again under the
+		// provisioning locks.
 		if ws, _, ok, wsErr := s.sharedBootstrapWorkspace(req); ok && wsErr == nil {
 			req.workspaceAdmissionChecked = true
 			req.workspaceAbsentAtAdmission = !sharedWorkspaceProvisioned(ws)
@@ -2157,7 +2158,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// A hub-managed project on the shared Layout: the upload is applied to
 	// the shared workspace under the project's provisioning locks, only
-	// when no provisioner has populated it yet (no sentinel), and the
+	// when it is not in use yet (no sentinel and no content), and the
 	// sentinel is written after it. No broker-local record or workspace
 	// marker is written: the project's identity lives in its configuration
 	// at the project root.
@@ -2174,7 +2175,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 			return opts, attemptMsg, httpMessage, err
 		}
 		if skipped {
-			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace was provisioned meanwhile",
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace came into use meanwhile",
 				"agent_id", req.ID, "project_id", req.ProjectID)
 		}
 		opts.Workspace = workspaceDir
@@ -8768,8 +8769,12 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 // equals projectID, so a stale or wrong hint can never redirect deletion to
 // another project's files.
 func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
-	if dir := s.findAgentInSharedProject(agentName, projectID); dir != "" {
-		return dir, nil
+	// A hub-managed project (no linked path hint) on the shared Layout is
+	// resolved there only, fail-closed, never by the broker-local scan.
+	if projectPathHint == "" {
+		if dir, handled, err := s.findAgentInSharedProject(context.Background(), agentName, projectID); handled {
+			return dir, err
+		}
 	}
 	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
 	if err != nil || resolved != "" || projectID == "" {

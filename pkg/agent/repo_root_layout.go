@@ -97,7 +97,7 @@ var legacyAgentWorkspaces sync.Map
 // project root (ptone/scion#5823): exactly that agent's legacy state
 // directory ~/.scion/projects/<slug>/.scion/agents/<name>, and only when
 // agentDir (its resolved state dir) is that directory, reached through the
-// read-only legacy fallback (config.LegacySharedProjectAgentDir), and the
+// legacy look-up fallback (config.LegacySharedProjectAgentDir), and the
 // agent's workspace is its own (sharedOrExplicit false). An agent-scoped
 // workspace there (clone-per-agent, for example) may hold unpushed work, so
 // it keeps being admitted until the agent is recreated; a shared or
