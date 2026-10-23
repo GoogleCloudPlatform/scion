@@ -264,8 +264,8 @@ func ptokSetTokenExpiry(t *testing.T, s store.Store, tokenID string, at time.Tim
 // is revoked or expires, the holder is suspended, or the holder loses
 // user.invite, the token is refused, and the record stays invited and
 // admits a sign-in under invite_only like any invited record. A revoked or
-// expired token gets 401 unauthorized, also when its holder is suspended
-// as well; a suspended holder's token gets 403 user_suspended; a token
+// expired token gets 401 unauthorized, also when its holder is suspended;
+// a suspended holder's token gets 403 user_suspended; a token
 // whose holder lost user.invite gets 403 forbidden. The
 // user_provision audit names the holder and the token (ID, kind and hub
 // boundary), and a record the token created can be withdrawn through the
