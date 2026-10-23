@@ -145,7 +145,7 @@ test.describe('Starred messages (phase 1)', () => {
 
     // The hub allows a human sender 30 sends a minute (a bucket of 30 that refills one every 2 s)
     // and answers 429 with Retry-After when it is empty. The seed waits as told and sends again,
-    // so the history can be longer than the burst without any test-only bypass.
+    // so the history can be longer than the burst with the hub unchanged.
     const send = async (content: string): Promise<string> => {
       let res: ApiResult;
       for (let attempt = 0; ; attempt++) {
