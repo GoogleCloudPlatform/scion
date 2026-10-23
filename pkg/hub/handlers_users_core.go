@@ -157,6 +157,14 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		s.revokeUserSessions(w, r, id)
 		return
 	}
+	if action == "delete-blockers" {
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.getUserDeleteBlockers(w, r, id)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -1296,9 +1304,10 @@ func (s *Server) checkLastSuperAdminTx(
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
-// A user who still owns agents is refused with 409 (ptone/scion#2769). The
-// user's user-scope secrets and env vars are removed after commit, best
-// effort.
+// A user whom agents or active delegations depend on is refused with
+// 409 user_delete_blocked (ptone/scion#2769, ptone/scion#2143); GET
+// /api/v1/users/{id}/delete-blockers lists the same blockers. The user's
+// user-scope secrets and env vars are removed after commit, best effort.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1402,14 +1411,57 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/users/{id}/delete-blockers — what blocks a user deletion
+//
+// Authorization: the same as DELETE /api/v1/users/{id} (session credential,
+// then user.delete on the user). It returns the lists a plain delete would
+// refuse with (listUserDeleteBlockers): {agents, edges, truncated}, each
+// list capped. It reads outside a transaction, takes no lock and writes
+// nothing, so a delete can find a blocker added after the listing.
+// ---------------------------------------------------------------------------
+
+func (s *Server) getUserDeleteBlockers(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
+		return
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   Resource{Type: "user", ID: id},
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	})
+	if !decision.Allowed {
+		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+		return
+	}
+
+	user, err := s.store.GetUser(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	blockers, err := listUserDeleteBlockers(ctx, s.store, user.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "list user delete blockers failed", "user_id", user.ID, "error", err)
+		InternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, blockers)
+}
+
 // deleteUserRowCascadeTx deletes the user row of userID and what hangs off
 // it, inside the caller's transaction. It is the part of a user deletion
 // shared by DELETE /api/v1/users/{id} and DELETE
 // /api/v1/test-identities/{id}. In order it:
 //
-//   - refuses while the user owns agents (checkUserOwnsNoAgentsTx; returns
-//     *userOwnsAgentsDeleteError, and store.ErrNotFound when the user no
-//     longer exists);
+//   - refuses while agents or active delegations depend on the user
+//     (checkUserDeleteBlockersTx; returns *userDeleteBlockedError, and
+//     store.ErrNotFound when the user does not exist);
 //   - runs the last-project-owner guard and the role-binding cascade
 //     (guardAndCascadeUserRoleBindingsTx);
 //   - deletes the user-scope skill injections and the group memberships;
@@ -1420,8 +1472,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 // errors with writeUserDeleteCascadeError, and calls afterUserDeleted once
 // the transaction commits.
 func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
-	// Refuse while the user owns agents (ptone/scion#2769).
-	if err := checkUserOwnsNoAgentsTx(ctx, tx, userID); err != nil {
+	// Refuse while agents or active delegations depend on the user
+	// (ptone/scion#2769, ptone/scion#2143).
+	if err := checkUserDeleteBlockersTx(ctx, tx, userID); err != nil {
 		return err
 	}
 
@@ -1454,6 +1507,13 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 		return fmt.Errorf("delete group memberships: %w", err)
 	}
 
+	// Deactivate every edge with the user as the delegator: after the
+	// check passed, only edges whose delegate is gone, or one a concurrent
+	// write reactivated after the check read.
+	if err := deactivateUserDelegatorEdgesTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
 	// Delete the user record.
 	if err := tx.DeleteUser(ctx, userID); err != nil {
 		return fmt.Errorf("delete user: %w", err)
@@ -1467,12 +1527,12 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 // any other error, which the caller answers itself.
 func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 	var lastOwnerErr *lastProjectOwnerDeleteError
-	var ownsAgentsErr *userOwnsAgentsDeleteError
+	var blockedErr *userDeleteBlockedError
 	switch {
 	case errors.As(err, &lastOwnerErr):
 		writeLastProjectOwnerDeleteError(w, lastOwnerErr)
-	case errors.As(err, &ownsAgentsErr):
-		writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
+	case errors.As(err, &blockedErr):
+		writeUserDeleteBlockedError(w, blockedErr)
 	case errors.Is(err, errUserRoleBindingsChanged):
 		writeUserRoleBindingsChangedError(w)
 	default:

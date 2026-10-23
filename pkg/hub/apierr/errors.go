@@ -272,6 +272,12 @@ const (
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
 
+	// ErrCodeUserDeleteBlocked is returned with 409 when a user cannot be
+	// deleted because agents or active delegations depend on the user. details.agents and details.edges list them (each capped) and
+	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
+	// returns the same lists without attempting the delete.
+	ErrCodeUserDeleteBlocked = "user_delete_blocked"
+
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a
 	// legacy (pre-opaque-cursor) plaintext cursor, a cursor sealed under a
