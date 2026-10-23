@@ -453,6 +453,24 @@ func TestAgentInfoToResponse_EffectiveConfig(t *testing.T) {
 	}
 }
 
+// TestAgentInfoToResponse_NoBrokerBuildWithoutResolution (review
+// wp1s3-r1 R1, O1): an entry no start resolved (no Harness: an
+// already-running start, a list or get entry) carries no brokerBuild, so
+// the hub sees no effective-only field and records nothing.
+func TestAgentInfoToResponse_NoBrokerBuildWithoutResolution(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{Name: "agent-listed", Phase: "running", RunID: "run-b", Template: "tmpl"})
+	if resp.BrokerBuild != "" {
+		t.Errorf("BrokerBuild = %q, want empty", resp.BrokerBuild)
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "brokerBuild") {
+		t.Errorf("wire form carries brokerBuild: %s", data)
+	}
+}
+
 func TestAgentInfoToResponseHarnessConfig(t *testing.T) {
 	info := api.AgentInfo{
 		Name:          "agent-harness",
