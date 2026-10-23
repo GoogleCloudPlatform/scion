@@ -742,11 +742,13 @@ type AgentInfo struct {
 	// already running).
 	WorkspacePlacement string   `json:"workspacePlacement,omitempty"`
 	Warnings           []string `json:"warnings,omitempty"`
-	// HubOnlyEnvWarnings carries only the warnings for broker-local values
-	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
-	// agent. They are also included in Warnings; this field lets the broker
-	// relay just these to the hub without leaking its other local warnings.
-	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
+	// HubRelayedWarnings carries only the start warnings the broker relays
+	// to the hub for its create and start responses: broker-local values of
+	// hub-only env keys (TZ) dropped for a hub-dispatched agent, and a
+	// hub-dispatched agent starting with no hub credential. They are also
+	// included in Warnings; this field lets the broker relay just these to
+	// the hub without leaking its other local warnings.
+	HubRelayedWarnings []string `json:"hubRelayedWarnings,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
@@ -1488,17 +1490,6 @@ type StartOptions struct {
 	// or target already exists. Like KubernetesBlockIdentity it is never
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
-
-	// ColocatedHubDevToken is the workstation server's dev token, offered by
-	// the runtime broker for an agent that has no hub-issued token. The
-	// broker sets it only when the dispatch is bound to the hub co-located
-	// in its own process (the binding HostCredentialFiles also requires) and
-	// TrustedHubEndpoint is set. The agent manager uses it as the agent's
-	// hub token only in BrokerMode, and only when the agent's final hub
-	// endpoint, after the agent config and config env overrides, still
-	// equals TrustedHubEndpoint; otherwise it is dropped. Like
-	// HostCredentialFiles it is never persisted.
-	ColocatedHubDevToken string `json:"-"`
 
 	// RerenderKeys are the provision-rendered config keys
 	// (RerenderableConfigKeys) whose files this start renders again before
