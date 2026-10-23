@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -847,4 +848,39 @@ func TestCreateSharedWorkspaceProject_SharedBackend_RefusesNonNetworkCloneURL(t 
 	} {
 		require.NoError(t, provision.CheckHostCloneURL(cloneURL), cloneURL)
 	}
+}
+
+// TestWriteRootFile_RefusesSymlinkAndSpecialFiles: os.Root follows a
+// symbolic link that stays inside the root even with O_NOFOLLOW, so
+// writeRootFile checks the leaf itself: a symlink (here to a sibling file)
+// and a FIFO are refused without blocking and left unchanged, and a regular
+// file is replaced.
+func TestWriteRootFile_RefusesSymlinkAndSpecialFiles(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("keep: me\n"), 0o644))
+	require.NoError(t, os.Symlink("settings.yaml", filepath.Join(dir, "project-slug")))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "project-id"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "existing"), []byte("a much longer old value\n"), 0o644))
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	require.Error(t, writeRootFile(root, "project-slug", "new-slug\n"), "a symlink is refused")
+	got, err := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep: me\n", string(got), "the link target is not truncated or written")
+	fi, err := os.Lstat(filepath.Join(dir, "project-slug"))
+	require.NoError(t, err)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "the link is left as is")
+
+	require.Error(t, writeRootFile(root, "project-id", "x\n"), "a FIFO is refused without blocking")
+
+	require.NoError(t, writeRootFile(root, "existing", "v\n"))
+	got, err = os.ReadFile(filepath.Join(dir, "existing"))
+	require.NoError(t, err)
+	assert.Equal(t, "v\n", string(got), "a regular file is replaced")
+	require.NoError(t, writeRootFile(root, "fresh", "f\n"))
+	got, err = os.ReadFile(filepath.Join(dir, "fresh"))
+	require.NoError(t, err)
+	assert.Equal(t, "f\n", string(got))
 }
