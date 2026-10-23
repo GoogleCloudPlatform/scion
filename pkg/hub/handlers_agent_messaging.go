@@ -2258,7 +2258,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// migrating recipient, or when a wake finds another start in progress.
 	deferDelivery := reincarnationInFlight(agent)
 
-	if req.Wake && !senderIsAgent && !deferDelivery {
+	// A delegated send is an agent send: before anything is written, it
+	// gets the delivery checks ExecuteAgentDM applies to the actor agent's
+	// own send (dispatch availability, the target's hold and its phase),
+	// with the same refusals, in place of the user checks below. A
+	// delegated request never carries wake.
+	delegatedSender := delegatedAgentIdentityFromContext(ctx) != nil
+	if delegatedSender {
+		if dmErr := s.delegatedDeliveryRefusal(ctx, agent, deferDelivery); dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+	}
+
+	if req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
@@ -2277,7 +2290,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !deferDelivery {
+	if !req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver

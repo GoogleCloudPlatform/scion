@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // delegatedAgentIdentityFromContext returns the request's agent delegated
@@ -83,4 +85,28 @@ func senderAgentProject(ctx context.Context) (projectID string, ok bool) {
 func senderAgentProjectID(ctx context.Context) string {
 	projectID, _ := senderAgentProject(ctx)
 	return projectID
+}
+
+// delegatedDeliveryRefusal applies to a delegated send the delivery checks
+// ExecuteAgentDM applies to the actor agent's own send, in the same order and
+// with the same refusals, before anything is written: dispatch availability
+// (checkDispatchAvailability), then, unless delivery is deferred for a
+// migrating target, the target's hold (a held target is refused like a
+// suspended one; a lookup fault refuses) and its phase
+// (validateAgentDeliverable). It returns nil when the send may proceed.
+func (s *Server) delegatedDeliveryRefusal(ctx context.Context, target *store.Agent, deferred bool) *AgentDMError {
+	if dmErr := s.checkDispatchAvailability(&AgentDMInput{TargetAgent: target}); dmErr != nil {
+		return dmErr
+	}
+	if deferred {
+		return nil
+	}
+	held, err := s.agentHeld(ctx, target.ID)
+	if err != nil {
+		return heldLookupFaultDMError()
+	}
+	if held {
+		return heldTargetDMError(target)
+	}
+	return validateAgentDeliverable(target)
 }

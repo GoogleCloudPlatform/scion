@@ -60,7 +60,8 @@ func adtSetInbound(t *testing.T, s store.Store, projectID, policy string) {
 }
 
 // adtSetCrossProjectEnabled replaces the server's operational settings with
-// ones whose hub cross_project_messaging_enabled setting is on.
+// ones whose hub cross_project_messaging_enabled setting is on (true) or off
+// (false).
 func adtSetCrossProjectEnabled(t *testing.T, srv *Server, on bool) {
 	t.Helper()
 	fake := newFakeHubSettingStore()
@@ -326,6 +327,56 @@ func TestAgentDelegatedMessage_ObserverCopyFollowsTheActorProject(t *testing.T) 
 	same := observers(f.agentC.Slug)
 	require.Len(t, same, 1, "one observer copy for the same-project send")
 	assert.Equal(t, "same-project body", same[0].Msg, "a same-project observer copy keeps the body")
+}
+
+// TestAgentDelegatedMessage_DeliveryChecksAsForAnAgentSend: a delegated
+// send gets the delivery checks the actor agent's own send gets
+// (ExecuteAgentDM), before anything is written. A held target (still
+// running) is refused with 409 agent_not_running like a suspended one, and
+// a stopped target with the agent send's phase refusal; each refusal is the
+// same as for agent A's own JWT send, and nothing is dispatched or stored.
+func TestAgentDelegatedMessage_DeliveryChecksAsForAnAgentSend(t *testing.T) {
+	ctx := context.Background()
+	f := newADTFixture(t, "adt-msg-held")
+	dispatcher := f.adtMessageWorld(t)
+	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
+	agentToken := f.agentJWT(t, f.agentA)
+	path := agentMessagePath(f.agentB.ID)
+	require.Equal(t, http.StatusOK, f.sendMessage(t, cred.Token, path, adtText("before")).Code)
+
+	sameRefusal := func(t *testing.T) {
+		t.Helper()
+		calls := len(dispatcher.getCalls())
+		before, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.agentB.ID}, store.ListOptions{Limit: 50})
+		require.NoError(t, err)
+		delegated := adtAssertAPIError(t, f.sendMessage(t, cred.Token, path, adtText("x")), http.StatusConflict, ErrCodeAgentNotRunning)
+		own := adtAssertAPIError(t, f.do(t, http.MethodPost, path, adtText("x"), map[string]string{"X-Scion-Agent-Token": agentToken}),
+			http.StatusConflict, ErrCodeAgentNotRunning)
+		assert.Equal(t, own.Message, delegated.Message, "the same refusal as the agent's own send")
+		assert.Equal(t, own.Details, delegated.Details)
+		assert.Len(t, dispatcher.getCalls(), calls, "nothing refused was dispatched")
+		after, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.agentB.ID}, store.ListOptions{Limit: 50})
+		require.NoError(t, err)
+		assert.Len(t, after.Items, len(before.Items), "nothing refused was stored")
+	}
+
+	t.Run("stopped target", func(t *testing.T) {
+		f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "stopped" })
+		defer func() { _ = f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running" }) }()
+		sameRefusal(t)
+	})
+	t.Run("held target", func(t *testing.T) {
+		_, err := f.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID: f.agentB.ID, ProjectID: f.agentB.ProjectID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: f.bob.ID,
+			Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
+		}})
+		require.NoError(t, err)
+		held, err := f.store.HasActiveAgentHold(ctx, f.agentB.ID)
+		require.NoError(t, err)
+		require.True(t, held, "the target is held while still running")
+		sameRefusal(t)
+	})
 }
 
 // TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode: a super-admin's

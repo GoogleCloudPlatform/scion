@@ -407,11 +407,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// other send is refused like a suspended target. A lookup
 			// fault refuses.
 			if holdErr != nil {
-				return nil, &AgentDMError{
-					Code:       ErrCodeInternalError,
-					Message:    "could not verify the target agent's status",
-					HTTPStatus: http.StatusInternalServerError,
-				}
+				return nil, heldLookupFaultDMError()
 			}
 			if input.SkipPhaseGate && input.Type == messages.TypeMention {
 				deferred = true
