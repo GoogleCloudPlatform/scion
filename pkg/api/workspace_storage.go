@@ -34,6 +34,10 @@ type BrokerWorkspaceStorage struct {
 	// NFS describes the share agent workspaces are placed on. It is set only
 	// when Backend is "nfs" and the broker's NFS configuration is valid.
 	NFS *BrokerNFSWorkspaceStorage `json:"nfs,omitempty"`
+	// Homes is where the broker places agent homes, server.project_storage
+	// homes: "local" or "nfs" (on the share described by NFS). Empty when
+	// the broker predates the field (unknown).
+	Homes string `json:"homes,omitempty"`
 }
 
 // BrokerNFSWorkspaceStorage identifies the NFS export a broker places agent
@@ -83,6 +87,14 @@ const (
 // local mount roots are broker-local naming and are not compared. Health is
 // not part of identity.
 func SameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
+	return sameWorkspaceExport(a, b)
+}
+
+// NormalizeExportPath drops trailing slashes from an export path, keeping
+// "/" itself, as SameWorkspaceExport compares exports.
+func NormalizeExportPath(p string) string { return normalizeExportPath(p) }
+
+func sameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
 	if a == nil || b == nil || a.NFS == nil || b.NFS == nil {
 		return false
 	}

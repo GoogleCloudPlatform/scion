@@ -44,8 +44,8 @@ import (
 // Without create, a missing directory is an fs.ErrNotExist-compatible error
 // and nothing is created.
 func (r Resolved) Open(create bool) (*os.Root, error) {
-	switch r.Backend {
-	case BackendNFS:
+	switch {
+	case r.Backend.Shared():
 		base, err := r.resolvedHostBase()
 		if err != nil {
 			return nil, err
@@ -60,7 +60,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			}
 		}
 		return shareddirs.OpenAnchoredRoot(base, r.RelPath)
-	case BackendLocal:
+	case r.Backend == BackendLocal:
 		return openConfinedDir(r.HostPath, create)
 	default:
 		return nil, fmt.Errorf("projectfs: cannot open a directory on backend %q", r.Backend)
@@ -83,7 +83,7 @@ func (r Resolved) resolvedHostBase() (string, error) {
 // ResolvedHostBase returns the shared backend's HostBase with symlinks
 // resolved, the base pkg/shareddirs' walks take.
 func (r Resolved) ResolvedHostBase() (string, error) {
-	if r.Backend != BackendNFS {
+	if !r.Backend.Shared() {
 		return "", fmt.Errorf("projectfs: backend %q has no host base", r.Backend)
 	}
 	return r.resolvedHostBase()

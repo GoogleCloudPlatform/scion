@@ -2014,10 +2014,10 @@ func nfsOwnerIDs(uid, gid int) (int, int) {
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 
-// sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
-// or nil when the agent mounts no nfs shared dir.
+// sharedDirGroups returns the guarded shared-dir leaf groups for config,
+// or nil when the agent mounts no shared dir from a shared backend.
 func sharedDirGroups(config RunConfig) []int64 {
-	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+	if !config.SharedDirStorage.Shared() || len(config.SharedDirs) == 0 {
 		return nil
 	}
 	var out []int64

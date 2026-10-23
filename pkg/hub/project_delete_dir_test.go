@@ -47,7 +47,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 		{
 			name: "nfs",
 			configure: func(t *testing.T, srv *Server, base string) string {
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend: "nfs",
 					NFS: &config.V1NFSConfig{
 						MountRoot: filepath.Join(base, "nfs"),
@@ -61,7 +61,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 			name: "cloudrun-volume",
 			configure: func(t *testing.T, srv *Server, base string) string {
 				setVolumeMountBase(t, filepath.Join(base, "mnt"))
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend:        "cloudrun-volume",
 					CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
 				}
@@ -72,7 +72,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 			name: "gke-shared-volume",
 			configure: func(t *testing.T, srv *Server, base string) string {
 				setVolumeMountBase(t, filepath.Join(base, "mnt"))
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend: "gke-shared-volume",
 					GKESharedVolume: &config.V1GKESharedVolumeConfig{
 						VolumeName:  "workspace-vol",
@@ -288,7 +288,7 @@ func TestRemoveProjectDirUnderProjectsRoot_EmptyNFSMountRootRemovesNothing(t *te
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: "",
@@ -330,7 +330,7 @@ func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
 
 	// A configuration whose resolved path is not under any projects root:
 	// the removal is refused and the resolved path is still returned.
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: "",
@@ -350,7 +350,7 @@ func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
 		mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
 		hangReadDirFor(t, mountRoot)
 		srv, _ := testServer(t)
-		srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+		srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 		assert.Equal(t, "", srv.removeHubManagedProjectDir("p", f.slug), "a path that cannot be resolved returns no path")
 		assert.DirExists(t, f.localDir, "nothing is removed when the path cannot be resolved")

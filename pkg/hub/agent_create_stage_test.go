@@ -88,7 +88,7 @@ func createRollbackSites() []createRollbackSite {
 				t.Setenv("HOME", tmpHome)
 				mountRoot := filepath.Join(tmpHome, "nfs-mount")
 				hangReadDirFor(t, mountRoot)
-				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+				srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 				srv.SetStorage(newMockStorage("test-bucket"))
 			},
 			req:       CreateAgentRequest{Workspace: "subdir"},

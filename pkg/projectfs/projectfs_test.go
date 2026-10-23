@@ -222,12 +222,14 @@ func TestDeclaredSharedDir(t *testing.T) {
 }
 
 func TestBackendDurable(t *testing.T) {
-	if !BackendNFS.Durable() {
-		t.Error("nfs must be durable")
+	for _, b := range []Backend{BackendNFS, BackendCloudRunVolume, BackendGKESharedVolume} {
+		if !b.Durable() || !b.Shared() {
+			t.Errorf("%q must be shared and durable", b)
+		}
 	}
-	for _, b := range []Backend{BackendLocal, "", "cloudrun-volume", "bogus"} {
-		if b.Durable() {
-			t.Errorf("%q must not be durable", b)
+	for _, b := range []Backend{BackendLocal, "", "bogus"} {
+		if b.Durable() || b.Shared() {
+			t.Errorf("%q must not be shared or durable", b)
 		}
 	}
 }

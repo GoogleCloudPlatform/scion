@@ -112,8 +112,8 @@ func TestSharedDirChainsParity(t *testing.T) {
 			}
 
 			fa := newFixture(t)
-			volumes, _, agentErr := resolveSharedDirs(sdCfgFor(fa), "/unused", fa.projectID, "docker",
-				[]api.SharedDir{{Name: fa.name}}, "/workspace", false)
+			volumes, _, agentErr := resolveSharedDirs(sdLayoutFor(t, sdCfgFor(fa)), false, "/unused", fa.projectID, "docker",
+				[]api.SharedDir{{Name: fa.name}}, "/workspace")
 
 			fp := newFixture(t)
 			gs := &config.VersionedSettings{Server: &config.V1ServerConfig{SharedDirStorage: sdCfgFor(fp)}}
@@ -164,8 +164,8 @@ func TestResolveSharedDirs_NFS_BackstopRefusesSwappedLeaf(t *testing.T) {
 		return fd, existed, nil
 	}
 
-	volumes, realization, err := resolveSharedDirs(nfsSharedDirStorageCfg(mountRoot), "/unused", "pid-1", "docker",
-		[]api.SharedDir{{Name: "scratchpad"}}, "/workspace", false)
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, nfsSharedDirStorageCfg(mountRoot)), false, "/unused", "pid-1", "docker",
+		[]api.SharedDir{{Name: "scratchpad"}}, "/workspace")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resolves through a symlink")
 	assert.Nil(t, volumes)

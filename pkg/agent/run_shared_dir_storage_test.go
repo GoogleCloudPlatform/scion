@@ -808,7 +808,7 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server.shared_dir_storage=nfs requires")
+	assert.Contains(t, err.Error(), "require this broker to have the share mounted")
 	assert.Equal(t, 0, ranCount, "Run must never be called: the legacy global file's shared_dir_storage is loaded and enforced")
 }
 
@@ -870,7 +870,7 @@ server:
 		SharedDirs: []api.SharedDir{{Name: "scratchpad"}},
 	})
 	require.Error(t, startErr)
-	assert.Contains(t, startErr.Error(), "server.shared_dir_storage=nfs requires")
+	assert.Contains(t, startErr.Error(), "require this broker to have the share mounted")
 	assert.Equal(t, 0, ranCount,
 		"Run must never be called: a v1 project-configs overlay must not make the global-only legacy gate think the global file is versioned")
 }

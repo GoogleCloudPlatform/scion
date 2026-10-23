@@ -80,7 +80,7 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 
 	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
@@ -104,7 +104,7 @@ func TestServerHubManagedProjectPath_NFSEmptyLocalHungReturnsError(t *testing.T)
 
 	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
@@ -125,7 +125,7 @@ func TestServerHubManagedProjectPath_NFSContentSkipsHungLocal(t *testing.T) {
 	hangReadDirFor(t, f.localDir)
 
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.NoError(t, err)
@@ -147,7 +147,7 @@ func TestServerHubManagedProjectPath_VolumeHungMountReturnsError(t *testing.T) {
 	hangReadDirFor(t, mountBase)
 
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(cloudRunVolumeConfig())
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
@@ -162,7 +162,7 @@ func TestServerHubManagedProjectPath_VolumeEmptyLocalHungReturnsError(t *testing
 	hangReadDirFor(t, f.localDir)
 
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(cloudRunVolumeConfig())
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
@@ -200,7 +200,7 @@ func TestProjectWorkspaceList_HungStorageReturns503(t *testing.T) {
 	project, _ := createTestHubManagedProject(t, srv, "WS Hung Storage")
 
 	mountRoot := filepath.Join(tmpHome, "nfs-mount")
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	hangReadDirFor(t, mountRoot)
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), nil)
@@ -221,7 +221,7 @@ func TestExecutePostDeletionEffects_LogsUnresolvedProjectPath(t *testing.T) {
 
 	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	project := &store.Project{ID: "proj-deleted-hung", Slug: f.slug}
 	srv.executePostDeletionEffects(context.Background(), project.ID, project, deletionEffectInputs{})
@@ -302,7 +302,7 @@ func TestMigrateProjectSlug_LogsUnresolvedProjectPath(t *testing.T) {
 
 	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 
 	project := &store.Project{ID: "proj-rename-hung", Slug: "new-slug-hung", Name: "Renamed"}
 	srv.migrateProjectSlug(context.Background(), project, f.slug)
@@ -325,7 +325,7 @@ func hungStorageServer(t *testing.T) (*Server, store.Store, string) {
 	mountRoot := filepath.Join(tmpHome, "nfs-mount")
 	hangReadDirFor(t, mountRoot)
 	srv, s := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	return srv, s, mountRoot
 }
 
@@ -517,7 +517,7 @@ func TestCreateProject_HungStorageReleasesProjectQuota(t *testing.T) {
 	}
 
 	// Storage healthy again: the single slot is still free.
-	srv.config.WorkspaceStorageConfig = nil
+	srv.config.ProjectStorageConfig = nil
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Healthy Quota"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, int64(1), countProjectQuotaReservations(t, s, DevUserID), "the quota is enforced in this test")
@@ -533,7 +533,7 @@ func TestReincarnateAgent_HungStorageReturns503(t *testing.T) {
 
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.AppliedConfig.Workspace = ""
 	})

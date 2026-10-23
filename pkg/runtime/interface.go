@@ -20,6 +20,7 @@ import (
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 type RunConfig struct {
@@ -82,13 +83,13 @@ type RunConfig struct {
 	// but must never widen the egress allowlist to match it.
 	TrustedHubEndpoint string
 	SharedDirs         []api.SharedDir
-	// SharedDirStorage holds the resolved shared-dir storage plan when
-	// server.shared_dir_storage.backend is "nfs" (design
-	// deploy-config-explore §3.2.3/§3.2.4). It is independent of
-	// WorkspaceBackendName/NFS* above, which describe workspace storage
-	// only. Nil means shared dirs use the default local layout (or, on K8s,
-	// fall back to the existing workspace_storage:nfs subPath branch or
-	// per-dir dynamic PVCs).
+	// SharedDirStorage holds the resolved shared-dir mounts when the
+	// broker's shared-dir Layout is on a shared backend (nfs,
+	// gke-shared-volume or cloudrun-volume; design fs-cleanup §P2): every
+	// shared dir is then mounted from that one volume by subPath. It is
+	// independent of WorkspaceBackendName/NFS* above, which describe
+	// workspace storage only. Nil means the local backend: shared dirs use
+	// the local layout (on Kubernetes, one claim per shared dir).
 	SharedDirStorage     *SharedDirRealization
 	BrokerMode           bool
 	NoAuth               bool
@@ -432,30 +433,26 @@ type HomeStorageRealization struct {
 	SkeletonMaxBytes int64
 }
 
-// SharedDirRealization holds the plan for realizing a project's shared
-// directories that use the "nfs" shared-dir storage backend (design
-// deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
-// pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
-// which mounts PVClaimName by subPath instead of creating per-dir dynamic
-// PVCs. Docker/Podman/Apple consume the equivalent bind-mount VolumeMounts
-// directly (from runtime.NFSSharedDirsToVolumeMounts) rather than this
-// struct.
+// SharedDirRealization holds the resolved mounts of a project's shared
+// directories on a shared backend: the broker's shared-dir Layout
+// (projectfs.Layout.SharedDirLayout), resolved once per start in
+// pkg/agent.resolveSharedDirs. The Kubernetes runtime's buildPod mounts
+// PVClaimName by each dir's subPath; Docker/Podman/Apple bind-mount the
+// resolved host paths, carried in the start's volume mounts, and read only
+// SupplementalGroups from it.
 type SharedDirRealization struct {
-	// Backend is "nfs" — the only realized backend today.
+	// Backend is the shared-dir Layout's backend ("nfs",
+	// "gke-shared-volume" or "cloudrun-volume"); never "local".
 	Backend string
-	// PVClaimName is the K8s PVC claim name holding the shared NFS export
-	// root. Empty means shared_dir_storage nfs is misconfigured (missing
-	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
-	// (design G5).
+	// PVClaimName is the claim holding the share (the nfs share's pv_name,
+	// or the gke-shared-volume pv_claim_name). Empty means the share has no
+	// claim; buildPod must then fail closed rather than fall back to
+	// per-dir claims or an EmptyDir (design G5).
 	PVClaimName string
-	// SubPaths maps each shared dir name served from the NFS export to its
-	// subPath within PVClaimName, e.g. "projects/<pid>/shared-dirs/<name>".
-	SubPaths map[string]string
-	// LocalDirs names the shared dirs that use the local backend instead
-	// (per-dir backends, shared_dir_storage_backends). Every other shared
-	// dir is served from the NFS export and must have a SubPaths entry;
+	// SubPaths maps every shared dir name to its subPath within
+	// PVClaimName, "<subpath root>/<project ID>/shared-dirs/<name>".
 	// buildPod fails closed when one is missing.
-	LocalDirs map[string]bool
+	SubPaths map[string]string
 	// SupplementalGroups are the owning group ids of the shared-dir leaves,
 	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
 	// and filtered by its guard. Kubernetes adds them to the pod's
@@ -464,27 +461,10 @@ type SharedDirRealization struct {
 	SupplementalGroups []int64
 }
 
-// Serves reports whether r serves the shared dir name from the NFS export:
-// r is an nfs realization and LocalDirs does not name name. It is false
-// for a nil r.
-func (r *SharedDirRealization) Serves(name string) bool {
-	if r == nil || r.Backend != "nfs" {
-		return false
-	}
-	return !r.LocalDirs[name]
-}
-
-// SharedDirClaimChecker is implemented by a runtime whose local shared-dir
-// storage can be a claim it looks up by name: on Kubernetes, the project's
-// shared-dir PersistentVolumeClaim. The start check that follows a shared
-// dir backend change back to local uses it to tell whether the local
-// storage exists. It never reads the claim's content.
-type SharedDirClaimChecker interface {
-	// SharedDirUsesClaim reports whether running cfg gives the shared dir
-	// dirName a claim of its own, created or reused by name.
-	SharedDirUsesClaim(cfg RunConfig, dirName string) bool
-	// SharedDirClaimExists reports whether that claim exists.
-	SharedDirClaimExists(ctx context.Context, cfg RunConfig, dirName string) (bool, error)
+// Shared reports whether r places the shared dirs on a shared backend. It
+// is false for a nil r (the local backend).
+func (r *SharedDirRealization) Shared() bool {
+	return r != nil && projectfs.Backend(r.Backend).Shared()
 }
 
 // RunRef identifies the runtime entry a Stop or Delete targets. ID is the

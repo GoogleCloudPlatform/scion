@@ -353,9 +353,6 @@ interface V1RuntimeConfig {
   cloudrun?: V1CloudRunConfig;
   cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
-  shared_dir_storage_backend?: string;
-  home_storage_backend?: string;
-  home_storage_leaf?: string;
 }
 
 // Sets or clears one key in a runtime's Cloud Run block, and drops the
@@ -387,9 +384,6 @@ interface V1ProfileConfig {
   env?: Record<string, string>;
   resources?: ResourceSpec;
   safe_to_evict?: boolean;
-  shared_dir_storage_backend?: string;
-  home_storage_backend?: string;
-  home_storage_leaf?: string;
   [key: string]: unknown;
 }
 
@@ -724,6 +718,32 @@ const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key);
+
+/**
+ * Storage overrides the hub no longer accepts on runtime and profile entries
+ * (server.project_storage places every agent's storage; a node-local
+ * directory is a volumes: entry). Dropped when settings are loaded, so a
+ * save never sends them back and is refused.
+ */
+const REMOVED_STORAGE_OVERRIDE_KEYS = [
+  'shared_dir_storage_backend',
+  'shared_dir_storage_backends',
+  'home_storage_backend',
+  'home_storage_leaf',
+];
+
+export function stripRemovedStorageOverrides<T extends object>(
+  entries: Record<string, T>
+): Record<string, T> {
+  for (const entry of Object.values(entries)) {
+    if (entry && typeof entry === 'object') {
+      for (const key of REMOVED_STORAGE_OVERRIDE_KEYS) {
+        delete (entry as Record<string, unknown>)[key];
+      }
+    }
+  }
+  return entries;
+}
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
@@ -2071,10 +2091,14 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
-      ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>
+        )
       : {};
     this.profiles = data.profiles
-      ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
+      ? stripRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>
+        )
       : {};
     this.harnessConfigsMap = data.harness_configs
       ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
@@ -5126,78 +5150,6 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             ></sl-input>
           </div>
-          <div class="form-field">
-            <label>Shared Dir Storage</label>
-            <span class="hint"
-              >Backend for shared dirs of agents on this runtime. Empty uses the server setting; a
-              profile's own value wins.</span
-            >
-            <sl-select
-              class="shared-dir-storage-backend"
-              placeholder="Server setting"
-              clearable
-              value=${rt.shared_dir_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'shared_dir_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Storage</label>
-            <span class="hint"
-              >Kubernetes only. Where the agent home lives for agents on this runtime. Empty uses
-              the server setting; a profile's own value wins.</span
-            >
-            <sl-select
-              class="home-storage-backend"
-              placeholder="Server setting"
-              clearable
-              value=${rt.home_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'home_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Directory Creation</label>
-            <span class="hint"
-              >How an NFS home directory is created: pod (init container) or broker (broker's mount
-              of the export). Empty uses the server setting.</span
-            >
-            <sl-select
-              class="home-storage-leaf"
-              placeholder="Server setting"
-              clearable
-              value=${rt.home_storage_leaf || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateRuntimeField(
-                  name,
-                  'home_storage_leaf',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="pod">pod</sl-option>
-              <sl-option value="broker">broker</sl-option>
-            </sl-select>
-          </div>
           ${!isCloudRun
             ? html`
                 <div class="form-field">
@@ -5548,78 +5500,6 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             >
               ${runtimeNames.map((rt) => html`<sl-option value=${rt}>${rt}</sl-option>`)}
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Shared Dir Storage</label>
-            <span class="hint"
-              >Backend for this profile's shared dirs. Empty uses the runtime's value, else the
-              server setting.</span
-            >
-            <sl-select
-              class="shared-dir-storage-backend"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.shared_dir_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'shared_dir_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Storage</label>
-            <span class="hint"
-              >Kubernetes only. Where the agent home lives for this profile. Empty uses the
-              runtime's value, else the server setting.</span
-            >
-            <sl-select
-              class="home-storage-backend"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.home_storage_backend || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'home_storage_backend',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="local">local</sl-option>
-              <sl-option value="nfs">nfs</sl-option>
-            </sl-select>
-          </div>
-          <div class="form-field">
-            <label>Home Directory Creation</label>
-            <span class="hint"
-              >How an NFS home directory is created for this profile: pod or broker. Empty uses the
-              runtime's value, else the server setting.</span
-            >
-            <sl-select
-              class="home-storage-leaf"
-              placeholder="Runtime or server setting"
-              clearable
-              value=${profile.home_storage_leaf || ''}
-              ?disabled=${readOnly}
-              @sl-change=${(e: Event) => {
-                this.updateProfileField(
-                  name,
-                  'home_storage_leaf',
-                  (e.target as HTMLSelectElement).value
-                );
-              }}
-            >
-              <sl-option value="pod">pod</sl-option>
-              <sl-option value="broker">broker</sl-option>
             </sl-select>
           </div>
           <div class="form-field">

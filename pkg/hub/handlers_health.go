@@ -185,7 +185,27 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Direct Cloud Logging path, when configured (non-critical).
 	s.checkCloudLoggingHealth(checks)
 
+	// Legacy storage blocks still in use (non-critical).
+	s.checkProjectStorageConfig(checks)
+
 	return checks
+}
+
+// projectStorageConfigCheck is the health check key of a hub whose storage
+// comes from the deprecated blocks. It is not in criticalHealthChecks, so
+// it makes the hub degraded (the diagnostics banner shows it), never
+// unhealthy.
+const projectStorageConfigCheck = "project_storage_config"
+
+// checkProjectStorageConfig reports a hub whose server.project_storage was
+// synthesized from the deprecated workspace_storage / shared_dir_storage /
+// home_storage blocks, until the operator writes the block (design M1;
+// the startup log prints the exact block to write).
+func (s *Server) checkProjectStorageConfig(checks map[string]string) {
+	if len(s.config.ProjectStorageWarnings) == 0 {
+		return
+	}
+	checks[projectStorageConfigCheck] = "degraded: legacy storage blocks in use; write server.project_storage (the hub startup log prints the block)"
 }
 
 // healthStats counts running agents, projects and online runtime brokers
@@ -243,7 +263,7 @@ func (h *HealthResponse) HealthStatus() string {
 // backends, it stats the mount point to confirm it is present. For local
 // storage, no check is needed.
 func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg == nil || wsCfg.Backend == "" || wsCfg.Backend == "local" {
 		return // Local storage — no health check needed
 	}
@@ -463,7 +483,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check workspace storage health for readiness
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg != nil && wsCfg.Backend != "" && wsCfg.Backend != "local" {
 		checks := make(map[string]string)
 		s.checkWorkspaceStorageHealth(checks)

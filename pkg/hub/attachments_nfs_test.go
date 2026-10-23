@@ -187,7 +187,7 @@ func TestSharedDirHostPath_NFSResolutionError_InvalidBlock_NoFallback(t *testing
 
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	staleLocalDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
 	require.NoError(t, os.MkdirAll(staleLocalDir, 0o755))
@@ -235,7 +235,7 @@ func TestSharedDirHostPath_NFSBackend_ResolveErrorWarnLoggedIndependentlyOfSkipL
 	// Now the same project's NFS-configured resolution starts failing
 	// (invalid block, mount_root missing) -- the Warn must still fire, not
 	// be suppressed by the Info log's own dedup key.
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
 	warnCount := strings.Count(buf.String(), "NFS-configured shared dir resolution failed")

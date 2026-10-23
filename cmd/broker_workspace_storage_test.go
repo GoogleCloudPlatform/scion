@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +65,7 @@ func TestRegisterGlobalProjectAndBroker_WorkspaceStorage(t *testing.T) {
 }
 
 func TestBrokerRegistrationWorkspaceStorage(t *testing.T) {
-	assert.Equal(t, &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendLocal},
+	assert.Equal(t, &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendLocal, Homes: "local"},
 		brokerRegistrationWorkspaceStorage(nil), "no settings means local")
 
 	vs := &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
@@ -83,4 +84,43 @@ func TestBrokerRegistrationWorkspaceStorage(t *testing.T) {
 	got = brokerRegistrationWorkspaceStorage(invalid)
 	assert.Equal(t, api.WorkspaceStorageBackendNFS, got.Backend)
 	assert.Nil(t, got.NFS, "invalid nfs config reports no share")
+}
+
+// TestBrokerStorageLayout: the broker builds its Layout from the same
+// server.project_storage struct as the hub (ptone/scion#5823), reports its
+// homes, and a settings file with only project_storage places workspaces
+// exactly as the equivalent workspace_storage block did.
+func TestBrokerStorageLayout(t *testing.T) {
+	ps := &config.VersionedSettings{Server: &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{
+		Backend: "nfs", Homes: "nfs",
+		NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a"}}},
+	}}}
+	layout, warnings := brokerStorageLayout(ps)
+	assert.Empty(t, warnings)
+	assert.Equal(t, projectfs.BackendNFS, layout.Backend)
+	assert.Equal(t, "/mnt/scion-nfs/a", layout.HostBase)
+	assert.Equal(t, projectfs.BackendNFS, layout.Homes)
+
+	got := brokerRegistrationWorkspaceStorage(ps)
+	assert.Equal(t, "nfs", got.Homes)
+	require.NotNil(t, got.NFS, "project_storage alone configures the workspace export")
+	assert.Equal(t, "/vol-a", got.NFS.Export)
+	assert.Empty(t, layout.DescriptorDiff(got, ""), "a broker's registration descriptor matches its own Layout")
+
+	legacy := &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+		Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a"}}},
+	}}}
+	layout, warnings = brokerStorageLayout(legacy)
+	assert.Equal(t, projectfs.BackendNFS, layout.Backend)
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0], "legacy storage blocks in use")
+
+	both := &config.VersionedSettings{Server: &config.V1ServerConfig{
+		ProjectStorage:   &config.V1ProjectStorageConfig{Backend: "local"},
+		WorkspaceStorage: &config.V1WorkspaceStorageConfig{Backend: "local"},
+	}}
+	layout, warnings = brokerStorageLayout(both)
+	assert.Equal(t, projectfs.BackendLocal, layout.Backend, "an unusable block reports the local layout")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "exactly one storage block")
 }

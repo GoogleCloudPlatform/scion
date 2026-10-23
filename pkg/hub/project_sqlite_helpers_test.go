@@ -827,12 +827,15 @@ server:
 	return hostBase
 }
 
-// useNFSSharedDirStorage gives srv the server.shared_dir_storage block that
-// setNFSSharedDirStorageGlobalSettings wrote, the way the hub holds it after
-// loading its server config at startup: the shared-dir browser reads only
-// the in-memory ServerConfig, never the settings file per request.
+// useNFSSharedDirStorage gives srv a server.project_storage nfs block on the
+// share setNFSSharedDirStorageGlobalSettings wrote, the way the hub holds it
+// after resolving its server config at startup: the shared-dir browser reads
+// only the in-memory ServerConfig, never the settings file per request.
 func useNFSSharedDirStorage(srv *Server, hostBase string) {
-	srv.config.SharedDirStorageConfig = nfsSharedDirStorageTestConfig(hostBase)
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
+		Backend: "nfs",
+		NFS:     nfsSharedDirStorageTestConfig(hostBase).NFS,
+	}
 }
 
 // nfsSharedDirStorageTestConfig is the in-memory form of the block
@@ -847,10 +850,11 @@ func nfsSharedDirStorageTestConfig(hostBase string) *config.V1SharedDirStorageCo
 	}
 }
 
-// invalidNFSSharedDirStorageTestConfig is an nfs block that fails
-// V1SharedDirStorageConfig.Validate (no mount_root).
-func invalidNFSSharedDirStorageTestConfig() *config.V1SharedDirStorageConfig {
-	return &config.V1SharedDirStorageConfig{
+// invalidNFSSharedDirStorageTestConfig is a server.project_storage nfs block
+// the hub cannot build a Layout from (no mount_root, so the share's host
+// base is relative).
+func invalidNFSSharedDirStorageTestConfig() *config.V1ProjectStorageConfig {
+	return &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS:     &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "nfs-export"}}},
 	}

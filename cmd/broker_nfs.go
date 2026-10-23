@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
@@ -38,10 +39,10 @@ import (
 // The second return value is a warning for the caller to log, set when the
 // backend is "nfs" but the block is unusable.
 func brokerNFSConfig(vs *config.VersionedSettings) (*config.V1NFSConfig, string) {
-	if vs == nil || vs.Server == nil || vs.Server.WorkspaceStorage == nil {
+	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return nil, ""
 	}
-	ws := *vs.Server.WorkspaceStorage
+	ws := *vs.Server.EffectiveWorkspaceStorage()
 	if ws.Backend != "nfs" {
 		return nil, ""
 	}
@@ -70,9 +71,9 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 	if vs == nil || vs.Server == nil {
 		return ""
 	}
-	if err := vs.Server.WorkspaceStorage.ValidateSelectedSubPathRoot(); err != nil {
+	if err := vs.Server.EffectiveWorkspaceStorage().ValidateSelectedSubPathRoot(); err != nil {
 		return fmt.Sprintf("server.%v; agent starts that use the %q workspace backend will fail until it is fixed",
-			err, vs.Server.WorkspaceStorage.Backend)
+			err, vs.Server.EffectiveWorkspaceStorage().Backend)
 	}
 	return ""
 }
@@ -80,10 +81,10 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 // brokerWorkspaceStorageBackend returns the server.workspace_storage backend
 // name from the broker's global settings, or "" (local) when unset.
 func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
-	if vs == nil || vs.Server == nil || vs.Server.WorkspaceStorage == nil {
+	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return ""
 	}
-	return vs.Server.WorkspaceStorage.Backend
+	return vs.Server.EffectiveWorkspaceStorage().Backend
 }
 
 // brokerRegistrationWorkspaceStorage returns the workspace storage
@@ -94,7 +95,34 @@ func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
 // the real health.
 func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.BrokerWorkspaceStorage {
 	nfs, _ := brokerNFSConfig(vs)
-	return runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
+	desc := runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
+	layout, _ := brokerStorageLayout(vs)
+	desc.Homes = runtimebroker.StorageHomes(layout)
+	return desc
+}
+
+// brokerStorageLayout builds the broker's projectfs Layout from its global
+// settings: the same server.project_storage struct the hub builds its Layout
+// from (config.ResolveProjectStorage: the block as written, or synthesized
+// from the deprecated blocks), translated by config.ProjectStorageLayout.
+// The returned warnings are for the caller to log once at startup: the
+// synthesis warnings, or the reason the block is unusable (the broker then
+// reports the local Layout, which the hub refuses for shared-mode
+// dispatches on a shared hub; the broker does not refuse to start).
+func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []string) {
+	local := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	if vs == nil {
+		return local, nil
+	}
+	ps, warnings, err := config.ResolveProjectStorage(vs.Server)
+	if err != nil {
+		return local, []string{fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err)}
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil {
+		return local, append(warnings, fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err))
+	}
+	return layout, warnings
 }
 
 // loadBrokerRegistrationWorkspaceStorage loads the global settings and
@@ -171,8 +199,8 @@ func defaultNFSDoctorProbe() nfsDoctorProbe {
 func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) scionruntime.CheckResult {
 	const name = "nfs-mounts"
 	backend := "local"
-	if vs != nil && vs.Server != nil && vs.Server.WorkspaceStorage != nil && vs.Server.WorkspaceStorage.Backend != "" {
-		backend = vs.Server.WorkspaceStorage.Backend
+	if vs != nil && vs.Server != nil && vs.Server.EffectiveWorkspaceStorage() != nil && vs.Server.EffectiveWorkspaceStorage().Backend != "" {
+		backend = vs.Server.EffectiveWorkspaceStorage().Backend
 	}
 	if backend != "nfs" {
 		return scionruntime.CheckResult{

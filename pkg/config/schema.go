@@ -160,6 +160,8 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
 		Server   struct {
+			ProjectStorage   *V1ProjectStorageConfig   `yaml:"project_storage"`
+			WorkspaceStorage *V1WorkspaceStorageConfig `yaml:"workspace_storage"`
 			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
 			HomeStorage      *V1HomeStorageConfig      `yaml:"home_storage"`
 			Broker           struct {
@@ -171,15 +173,13 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 	// reported by the schema pass above.
 	if yaml.Unmarshal(data, &vs) == nil {
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
-		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
-		errs = append(errs, ValidateHomeStorageOverrides(vs.Runtimes, vs.Profiles)...)
-		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
-		if err := vs.Server.HomeStorage.Validate(); err != nil {
-			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
+		errs = append(errs, RemovedStorageOverrideErrors(vs.Runtimes, vs.Profiles, RuntimeBrokerInstanceTargets(vs.Server.Broker.Instances))...)
+		if err := ValidateStorageBlocks(vs.Server.ProjectStorage, vs.Server.WorkspaceStorage, vs.Server.SharedDirStorage, vs.Server.HomeStorage); err != nil {
+			errs = append(errs, ValidationError{Path: ProjectStorageKey, Message: err.Error()})
 		}
+		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
 		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
-		errs = append(errs, RuntimeBrokerInstanceNFSErrors(vs.Server.Broker.Instances, vs.Server.SharedDirStorage)...)
 	}
 	return errs, nil
 }
@@ -203,7 +203,6 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
-	warnings = append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)

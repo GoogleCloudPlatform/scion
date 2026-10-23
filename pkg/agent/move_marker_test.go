@@ -316,22 +316,24 @@ func TestEnsureNFSAgentWorkspaceLeafClaim_ReportsCreatedOnLaterError(t *testing.
 }
 
 // A forced move's start marks the export directory it created even when a
-// later directory then fails the start.
+// later step then fails the start (here the runtime itself; shared dirs are
+// created on the shared-dir Layout before the workspace, so they can no
+// longer be the later failure).
 func TestStart_MarksMoveExportAgentDirBeforeLaterFailure(t *testing.T) {
 	fx := newMoveAbsentFixture(t, "kubernetes", true)
 	opts := moveAbsentOpts(fx.projectPath, "test-agent", false)
 	opts.MoveReincarnationID = testMoveID
 	_, err := fx.mgr.Provision(context.Background(), opts)
 	require.NoError(t, err)
-	blocker := filepath.Join(fx.mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
-	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+	fx.mgr.Runtime = &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc:  func(context.Context, runtime.RunConfig) (string, error) { return "", errors.New("pod create failed") },
+	}
 
 	startOpts := opts
 	startOpts.FreshProvision = false
 	startOpts.MoveReincarnationID = ""
 	startOpts.Env = moveAbsentOpts(fx.projectPath, "test-agent", false).Env
-	startOpts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
 	_, err = fx.mgr.Start(context.Background(), startOpts)
 	require.Error(t, err)
 	export := nfsTestAgentDir(fx.mountRoot, "test-agent")

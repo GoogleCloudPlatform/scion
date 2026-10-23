@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package projectfs is the single authority for where a project's storage
-// lives (design fs-cleanup design-v4 §P1, ptone/scion#5805). It answers
+// lives (design fs-cleanup design §P1, ptone/scion#5805). It answers
 // "host path / subPath / server path for (project, agent, Mount)" for every
 // component, keyed by the project UUID on shared backends and by today's
 // slug-keyed layout on the local backend.
@@ -49,13 +49,30 @@ const (
 	// BackendNFS is a shared NFS export mounted at HostBase, with the
 	// UUID-keyed tree <SubPathRoot>/<projectID>/...
 	BackendNFS Backend = "nfs"
+	// BackendCloudRunVolume is a Cloud Run managed volume mounted at
+	// HostBase (/mnt/<volume_name>), with the nfs backend's UUID-keyed tree.
+	BackendCloudRunVolume Backend = "cloudrun-volume"
+	// BackendGKESharedVolume is a GKE-managed shared volume (a Filestore
+	// CSI PVC) mounted at HostBase (/mnt/<volume_name>), with the nfs
+	// backend's UUID-keyed tree.
+	BackendGKESharedVolume Backend = "gke-shared-volume"
 )
+
+// Shared reports whether the backend is a shared export with the
+// UUID-keyed tree <SubPathRoot>/<projectID>/... (every backend but local).
+func (b Backend) Shared() bool {
+	switch b {
+	case BackendNFS, BackendCloudRunVolume, BackendGKESharedVolume:
+		return true
+	}
+	return false
+}
 
 // Durable reports whether data written to this backend survives the loss
 // of the process's own instance (a Cloud Run instance recycle). Only shared
 // backends are durable; local disk is not.
 func (b Backend) Durable() bool {
-	return b == BackendNFS
+	return b.Shared()
 }
 
 // Scope says whether a Mount is one directory for all agents of a project or
@@ -187,17 +204,6 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 	}
 }
 
-// Realize (design §P1) is deferred to phase 3 (fs-cleanup-arch R3): its
-// first callers are the k8s buildPod fold (ptone/scion#5823) and the
-// docker/podman/apple run arguments. The intended shape, so phases 3 and 5
-// implement one function rather than two:
-//
-//	func (l Layout) Realize(r Resolved, runtime RuntimeKind) (Realized, error)
-//
-// where Realized carries either a host bind mount (source HostPath, target
-// r.Target, read-only) or a pod volume plus volume mount (claim, SubPath,
-// target), and container targets are never computed by callers.
-
 // ErrNoMount is returned for a Mount the project does not declare.
 var ErrNoMount = errors.New("projectfs: mount is not declared for this project")
 
@@ -232,6 +238,26 @@ type Layout struct {
 	SubPathRoot string
 	Share       Share
 	UID, GID    int
+	// Homes is where agent homes live (design §P2 homes: local | nfs):
+	// BackendLocal (in the pod or on the broker host, the default when
+	// empty) or BackendNFS (on this Layout's share).
+	Homes Backend
+	// SharedDirs, when set, is where shared-dir Mounts (and nfs homes)
+	// resolve instead of this Layout: a transitional split kept only for a
+	// hub still on the deprecated storage blocks whose shared dirs are on
+	// an nfs export while its workspaces are not (design M1,
+	// ptone/scion#5821). It is never configurable and goes
+	// away with the old blocks in phase 6.
+	SharedDirs *Layout
+}
+
+// SharedDirLayout returns the Layout shared-dir Mounts resolve on: the
+// transitional SharedDirs split when set, else l.
+func (l Layout) SharedDirLayout() Layout {
+	if l.SharedDirs != nil {
+		return *l.SharedDirs
+	}
+	return l
 }
 
 // Project identifies the project a Mount is resolved for.
@@ -271,6 +297,8 @@ type Resolved struct {
 	// Kind and Name are the resolved Mount's.
 	Kind Kind
 	Name string
+	// ReadOnly is the resolved Mount's: the realized mount is read-only.
+	ReadOnly bool
 }
 
 const (
@@ -331,7 +359,7 @@ func validSharedDirName(name string) error {
 // ProjectRoot resolves the root of a project's tree on a shared backend:
 // <SubPathRoot>/<projectID>.
 func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
-	if l.Backend != BackendNFS {
+	if !l.Backend.Shared() {
 		return Resolved{}, fmt.Errorf("projectfs: ProjectRoot is defined for shared backends, not %q", l.Backend)
 	}
 	if err := validProjectID(projectID); err != nil {
@@ -368,6 +396,7 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		SubPathRoot: root,
 		SubPath:     filepath.ToSlash(rel),
 		Target:      m.Target,
+		ReadOnly:    m.ReadOnly,
 		Kind:        m.Kind,
 		Name:        m.Name,
 	}
@@ -400,16 +429,22 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 		if err := validSharedDirName(m.Name); err != nil {
 			return Resolved{}, err
 		}
+		if l.SharedDirs != nil {
+			if l.SharedDirs.SharedDirs != nil {
+				return Resolved{}, errors.New("projectfs: nested shared-dir layouts are not supported")
+			}
+			return l.SharedDirs.Resolve(p, agent, m)
+		}
 	}
 	if agent != "" {
 		if err := validAgentSlug(agent); err != nil {
 			return Resolved{}, err
 		}
 	}
-	switch l.Backend {
-	case BackendNFS:
+	switch {
+	case l.Backend.Shared():
 		return l.resolveNFS(p, agent, m)
-	case BackendLocal:
+	case l.Backend == BackendLocal:
 		return l.resolveLocal(p, agent, m)
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported backend %q", l.Backend)
@@ -418,7 +453,7 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 
 func (l Layout) resolveNFS(p Project, agent string, m Mount) (Resolved, error) {
 	if p.ID == "" {
-		return Resolved{}, errors.New("projectfs: project ID is required on the nfs backend")
+		return Resolved{}, fmt.Errorf("projectfs: project ID is required on the %s backend", l.Backend)
 	}
 	pr, err := l.ProjectRoot(p.ID)
 	if err != nil {
@@ -453,7 +488,7 @@ func (l Layout) resolveNFS(p Project, agent string, m Mount) (Resolved, error) {
 
 func (l Layout) resolveLocal(p Project, agent string, m Mount) (Resolved, error) {
 	local := func(hostPath string) Resolved {
-		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name, ReadOnly: m.ReadOnly}
 	}
 	switch m.Kind {
 	case KindSharedDir:

@@ -1055,7 +1055,7 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 		return "", err
 	}
 
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
@@ -3687,7 +3687,7 @@ func (s *Server) hubManagedProjectsRoots() []string {
 		roots = append(roots, filepath.Join(globalDir, "projects"))
 	}
 
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg == nil {
 		return roots
 	}
@@ -3925,7 +3925,7 @@ var hubNFSCleanupAttemptHook func(attempt int)
 // result keeps the tree, logged at Info). A final failure is logged for an
 // operator, never returned.
 func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
 		return
 	}

@@ -1202,6 +1202,20 @@ type GlobalConfig struct {
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
 
+	// ProjectStorage is server.project_storage as written (file, then
+	// SCION_SERVER_PROJECT_STORAGE_* env). SharedDirStorage and HomeStorage
+	// are server.shared_dir_storage and server.home_storage from the file
+	// only. ResolveProjectStorage turns the four blocks into the one block
+	// the hub uses.
+	ProjectStorage   *V1ProjectStorageConfig   `json:"-" yaml:"-" koanf:"-"`
+	SharedDirStorage *V1SharedDirStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	HomeStorage      *V1HomeStorageConfig      `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorage is the block ResolveGlobalProjectStorage
+	// returned at hub startup; nil means the local backend.
+	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorageWarnings are that resolution's warnings.
+	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
+
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
 	NativeChat *V1NativeChatConfig `json:"-" yaml:"-" koanf:"-"`
@@ -2321,6 +2335,7 @@ type globalConfigEnvOverlay struct {
 	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
 	Server                             struct {
 		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		ProjectStorage   *V1ProjectStorageConfig   `koanf:"project_storage"`
 		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
 	} `koanf:"server"`
 }
@@ -2344,12 +2359,14 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	var ov globalConfigEnvOverlay
 	ov.Telemetry = gc.TelemetryConfig
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.ProjectStorage = gc.ProjectStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
 		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.ProjectStorage = ov.Server.ProjectStorage
 	gc.NativeChat = ov.Server.NativeChat
 	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
 		gc.DefaultScratchpad = v

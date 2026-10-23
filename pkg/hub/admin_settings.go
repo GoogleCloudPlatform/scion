@@ -617,67 +617,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// home_storage_backend and home_storage_leaf on runtime and profile
-	// entries, and server.home_storage, must hold known values.
-	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
+	// The per-runtime and per-profile storage overrides are removed
+	// (server.project_storage decides storage; volumes: replaces node-local
+	// overrides), and the storage blocks in the request must resolve to
+	// one server.project_storage.
+	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
 		return
 	}
 	if req.Server != nil {
-		if err := req.Server.HomeStorage.Validate(); err != nil {
+		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
-		}
-	}
-
-	// shared_dir_storage_backend on runtime and profile entries must be
-	// "local" or "nfs", and "nfs" needs a complete
-	// server.shared_dir_storage.nfs block (from this request, else the
-	// current global settings). When the request changes
-	// server.shared_dir_storage, it is also checked against the runtimes
-	// and profiles already stored, so removing or emptying the nfs block
-	// cannot strand an existing nfs override. Configuration only; no mount
-	// is checked.
-	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
-	// Values and per-dir names do not depend on the current settings, so
-	// they are checked even when those cannot be read below.
-	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
-		return
-	}
-	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
-		runtimes, profiles := req.Runtimes, req.Profiles
-		var sdGlobal *config.V1SharedDirStorageConfig
-		if sdInRequest {
-			sdGlobal = req.Server.SharedDirStorage
-		}
-		sdKnown := true
-		if !sdInRequest || runtimes == nil || profiles == nil {
-			gs, _, gErr := config.LoadGlobalSettings()
-			switch {
-			case gErr != nil:
-				// The current settings cannot be read, so the merged
-				// result is unknown; validation at agent start still
-				// applies.
-				sdKnown = false
-			case gs != nil:
-				if sdInRequest {
-					if runtimes == nil {
-						runtimes = gs.Runtimes
-					}
-					if profiles == nil {
-						profiles = gs.Profiles
-					}
-				} else if gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-			}
-		}
-		if sdKnown {
-			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
-				return
-			}
 		}
 	}
 
@@ -861,13 +812,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
-// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
-// non-Kubernetes runtime. The value is saved and ignored at agent start;
-// this is the same rule as config validate. Used by both the file-mode and
-// DB-mode PUT handlers.
+// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
+// saved and ignored at agent start; this is the same rule as config
+// validate. Used by both the file-mode and DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
-	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}

@@ -2,5 +2,32 @@
   "profile_map": {
     "batch": "k8s-agents"
   },
-  "findings": []
+  "findings": [
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.batch.shared_dir_storage_backend",
+      "profiles": [
+        "batch"
+      ],
+      "message_contains": [
+        "profiles.batch.shared_dir_storage_backend is no longer supported and is not converted",
+        "server.project_storage",
+        "volumes:"
+      ]
+    },
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "runtimes.cluster.shared_dir_storage_backends",
+      "profiles": [
+        "batch"
+      ],
+      "message_contains": [
+        "runtimes.cluster.shared_dir_storage_backends is no longer supported and is not converted",
+        "server.project_storage",
+        "volumes:"
+      ]
+    }
+  ]
 }

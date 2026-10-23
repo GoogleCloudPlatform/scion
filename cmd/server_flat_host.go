@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -365,10 +366,16 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
+	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
+		var layoutWarnings []string
+		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		for _, w := range layoutWarnings {
+			log.Printf("WARNING: %s", w)
+		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
@@ -401,6 +408,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
+		storageLayout:           brokerLayout,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 		containerHub:            containerHub,
 	}
@@ -623,6 +631,7 @@ type flatServerShared struct {
 	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
+	storageLayout           projectfs.Layout
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares.
 	workspaceLocks *runtimebroker.WorkspaceLocks
@@ -667,6 +676,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		NFSConfig:                     sh.nfs,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
+		StorageLayout:                 sh.storageLayout,
 		WorkspaceLocks:                sh.workspaceLocks,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,

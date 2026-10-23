@@ -22,28 +22,20 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // TestSharedDirStorage_DockerAndK8s_SameLayout is test (a) from design
-// deploy-config-explore §7: it inverts the repro in findings/code-surface.md
-// ("Reproduction"). With one shared_dir_storage nfs settings block, the
-// Docker bind-mount source and the K8s PVC subPath must resolve to the same
-// projects/<pid>/shared-dirs/scratchpad path under the same base (AC2), and
-// there must be no dynamic scion-shared-* PVC. It exercises the export-root
-// guard (ValidateNotExportRoot) inside NFSSharedDirsToVolumeMounts.
-//
-// Note (round 1 review finding #10): this test calls NewNFSBackend(...).Resolve
-// and NFSSharedDirsToVolumeMounts directly — it does not call the actual
-// production caller, pkg/agent.resolveSharedDirs, which package boundaries
-// prevent (pkg/runtime cannot import pkg/agent). The production wiring
-// itself is pinned by the pkg/agent run.go-level tests
-// (TestStartSharedDirStorage_GlobalWinsOverProjectLevel and siblings in
-// run_shared_dir_storage_test.go) and by
-// TestResolveSharedDirs_NFS_HostBasePresent_MkdirsSharedDirs, which calls
-// resolveSharedDirs end to end from the agent side.
+// deploy-config-explore §7: with one nfs storage block, the Docker
+// bind-mount source and the K8s PVC subPath resolve to the same
+// projects/<pid>/shared-dirs/scratchpad path under the same base (AC2),
+// both from the layout authority's Resolve (pkg/projectfs), and there is
+// no dynamic scion-shared-* PVC. The production wiring, pkg/agent
+// resolveSharedDirs, is pinned by the pkg/agent tests (pkg/runtime cannot
+// import pkg/agent).
 func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 	sdCfg := &config.V1SharedDirStorageConfig{
 		Backend: "nfs",
@@ -58,25 +50,21 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
 	// --- Resolve, exactly as pkg/agent.resolveSharedDirs does for both runtimes ---
-	res, err := NewNFSBackend(sdCfg.NFS).Resolve(ResolveInput{
-		ProjectID:      projectID,
-		SharedDirNames: []string{"scratchpad"},
-	})
+	layout, err := config.NFSLayout(sdCfg.NFS)
+	require.NoError(t, err)
+	res, err := layout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.SharedDirMount(dirs[0], "/workspace"))
 	require.NoError(t, err)
 
 	wantHostBase := filepath.Join("/srv", "scion-shared")
 	wantRel := filepath.Join("projects", projectID, "shared-dirs", "scratchpad")
 	assert.Equal(t, wantHostBase, res.HostBase)
-	assert.Equal(t, wantRel, res.SharedDirs["scratchpad"].ServerRelativePath)
+	assert.Equal(t, wantRel, res.RelPath)
+	require.NoError(t, ValidateNotExportRoot(res.HostPath, res.HostBase))
 
-	// --- Docker/Podman/Apple side: NFSSharedDirsToVolumeMounts (AC6: exercised here; the actual production caller is pkg/agent.resolveSharedDirs) ---
-	mounts, err := NFSSharedDirsToVolumeMounts(res, dirs, "/workspace")
-	require.NoError(t, err)
-	require.Len(t, mounts, 1)
+	// --- Docker/Podman/Apple side: the bind-mount source and target ---
 	wantDockerSource := filepath.Join(wantHostBase, wantRel)
-	assert.Equal(t, wantDockerSource, mounts[0].Source, "docker bind source")
-	assert.Equal(t, "/scion-volumes/scratchpad", mounts[0].Target)
-	assert.False(t, mounts[0].ReadOnly)
+	assert.Equal(t, wantDockerSource, res.HostPath, "docker bind source")
+	assert.Equal(t, "/scion-volumes/scratchpad", res.Target)
 
 	// --- K8s side: buildPod with the SharedDirRealization run.go would populate ---
 	rt := newNFSTestK8sRuntime()
@@ -92,7 +80,7 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 			Backend:     "nfs",
 			PVClaimName: sdCfg.NFS.Shares[0].PVName,
 			SubPaths: map[string]string{
-				"scratchpad": res.SharedDirs["scratchpad"].ServerRelativePath,
+				"scratchpad": res.SubPath,
 			},
 		},
 	}

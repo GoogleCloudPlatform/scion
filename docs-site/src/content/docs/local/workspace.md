@@ -311,7 +311,7 @@ Creating a shared directory and creating its backing directory on disk are separ
 
 - **Local CLI (`scion shared-dir create`)** creates the backing directory immediately.
 - **Hub (Web UI or API)** only records the declaration. The backing directory is created on first use:
-  - when an agent in the project starts on a Runtime Broker. Each broker creates the directory locally, or on the NFS export when `server.shared_dir_storage.backend` is `nfs`.
+  - when an agent in the project starts on a Runtime Broker. Each broker creates the directory locally, or on the shared export or volume when `server.project_storage.backend` is `nfs`, `cloudrun-volume` or `gke-shared-volume`.
   - when a file is first written or uploaded to it through the Hub.
 
 Until then, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
@@ -328,7 +328,7 @@ Each shared directory's mount location depends on its `in_workspace` setting:
 
 A shared directory is mounted at one of these locations, not both.
 
-By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories to the same NFS export, so agents on different brokers share the same files.
+By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories (and workspaces) to the same NFS export, so agents on different brokers share the same files. A directory that should stay on each node, such as a build cache, is a `volumes:` entry, not a shared directory.
 
 ### Common Patterns
 

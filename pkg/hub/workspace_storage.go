@@ -140,7 +140,7 @@ func (s *Server) warnEphemeralProjectPath(slug string) {
 		return
 	}
 	backend := ""
-	if wsCfg := s.config.WorkspaceStorageConfig; wsCfg != nil {
+	if wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage(); wsCfg != nil {
 		backend = wsCfg.Backend
 	}
 	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; workspace volume mount has no content yet",
