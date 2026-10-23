@@ -53,6 +53,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 
 - **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
 - **Conversations stay in their project.** A conversation keeps the project it was created in. Conversation lists and lookups return only conversations you can read, and replies, attachments, read markers and thread references stay inside their own conversation. Live DM events go only to the DM's participants, and live agent messages follow the same visibility rule as the agent's message history.
+- **Reading is not posting.** Posting in a project thread, or promoting a DM into one, needs the `project.chat_post` permission on the project. Project owners, admins and members have it. Someone whose only access is a custom role that reads the project sees the threads with a read-only notice in place of the message box. See [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
 - **Direct messages do not appear in the project space.** Messages you exchange with an agent also become part of that agent's history, which the agent's owner can see. If you promote an agent DM into a space thread, its messages move into the space, and everyone with access to the project can then read them.
 - **Pick the right place:**
   - Use a DM to keep an exchange with one person or one agent out of the project space.
