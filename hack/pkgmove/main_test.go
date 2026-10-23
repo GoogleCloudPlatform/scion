@@ -553,6 +553,15 @@ func TestScanCoversGuardScanSubdirs(t *testing.T) {
 			`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:12, through the guardScanSubdirs entry "sub"`},
 		{"mixedunlisted", list, "other", true, true,
 			`marker at hub/guard_test.go:12 claims the guardScanSubdirs entries, but the list (declared at hub/helpers_test.go:3) does not include other: add "other" to guardScanSubdirs; the marker at hub/guard_test.go:23 does not clear the file while the guardScanSubdirs marker at hub/guard_test.go:12 misses the target`},
+		// The helpers read each entry one level deep, so a listed parent does not cover a target below it.
+		{"belowentry", list, "sub/deeper", false, true,
+			`does not include sub/deeper: add "sub/deeper" to guardScanSubdirs`},
+		{"outsidefrom", list, "../other", false, true,
+			"marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but the target is not below the source directory"},
+		{"dotentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub\", \".\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
+		{"recursiveentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub/...\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := guard
@@ -584,6 +593,51 @@ func TestScanCoversGuardScanSubdirs(t *testing.T) {
 			}
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+
+	// Two declarations (build-tag variants, so the package still compiles)
+	// and a listed target whose marker has no reason line: both stay HIGH.
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"duplicate", map[string]string{
+			"hub/helpers_test.go":             "//go:build !integration\n\npackage hub\n\nvar guardScanSubdirs = []string{\"sub\"}\n",
+			"hub/helpers_integration_test.go": "//go:build integration\n\npackage hub\n\nvar guardScanSubdirs = []string{\"sub\"}\n",
+			"hub/guard_test.go":               guard,
+		}, "but guardScanSubdirs is declared more than once (hub/helpers_integration_test.go:5, hub/helpers_test.go:5)"},
+		{"noreason", map[string]string{
+			"hub/helpers_test.go": list,
+			"hub/guard_test.go":   strings.Replace(guard, "\t// reads the package directory and every guardScanSubdirs entry.\n", "", 1),
+		}, "marker at hub/guard_test.go:11 has no reason line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{
+				"go.mod":      "module example.com/fx\n\ngo 1.26\n",
+				"hub/move.go": "package hub\n\nfunc Handler() {}\n",
+				"hub/stay.go": "package hub\n\nconst version = 1\n",
+			}
+			for k, v := range tc.files {
+				files[k] = v
+			}
+			writeTree(t, dir, files)
+			var buf bytes.Buffer
+			err := run(&Config{
+				SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+				Files: []string{"move.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+			})
+			out := buf.String()
+			if !errors.Is(err, errPlan) {
+				t.Fatalf("want errPlan, got %v\n%s", err, out)
+			}
+			for _, w := range []string{"hub/guard_test.go: -strict: source-scanning test does not cover the target", tc.want} {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q:\n%s", w, out)
+				}
 			}
 		})
 	}
