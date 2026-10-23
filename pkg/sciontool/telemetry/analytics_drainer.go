@@ -38,6 +38,11 @@ const (
 	analyticsBackoffMax       = 5 * time.Minute
 	analyticsIndexExpiryEvery = 10 * time.Minute
 	analyticsHubIDTimeout     = 5 * time.Second
+	// analyticsRelocationConfirm debounces a hub ID that differs from the
+	// pin: it is recorded as a relocation only when a resolution at least
+	// this long after the first sighting agrees (false-positive
+	// mitigation for transient misroutes, not an identity proof).
+	analyticsRelocationConfirm = 5 * time.Minute
 	// analyticsSendTimeout bounds one send so a stalled RPC cannot hold
 	// the drain loop until Stop.
 	analyticsSendTimeout = 30 * time.Second
@@ -121,10 +126,19 @@ type AnalyticsDrainer struct {
 	// to PinHubID (drainer goroutine only). hubMu guards verifiedHub (the
 	// resolution, when it equals the pin: this process's finalize
 	// authorization) and observedHub (the resolution, whatever the pin).
-	resolved    bool
-	hubMu       sync.Mutex
-	verifiedHub string
-	observedHub string
+	resolved bool
+	// candidate/candidateSince track an unconfirmed mismatch: a resolution
+	// differing from the pin is recorded as a relocation only when a later
+	// resolution, at least analyticsRelocationConfirm after the first,
+	// agrees; a resolution equal to the pin in between clears it.
+	candidate      string
+	candidateSince time.Time
+	// lastFinalizeWarn rate-limits the unexpected-finalize-failure warning
+	// (drainer goroutine only).
+	lastFinalizeWarn time.Time
+	hubMu            sync.Mutex
+	verifiedHub      string
+	observedHub      string
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -169,7 +183,7 @@ func (d *AnalyticsDrainer) ObservedHubID() string {
 // VerifiedHubID returns this process's usage finalize authorization: the
 // resolved hub ID when it equals the outbox pin, else "" (unresolved, or
 // relocated: it is never set on a mismatch). Published under the same rule
-// as ObservedHubID. Finalize still re-checks the persisted relocation
+// as ObservedHubID. finalize still re-checks the persisted relocation
 // marker under the outbox lock.
 func (d *AnalyticsDrainer) VerifiedHubID() string {
 	if d == nil {
@@ -238,7 +252,8 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	}
 	// Resolve once per process, even when a pin is on disk: provisional
 	// lines are finalized only under a hub this process verified, and a
-	// home now under a different hub is recorded as relocated.
+	// home now under a different hub is recorded as relocated once a
+	// later resolution confirms it (see analyticsRelocationConfirm).
 	if !d.resolved && d.resolve != nil && !d.now().Before(d.resolveAfter) {
 		rctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
 		id, err := d.resolve(rctx)
@@ -247,7 +262,23 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		if err == nil {
 			pinned, err = d.outbox.PinHubID(id)
 		}
-		if err != nil {
+		confirmed := err == nil && pinned == id
+		if err == nil && pinned != id {
+			switch {
+			case d.candidate != id:
+				// First sighting (or a different hub): wait for agreement.
+				d.candidate, d.candidateSince = id, d.now()
+				d.resolveAfter = d.candidateSince.Add(analyticsRelocationConfirm)
+				log.Debug("Analytics drainer: hub %q differs from the pinned hub %q; confirming", id, pinned)
+			case d.now().Before(d.candidateSince.Add(analyticsRelocationConfirm)):
+				d.resolveAfter = d.candidateSince.Add(analyticsRelocationConfirm)
+			default:
+				err = d.outbox.recordRelocation(id)
+				confirmed = err == nil
+			}
+		}
+		switch {
+		case err != nil:
 			// Back off like sends do (1 s .. 5 min), so an agent whose hub
 			// never reports hub_id does not poll /healthz every interval.
 			if d.resolveBackoff == 0 {
@@ -257,8 +288,12 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			}
 			d.resolveAfter = d.now().Add(d.resolveBackoff)
 			log.Debug("Analytics drainer: hub ID not resolved yet (retry in %s): %v", d.resolveBackoff, err)
-		} else {
+		case !confirmed:
+			// Unconfirmed mismatch: nothing published, finalize held; the
+			// next resolution is scheduled above.
+		default:
 			d.resolveBackoff, d.resolveAfter = 0, time.Time{}
+			d.candidate, d.candidateSince = "", time.Time{}
 			d.resolved = true
 			d.hubMu.Lock()
 			d.observedHub = id
@@ -274,8 +309,20 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	if verified := d.VerifiedHubID(); verified != "" {
 		// Re-checked under the outbox lock (another process may have
 		// recorded a relocation since this one verified).
-		if _, err := d.outbox.FinalizeContext(ctx, verified); err != nil {
-			log.Debug("Analytics drainer: finalize: %v", err)
+		if _, err := d.outbox.finalize(ctx, verified); err != nil {
+			switch {
+			case errors.Is(err, ErrAnalyticsOutboxRelocated), errors.Is(err, ErrAnalyticsHubNotVerified), ctx.Err() != nil:
+				log.Debug("Analytics drainer: finalize: %v", err)
+			default:
+				// Unexpected: finalize (rotation or commit) failed (counted
+				// in FinalizeFailures); warn at most every
+				// analyticsBackoffMax.
+				d.outbox.finalizeFailures.Add(1)
+				if now := d.now(); d.lastFinalizeWarn.IsZero() || now.Sub(d.lastFinalizeWarn) >= analyticsBackoffMax {
+					d.lastFinalizeWarn = now
+					log.Warn("Analytics drainer: finalize failed; provisional usage stays held: %v", err)
+				}
+			}
 		}
 	}
 
