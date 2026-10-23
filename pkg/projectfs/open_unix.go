@@ -114,6 +114,31 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 	return got, nil
 }
 
+// EnsureProjectConfigDir creates (or verifies) a project's configuration
+// directory on a shared backend, <ProjectRoot(projectID)>/.scion (beside
+// workspace/, inside no Mount), through pkg/shareddirs'
+// O_NOFOLLOW component walk, and returns its host path. A newly created
+// directory gets mode 2755 and no default ACL: only Scion components write
+// it. Missing intermediates are created as the brokers create them.
+func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
+	cfg, err := l.ProjectConfig(projectID)
+	if err != nil {
+		return "", err
+	}
+	base, err := cfg.ResolvedHostBase()
+	if err != nil {
+		return "", err
+	}
+	fd, _, err := shareddirs.EnsurePrivateDir(base, cfg.RelPath)
+	if err != nil {
+		return "", fmt.Errorf("create project configuration directory: %w", err)
+	}
+	if err := shareddirs.CloseFd(fd); err != nil {
+		return "", err
+	}
+	return cfg.HostPath, nil
+}
+
 // openConfinedDir opens dir as an *os.Root, refusing a dir whose own final
 // component is a symlink. With create, a missing dir is created (0755);
 // without it, a missing dir is an fs.ErrNotExist-compatible error.

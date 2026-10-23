@@ -353,7 +353,6 @@ func TestMethodNotAllowed_AllowHeaderPerRoute(t *testing.T) {
 		{http.MethodGet, "/api/v1/images/local", "DELETE"},
 		{http.MethodGet, "/api/v1/workspace/upload", "POST"},
 		{http.MethodGet, "/api/v1/workspace/apply", "POST"},
-		{http.MethodGet, "/api/v1/workspace/project-upload", "POST"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {

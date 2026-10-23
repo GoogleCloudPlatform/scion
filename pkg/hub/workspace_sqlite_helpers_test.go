@@ -20,9 +20,6 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -31,39 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// hangReadDirFor makes workspaceReadDir block for any path under hungPrefix
-// until the test ends, and shortens workspaceContentTimeout. Other paths use
-// os.ReadDir. These tests mutate package-level seams and must not call
-// t.Parallel(); parallel tests in this package run only after the serial
-// ones, so they cannot observe the swapped values.
-func hangReadDirFor(t *testing.T, hungPrefix string) {
-	t.Helper()
-	release := make(chan struct{})
-	prevRead, prevTimeout := workspaceReadDir, workspaceContentTimeout
-	workspaceReadDir = func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, hungPrefix) {
-			<-release
-			return nil, os.ErrDeadlineExceeded
-		}
-		return os.ReadDir(dir)
-	}
-	workspaceContentTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		close(release)
-		workspaceReadDir, workspaceContentTimeout = prevRead, prevTimeout
-	})
-}
-
-func newHungPathFixture(t *testing.T, slug string) hungPathFixture {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
-	require.NoError(t, os.MkdirAll(localDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
-	return hungPathFixture{tmpHome: tmpHome, slug: slug, localDir: localDir}
-}
 
 func nfsConfig(mountRoot string) *config.V1WorkspaceStorageConfig {
 	return &config.V1WorkspaceStorageConfig{
@@ -120,12 +84,4 @@ func newGCSContentMockStorage(bucket string) *contentMockStorage {
 	stor := newContentMockStorage(bucket)
 	stor.provider = storage.ProviderGCS
 	return stor
-}
-
-// hungPathFixture is a temp HOME with a legacy local project dir that has
-// content.
-type hungPathFixture struct {
-	tmpHome  string
-	slug     string
-	localDir string
 }

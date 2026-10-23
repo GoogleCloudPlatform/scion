@@ -133,18 +133,32 @@ func gkeSharedVolumeWorkspaceStorage(string) *config.V1WorkspaceStorageConfig {
 	}
 }
 
+// backendWorkspacePath is the hub's workspace of f.project on its configured
+// backend (projectWorkspaceResolved): projects/<uuid>/workspace on a shared
+// backend.
+func (f *embeddedCleanupFixture) backendWorkspacePath(t *testing.T) string {
+	t.Helper()
+	res, err := f.srv.projectWorkspaceResolved(f.project)
+	require.NoError(t, err)
+	return res.HostPath
+}
+
 // TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir
-// verifies that on a combined server with a workspace storage backend, project
-// delete removes both the backend project directory and the embedded broker's
-// local ~/.scion/projects/<slug> directory.
+// verifies that on a combined server with a shared workspace backend,
+// project delete removes the embedded broker's local
+// ~/.scion/projects/<slug> directory, and on nfs the project's uuid tree
+// (by the ID-keyed tree cleanup). The volume backends' uuid tree is left
+// to the lifecycle phase (ptone/scion#5833), as before for the agents'
+// tree on those backends.
 func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t *testing.T) {
 	tests := []struct {
-		name  string
-		wsCfg func(home string) *config.V1WorkspaceStorageConfig
+		name               string
+		wsCfg              func(home string) *config.V1WorkspaceStorageConfig
+		wantBackendRemoved bool
 	}{
-		{"nfs", nfsWorkspaceStorage},
-		{"cloudrun-volume", cloudRunVolumeWorkspaceStorage},
-		{"gke-shared-volume", gkeSharedVolumeWorkspaceStorage},
+		{"nfs", nfsWorkspaceStorage, true},
+		{"cloudrun-volume", cloudRunVolumeWorkspaceStorage, false},
+		{"gke-shared-volume", gkeSharedVolumeWorkspaceStorage, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,9 +168,9 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 
 			f := newEmbeddedCleanupFixture(t, "backend-local-"+tt.name, tt.wsCfg, true)
 
-			backendPath, err := f.srv.hubManagedProjectPath(f.project.Slug)
-			require.NoError(t, err)
+			backendPath := f.backendWorkspacePath(t)
 			require.NotEqual(t, f.localPath, backendPath, "backend path must differ from the local path")
+			require.Contains(t, backendPath, filepath.Join("projects", f.project.ID, "workspace"), "the uuid tree")
 
 			writeTree(t, backendPath, "README.md")
 			writeTree(t, f.localPath,
@@ -169,10 +183,13 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 			writeTree(t, siblingPath, "keep.txt")
 
 			f.deleteProject(t)
+			f.srv.nfsCleanupWG.Wait()
 
-			assertAbsent(t, backendPath, "backend project directory should be removed")
+			if tt.wantBackendRemoved {
+				assertAbsent(t, backendPath, "backend project tree should be removed")
+			}
 			assertAbsent(t, f.localPath, "embedded broker local project directory should be removed")
-			_, err = os.Stat(filepath.Join(siblingPath, "keep.txt"))
+			_, err := os.Stat(filepath.Join(siblingPath, "keep.txt"))
 			assert.NoError(t, err, "sibling project directory must be untouched")
 		})
 	}
@@ -184,9 +201,7 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesLocalProjectDir(t 
 func TestDeleteProject_LocalBackendCombinedServer_RemovesProjectDir(t *testing.T) {
 	f := newEmbeddedCleanupFixture(t, "local-default", nil, true)
 
-	hubPath, err := f.srv.hubManagedProjectPath(f.project.Slug)
-	require.NoError(t, err)
-	require.Equal(t, f.localPath, hubPath)
+	require.Equal(t, f.localPath, f.backendWorkspacePath(t))
 
 	writeTree(t, f.localPath, "README.md", ".scion/agents/worker/home/notes.txt")
 	siblingPath := filepath.Join(f.home, ".scion", "projects", "sibling-project")
@@ -195,7 +210,7 @@ func TestDeleteProject_LocalBackendCombinedServer_RemovesProjectDir(t *testing.T
 	f.deleteProject(t)
 
 	assertAbsent(t, f.localPath, "local project directory should be removed")
-	_, err = os.Stat(filepath.Join(siblingPath, "keep.txt"))
+	_, err := os.Stat(filepath.Join(siblingPath, "keep.txt"))
 	assert.NoError(t, err, "sibling project directory must be untouched")
 }
 
@@ -205,32 +220,32 @@ func TestDeleteProject_LocalBackendCombinedServer_RemovesProjectDir(t *testing.T
 func TestDeleteProject_BackendConfiguredCombinedServer_LocalProjectDirAbsent(t *testing.T) {
 	f := newEmbeddedCleanupFixture(t, "local-absent", nfsWorkspaceStorage, true)
 
-	backendPath, err := f.srv.hubManagedProjectPath(f.project.Slug)
-	require.NoError(t, err)
+	backendPath := f.backendWorkspacePath(t)
 	writeTree(t, backendPath, "README.md")
 	assertAbsent(t, f.localPath, "precondition: local project directory absent")
 
 	f.deleteProject(t)
+	f.srv.nfsCleanupWG.Wait()
 
-	assertAbsent(t, backendPath, "backend project directory should be removed")
+	assertAbsent(t, backendPath, "backend project tree should be removed")
 	assertAbsent(t, f.localPath, "local project directory should remain absent")
 }
 
 // TestDeleteProject_BackendConfiguredHubOnly_KeepsLocalPathHandling verifies
 // that a hub without an embedded broker keeps its existing delete behaviour:
-// only the backend project directory is removed.
+// only the backend project tree is removed.
 func TestDeleteProject_BackendConfiguredHubOnly_KeepsLocalPathHandling(t *testing.T) {
 	f := newEmbeddedCleanupFixture(t, "hub-only", nfsWorkspaceStorage, false)
 
-	backendPath, err := f.srv.hubManagedProjectPath(f.project.Slug)
-	require.NoError(t, err)
+	backendPath := f.backendWorkspacePath(t)
 	writeTree(t, backendPath, "README.md")
 	writeTree(t, f.localPath, ".scion/settings.yaml")
 
 	f.deleteProject(t)
+	f.srv.nfsCleanupWG.Wait()
 
-	assertAbsent(t, backendPath, "backend project directory should be removed")
-	_, err = os.Stat(filepath.Join(f.localPath, ".scion", "settings.yaml"))
+	assertAbsent(t, backendPath, "backend project tree should be removed")
+	_, err := os.Stat(filepath.Join(f.localPath, ".scion", "settings.yaml"))
 	assert.NoError(t, err, "without an embedded broker the local path is not removed")
 }
 
@@ -269,8 +284,6 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesOnlyDirectChildOfP
 	}))
 	srv.SetEmbeddedBrokerID(broker.ID)
 
-	// Backend content so the hub-managed path resolves to the backend mount.
-	writeTree(t, filepath.Join(home, "nfs", "share1", "hub-projects", "other-project"), "README.md")
 	siblingFile := filepath.Join(home, ".scion", "projects", "other-project", "keep.txt")
 	writeTree(t, filepath.Dir(siblingFile), "keep.txt")
 
@@ -295,7 +308,7 @@ func TestRemoveEmbeddedBrokerProjectDir_RemovedPathCases(t *testing.T) {
 		{"equal path uncleaned", func(localPath, _ string) string { return localPath + string(filepath.Separator) }, false},
 		{"empty path", func(string, string) string { return "" }, true},
 		{"backend path", func(_, home string) string {
-			return filepath.Join(home, "nfs", "share1", "hub-projects", "removed-path")
+			return filepath.Join(home, "nfs", "share1", "projects", "removed-path", "workspace")
 		}, true},
 	}
 	for _, tt := range tests {

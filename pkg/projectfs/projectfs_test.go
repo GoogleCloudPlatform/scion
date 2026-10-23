@@ -229,7 +229,32 @@ func TestBackendDurable(t *testing.T) {
 	}
 	for _, b := range []Backend{BackendLocal, "", "bogus"} {
 		if b.Durable() || b.Shared() {
-			t.Errorf("%q must not be shared or durable", b)
+			t.Errorf("%q must be neither shared nor durable", b)
+		}
+	}
+}
+
+// The platform volume backends resolve the same UUID-keyed tree as nfs
+// under their mount point.
+func TestResolve_VolumeBackendsUseUUIDTree(t *testing.T) {
+	for _, b := range []Backend{BackendCloudRunVolume, BackendGKESharedVolume} {
+		l := Layout{Backend: b, HostBase: "/mnt/ws", SubPathRoot: "projects"}
+		ws, err := l.Resolve(Project{ID: testPID, Slug: "acme"}, "", WorkspaceMount(ModeSharedPlain, ""))
+		if err != nil {
+			t.Fatalf("%s: Resolve workspace: %v", b, err)
+		}
+		if want := "/mnt/ws/projects/" + testPID + "/workspace"; ws.HostPath != want || ws.Backend != b {
+			t.Errorf("%s: workspace = %+v, want HostPath %q", b, ws, want)
+		}
+		root, err := l.ProjectRoot(testPID)
+		if err != nil {
+			t.Fatalf("%s: ProjectRoot: %v", b, err)
+		}
+		if want := "/mnt/ws/projects/" + testPID; root.HostPath != want {
+			t.Errorf("%s: ProjectRoot = %q, want %q", b, root.HostPath, want)
+		}
+		if _, err := l.Resolve(Project{Slug: "acme"}, "", WorkspaceMount(ModeSharedPlain, "")); err == nil {
+			t.Errorf("%s: Resolve without a project ID must fail", b)
 		}
 	}
 }

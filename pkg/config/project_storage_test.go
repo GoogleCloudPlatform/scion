@@ -399,3 +399,20 @@ func TestValidateHubProjectStorageLayout(t *testing.T) {
 	split := &V1ProjectStorageConfig{LegacySharedDirsNFS: psNFS("", "a", "s", "/e", "")}
 	assert.ErrorContains(t, ValidateHubProjectStorageLayout(split), "absolute path", "the shared-dir split is checked too")
 }
+
+// TestCheckGlobalStorageBlocksLoaded_LegacyTopLevelBlock: a legacy-format
+// global file (no schema_version) with a storage block that does not load
+// (here at the top level instead of under server:) refuses startup rather
+// than resolving to the local backend.
+func TestCheckGlobalStorageBlocksLoaded_LegacyTopLevelBlock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("shared_dir_storage:\n  backend: nfs\n"), 0o600))
+	require.True(t, GlobalSettingsIsLegacyFormat(), "fixture must load as the legacy format")
+	cfg, err := LoadGlobalConfig(dir)
+	require.NoError(t, err)
+	err = CheckGlobalStorageBlocksLoaded(cfg)
+	assert.ErrorContains(t, err, "has a shared_dir_storage block that was not loaded")
+}
