@@ -291,11 +291,16 @@ func TestChatStars_PutValidation(t *testing.T) {
 	rec = f.session(t, f.admin, http.MethodPost, "/api/v1/chat/stars/state", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 
-	// A deleted topic is gone for stars too.
+	// A deleted topic is gone for stars too: a star made before the delete
+	// is hidden from state, list and detail, and a new one is refused.
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	require.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil)))
 	f.topic(t, f.projA) // a project keeps at least one thread
 	require.NoError(t, f.wcs.DeleteTopic(ctx, f.topicA))
 	assert.Equal(t, http.StatusNotFound, f.put(t, f.admin, msg, f.topicA).Code)
 	assert.Empty(t, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg, other, deleted, msgB), nil)))
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodGet, starListPath(f.topicA), nil).Code)
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodGet, starPath(msg), nil).Code)
 }
 
 func TestChatStars_DeleteAlways204(t *testing.T) {
