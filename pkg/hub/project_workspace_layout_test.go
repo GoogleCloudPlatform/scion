@@ -818,10 +818,6 @@ func TestCreateSharedWorkspaceProject_SharedBackend_RefusesNonNetworkCloneURL(t 
 			Name: name, GitRemote: fmt.Sprintf("github.com/test/refused-clone-%d", i), WorkspaceMode: store.WorkspaceModeShared,
 			Labels: map[string]string{store.LabelCloneURL: cloneURL},
 		})
-		if rec.Code == http.StatusBadRequest {
-			// The clone-url label validation refused it even earlier.
-			continue
-		}
 		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "%s: body: %s", cloneURL, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), provision.ErrHostCloneURLRefused.Error())
 		assert.NotContains(t, rec.Body.String(), src, "the refused URL is not echoed")
