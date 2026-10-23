@@ -143,9 +143,17 @@ func (f *reincStepFixture) step(maxAttempts int, txWork func(context.Context, st
 		appliedConfig:      &store.AgentAppliedConfig{Harness: "claude", Model: "m-b"},
 		txWork:             txWork,
 	}
-	_, err := f.srv.updateReincarnationStep(context.Background(), f.agent.ID, upd, maxAttempts)
+	// A bound on the step: a write that blocked on the transaction's own
+	// lock (a write outside it, under SQLite's single writer) fails the
+	// test instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), reincStepTimeout)
+	defer cancel()
+	_, err := f.srv.updateReincarnationStep(ctx, f.agent.ID, upd, maxAttempts)
 	return err
 }
+
+// reincStepTimeout bounds one step call in these tests.
+const reincStepTimeout = 30 * time.Second
 
 func (f *reincStepFixture) configured(t *testing.T) []*tc.LifecycleEvent {
 	t.Helper()
