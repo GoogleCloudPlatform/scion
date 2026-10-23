@@ -53,7 +53,9 @@ export function resolveLocale(
   for (const preference of preferences) {
     try {
       const tag = new Intl.Locale(preference);
-      const candidates = [tag.baseName, `${tag.language}-${tag.script}`, tag.language];
+      const candidates = [tag.baseName];
+      if (tag.script) candidates.push(`${tag.language}-${tag.script}`);
+      candidates.push(tag.language);
       // A bare language alias must not override an explicitly different script/region.
       for (const candidate of candidates) {
         const found = registry.find(

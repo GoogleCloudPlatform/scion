@@ -28,6 +28,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+it('returns an unknown message key before the localization runtime loads', () => {
+  expect(t('missing.message' as Parameters<typeof t>[0])).toBe('missing.message');
+});
+
 it('keeps the English shell usable when an opt-in chunk fails to load', async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   loadEngine.mockRejectedValueOnce(new Error('chunk unavailable'));
