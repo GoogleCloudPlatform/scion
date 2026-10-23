@@ -931,7 +931,7 @@ func (f remoteTemplatesRoundTripFunc) RoundTrip(r *http.Request) (*http.Response
 // and the auth token, and that its result is returned as-is.
 func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
 	calls, _ := installFakeGit(t) // any real git exec would be recorded here
-	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errors.New("ls-remote disabled in test")
 	}))
 
