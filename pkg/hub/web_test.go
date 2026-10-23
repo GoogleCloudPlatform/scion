@@ -2949,7 +2949,10 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 }
 
 // The /agents and /projects list pages load their own lists, so their shells
-// carry no prefetched data and the hub API is not called while rendering them.
+// carry no prefetched data and the hub API is not called for page data while
+// rendering them. The signed-in shell's experiment map (GET
+// /api/v1/experiments, ptone/scion#2489) is the one call it does make; that
+// embed is covered by web_shell_experiments_test.go.
 func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
@@ -2959,7 +2962,9 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 
 	var hubCalls []string
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hubCalls = append(hubCalls, r.URL.Path)
+		if r.URL.Path != "/api/v1/experiments" {
+			hubCalls = append(hubCalls, r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []interface{}{}, "projects": []interface{}{}})
@@ -2991,7 +2996,7 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 
 			assert.NotNil(t, pageData["user"], "user field should still be present")
 			assert.Nil(t, pageData["data"], "list page shell must carry no prefetched data")
-			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API")
+			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API for page data")
 		})
 	}
 }
