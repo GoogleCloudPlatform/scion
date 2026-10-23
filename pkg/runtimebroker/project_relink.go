@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -758,13 +757,4 @@ func verifyDirCopy(src, dst string) error {
 		}
 		return nil
 	})
-}
-
-// fileOwner returns the owner of info's file, when the platform reports it.
-func fileOwner(info fs.FileInfo) (uid, gid int, ok bool) {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, false
-	}
-	return int(st.Uid), int(st.Gid), true
 }

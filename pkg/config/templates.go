@@ -538,27 +538,12 @@ func isHubWorkspaceRootWithoutScion(p string) bool {
 	return isUnderHubProjectsDir(p)
 }
 
-// isUnderHubProjectsDir reports whether p lies below the global
-// directory's projects/ directory, where hub-managed workspaces live.
-func isUnderHubProjectsDir(p string) bool {
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return false
-	}
-	projects := filepath.Join(globalDir, "projects")
-	if resolved, err := filepath.EvalSymlinks(projects); err == nil {
-		projects = resolved
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-	rel, err := filepath.Rel(projects, abs)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
+// isUnderHubProjectsDir (hub_projects_dir_other.go and
+// hub_projects_dir_windows.go) reports whether p lies below the global
+// directory's projects/ directory, where hub-managed workspaces live. It is
+// the only containment decision for the project layer of a hub workspace
+// root: settings, project templates and harness-configs all read it through
+// isHubWorkspaceRootWithoutScion.
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
 // a workspace root (see projectTemplatesRoot) with templates under its own
@@ -651,7 +636,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
 	// existing dir, so without this the published default diverges from every other
 	// seeding path, which yields 0755.
-	_ = os.Chmod(staging, 0755)
+	_ = os.Chmod(staging, 0755) //winsec:not-protection mode 0755 is not a privacy mode
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)

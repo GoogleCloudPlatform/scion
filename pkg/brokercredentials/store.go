@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -115,14 +116,16 @@ func (s *Store) Exists() bool {
 	return err == nil
 }
 
-// Load reads and parses the credentials file.
+// Load reads and parses the credentials file. On Windows the file is read
+// through privatefs and refused unless only the current user (and SYSTEM
+// and Administrators) can access it; see readCredentialsFile.
 func (s *Store) Load() (*BrokerCredentials, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := os.ReadFile(s.path)
+	data, err := readCredentialsFile(s.path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("failed to read credentials file: %w", err)

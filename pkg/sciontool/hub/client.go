@@ -32,7 +32,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1631,7 +1630,7 @@ const githubTokenFileMode = 0600
 // uses. It is a package var purely so tests that don't run as root can
 // replace it with a fake and still exercise the call site; production code
 // never overrides it.
-var fchownFn = syscall.Fchown
+var fchownFn = dirfd.Fchown
 
 // enforceTokenFileOwnerChecks gates the extra "owner is root or the
 // containing directory's owner" check that ReadTokenFile and
@@ -2109,7 +2108,7 @@ func removeFileNoFollow(path string) (bool, error) {
 		}
 		return false, err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -2200,62 +2199,6 @@ func ReadTransportTokenFileGuarded(path string) (string, error) {
 	return readTokenFileGuarded(path)
 }
 
-// ChownTokenFile fixes the ownership of an already-written token file to
-// uid:gid — used when the token file was written by another process (the
-// host-side agent manager, before this container started) and this
-// (root) process only needs to hand it off to the scion user, not rewrite
-// its content.
-//
-// It resolves the token file's parent directory the same symlink-safe way
-// WriteFileNoFollowChown does (dirfd.OpenParentNoFollow), then opens the
-// leaf itself without following a symlink, and refuses to chown anything
-// but a single-link regular file — a hardlink to a root-owned file would
-// otherwise pass a bare "is this a regular file" check and hand that file
-// to the scion user. This check always applies, on every runtime. The
-// chown is fchown on that open fd, never a path-based chown that a symlink
-// swapped in afterwards could redirect.
-//
-// When EnforceTokenFileOwnerChecks(true) has been called (substrate only),
-// it additionally requires the file's current owner to be root or the
-// containing directory's own owner before chowning it — the same rule
-// readTokenFileGuarded applies, gated the same way and for the same
-// reason: it isn't provably safe to require on every runtime's
-// token-provisioning path, only on the one that requires privilege drop.
-func ChownTokenFile(uid, gid int) error {
-	path := TokenFilePath()
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
-	if err != nil {
-		return fmt.Errorf("failed to open parent directory of token file: %w", err)
-	}
-	defer func() { _ = syscall.Close(dirFd) }()
-
-	var dirSt syscall.Stat_t
-	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
-		return fmt.Errorf("failed to stat parent directory of token file: %w", err)
-	}
-
-	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open token file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return fmt.Errorf("failed to stat token file: %w", err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		return fmt.Errorf("refusing to chown token file: not a single-link regular file")
-	}
-	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return fmt.Errorf("refusing to chown token file: unexpected owner")
-	}
-	if err := f.Chown(uid, gid); err != nil {
-		return fmt.Errorf("failed to chown token file: %w", err)
-	}
-	return nil
-}
-
 // tokenFileMaxBytes bounds readTokenFileGuarded's read: the agent token is
 // a compact JWT-style string, so anything longer already isn't a token
 // this process (or the host-side agent manager) wrote. A longer file is
@@ -2311,7 +2254,7 @@ func ReadTokenFileUnder(base, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	token, err := readTokenAt(dirFd, leaf, filepath.Join(base, rel))
 	if err != nil {
 		return "", err
@@ -2338,33 +2281,8 @@ func readTokenFileGuarded(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	return readTokenAt(dirFd, leaf, path)
-}
-
-// readTokenAt applies the token-file checks to leaf, relative to the
-// already-resolved parent directory dirFd; path is used only in errors.
-func readTokenAt(dirFd int, leaf, path string) (string, error) {
-	value, _, err := readTokenAtStat(dirFd, leaf, path)
-	return value, err
-}
-
-// readTokenAtStat is readTokenAt that also returns the fstat of the file
-// it read, taken on the same descriptor.
-func readTokenAtStat(dirFd int, leaf, path string) (string, syscall.Stat_t, error) {
-	var dirSt syscall.Stat_t
-	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
-		return "", dirSt, fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
-	}
-
-	data, st, err := dirfd.ReadAtNoFollowStat(dirFd, leaf, tokenFileMaxBytes)
-	if err != nil {
-		return "", st, fmt.Errorf("%s: %w", path, err)
-	}
-	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return "", st, fmt.Errorf("refusing to read %s: unexpected owner", path)
-	}
-	return string(data), st, nil
 }
 
 // selfMessageRequest is the payload for delivering a message to the current agent

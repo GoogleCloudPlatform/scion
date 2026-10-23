@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1047,7 +1046,7 @@ func TestReadTransportTokenFile_RefusesNonRegular(t *testing.T) {
 	assert.Error(t, err, "symlink must be refused")
 
 	fifo := filepath.Join(dir, "fifo")
-	require.NoError(t, syscall.Mkfifo(fifo, 0600))
+	require.NoError(t, mkfifoForTest(fifo, 0600))
 	done := make(chan error, 1)
 	go func() {
 		_, err := ReadTransportTokenFile(fifo)

@@ -180,7 +180,7 @@ func writeSCIONWrapper(t *testing.T) string {
 	exe, err := os.Executable()
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "scion")
-	script := "#!/bin/sh\nSCION_TEST_EXEC_CLI=1 exec " + sshShellQuote(exe) + " '-test.run=^TestSSHCLIHelperProcess$' -- \"$@\"\n"
+	script := "#!/bin/sh\nSCION_TEST_EXEC_CLI=1 exec " + mustSSHShellQuote(t, exe) + " '-test.run=^TestSSHCLIHelperProcess$' -- \"$@\"\n"
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 	return path
 }

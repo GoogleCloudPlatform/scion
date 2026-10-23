@@ -387,7 +387,7 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 	if err != nil {
 		return false, "", fmt.Errorf("resolve candidate %q: %w", candidate, err)
 	}
-	rel, err := filepath.Rel(resolvedBase, resolvedCandidate)
+	rel, err := filepath.Rel(resolvedBase, resolvedCandidate) //winsec:not-containment gated on Windows: only RemoveWorktree (agent deletion, broker-side) reaches it
 	if err != nil {
 		return false, "", nil
 	}
