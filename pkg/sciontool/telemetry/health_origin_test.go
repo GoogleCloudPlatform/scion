@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -299,12 +301,22 @@ func TestHealthOriginResolverChangeCachedMode(t *testing.T) {
 }
 
 // Fixture 6 (WP4 H6): a relocation detected concurrently with health builds
-// and freezes, repeated. No event ever has relocated=false with hub_id !=
-// outbox_pinned_hub_id, and none is rejected by Validate.
+// and freezes, repeated, in both process roles.
+//
+// Relocated process (its drainer confirms hub-z against pin hub-a, so it
+// never verifies): the marker is asserted to be recorded, and no event ever
+// reports relocated=false; all carry hub-z and none is rejected.
+//
+// Verified process (hub-a = pin) while another process records the
+// relocation concurrently: relocated=false IS reachable (an event is built
+// before the marker), every false event carries hub_id == the pin, no false
+// follows a true in health_seq order (the marker is sticky), and the last
+// event is true.
 func TestHealthOriginConcurrentRelocationNeverFalseWithNewHub(t *testing.T) {
 	origin := pinnedOutbox(t, "hub-a")
 	for round := 0; round < 25; round++ {
-		h := newOriginHarness(t, copyOutbox(t, origin), trustedHub("hub-z"))
+		cp := copyOutbox(t, origin)
+		h := newOriginHarness(t, cp, trustedHub("hub-z"))
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
@@ -316,9 +328,12 @@ func TestHealthOriginConcurrentRelocationNeverFalseWithNewHub(t *testing.T) {
 		}
 		wg.Wait()
 		h.periodic()
+		if l := ledger(t, reopen(t, cp)); l.RelocatedHubID != "hub-z" {
+			t.Fatalf("round %d: the relocation marker must be recorded first: %q", round, l.RelocatedHubID)
+		}
 		for _, ev := range h.sentEvents(t) {
-			if ev.OutboxRelocated != nil && !*ev.OutboxRelocated && ev.HubID != ev.OutboxPinnedHubID {
-				t.Fatalf("round %d: relocated=false with hub %q != pin %q", round, ev.HubID, ev.OutboxPinnedHubID)
+			if relocatedValue(ev) == "false" {
+				t.Fatalf("round %d: a relocated process reported relocated=false (hub %q, pin %q)", round, ev.HubID, ev.OutboxPinnedHubID)
 			}
 			if ev.HubID != "hub-z" {
 				t.Fatalf("round %d: hub_id %q, want this process's hub-z", round, ev.HubID)
@@ -329,6 +344,53 @@ func TestHealthOriginConcurrentRelocationNeverFalseWithNewHub(t *testing.T) {
 		}
 		if ev := h.last(t); relocatedValue(ev) != "true" {
 			t.Fatalf("round %d: the event after the relocation reports relocated %s", round, relocatedValue(ev))
+		}
+	}
+
+	for round := 0; round < 25; round++ {
+		o := pinnedOutbox(t, "hub-a")
+		h := newOriginHarness(t, o, trustedHub("hub-a"))
+		h.drainer.RunOnce(context.Background()) // verified: hub-a = pin
+		h.periodic()                            // built before any marker: false is reachable
+		other := reopen(t, o)
+		var wg sync.WaitGroup
+		var relocErr error
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			relocErr = other.recordRelocation("hub-z")
+		}()
+		for i := 0; i < 4; i++ {
+			h.periodic()
+		}
+		wg.Wait()
+		if relocErr != nil {
+			t.Fatalf("round %d: recordRelocation: %v", round, relocErr)
+		}
+		h.periodic()
+		falses, seenTrue := 0, false
+		for _, ev := range h.sentEvents(t) {
+			switch relocatedValue(ev) {
+			case "false":
+				falses++
+				if ev.HubID != ev.OutboxPinnedHubID {
+					t.Fatalf("round %d: relocated=false with hub %q != pin %q", round, ev.HubID, ev.OutboxPinnedHubID)
+				}
+				if seenTrue {
+					t.Fatalf("round %d: relocated=false after a true (seq %d): the marker is sticky", round, ev.HealthSeq)
+				}
+			case "true":
+				seenTrue = true
+			}
+		}
+		if falses == 0 {
+			t.Fatalf("round %d: relocated=false never reported; the verified path must be reachable", round)
+		}
+		if ev := h.last(t); relocatedValue(ev) != "true" {
+			t.Fatalf("round %d: the last event reports relocated %s, want true", round, relocatedValue(ev))
+		}
+		if h.p.health.rejected != 0 {
+			t.Fatalf("round %d: %d events rejected", round, h.p.health.rejected)
 		}
 	}
 }
@@ -471,5 +533,54 @@ func TestHealthOriginDifferentCandidateRestartsWindow(t *testing.T) {
 	ev := h.last(t)
 	if ev.HubID != "hub-y" || ev.OutboxPinnedHubID != "hub-a" || relocatedValue(ev) != "true" || *ev.OutboxHubMismatchTotal != 1 {
 		t.Fatalf("after confirmation: hub %q pinned %q relocated %s mismatch %d", ev.HubID, ev.OutboxPinnedHubID, relocatedValue(ev), *ev.OutboxHubMismatchTotal)
+	}
+}
+
+// An outbox with a NIL drainer falls back to the cached no-outbox mode:
+// hub_id comes from the /healthz resolution (first success kept) and the
+// outbox-subject group is not reported.
+func TestHealthOriginOutboxWithNilDrainerUsesCachedMode(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"hub_id":"hub-c"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	o := pinnedOutbox(t, "hub-a")
+	var mu sync.Mutex
+	var sent [][]byte
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.sendOverride = func(_ context.Context, line []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, append([]byte(nil), line...))
+		return nil
+	}
+	p.health.periodic, p.health.retry = 1<<62, 1<<62
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { p.stopHealthLoop(); cancel() })
+	handles := analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative), send: newCountingSend(nil)}
+	if c := handles.counters(time.Now()); c.StatsFailed || c.Outbox != nil {
+		t.Fatalf("nil drainer: stats failed %v, outbox subject %+v; want measured, subject nil", c.StatsFailed, c.Outbox)
+	}
+	p.startHealth(ctx, &GCPExporter{}, handles)
+	p.stopHealthLoop()
+	p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	p.flushHealth(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d events, want 1", len(sent))
+	}
+	var ev telemetrycontract.HealthEvent
+	if err := telemetrycontract.Unmarshal(sent[0], &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.HubID != "hub-c" || ev.OutboxPinnedHubID != "" || ev.OutboxRelocated != nil || ev.OutboxHubMismatchTotal != nil {
+		t.Fatalf("nil drainer: hub %q, subject pinned %q relocated %v mismatch %v; want the cached /healthz hub and no subject",
+			ev.HubID, ev.OutboxPinnedHubID, ev.OutboxRelocated, ev.OutboxHubMismatchTotal)
 	}
 }

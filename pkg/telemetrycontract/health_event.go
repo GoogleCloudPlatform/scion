@@ -136,8 +136,9 @@ type HealthAnalyticsCounters struct {
 	ProducerSeqLast        int64
 	// Outbox is the outbox-subject group (WP3 hub-origin plan v5, section
 	// 1a), nil when it is not reported: this process had not resolved its
-	// hub before the ledger read, or the read failed. SetAnalyticsCounters
-	// ignores it when StatsFailed.
+	// hub before the ledger read, the outbox has no pin yet, there is no
+	// drainer (the cached no-outbox mode), or the read failed.
+	// SetAnalyticsCounters ignores it when StatsFailed.
 	Outbox *HealthOutboxSubject
 	// StatsFailed means some on-disk read failed (pending, retained,
 	// epoch, seq, the held intent or a persisted total):
