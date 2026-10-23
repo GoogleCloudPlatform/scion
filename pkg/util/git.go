@@ -1661,3 +1661,77 @@ func EnsureGitIgnoresFile(dir, name string) error {
 	}
 	return nil
 }
+
+// hardenedGitCommand returns a git command that reads no system or global
+// configuration and never prompts, for checks whose answer the broker
+// relies on about a repository an agent may be able to write.
+func hardenedGitCommand(dir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
+// IsRegisteredLinkedWorktree reports whether path is a linked worktree (not
+// the main worktree) that git has registered for the repository at
+// repoRoot, matched by resolved path equality like IsRegisteredWorktree.
+// It runs git with hardenedGitCommand. A failure to list returns
+// (false, err); callers must treat that as not verified.
+func IsRegisteredLinkedWorktree(repoRoot, path string) (bool, error) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	out, err := hardenedGitCommand(repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return false, fmt.Errorf("git common dir for %s: %w", repoRoot, err)
+	}
+	resolvedCommonDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	worktreesDir := filepath.Join(resolvedCommonDir, "worktrees")
+	output, err := hardenedGitCommand(repoRoot, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return false, fmt.Errorf("git worktree list: %w", err)
+	}
+	for _, record := range splitPorcelainRecords(string(output)) {
+		var wtPath string
+		prunable := false
+		for _, line := range strings.Split(record, "\n") {
+			switch {
+			case strings.HasPrefix(line, "worktree "):
+				wtPath = strings.TrimPrefix(line, "worktree ")
+				if strings.HasPrefix(wtPath, "\"") {
+					if unquoted, uerr := strconv.Unquote(wtPath); uerr == nil {
+						wtPath = unquoted
+					}
+				}
+			case strings.HasPrefix(line, "prunable"):
+				prunable = true
+			}
+		}
+		if wtPath == "" || prunable {
+			continue
+		}
+		resolvedWt, err := filepath.EvalSymlinks(wtPath)
+		if err != nil || resolvedWt != resolvedPath {
+			continue
+		}
+		if isMainWorktreeOf(wtPath, resolvedCommonDir) {
+			return false, nil
+		}
+		return isLinkedWorktreeOf(wtPath, worktreesDir), nil
+	}
+	return false, nil
+}
+
+// HardenedRepoRootDir is RepoRootDir (git rev-parse --show-toplevel run in
+// dir) with hardenedGitCommand, without walking up on failure.
+func HardenedRepoRootDir(dir string) (string, error) {
+	out, err := hardenedGitCommand(dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("git toplevel for %s: %w", dir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
