@@ -787,6 +787,12 @@ func isSingleCleanPathElement(name string) bool {
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
+	// A flat instance releases the create's slug reservation before any
+	// error response is written, and when the request unwinds without one
+	// (a panic), unless the request has started the agent by then
+	// (ptone/scion#5768).
+	w, ownedAbandon := s.wrapOwnedCreate(w, r)
+	defer s.finishOwnedCreate(r.Context(), w, ownedAbandon)
 
 	var req CreateAgentRequest
 	if err := readJSON(r, &req); err != nil {
@@ -1404,7 +1410,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ownedHandoff := false
 	defer func() {
 		if sc != nil && !ownedHandoff {
-			s.releaseOwnedStart(sc.Opts.RunID)
+			// Only this request's own mirror: a same-run resend that
+			// installed its own keeps it.
+			s.releaseOwnedMirror(sc.Opts.RunID, sc.ownedStart)
 		}
 	}()
 	if testHookCreateBeforeBuildStartContext != nil {
@@ -1433,6 +1441,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		RunID:              req.RunID,
 		HTTPRequest:        r,
 		Operation:          opCreate,
+		OwnedAbandon:       ownedAbandon,
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
@@ -1540,6 +1549,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// runLaunch completes the ownership mirror only for an accepted
 			// launch; a refused one leaves it to the deferred release.
 			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.RuntimeType, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
+			if ownedHandoff {
+				ownedAbandon.handOff()
+			}
 			return
 		}
 	}
@@ -1565,6 +1577,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.WorkspaceStoragePath != "" {
 		var attemptMsg, httpMessage string
 		var dlErr error
+		ownedAbandon.markWriting()
+		if testHookCreateBeforeWorkspaceDownload != nil {
+			testHookCreateBeforeWorkspaceDownload(opts)
+		}
 		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
 		if dlErr != nil {
 			span.SetStatus(codes.Error, dlErr.Error())
@@ -1591,6 +1607,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// The marker lets the failure cleanup below confirm it still owns the
 	// name before removing files addressed by that name.
 	if ss != nil {
+		ownedAbandon.markWriting()
 		if err := ss.takeName(opts); err != nil {
 			s.agentLifecycleLog.Error("Agent create failed before start",
 				"agent_id", req.ID, "project_id", req.ProjectID,
@@ -1622,6 +1639,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// delete or newer start), by broker shutdown, or at the broker's
 		// own bound, not when the request ends (bind, ptone/scion#4817).
 		var startCtx, trackCtx context.Context
+		// From here the start belongs to Manager.Start and its own failure
+		// cleanup (completeOwnedStart): the reservation is no longer
+		// released by an error response.
+		ownedAbandon.disarm()
 		startCtx, unbindStart = ss.bind(ctx, s.syncStartMaxDuration)
 		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
@@ -1630,6 +1651,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
+		// A provision-only create (no start registration, so never
+		// disarmed above) may write agent files from here; its failures
+		// release the reservation only with the files proven absent.
+		ownedAbandon.markWriting()
 		// Provision only: set up dirs, worktree, templates without starting the container.
 		// Reprovision (reincarnation) forces a fresh render of an existing agent's
 		// config instead of reusing what's persisted — see Manager.Reprovision.
@@ -1798,6 +1823,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Full start: provision and launch the container
 	startOpStart := time.Now()
+	ownedAbandon.markWriting()
 	agentInfo, err := sc.Manager.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, sc.Manager, opts.RunID, err, true)
 	if err != nil {
@@ -1885,6 +1911,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				} else {
 					s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+					// A flat instance retires the failed create's record
+					// once its run ended and its files are proven gone
+					// (ptone/scion#5768).
+					if ownedAbandon != nil && cleanupErr == nil {
+						removed := s.filesRemovedAfterCleanup(ownedAbandon.key.projectID, ownedAbandon.slug, opts.ProjectPath, opts.HubProjectID)
+						s.retireEndedCreate(ownedAbandon.key, removed, ownedAbandon.hold)
+					}
 				}
 			}()
 		}

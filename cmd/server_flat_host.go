@@ -582,6 +582,16 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	if _, err := records.ReconcileAbsent(objects, absent, slog.Warn); err != nil {
 		return fmt.Errorf("ownership records cannot be reconciled with the execution scope: %w", err)
 	}
+	// Records of creates that failed before their agent existed, older
+	// builds' included, are retired when their files are proven absent
+	// (ptone/scion#5768).
+	targetType := ""
+	if c.Instance.RuntimeTarget != nil {
+		targetType = c.Instance.RuntimeTarget.Type
+	}
+	if _, err := records.RetireAbandonedRecords(runtimebroker.OwnershipFilesProof(targetType), slog.Warn); err != nil {
+		return fmt.Errorf("ownership records of failed creates cannot be retired: %w", err)
+	}
 	problems, err := records.RepairSlugIndex()
 	if err != nil {
 		return fmt.Errorf("ownership records cannot be read: %w", err)
