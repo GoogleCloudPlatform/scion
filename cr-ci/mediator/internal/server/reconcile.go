@@ -156,7 +156,6 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	}
 
 	v := newView()
-	s.capacityFull = false // set again by dispatchLocked if the queue still does not fit
 	for i, c := range cands {
 		out, err := s.dispatchLocked(ctx, v, c.repo, c.job.ID, c.job.RunID, c.job.ID, "reconcile")
 		switch {
@@ -184,32 +183,6 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 func githubServerError(err error) bool {
 	var ae *githubapp.APIError
 	return errors.As(err, &ae) && ae.Status >= 500 && ae.Status <= 599
-}
-
-// scheduleBackfill runs a reconcile pass BackfillDelay after a cr-ci
-// runner's job completed, but only while jobs are left queued for capacity:
-// otherwise /reconcile (RECONCILE_SCHEDULE) would serve them only at its next
-// run, and a burst of pushes would wait one interval per wave. Single-flight:
-// a completed webhook that arrives while a backfill is pending adds nothing.
-func (s *Server) scheduleBackfill() {
-	s.dispatchMu.Lock()
-	full := s.capacityFull
-	s.dispatchMu.Unlock()
-	if !full || !s.backfillPending.CompareAndSwap(false, true) {
-		return
-	}
-	s.backfills.Add(1)
-	go func() {
-		defer s.backfills.Done()
-		defer s.backfillPending.Store(false)
-		if s.o.BackfillDelay > 0 {
-			time.Sleep(s.o.BackfillDelay)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), s.o.ReconcileTimeout)
-		defer cancel()
-		s.log().Info("backfill after a runner finished, while jobs were left queued for capacity", "event", logging.EventBackfill)
-		s.Reconcile(ctx)
-	}()
 }
 
 // discover lists queued and in_progress runs of every served repo. It

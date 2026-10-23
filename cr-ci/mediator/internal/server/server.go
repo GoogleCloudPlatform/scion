@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/cr-ci/mediator/internal/claim"
@@ -51,7 +50,6 @@ const (
 	defaultReapAfter        = 5 * time.Minute
 	defaultRequestTimeout   = 60 * time.Second
 	defaultReconcileTimeout = 4 * time.Minute
-	defaultBackfillDelay    = 20 * time.Second
 	cleanupTimeout          = 30 * time.Second
 	// launchListLag covers executions that jobs.run created but
 	// executions.list does not show yet.
@@ -104,11 +102,6 @@ type Options struct {
 
 	RequestTimeout   time.Duration // budget for webhook work, detached from the delivery (default 60s)
 	ReconcileTimeout time.Duration // budget for one reconcile (default 4m)
-	// BackfillDelay: after a cr-ci runner's job completes while jobs are left
-	// queued for capacity, a backfill (a reconcile pass) runs this long after
-	// the completed webhook, once the finished runner's execution has had time
-	// to end (default 20s; negative: right away, for tests).
-	BackfillDelay time.Duration
 
 	// WebhookSecret fetches the webhook HMAC secret (Secret Manager).
 	WebhookSecret func(ctx context.Context) ([]byte, error)
@@ -157,14 +150,6 @@ type Server struct {
 	cancelled   map[string]time.Time     // execution refs this process cancelled
 	offlineSeen map[string]time.Time     // runner name -> first seen offline
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
-	// capacityFull: the last dispatch decision left a job queued for capacity
-	// and no reconcile has served the queue since (guarded by dispatchMu).
-	capacityFull bool
-
-	// backfillPending makes completed-webhook backfills single-flight;
-	// backfills tracks them (tests wait on it).
-	backfillPending atomic.Bool
-	backfills       sync.WaitGroup
 }
 
 // New returns a Server.
@@ -180,9 +165,6 @@ func New(o Options) *Server {
 	}
 	if o.ReconcileTimeout == 0 {
 		o.ReconcileTimeout = defaultReconcileTimeout
-	}
-	if o.BackfillDelay == 0 {
-		o.BackfillDelay = defaultBackfillDelay
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))

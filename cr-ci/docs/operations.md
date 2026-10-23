@@ -248,7 +248,6 @@ logged (a unit test enforces this).
 | `dispatch` | INFO | Runner registered and execution started (`job_id`, `runner`, `execution`, `active`) |
 | `dispatch_skip` | INFO | Duplicate delivery or job already has a runner (`reason`) |
 | `capacity_full` | INFO | `MAX_CONCURRENT_RUNNERS` reached; job left queued |
-| `backfill` | INFO | A cr-ci runner's job completed while jobs were left queued for capacity: a reconcile pass runs 20 s later (once the runner's execution has ended), instead of waiting for the next `RECONCILE_SCHEDULE` run. Single-flight; never runs when nothing was left queued |
 | `launch_failed` | ERROR | `jobs.run` failed; registration deleted, job retried by reconcile |
 | `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
