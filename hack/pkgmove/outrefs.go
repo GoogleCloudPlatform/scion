@@ -419,15 +419,16 @@ func shortenRef(s string) string {
 	return truncateUTF8(s, 120)
 }
 
-// truncateUTF8 returns s if it is at most max bytes long, and otherwise its
-// longest prefix that ends on a rune boundary and leaves room for "...",
-// followed by "...". The result is at most max bytes and never splits a
-// multi-byte UTF-8 sequence.
-func truncateUTF8(s string, max int) string {
-	if len(s) <= max {
+// truncateUTF8 returns s if it is at most limit bytes long, and otherwise
+// its longest prefix that ends on a rune boundary and leaves room for "...",
+// followed by "...". It never splits a multi-byte UTF-8 sequence, and the
+// result is at most limit bytes when limit is at least 3 (below that it is
+// "..." alone).
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := max - len("...")
+	cut := limit - len("...")
 	if cut < 0 {
 		cut = 0
 	}

@@ -766,7 +766,8 @@ func TestOutsideRefs(t *testing.T) {
 }
 
 // TestTruncateUTF8 checks that the report truncation (shortenRef, shorten)
-// never splits a multi-byte UTF-8 sequence and keeps its byte limit.
+// never splits a multi-byte UTF-8 sequence, keeps its byte limit, and cuts
+// ASCII exactly at the limit.
 func TestTruncateUTF8(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -776,11 +777,18 @@ func TestTruncateUTF8(t *testing.T) {
 		{"shortenRef", shortenRef, 120},
 		{"shorten", shorten, 60},
 	} {
+		// ASCII: unchanged up to the limit; one byte more is cut to max-3 plus "...".
+		if a := strings.Repeat("a", tc.max); tc.f(a) != a {
+			t.Errorf("%s: %d ASCII bytes changed to %q", tc.name, tc.max, tc.f(a))
+		}
+		if a, want := strings.Repeat("a", tc.max+1), strings.Repeat("a", tc.max-3)+"..."; tc.f(a) != want {
+			t.Errorf("%s: %d ASCII bytes gave %q, want %q", tc.name, tc.max+1, tc.f(a), want)
+		}
 		for _, s := range []string{
-			strings.Repeat("é", 200),            // 2-byte runes
-			strings.Repeat("a", 116) + "日本語日本語", // a 3-byte rune across the cut
-			strings.Repeat("😀", 50),             // 4-byte runes
-			"x" + strings.Repeat("😀", 50),       // 4-byte runes, offset by one
+			strings.Repeat("é", 200), // 2-byte runes
+			strings.Repeat("a", tc.max-4) + strings.Repeat("日本語", 10), // a 3-byte rune across the cut at max-3
+			strings.Repeat("😀", 50),                                   // 4-byte runes
+			"x" + strings.Repeat("😀", 50),                             // 4-byte runes, offset by one
 		} {
 			got := tc.f(s)
 			if !utf8.ValidString(got) {
@@ -792,7 +800,8 @@ func TestTruncateUTF8(t *testing.T) {
 			if !strings.HasSuffix(got, "...") || !strings.HasPrefix(s, strings.TrimSuffix(got, "...")) {
 				t.Errorf("%s(%q...) = %q: want a prefix of the input plus \"...\"", tc.name, s[:8], got)
 			}
-			if len(got) < tc.max-6 {
+			// The back-off to a rune boundary is at most 3 bytes.
+			if len(got) < tc.max-3 {
 				t.Errorf("%s: result is %d bytes, cut more than one rune short of %d", tc.name, len(got), tc.max)
 			}
 		}
