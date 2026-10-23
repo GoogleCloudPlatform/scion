@@ -562,6 +562,86 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 	assert.Equal(t, project.ID, adminResp.Projects[0].ProjectID)
 }
 
+// TestGetBrokerProjects_IsDefault covers ptone/scion#5413: each provider
+// row in GET /runtime-brokers/{id}/projects says whether the listed broker is
+// the project's default Runtime Broker, so the web needs no per-project
+// read. The marker rides on rows that already passed the project read
+// filter, so a caller who cannot read the project still sees no row.
+func TestGetBrokerProjects_IsDefault(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:          tid("user-isdefault-owner"),
+		Email:       "isdefault-owner@test.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	outsider := &store.User{
+		ID:          tid("user-isdefault-outsider"),
+		Email:       "isdefault-outsider@test.com",
+		DisplayName: "Outsider",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+	ensureHubMembership(ctx, s, outsider.ID)
+
+	adminID := tid("user-isdefault-admin")
+	createTestUserWithRole(t, s, adminID, "isdefault-admin@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+	ensureHubMembership(ctx, s, admin.ID)
+
+	defaultBrokerID, project := autoProvideBrokerWithProject(t, srv, owner,
+		"isdefault-broker", "DefaultProj", "https://github.com/acme/default-repo.git")
+
+	// A second broker also provides for the project but is not its default.
+	other := newTestBroker(t, s, "isdefault-other")
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: other.ID, BrokerName: other.Name, Status: store.BrokerStatusOnline,
+	}))
+
+	stored, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	stored.DefaultRuntimeBrokerID = defaultBrokerID
+	require.NoError(t, s.UpdateProject(ctx, stored))
+
+	list := func(t *testing.T, user *store.User, brokerID string) ListBrokerProjectsResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ListBrokerProjectsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp
+	}
+
+	t.Run("the default broker's row is marked", func(t *testing.T) {
+		resp := list(t, owner, defaultBrokerID)
+		require.Len(t, resp.Projects, 1)
+		assert.Equal(t, project.ID, resp.Projects[0].ProjectID)
+		assert.True(t, resp.Projects[0].IsDefault, "the project's default broker must list it with isDefault")
+	})
+
+	t.Run("another provider's row is not marked", func(t *testing.T) {
+		resp := list(t, admin, other.ID)
+		require.Len(t, resp.Projects, 1)
+		assert.Equal(t, project.ID, resp.Projects[0].ProjectID)
+		assert.False(t, resp.Projects[0].IsDefault, "a broker that is not the project's default must not mark it")
+	})
+
+	t.Run("an unreadable project is still filtered out", func(t *testing.T) {
+		resp := list(t, outsider, defaultBrokerID)
+		assert.Empty(t, resp.Projects, "a caller who cannot read the project gets no row, marked or not")
+	})
+}
+
 // getProjectErrWrap returns an installStoreFault wrap func for a
 // getProjectErrStore failing with err; set projectID before arming.
 func getProjectErrWrap(err error) func(store.Store, *storeFaultSwitch) *getProjectErrStore {
@@ -624,6 +704,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 		"a project whose lookup returned not-found must not carry a stale or fabricated name")
 	assert.Empty(t, resp.Projects[0].GitRemote,
 		"a project whose lookup returned not-found must not carry a stale or fabricated git remote")
+	assert.False(t, resp.Projects[0].IsDefault,
+		"a project whose lookup returned not-found cannot be marked as defaulting to this broker")
 }
 
 // TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors is the other

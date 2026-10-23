@@ -289,7 +289,9 @@ func (f *ptyConduitFixture) startPTYAgent(t *testing.T, hubURL string) {
 }
 
 // startSciontoolAgent runs a sciontool conduit agent for the launched
-// agent against hubURL and returns once its session is admitted. With
+// agent against hubURL and returns once its session is admitted and,
+// unless f.noAgentKeyWait, its first grant-key fetch has installed the
+// hub's current key (waitAgentGrantKeys). With
 // noPTY it serves no pty streams (Options.NoPTY); otherwise it serves
 // pty with a fake spawner that reports each process on f.spawned.
 func (f *ptyConduitFixture) startSciontoolAgent(t *testing.T, hubURL string, noPTY bool) {
@@ -341,6 +343,9 @@ func (f *ptyConduitFixture) startSciontoolAgent(t *testing.T, hubURL string, noP
 	case <-admitted:
 	case <-time.After(10 * time.Second):
 		t.Fatal("conduit session not admitted")
+	}
+	if !f.noAgentKeyWait {
+		waitAgentGrantKeys(t, f.srv, a.Keys())
 	}
 }
 

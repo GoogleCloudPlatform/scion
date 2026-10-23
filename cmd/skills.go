@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -256,32 +257,9 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect files
-	var files []publishFile
-	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
-			return nil
-		}
-		relPath, _ := filepath.Rel(skillDir, path)
-		relPath = filepath.ToSlash(relPath)
-		files = append(files, publishFile{
-			path:    relPath,
-			absPath: path,
-			size:    info.Size(),
-		})
-		return nil
-	})
+	files, err := collectPublishFiles(skillDir)
 	if err != nil {
-		return fmt.Errorf("failed to collect files: %w", err)
+		return err
 	}
 
 	// Validate limits
@@ -385,19 +363,9 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build manifest with file hashes
-	manifest := &hubclient.SkillManifest{
-		Files: make([]hubclient.TemplateFile, len(files)),
-	}
-	for i, f := range files {
-		hash, err := hashFile(f.absPath)
-		if err != nil {
-			return fmt.Errorf("failed to hash %s: %w", f.path, err)
-		}
-		manifest.Files[i] = hubclient.TemplateFile{
-			Path: f.path,
-			Size: f.size,
-			Hash: hash,
-		}
+	manifest, err := buildSkillManifest(files)
+	if err != nil {
+		return err
 	}
 
 	// Finalize
@@ -421,6 +389,88 @@ type publishFile struct {
 	path    string
 	absPath string
 	size    int64
+	// mode is the normalised mode recorded in the manifest: "0755" for an
+	// executable file, otherwise "0644" (ptone/scion#5657).
+	mode string
+}
+
+// collectPublishFiles walks skillDir and returns the files `scion skills
+// publish` uploads, skipping VCS and editor clutter.
+//
+// filepath.Walk reports a symlink with its own (Lstat) info, whose mode is
+// 0777 on Linux, while the upload and hashFile read the file it points to.
+// The size and mode of a symlinked file are therefore taken from its
+// target, so a symlinked data file is not published executable.
+func collectPublishFiles(skillDir string) ([]publishFile, error) {
+	var files []publishFile
+	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			info = target
+		}
+		relPath, _ := filepath.Rel(skillDir, path)
+		relPath = filepath.ToSlash(relPath)
+		files = append(files, publishFile{
+			path:    relPath,
+			absPath: path,
+			size:    info.Size(),
+			mode:    publishFileMode(info.Mode()),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect files: %w", err)
+	}
+	return files, nil
+}
+
+// publishFileMode is the manifest mode for a local file with mode m. Only
+// the executable bit is carried. On Windows, whose file modes carry no
+// executable bit, every file is "0644".
+func publishFileMode(m os.FileMode) string {
+	if !localModesCarryExecBit() {
+		return transfer.FormatMode(transfer.ModeRegular)
+	}
+	return transfer.NormalizedModeString(transfer.FormatMode(m))
+}
+
+// buildSkillManifest returns the finalize manifest for files: each file's
+// path, size, sha256 hash and mode. The Hub serves the mode back with the
+// download URLs, so the broker installs an executable skill script
+// executable (ptone/scion#5657).
+func buildSkillManifest(files []publishFile) (*hubclient.SkillManifest, error) {
+	manifest := &hubclient.SkillManifest{
+		Files: make([]hubclient.TemplateFile, len(files)),
+	}
+	for i, f := range files {
+		hash, err := hashFile(f.absPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hash %s: %w", f.path, err)
+		}
+		manifest.Files[i] = hubclient.TemplateFile{
+			Path: f.path,
+			Size: f.size,
+			Hash: hash,
+			Mode: f.mode,
+		}
+	}
+	return manifest, nil
 }
 
 func skillDisplayName(slug string) string {

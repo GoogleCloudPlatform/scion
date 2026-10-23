@@ -38,9 +38,21 @@ type AgentWithCapabilities struct {
 	ModelSize string `json:"modelSize,omitempty"`
 	// Editability is set on the single-agent GET only.
 	Editability *AgentEditability `json:"editability,omitempty"`
+	// EffectiveNextRun is the agent's applied config with its pending
+	// config applied (AppliedConfig ⊕ pendingConfig), set on the
+	// single-agent GET with ?view=edit only.
+	EffectiveNextRun *store.AgentAppliedConfig `json:"effectiveNextRun,omitempty"`
 	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
 	// set on the single-agent GET only (agentSSHHostKey).
 	SSHHostKey string `json:"sshHostKey,omitempty"`
+	// ResolvedTimezone and TimezoneSource are the container TZ the agent's
+	// next start gets and the rung that supplies it, as on the PATCH
+	// response ("" with source "none" when no TZ is sent). Set on the
+	// single-agent GET only, and only for a caller who may view the agent's
+	// env, since the zone can come from a TZ env var (ptone/scion#2767).
+	// Pointers, so "" still reaches the wire while unset means omitted.
+	ResolvedTimezone *string `json:"resolvedTimezone,omitempty"`
+	TimezoneSource   *string `json:"timezoneSource,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -56,7 +68,10 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
 		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -67,7 +82,10 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		HarnessVendor:       a.HarnessVendor,
 		ModelSize:           a.ModelSize,
 		Editability:         a.Editability,
+		EffectiveNextRun:    a.EffectiveNextRun,
 		SSHHostKey:          a.SSHHostKey,
+		ResolvedTimezone:    a.ResolvedTimezone,
+		TimezoneSource:      a.TimezoneSource,
 	})
 }
 
@@ -85,7 +103,10 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		HarnessVendor       string                           `json:"harnessVendor,omitempty"`
 		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
+		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
+		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -99,7 +120,10 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.HarnessVendor = wrapper.HarnessVendor
 	a.ModelSize = wrapper.ModelSize
 	a.Editability = wrapper.Editability
+	a.EffectiveNextRun = wrapper.EffectiveNextRun
 	a.SSHHostKey = wrapper.SSHHostKey
+	a.ResolvedTimezone = wrapper.ResolvedTimezone
+	a.TimezoneSource = wrapper.TimezoneSource
 	return nil
 }
 

@@ -287,18 +287,18 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 		}
 		s.handleIntegrationHealth(w, r, name)
 	case "update":
-		if actionSub != "" && r.Method == http.MethodGet {
+		// .../update/{id} is the status lookup and accepts only GET; only a
+		// POST to the bare .../update starts an update (ptone/scion#2422).
+		if actionSub != "" {
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
 			s.handleGetUpdateStatus(w, r, name, actionSub)
 			return
 		}
 		if r.Method != http.MethodPost {
-			// .../update/{id} also accepts GET (status lookup, handled above);
-			// only the no-actionSub form is POST-only.
-			if actionSub != "" {
-				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
-			} else {
-				MethodNotAllowed(w, http.MethodPost)
-			}
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)

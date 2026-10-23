@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -80,13 +79,6 @@ type ProjectService interface {
 	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
 	// of the project settings; every other setting keeps its stored value.
 	UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error)
-
-	// RefreshCache triggers a cache refresh for a linked project.
-	// The hub pulls the workspace from a connected provider broker.
-	RefreshCache(ctx context.Context, projectID string) (*ProjectCacheRefreshResponse, error)
-
-	// GetCacheStatus returns the cache status for a project workspace.
-	GetCacheStatus(ctx context.Context, projectID string) (*ProjectCacheStatusResponse, error)
 
 	// Clone creates a new project seeded from an existing project's configuration.
 	Clone(ctx context.Context, sourceID string, req CloneProjectRequest) (*Project, error)
@@ -466,43 +458,6 @@ func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID str
 		return err
 	}
 	return apiclient.CheckResponse(resp)
-}
-
-// ProjectCacheRefreshResponse is the response for a project cache refresh operation.
-type ProjectCacheRefreshResponse struct {
-	ProjectID  string    `json:"projectId"`
-	BrokerID   string    `json:"brokerId"`
-	FileCount  int       `json:"fileCount"`
-	TotalBytes int64     `json:"totalBytes"`
-	CachedAt   time.Time `json:"cachedAt"`
-}
-
-// ProjectCacheStatusResponse is the response for project cache status.
-type ProjectCacheStatusResponse struct {
-	ProjectID   string     `json:"projectId"`
-	Cached      bool       `json:"cached"`
-	BrokerID    string     `json:"brokerId,omitempty"`
-	FileCount   int        `json:"fileCount"`
-	TotalBytes  int64      `json:"totalBytes"`
-	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
-}
-
-// RefreshCache triggers a cache refresh for a linked project.
-func (s *projectService) RefreshCache(ctx context.Context, projectID string) (*ProjectCacheRefreshResponse, error) {
-	resp, err := s.c.post(ctx, "/api/v1/projects/"+projectID+"/workspace/cache/refresh", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeRequired[ProjectCacheRefreshResponse](resp)
-}
-
-// GetCacheStatus returns the cache status for a project workspace.
-func (s *projectService) GetCacheStatus(ctx context.Context, projectID string) (*ProjectCacheStatusResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/workspace/cache/status", nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeRequired[ProjectCacheStatusResponse](resp)
 }
 
 // Clone creates a new project seeded from an existing project's configuration.
