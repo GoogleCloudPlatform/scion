@@ -117,8 +117,11 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// pkg/sciontool/{hub,telemetry,autoexpose}) only reads an environment
 	// variable and parses it, with no exec.Cmd. The package's actual
 	// exec.Command call sites (pkg/util/git.go) are listed in
-	// execAuditFileAllowlist above.
-	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true},
+	// execAuditFileAllowlist above. HostGitArgs (pkg/util/git_host.go) returns a
+	// fresh []string of `-c` config arguments and makes no exec.Cmd call and does
+	// no I/O; pkg/provision/host_git.go's HostCloneGitArgs delegates to it (the K1
+	// consolidation), so that pure symbol is allowed here too.
+	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true, "HostGitArgs": true},
 	// init.go's only use of pkg/provision: GitTokenCredentialHelper is a
 	// string constant (the git credential helper value it writes to the
 	// agent's gitconfig); no exec.Cmd is reachable through it.
