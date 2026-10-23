@@ -15,8 +15,10 @@ Per repository, in this order (details in
 2. The [deploy preconditions](architecture.md#deploy-preconditions) hold,
    above all "Require approval for **all** external contributors".
 3. The P6 [PoC checklist](poc-checklist.md) passed on this target.
-4. `ci.yml` carries the routing expression (P7). Until then, the variable
-   changes nothing.
+4. The workflows carry the routing expression on the routed jobs (primary-runner
+   PR-wf1 for phase A, PR-wf2 for phase B; see
+   [workflows/README.md](../workflows/README.md#routing-in-githubworkflows)). Until
+   then, the variable changes nothing.
 5. `scripts/set-routing-variable.sh --repo <owner/repo> --apply` sets
    `ROUTING_VARIABLE_NAME` to `RUNNER_LABEL` (needs write access).
 6. Watch for 48 hours: `dispatch` and `claim_consumed` for every routed job,
