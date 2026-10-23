@@ -329,8 +329,6 @@ func (s *Server) profileRungCause(res runtimeResolution, profileGlobal bool, ent
 		return fmt.Sprintf("profile %s's placement targets a different runtime than the one chosen", res.Profile)
 	case resolutionDefaultFallback:
 		return "the agent's profile could not be determined (the selection profile or its runtime is not defined in the settings), and profile-level placement is configured for this runtime"
-	case resolutionStrictFallback:
-		return "the agent's profile could not be determined (the recorded profile no longer resolves), and profile-level placement is configured for this runtime"
 	default:
 		return "the agent's profile could not be determined (the runtime choice was not classified), and profile-level placement is configured for this runtime"
 	}

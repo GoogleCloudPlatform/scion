@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -275,7 +274,7 @@ func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
 	if jr.Profile == "" {
 		return nil
 	}
-	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient)
 	mgr := res.Manager
 	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
 		return nil

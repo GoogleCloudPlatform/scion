@@ -172,11 +172,11 @@ func storedProfileShapes() []struct {
 	}
 }
 
-// A saved profile the stored profiles lack fails start, restart and resume
-// with the saved-profile error, and never falls back to the default profile
-// (including the only stored profile) or the default runtime, including
-// when agent-info.json records that the agent last ran on the default
-// runtime (ptone/scion#3907).
+// A provisioned profile the stored profiles lack fails start, restart and
+// resume with the saved-profile error, and never falls back to the default
+// profile (including the only stored profile) or the default runtime,
+// including when agent-info.json records that the agent last ran on the
+// default runtime (ptone/scion#3907).
 func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 	for _, shape := range storedProfileShapes() {
 		for _, recorded := range []string{"", "docker"} {
@@ -190,6 +190,7 @@ func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 					shape.install(t)
 					const name = "vanished-profile-agent"
 					writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
+					writeProvisionedProfile(t, f.projectPath, name, "vanished")
 					f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
 					w := op.run(t, f, name)

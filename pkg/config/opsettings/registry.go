@@ -191,6 +191,7 @@ func init() {
 				"telemetry.enabled",
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
+				"telemetry.cloud.gcp_project_id",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
 				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
@@ -361,6 +362,15 @@ func init() {
 			Name:       "profiling",
 			KoanfPaths: nil,
 			New:        func() any { return &ProfilingSettings{} },
+		},
+		{
+			// agent_delegation_policy is durable via DB but has no
+			// settings.yaml representation. It only narrows the code-owned
+			// hub agent-delegation policy. Absent DB row = no narrowing.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       AgentDelegationPolicySectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &AgentDelegationPolicySettings{} },
 		},
 	}
 
@@ -614,6 +624,9 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// agent_delegation_policy schema is hand-written -- runtime state
+		// with no $defs in settings-v1.schema.json.
+		AgentDelegationPolicySectionName: agentDelegationPolicySchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{

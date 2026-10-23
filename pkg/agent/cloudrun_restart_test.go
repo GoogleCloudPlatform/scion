@@ -153,6 +153,10 @@ func TestStart_CloudRunRunningInstanceFromListKept(t *testing.T) {
 			"scion_agent":  "true",
 			"scion_name":   "tz-agent",
 			"scion_run_id": "run-a",
+			// The project ID a hub-dispatched instance carries, under its
+			// GCP-sanitized key; List reports it as ProjectID. Start's
+			// pre-clean keeps only entries of its project (matchAgentProject).
+			"scion_project_id": identityProjB,
 		},
 		TerminalCondition: &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Started instance in 2.54s."},
 		Conditions: []*runpb.Condition{
@@ -181,6 +185,7 @@ func TestStart_CloudRunRunningInstanceFromListKept(t *testing.T) {
 	}
 	got, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

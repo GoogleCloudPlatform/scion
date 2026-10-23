@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -992,12 +993,10 @@ func newFakeAgentPodWithHomeDirAnnotation(name, homeDirPath string) *corev1.Pod 
 // the sync call to actually run.
 func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
-		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
+		{name: "root", bad: "/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1011,7 +1010,7 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatal("expected Sync to fail for a persisted workspace path of '/'")
 			}
@@ -1019,6 +1018,22 @@ func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
 				t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
 			}
 		})
+	}
+}
+
+// Sync from an agent is not supported on Kubernetes: it fails with a clear
+// error before making any API request.
+func TestSync_FromUnsupported(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	err := rt.Sync(context.Background(), "test-agent", SyncFrom)
+	if !errors.Is(err, errK8sSyncFromUnsupported) {
+		t.Fatalf("err = %v, want errK8sSyncFromUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("err = %v, want a not-supported message", err)
+	}
+	if acts := cs.Actions(); len(acts) != 0 {
+		t.Errorf("Sync from made API requests: %v", acts)
 	}
 }
 
@@ -1046,14 +1061,11 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name      string
-		direction SyncDirection
-		bad       string
+		name string
+		bad  string
 	}{
-		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
-		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
-		{name: "SyncTo with $HOME", direction: SyncTo, bad: home},
-		{name: "SyncFrom with $HOME", direction: SyncFrom, bad: home},
+		{name: "root", bad: "/"},
+		{name: "$HOME", bad: home},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clientset := k8sfake.NewClientset()
@@ -1067,7 +1079,7 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 			client := k8s.NewTestClient(fc, clientset)
 			r := NewKubernetesRuntime(client)
 
-			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			err := r.Sync(context.Background(), "test-agent", SyncTo)
 			if err == nil {
 				t.Fatalf("expected Sync to fail for a persisted home directory path of %q", tt.bad)
 			}
