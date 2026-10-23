@@ -566,7 +566,7 @@ type ScionConfig struct {
 	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
 	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
 	// resolution, not this flag, is what tells the two cases apart — see
-	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// pkg/agent's repository root record (readRepoRootRecord). That value is deliberately
 	// not a field on ScionConfig (populated by unmarshaling templates, hub
 	// inline config, and --config files) nor on AgentInfo (persisted in
 	// agentHome, which the container can write) — see
@@ -1155,18 +1155,18 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
 // the wire.
 //
-// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
-// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
-// workspace skips git detection" rule — that rule exists for a user's own
-// --workspace override and must not swallow the broker's own
-// provisioning. This doc is the canonical statement of that rationale; other
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext,
+// via resolveStartRepoRoot) to set RunConfig.RepoRoot directly, rather than
+// from the agent directory's recorded repository root — a broker-provisioned
+// worktree is authoritative for this dispatch. This doc is the canonical
+// statement of that rationale; other
 // call sites point back here.
 //
 // The value is never a ScionConfig field (populated by unmarshaling
 // templates, hub inline config, and --config files) or an AgentInfo field
 // (agent-info.json lives in agentHome, which the container can write). The
 // broker persists it in a broker-owned file under agentDir instead — see
-// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// pkg/agent's repository root record (writeRepoRootRecord/readRepoRootRecord)
 // — and run.go independently validates it against the real filesystem
 // (provision.ValidateWorktreeForBase) before trusting it either way.
 func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
