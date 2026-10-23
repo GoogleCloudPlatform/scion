@@ -164,8 +164,9 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
 		if isClaudeUserWaitTool(event) {
 			// A sub-agent's question during a wait the agent set itself
-			// leaves that wait in place locally; sending a new
-			// waiting_for_input would replace the agent's own message.
+			// keeps that wait locally (recorded as parentWaitAgent next
+			// to the sub-agent's entry); sending a new waiting_for_input
+			// would replace the agent's own message.
 			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
 				return nil
@@ -174,6 +175,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			// crashed in place locally; the Hub follows.
 			if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+				return nil
+			}
+			// The parent's own question leaves limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if h.isLocalTerminal() {
+				log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
 				return nil
 			}
 			message := "Waiting on parent"

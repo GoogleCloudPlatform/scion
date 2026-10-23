@@ -71,7 +71,8 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
    `MEDIATOR_URL` ([github-setup.md, step 1](docs/github-setup.md#1-fix-the-mediator-url)).
 6. **GitHub App.** Create it from the manifest, and set `GITHUB_APP_ID`
    ([step 2](docs/github-setup.md#2-create-the-github-app-from-the-manifest-recommended);
-   manual fallback in step 3).
+   manual fallback in step 3). The App's **webhook URL is `MEDIATOR_URL/webhook`**,
+   not the bare `MEDIATOR_URL`: deliveries to `/` get 404.
 7. **Secrets.** `scripts/set-secrets.sh` with the App key and webhook secret
    from step 6 ([step 2.4](docs/github-setup.md#24-store-the-key-and-the-webhook-secret-in-secret-manager)).
 8. **Mediator.** `scripts/deploy-mediator.sh`. It warns if the deployed URL

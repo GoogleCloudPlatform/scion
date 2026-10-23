@@ -29,7 +29,7 @@ import (
 
 func setupTestNonceCacheStore(t *testing.T) *NonceCacheStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 

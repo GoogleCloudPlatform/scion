@@ -697,7 +697,7 @@ func (s *Server) generateBlobRowDownloadURLs(ctx context.Context, stor storage.S
 		if err != nil {
 			return nil, "", expires, fmt.Errorf("storage object missing: %s (run validate to check storage consistency): %w", f.Path, err)
 		}
-		out = append(out, DownloadURLInfo{Path: f.Path, URL: signed.URL, Size: f.Size, Hash: f.Hash})
+		out = append(out, DownloadURLInfo{Path: f.Path, URL: signed.URL, Size: f.Size, Hash: f.Hash, Mode: transfer.NormalizedModeString(f.Mode)})
 	}
 	return out, "", expires, nil
 }
