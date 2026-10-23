@@ -131,12 +131,18 @@ func checkMoveMarker(dir, id string) error {
 // checked, is ErrMoveMarkerMismatch, and the delete must remove nothing. It
 // returns the paths it checked, and changes nothing.
 //
+// hubProjectID is the Hub project ID the same delete resolves the agent's
+// hub-project state directory with (hubStateDirToRemove, from the
+// project ID the broker puts in the delete's context); that directory is
+// checked like the others. An empty ID names no such directory, as for the
+// delete.
+//
 // sharerKey is the key the same delete uses for the agent's worktree and
 // sharer registry entry (DeleteHubAgentFiles): on a hub-managed broker the
 // hub agent ID the agent was provisioned under, and "" (meaning agentName)
 // in local mode. The worktree and registration checks cover every key the
 // delete acts on (sharerKeys), so the check and the delete cannot diverge.
-func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, sharerKey, moveID string) ([]string, error) {
+func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error) {
 	if moveID == "" {
 		return nil, fmt.Errorf("%w: no move reincarnation ID", ErrMoveMarkerMismatch)
 	}
@@ -164,8 +170,15 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 		dirs = append(dirs, filepath.Join(projectDir, "workspace", agentName))
 	}
 	layout := resolveAgentProjectLayout(projectDir)
+	var externalAgentDir string
 	if layout.externalAgentsRoot != "" {
-		dirs = append(dirs, filepath.Join(layout.externalAgentsRoot, agentName))
+		externalAgentDir = filepath.Join(layout.externalAgentsRoot, agentName)
+		dirs = append(dirs, externalAgentDir)
+	}
+	// The hub-project state directory the delete also removes, when it is
+	// a directory of its own (hubStateDirToRemove).
+	if hubDir := hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir); hubDir != "" {
+		dirs = append(dirs, hubDir)
 	}
 	// DeleteAgentFiles removes the worktree-per-agent worktree under
 	// the shared base, and a shared worktree the agent is registered
