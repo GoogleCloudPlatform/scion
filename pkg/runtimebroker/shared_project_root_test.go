@@ -598,3 +598,91 @@ func TestCreateAgent_SharedPlainBackstopSentinel(t *testing.T) {
 		}
 	})
 }
+
+// The broker start hook moves shared dirs it kept node-local
+// (~/.scion/project-configs/<slug>__<id8>/shared-dirs/<name>) into the
+// project's shared-dir leaves on the share: copy-only, never overwriting,
+// the source kept as .migrated-<ts>; a second run moves nothing; projects
+// not on the share are left alone.
+func TestMigrateLocalSharedDirs(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(globalDir, config.ProjectConfigsDir, "web__0f9e8d7c", "shared-dirs")
+	other := filepath.Join(globalDir, config.ProjectConfigsDir, "other__11111111", "shared-dirs", "scratchpad", "keep.txt")
+	for path, content := range map[string]string{
+		filepath.Join(legacy, "scratchpad", "notes.txt"): "from broker",
+		filepath.Join(legacy, "scratchpad", "clash.txt"): "broker version",
+		filepath.Join(legacy, "data", "d.txt"):           "data",
+		other:                                            "other project",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := filepath.Join(f.root, "shared-dirs")
+	if err := os.MkdirAll(filepath.Join(shared, "scratchpad"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "scratchpad", "clash.txt"), []byte("share version"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.srv.migrateLocalSharedDirs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.Failed() {
+			t.Fatalf("move failed: %+v", r)
+		}
+	}
+	for path, want := range map[string]string{
+		filepath.Join(shared, "scratchpad", "notes.txt"): "from broker",
+		filepath.Join(shared, "scratchpad", "clash.txt"): "share version",
+		filepath.Join(shared, "data", "d.txt"):           "data",
+		other:                                            "other project",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Errorf("%s = (%q, %v), want %q", path, got, err, want)
+		}
+	}
+	kept, _ := filepath.Glob(filepath.Join(legacy, "scratchpad.migrated-*", "clash.txt"))
+	if len(kept) != 1 {
+		t.Errorf("the source must be kept as .migrated-<ts> with its conflicting file, got %v", kept)
+	}
+
+	res, err = f.srv.migrateLocalSharedDirs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.Moved() || r.Failed() {
+			t.Errorf("second run: %+v, want no moves", r)
+		}
+	}
+}
+
+// The hook does nothing on a broker whose shared dirs are not on a shared
+// Layout, and refuses (retrying at the next start) when the share is not
+// mounted.
+func TestMigrateLocalSharedDirs_Preconditions(t *testing.T) {
+	setupTestScionEnv(t)
+	srv, _ := newSharedLayoutServer(t, projectfs.Layout{Backend: projectfs.BackendLocal})
+	if res, err := srv.migrateLocalSharedDirs(context.Background()); err != nil || res != nil {
+		t.Fatalf("local layout: (%v, %v), want nothing", res, err)
+	}
+	f := newSharedRootFixture(t, true)
+	if err := os.RemoveAll(f.layout.HostBase); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.migrateLocalSharedDirs(context.Background()); err == nil {
+		t.Fatal("an unmounted share must refuse")
+	}
+}

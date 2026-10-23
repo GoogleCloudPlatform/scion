@@ -548,7 +548,10 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -1559,6 +1562,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// NFS. Until the first pass finishes, /healthz reports the shares as not
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
+
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
 
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
