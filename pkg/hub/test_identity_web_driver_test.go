@@ -251,13 +251,20 @@ type tiCall struct {
 	pos token.Pos
 }
 
-// tiCensus parses every non-test .go file of the package and returns, per
+// tiCensus parses every non-test .go file of the package (and its
+// guardScanSubdirs subpackages) and returns, per
 // selector name, the call sites x.<name>(...) with the selector expression
 // x rendered as source-like text ("cfg.ProxyAuthenticator").
 func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	out := map[string]map[string][]tiCall{}
 	for _, e := range entries {
@@ -436,7 +443,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	}
 	// Helpers whose callers carry the check, with every caller listed.
 	helperCallers := map[string][]string{
-		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser"},
+		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser", "inviteBatchUserStep"},
 		"provisionNewUser":    {"Resolve"},
 		"grantProjectVisitor": {"handleAddProjectVisitor"},
 	}
@@ -447,7 +454,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]bool{
-		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
+		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
 		"grantProjectVisitor": true, "linkPendingVisitor": true,
@@ -517,8 +524,11 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The project storage layout authority (pkg/projectfs), not a
+		// user or transport resolver.
+		"projectRecordSharedDirPath localLayout",
 		"resolveAsNeededForKeys d.secretBackend",
-		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
+		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")

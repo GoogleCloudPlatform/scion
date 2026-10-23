@@ -144,6 +144,11 @@ export interface PageData {
   data?: Record<string, unknown> | undefined;
   /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
   readinessMarks?: boolean | undefined;
+  /**
+   * The `experiments` map of GET /api/v1/experiments, as the hub answered
+   * the session user (ptone/scion#2489); present only for a signed-in shell
+   */
+  experiments?: Record<string, boolean> | undefined;
 }
 
 /**
@@ -879,6 +884,20 @@ export interface AgentFieldEditState {
   reason?: string;
 }
 
+/**
+ * Edits the hub holds for an agent until a start or a reincarnation applies
+ * them. Provisional, from the ptone/scion#3976 issue text, which owns the
+ * final shape: the raw present-key PATCH object (a null means
+ * clear at apply) with who saved it and when.
+ */
+export interface AgentPendingConfig {
+  config?: Record<string, unknown>;
+  agentRole?: string;
+  gcp_identity?: unknown;
+  savedBy?: string;
+  savedAt?: string;
+}
+
 /** Per-field editability of an agent for the caller (GET /api/v1/agents/{id}). */
 export interface AgentEditability {
   phase: string;
@@ -1012,6 +1031,9 @@ export interface Agent {
 
   // Per-field editability for the caller; set on the single-agent GET only.
   editability?: AgentEditability;
+  // Edits the hub holds for the agent; absent until the hub stores held
+  // edits. Provisional: ptone/scion#3976 owns the final shape.
+  pendingConfig?: AgentPendingConfig | null;
   // Optimistic-concurrency version; send it back with a PATCH.
   stateVersion?: number;
 }

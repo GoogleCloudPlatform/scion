@@ -193,9 +193,24 @@ type MessageFailure struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+// AttachmentOutcome is the outcome of one attachment delivered with a message
+// (ptone/scion#4596): "delivered", or "not_delivered" with the reason the
+// agent was told.
+type AttachmentOutcome struct {
+	MessageID    string `json:"messageId"`
+	AgentID      string `json:"agentId,omitempty"`
+	AttachmentID string `json:"attachmentId,omitempty"`
+	Outcome      string `json:"outcome"`
+	Reason       string `json:"reason,omitempty"`
+}
+
 // MessageFailuresReport is the body of a message-failures report.
 type MessageFailuresReport struct {
 	Failures []MessageFailure `json:"failures"`
+	// AttachmentOutcomes are the per-file outcomes of attachment deliveries
+	// (ptone/scion#4596). The hub logs and counts them; they never change a
+	// message's state.
+	AttachmentOutcomes []AttachmentOutcome `json:"attachmentOutcomes,omitempty"`
 }
 
 // runtimeBrokerService is the implementation of RuntimeBrokerService.

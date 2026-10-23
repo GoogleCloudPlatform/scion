@@ -112,6 +112,7 @@ func TestSSH_NoCredential_Exit255OneLineNoStdin(t *testing.T) {
 	assert.Equal(t, 255, runSSH(context.Background(), env, []string{"a-b/c"}))
 	assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
 	assert.Contains(t, errb.String(), "no usable credential")
+	assert.Contains(t, errb.String(), "run scion hub auth login --hub "+tunnelclient.NormalizeEndpoint(hub.srv.URL))
 	assert.NotContains(t, errb.String(), "\x1b")
 	assert.NotContains(t, errb.String(), "Usage")
 	assert.Empty(t, out.String())

@@ -217,7 +217,7 @@ func TestStart_EffectiveHarnessIsTheResolvedHarness(t *testing.T) {
 	if switched.Harness != "switched-h" || !switched.ConfigResolved {
 		t.Errorf("switched start: Harness = %q, ConfigResolved = %v; want the resolved harness switched-h", switched.Harness, switched.ConfigResolved)
 	}
-	// Known divergence (addendum v15 sections 5 and 17): the container's
+	// Known divergence (addendum v15 sections 5 and 18): the container's
 	// SCION_HARNESS (scion.harness on telemetry and usage points) is still
 	// the stored name, and selects the usage-parsing rules.
 	if containerHarness != "generic" {

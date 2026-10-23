@@ -4068,6 +4068,13 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// An agent delegated credential is served only on the route routeGuard
+	// admitted for agent.read, for the agent in its path
+	// (.design/agent-delegation.md §11.1).
+	if !admitDelegatedHandler(w, r, opAgentRead, agentResource(agent)) {
+		return
+	}
+
 	// If the caller is an agent, enforce project isolation.
 	//
 	// This check MUST run before s.authorize: cross-project access is answered
@@ -4218,6 +4225,9 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 		return agentEditAccess{}
 	}
 	access := agentEditAccess{CanUpdate: slices.Contains(caps.Actions, string(ActionUpdate))}
+	if access.CanUpdate {
+		access.Broker = s.agentBrokerStartSupport(ctx, agent)
+	}
 	if !access.CanUpdate || !slices.Contains(caps.Actions, string(ActionLifecycle)) || s.authzService == nil {
 		return access
 	}
@@ -4542,7 +4552,25 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// config leaves empty; the cleared paths it sends with each start
 		// let the broker remove them (ptone/scion#3906).
 		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
-		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
+		// The provision-rendered keys changed since creation, which a
+		// broker with changedFields re-renders at start; for such a broker
+		// they take effect at the next start, not at the next
+		// reincarnation (ptone/scion#3982).
+		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
+		// A resources edit that drops a stored sub-field keeps that
+		// sub-field at start (the merge applies only non-empty values) and
+		// records no clear, so it waits for the next reincarnation
+		// (ptone/scion#5676). Added after the clears are recorded:
+		// recording it would revert the whole resources value.
+		cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, presentConfigKeys)
+		// A broker with clearedFields applies the clears recorded above at
+		// the next start (ptone/scion#4890), so only the rest are held.
+		// What is reported applied follows what was recorded above.
+		sup := s.agentBrokerStartSupport(ctx, agent)
+		provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
+		cleared = sup.heldClearEdits(cleared, rawFields, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, presentConfigKeys))
+		removed = sup.heldRemovals(removed, merged.ClearedFields)
+		warnings = append(warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
@@ -5187,8 +5215,23 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 		if !eventTargetsAgent(evt, agent) {
 			continue
 		}
-		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID,
-			store.ScheduledEventCancelled, nil, "target agent deleted"); err != nil {
+		// The cancel only changes an event that is still pending. An event
+		// that fired or was claimed after the list above keeps its status.
+		if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID,
+			"target agent deleted"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// No longer pending: it fired or was claimed between
+				// the list and this cancel. That is a normal outcome,
+				// so keep its status and leave its timer alone. If this
+				// replica is firing it, the timer stays registered until
+				// fireEvent returns, and StopEventTimer would cancel the
+				// context of the running handler and of its final
+				// status write. If another replica claimed it, this
+				// replica's timer loses the claim and skips by itself.
+				s.agentLifecycleLog.Debug("Scheduled event no longer pending; not cancelled",
+					"event_id", evt.ID, "agent_id", agent.ID)
+				continue
+			}
 			s.agentLifecycleLog.Warn("Failed to cancel scheduled event",
 				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
 			continue

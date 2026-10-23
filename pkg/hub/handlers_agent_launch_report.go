@@ -200,9 +200,25 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// HTTPStatus — in both of those cases the agent may still be relying on
 	// its current credential. The launch kind decides the rule
 	// (launchFailureRevokeReason).
+	// settled: the run-intent hook settled this report's start launch and
+	// published the settled row (settleFailedProvisionedStart publishes), so
+	// the handler's own publish of the pre-settle row is skipped.
+	settled := false
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		if reason := launchFailureRevokeReason(&updated); reason != "" {
 			revokeAgentCredentialsBestEffort(ctx, s.store, agentID, reason)
+		}
+		// A failed start of a provisioned agent returns it to rest, as a
+		// synchronous failed start does (ptone/scion#4669, design D-c "Run
+		// intent"). Only on the report that ended the launch (end reason
+		// failed): a failed report that refines a launch the reaper had
+		// already ended (timed_out/lost, settled then) must not settle
+		// again, since a newer start may hold the intent now; it only
+		// restores the message shape.
+		if updated.LaunchEndReason == store.LaunchEndReasonFailed {
+			settled = s.settleFailedStartLaunch(ctx, &updated)
+		} else {
+			s.reapplyStartLaunchFailureMessage(ctx, &updated)
 		}
 	}
 
@@ -255,8 +271,9 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 
 	// design §3.7 step 7: publish after every applied change to step, phase,
 	// message or launch state. Keepalive-only writes (Changed == false) are
-	// not published.
-	if answer.Changed {
+	// not published. A settled start launch was published by the settle,
+	// with its settled intent and message.
+	if answer.Changed && !settled {
 		s.events.PublishAgentStatus(ctx, &updated)
 	}
 }
@@ -325,8 +342,8 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 //     credential. This differs on purpose from a synchronous restart of a
 //     stopped agent, which can revoke through DispatchAgentStart.
 //
-// Only create launches exist until asynchronous start ships, so the start
-// and restart rules are not reached yet.
+// Start and restart launches exist once asynchronous start is on
+// (hub.async_agent_start).
 func launchFailureRevokeReason(a *store.Agent) string {
 	switch a.LaunchKind {
 	case store.LaunchKindStart:

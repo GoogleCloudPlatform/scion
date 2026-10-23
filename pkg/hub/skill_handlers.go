@@ -1148,7 +1148,9 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 
 	// b) Parse multipart form: 10 MB in memory, rest spills to disk.
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	cleanup, err := parseMultipartUpload(r, 10<<20)
+	defer cleanup()
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds 50MB limit", nil)
@@ -1157,7 +1159,6 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		BadRequest(w, "Failed to parse multipart form: "+err.Error())
 		return
 	}
-	defer func() { _ = r.MultipartForm.RemoveAll() }()
 
 	// c) Extract and validate version.
 	version := r.FormValue("version")

@@ -114,7 +114,12 @@ describe('workspace metadata', () => {
     const gates = Array.from({ length: 8 }, () => deferred<Response>());
     fetcher.mockReset();
     for (const gate of gates) fetcher.mockReturnValueOnce(gate.promise);
+    // The reopen waits the first reconnect's full jitter; a zero draw makes
+    // it the next timer turn.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     source.dispatchEvent(new Event('reconnect'));
+    expect(Source.instances).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const replacement = Source.instances[1];
     expect(fetcher).not.toHaveBeenCalled();
     replacement.open();
