@@ -675,6 +675,8 @@ func directlyUnderProjectConfigs(dir string) bool {
 // checkErr, a *workspaceConfigChangedError, that the entry was not in the
 // recorded state before (the re-link did not run) or changed in a way the
 // broker does not make; relinkErr is relinkSharedProjectIdentity's error.
+// When both checkErr and relinkErr are set, the callers return checkErr and
+// log relinkErr.
 func (s *Server) relinkSharedProjectIdentityChecked(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) (lockErr, checkErr, relinkErr error) {
 	if projectPath == "" {
 		return nil, nil, s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)

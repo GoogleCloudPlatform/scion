@@ -358,6 +358,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			return nil, fmt.Errorf("project workspace lock: %w", lockErr)
 		}
 		if checkErr != nil {
+			if err != nil {
+				s.agentLifecycleLog.Warn("project re-link: the re-link also failed; returning the workspace record conflict", "agent", in.Name, "relink_error", err.Error())
+			}
 			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
 			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
 		}

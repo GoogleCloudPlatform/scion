@@ -1031,6 +1031,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if checkErr != nil {
+			if err != nil {
+				s.agentLifecycleLog.Warn("project re-link: the re-link also failed; returning the workspace record conflict", "agent", req.Name, "relink_error", err.Error())
+			}
 			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
 			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
 			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")

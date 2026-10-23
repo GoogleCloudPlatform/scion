@@ -202,36 +202,160 @@ func TestRelinkRecord_StartAndRestartCarry(t *testing.T) {
 	}
 }
 
-// TestRelinkRecord_EntryChangedBeforeCarryRefused: a .scion entry changed by
-// someone else between the record check and the re-link is refused as a
-// changed entry, nothing is carried over and the change is not recorded.
-func TestRelinkRecord_EntryChangedBeforeCarryRefused(t *testing.T) {
-	h := newHubNativeRelink(t)
-	if err := recordWorkspaceConfigState(h.root, relinkNewID); err != nil {
+// recordFile returns the bytes of the broker's record of the workspace's
+// .scion entry (one record file per workspace path; the Hub project ID it
+// is for is inside it), or nil when there is none.
+func (h *hubNativeRelink) recordFile(t *testing.T) []byte {
+	t.Helper()
+	_, recordPath, ok, err := workspaceConfigRecordFor(h.root, relinkNewID)
+	if err != nil || !ok {
+		t.Fatalf("workspaceConfigRecordFor: ok=%v err=%v", ok, err)
+	}
+	data, err := os.ReadFile(recordPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
+	return data
+}
+
+// TestRelinkRecord_EntryChangedBeforeCarryRefused: a .scion entry changed by
+// someone else between the record check and the re-link is refused as a
+// changed entry, nothing is carried over and the change is not recorded,
+// under each record state a real flow leaves before the carry:
+//   - create: the create path's checked identity alignment, run for the
+//     current ID, has recorded the entry as it found it (a directory whose
+//     project-id names the earlier ID);
+//   - start or restart: no record for the current ID, the only record being
+//     the one an earlier start kept for the earlier ID;
+//   - no record at all.
+//
+// withCheckedWorkspaceConfig compares the entry after the re-link with the
+// state it observed at its check (not with the stored record) and accepts
+// only a change the broker makes, so the refusal does not depend on a
+// record for the current ID.
+func TestRelinkRecord_EntryChangedBeforeCarryRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, h *hubNativeRelink)
+		// recordID is the Hub project ID of the record the seed leaves
+		// ("" for none); the record always holds the entry as found (a
+		// directory whose project-id names the earlier ID).
+		recordID string
+	}{
+		{name: "create: alignment recorded the entry for the current ID", seed: func(t *testing.T, h *hubNativeRelink) {
+			if err := h.srv.alignHubManagedProjectIdentityChecked(context.Background(), "agent-uuid-relink", h.root, "proj", relinkNewID); err != nil {
+				t.Fatal(err)
+			}
+		}, recordID: relinkNewID},
+		{name: "start: record only for the earlier ID", seed: func(t *testing.T, h *hubNativeRelink) {
+			if err := recordWorkspaceConfigState(h.root, relinkOldID); err != nil {
+				t.Fatal(err)
+			}
+		}, recordID: relinkOldID},
+		{name: "no record", seed: func(*testing.T, *hubNativeRelink) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHubNativeRelink(t)
+			tc.seed(t, h)
+			before := h.recordFile(t)
+			if tc.recordID == "" {
+				if before != nil {
+					t.Fatalf("seed left a record: %s", before)
+				}
+			} else {
+				var rec workspaceConfigRecord
+				if err := json.Unmarshal(before, &rec); err != nil {
+					t.Fatalf("seeded record: %v", err)
+				}
+				if rec.HubProjectID != tc.recordID || rec.State.Kind != workspaceConfigDirectory || rec.State.Detail != relinkOldID {
+					t.Fatalf("seeded record = %+v, want a directory with project-id %s for %s", rec, relinkOldID, tc.recordID)
+				}
+			}
+			afterWorkspaceConfigCheckHook = func() {
+				if err := config.WriteProjectID(h.dotScion, relinkOtherID); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { afterWorkspaceConfigCheckHook = nil })
+
+			lockErr, checkErr, relinkErr := h.srv.relinkSharedProjectIdentityChecked(context.Background(), h.root, "proj", relinkNewID, relinkAgent, []string{relinkOldID}, false)
+			if lockErr != nil || relinkErr != nil {
+				t.Fatalf("lockErr=%v relinkErr=%v", lockErr, relinkErr)
+			}
+			var ce *workspaceConfigChangedError
+			if !errors.As(checkErr, &ce) {
+				t.Fatalf("expected a changed-entry refusal, got %v", checkErr)
+			}
+			if got := h.projectID(t); got != relinkOtherID {
+				t.Fatalf("project-id = %q, want the other writer's %q", got, relinkOtherID)
+			}
+			h.assertNotCarried(t)
+			if after := h.recordFile(t); string(after) != string(before) {
+				t.Fatalf("the record changed: before %q, after %q", before, after)
+			}
+		})
+	}
+}
+
+// changeEntryOnCheck makes the n-th withCheckedWorkspaceConfig check of the
+// test rewrite the workspace's project-id to relinkOtherID, as another
+// writer would between that check and the write it guards.
+func (h *hubNativeRelink) changeEntryOnCheck(t *testing.T, n int) {
+	t.Helper()
+	calls := 0
 	afterWorkspaceConfigCheckHook = func() {
-		if err := config.WriteProjectID(h.dotScion, relinkOtherID); err != nil {
-			t.Error(err)
+		calls++
+		if calls == n {
+			if err := config.WriteProjectID(h.dotScion, relinkOtherID); err != nil {
+				t.Error(err)
+			}
 		}
 	}
 	t.Cleanup(func() { afterWorkspaceConfigCheckHook = nil })
+}
 
-	lockErr, checkErr, relinkErr := h.srv.relinkSharedProjectIdentityChecked(context.Background(), h.root, "proj", relinkNewID, relinkAgent, []string{relinkOldID}, false)
-	if lockErr != nil || relinkErr != nil {
-		t.Fatalf("lockErr=%v relinkErr=%v", lockErr, relinkErr)
+// assertEntryConflict checks a 409 carrying the workspace record refusal
+// and, when code is set, that error code.
+func assertEntryConflict(t *testing.T, w *httptest.ResponseRecorder, code string) {
+	t.Helper()
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "not in the state the Runtime Broker recorded") {
+		t.Fatalf("expected 409 with the workspace record refusal, got %d: %s", w.Code, w.Body.String())
 	}
-	var ce *workspaceConfigChangedError
-	if !errors.As(checkErr, &ce) {
-		t.Fatalf("expected a changed-entry refusal, got %v", checkErr)
+	if code != "" && !strings.Contains(w.Body.String(), `"code":"`+code+`"`) {
+		t.Fatalf("expected error code %q: %s", code, w.Body.String())
 	}
-	if got := h.projectID(t); got != relinkOtherID {
-		t.Fatalf("project-id = %q, want the other writer's %q", got, relinkOtherID)
-	}
-	h.assertNotCarried(t)
-	if rec := h.record(t); rec.State.Detail != relinkOldID {
-		t.Fatalf("the change was recorded: %+v", rec)
-	}
+}
+
+// TestRelinkRecord_HTTPEntryChangedDuringCarryRefused: through the create
+// and start handlers, a .scion entry changed by someone else between the
+// re-link's record check and the re-link is answered with the workspace
+// record 409, and nothing is carried over. On create the re-link's check is
+// the second (after the identity alignment's); on start it is the first.
+func TestRelinkRecord_HTTPEntryChangedDuringCarryRefused(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		h := newHubNativeRelink(t)
+		h.changeEntryOnCheck(t, 2)
+		assertEntryConflict(t, h.create(t), ErrCodeConflict)
+		if got := h.projectID(t); got != relinkOtherID {
+			t.Fatalf("project-id = %q, want the other writer's %q", got, relinkOtherID)
+		}
+		h.assertNotCarried(t)
+		if h.mgr.provisionCalled {
+			t.Fatal("Provision ran after the refusal")
+		}
+	})
+	t.Run("start", func(t *testing.T) {
+		h := newHubNativeRelink(t)
+		h.changeEntryOnCheck(t, 1)
+		assertEntryConflict(t, h.startOrRestart(t, "start"), "")
+		if got := h.projectID(t); got != relinkOtherID {
+			t.Fatalf("project-id = %q, want the other writer's %q", got, relinkOtherID)
+		}
+		h.assertNotCarried(t)
+	})
 }
 
 // TestRelinkRecord_EntryChangedBeforeCheckRefused: a .scion entry that no
@@ -255,8 +379,8 @@ func TestRelinkRecord_EntryChangedBeforeCheckRefused(t *testing.T) {
 
 // TestRelinkRecord_HubManagedWithoutSlugNotCarried: on a hub-managed
 // workspace a re-link without the dispatch slug carries nothing over, even
-// when the earlier config records the workspace and the scope allows an
-// unrecorded config.
+// though the earlier config records this workspace (which would otherwise
+// allow the carry).
 func TestRelinkRecord_HubManagedWithoutSlugNotCarried(t *testing.T) {
 	h := newHubNativeRelink(t)
 	if err := h.srv.relinkSharedProjectIdentity(context.Background(), h.root, "", relinkNewID, relinkAgent, []string{relinkOldID}, true); err != nil {
