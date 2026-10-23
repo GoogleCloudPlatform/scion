@@ -1459,8 +1459,8 @@ jobs:
       # 6.6-6.8 GB used, so it runs at Go's and golangci-lint's defaults (no
       # -c=1, GOGC, GOMEMLIMIT or --concurrency throttles any more). Trade-off:
       # pkg/hub's _test.go files are no longer linted by errcheck,
-      # staticcheck or ineffassign (go vet still covers them in the hub
-      # shard jobs); see hack/LINT-CONVENTIONS.md.
+      # staticcheck, unused or ineffassign (govet is still covered: go vet
+      # checks them in the hub shard jobs); see hack/LINT-CONVENTIONS.md.
       # The script's own tests run first (bash only, about a second).
       # GOLANGCI_LINT_CACHE is exported because the action sets it only
       # in its own process; it must match the path the action restores

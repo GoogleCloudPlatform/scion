@@ -125,8 +125,9 @@ What this changes for pkg/hub (`./pkg/hub` only; its sub-packages keep
 full test-file lint):
 
 - **Not linted any more:** pkg/hub's `_test.go` files, for errcheck,
-  staticcheck (including `unused`) and ineffassign. `go vet` still checks
-  them (`make vet-hub-shard`, in the hub shard CI jobs).
+  staticcheck, unused and ineffassign (golangci-lint v2's other default
+  linters). govet is still covered: `go vet` checks them
+  (`make vet-hub-shard`, in the hub shard CI jobs).
 - **`unused` reports test-only helpers.** pkg/hub has helpers in non-test
   files that only its tests call (47 when the split landed, for example
   `applySettingsUpdates` in admin_settings.go or `verifyTestAdminAuditChain`
@@ -137,7 +138,7 @@ full test-file lint):
   expect an `unused` report: move the helper into a `_test.go` file (or delete
   it if nothing needs it).
 
-**Tracking item (open):** move pkg/hub's existing test-only helpers from
+**Tracking item (open, ptone/scion#5878):** move pkg/hub's existing test-only helpers from
 non-test files into `_test.go` files, so that a full (non-diff) lint of
 pkg/hub reports none of them. List them with
 `golangci-lint run --tests=false --enable-only=unused ./pkg/hub`. This touches

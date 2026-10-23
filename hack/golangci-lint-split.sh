@@ -22,8 +22,9 @@
 # nothing reads. That one compile peaks at ~14.5 GB RSS: it exhausted the
 # 16 GB ubuntu-latest runner (ptone/scion#4208) and dominated the lint job's
 # time. Without it the whole lint takes ~3 min and peaks at ~7 GB.
-# The cost: errcheck, staticcheck (incl. unused) and ineffassign no longer
-# see pkg/hub's _test.go files (go vet still does, in the hub shard jobs), and
+# The cost: errcheck, staticcheck, unused and ineffassign no longer see
+# pkg/hub's _test.go files (govet still does, through go vet in the hub shard
+# jobs), and
 # unused reports pkg/hub helpers that only tests use (see
 # hack/LINT-CONVENTIONS.md, "golangci-lint: two passes").
 #
@@ -39,15 +40,18 @@
 # Used by .github/workflows/ci.yml (lint job) and make golangci-lint.
 #
 # Exit: pass 1's exit code if non-zero, else pass 2's (both passes always
-# run, so one run reports every issue). Otherwise, following
-# hack/LINT-CONVENTIONS.md: 3 = a required tool is missing or go list failed;
-# 4 = the package list is not what the split assumes (no ./pkg/hub, or nothing
-# else), so nothing was linted; 64 = bad arguments.
+# run, so one run reports every issue). golangci-lint's own codes pass through
+# unchanged, and those include 3 (failure) and 4 (timeout). Before any pass
+# runs, the script itself can exit, following hack/LINT-CONVENTIONS.md, with:
+# 3 = a required tool is missing or go list failed; 4 = the package list is not
+# what the split assumes (no ./pkg/hub, ./pkg/hub twice, nothing else, an
+# empty or outside directory), so nothing was linted; 64 = bad arguments. The
+# script's own errors are on stderr, prefixed "golangci-lint-split:", and no
+# "pass 1" line was printed; that is how to tell them from a pass's 3 or 4.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 root=$(pwd -P)
-cd "$root"
 
 hub=./pkg/hub
 golangci_lint=${GOLANGCI_LINT:-golangci-lint}
@@ -79,8 +83,11 @@ fi
 rest=()
 nhub=0
 while IFS= read -r d; do
-  [ -n "$d" ] || continue
   case "$d" in
+    "")
+      echo "golangci-lint-split: go list returned an empty directory line" >&2
+      exit 4
+      ;;
     "$root") rel=. ;;
     "$root"/*) rel="./${d#"$root"/}" ;;
     *)
