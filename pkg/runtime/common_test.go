@@ -1445,7 +1445,7 @@ func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
 	}
 }
 
-func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
+func TestWorktreeGitMounts_AppliesToLinkedProject(t *testing.T) {
 	// The narrowing now applies to linked projects too (previously it
 	// was hub-native-only). The container must not be able to write the linked
 	// checkout's hooks/info, and its config is served from the private copy.
@@ -1492,7 +1492,7 @@ func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
 	}
 }
 
-func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
+func TestWorktreeGitMounts_AppliesToPodman(t *testing.T) {
 	// Podman gets the same read-only-root layout as docker (read-only .git root,
 	// read-write objects/refs/logs overlays, private config over .git/config).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
@@ -1521,8 +1521,9 @@ func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
 
 func TestAppleWorktreeGitMounts_ReadOnlyGitWithRwOverlays(t *testing.T) {
 	// On the Apple runtime (which cannot bind single files) the
-	// whole .git is bound read-only and only objects/refs/logs and the agent's
-	// own worktree admin dir are overlaid read-write; .git/config is read-only by
+	// whole .git is bound read-only and the read-write overlays (objects, refs, logs,
+	// lfs, the agent's own worktree admin dir, and rr-cache only when it already
+	// exists) are layered on top; .git/config is read-only by
 	// inheritance, so there is no private-config bind (and none is required).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	gitDir := filepath.Join(repoRoot, ".git")
@@ -1612,8 +1613,9 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 }
 
 func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
-	// For a hub-native worktree-per-agent base, Docker runs layer read-only mounts
-	// over the sharer registry directory and this worktree's admin back-link file.
+	// For a hub-native worktree-per-agent base, the sharer registry directory is
+	// read-only by inheritance from the read-only .git root (no separate overlay),
+	// and this worktree's admin back-link file is bound read-only.
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	gitDir := filepath.Join(repoRoot, ".git")
 	backLinkDir := filepath.Join(gitDir, "worktrees", "agent-1")
@@ -1658,8 +1660,9 @@ func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
 }
 
 func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
-	// The sharer-registry and worktree-admin back-link read-only mounts also apply
-	// to LOCAL (non-hub-managed / linked) bases, not only hub-native ones.
+	// The worktree-admin back-link read-only mount, and the sharer registry's
+	// read-only-by-inheritance under the read-only .git root, also apply to LOCAL
+	// (non-hub-managed / linked) bases, not only hub-native ones.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 

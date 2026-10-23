@@ -345,10 +345,11 @@ and refs from). Only the paths an in-container git must write are re-opened read
 The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already exists — Scion never
 creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
 `.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
-the private copy has credential-bearing settings stripped and is pre-seeded so that `git push` and
-`git push -u origin <branch>` for the agent's own branch exit 0. Under the read-only `.git` git cannot
-persist the upstream (it logs a "could not lock config file" warning), but the upstream is pre-seeded,
-so the push still targets the right remote and branch.
+the private copy has credential-bearing settings stripped and is pre-seeded (the agent's branch
+upstream plus `push.autoSetupRemote`) so that a bare `git push` exits 0 — without the pre-seed a bare
+push fails with "no upstream branch". `git push -u origin <branch>` exits 0 and reaches the remote
+either way; under the read-only `.git` git cannot persist the upstream and prints `error: could not
+lock config file` (an error, not a warning), but the push still succeeds.
 That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
 commands do not try to write lock files in the read-only root. Personal git preferences inside the
 agent go in the agent's own global git config, which is writable, not in the repository config. On the
@@ -359,6 +360,10 @@ credential helper in your global git config). An Apple agent whose repository `.
 credential-bearing settings is refused at start, naming the sections that must be cleared; use a
 credential helper in your global git config, or run the project on a runtime that provides the private
 config copy.
+
+A shared-workspace git project (agents sharing one checkout) is refused outright on the Apple runtime,
+which cannot bind the per-agent private `.git/config`; use a worktree-per-agent project or a non-Apple
+runtime.
 
 Commit, branch creation, fetch, pull, push and rebase work normally. Because the `.git` root is
 read-only, a few operations that write a lock or state file directly in it do not work inside an agent:

@@ -107,7 +107,7 @@ func TestSeedPrivateGitConfig_ReplacesSymlink(t *testing.T) {
 	}
 }
 
-func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
+func TestSeedPrivateGitConfig_MissingBaseSeedsDefaultsOnly(t *testing.T) {
 	agentDir := t.TempDir()
 	dest, err := seedPrivateGitConfig(filepath.Join(t.TempDir(), "nope"), agentDir, "agent-x")
 	if err != nil {
@@ -144,16 +144,21 @@ func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
 	}
 }
 
-// Under the agent's real read-only .git root, `git push -u` for the agent's own
-// branch exits 0 and the push reaches the remote, even though git cannot persist
-// the upstream (it logs "could not lock config file" / "unable to write upstream
-// branch configuration" and continues). This is the mitigation: the upstream is
-// pre-seeded, so the push targets the right remote/branch and succeeds without
-// needing a writable config. The config is left unchanged because the write is
-// blocked, not because git skips it.
-func TestSeedPrivateGitConfig_PushUExitsZeroUnderReadOnlyGit(t *testing.T) {
+// Under the agent's real read-only .git root, the pre-seed keeps normal pushes
+// working:
+//   - a BARE `git push` exits 0 because the upstream is pre-seeded; without the
+//     seed a bare push exits 128, "no upstream branch" — this is what the seed buys.
+//   - `git push -u origin <branch>` exits 0 and reaches the remote regardless of
+//     the seed, and cannot persist the upstream under the read-only .git (git
+//     reports an error locking the config), but the push still succeeds.
+//
+// The repo config is left unchanged because the write is blocked, not skipped.
+func TestSeedPrivateGitConfig_PushUnderReadOnlyGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the read-only .git bits, so this test cannot exercise the read-only path")
 	}
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -208,20 +213,28 @@ func TestSeedPrivateGitConfig_PushUExitsZeroUnderReadOnlyGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(gitRoot, 0o755) })
+
+	// The seed's actual effect: a BARE `git push` exits 0 under the read-only .git
+	// because the upstream is already set. Without the seed this is what fails, so
+	// this is the assertion that exercises the seed.
+	barePush := exec.Command("git", "push")
+	barePush.Dir = repo
+	if out, err := barePush.CombinedOutput(); err != nil {
+		t.Fatalf("bare `git push` should exit 0 under the read-only .git with the upstream pre-seeded, got: %v\n%s", err, out)
+	}
+	// `git push -u` exits 0 and reaches the remote regardless of the seed; it just
+	// cannot persist the upstream here.
 	cmd := exec.Command("git", "push", "-u", "origin", "agent-x")
 	cmd.Dir = repo
-	out, err := cmd.CombinedOutput()
-	// push -u exits 0 even though the upstream write is blocked by the read-only root.
-	if err != nil {
-		t.Fatalf("git push -u should exit 0 under the read-only .git with the upstream pre-seeded, got: %v\n%s", err, out)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git push -u should exit 0 under the read-only .git, got: %v\n%s", err, out)
 	}
-	// The push actually reached the remote (the mitigation keeps push working).
+	// The push reached the remote.
 	ls := exec.Command("git", "-C", bare, "rev-parse", "--verify", "refs/heads/agent-x")
 	if lsout, lserr := ls.CombinedOutput(); lserr != nil {
-		t.Fatalf("push -u did not create the branch on the remote: %v\n%s", lserr, lsout)
+		t.Fatalf("push did not create the branch on the remote: %v\n%s", lserr, lsout)
 	}
-	// The config was not persisted (the read-only root blocked the write); this is
-	// the documented limitation, not "git skipped the write".
+	// The config was not persisted (the read-only root blocked the write).
 	after, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
 	if string(before) != string(after) {
 		t.Errorf("read-only .git config changed unexpectedly:\nbefore:\n%s\nafter:\n%s", before, after)

@@ -136,12 +136,12 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	// the /workspace mount and must be shadowed by the agents tmpfs.
 	modes = append(modes, mode{"shared workspace, in-project agent dir (restart resolution)", inProject,
 		withPaths(filepath.Join(external, "home"), root, root, nil)})
-	// The Apple runtime no longer reaches a mount layout for these cases: the
-	// outside-root fallback is refused (the full repo root is never mounted),
-	// and the shared-workspace layout is refused because Apple cannot bind the
-	// per-agent read-only .git/config it needs. Both refusals are asserted
-	// below, so Apple contributes no run-arg mounts here and the containment
-	// property holds vacuously.
+	// Neither case reaches a mount layout here: the outside-root workspace is
+	// UNREGISTERED, so it is refused on EVERY runtime (a registered outside worktree
+	// would instead start, on Apple too); and the shared-workspace layout is refused
+	// on Apple specifically, which cannot bind the per-agent read-only .git/config.
+	// Both refusals are asserted below, so Apple contributes no run-arg mounts here
+	// and the containment property holds vacuously.
 	apple := func(cfg RunConfig) RunConfig {
 		cfg.RuntimeName = appleContainerRuntimeName
 		return cfg

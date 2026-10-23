@@ -89,13 +89,14 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 
 	// The repository config is read-only to the agent (the copy is bound
 	// read-only), so `git config --local` and any config write cannot persist.
-	// Pre-seed the agent's own branch upstream and push.autoSetupRemote so the push
-	// targets the right remote and branch: `git push` then needs no config write
-	// and exits 0, and `git push -u <origin> <branch>` also exits 0 — under the
-	// read-only .git it cannot record the upstream (git logs a "could not lock
-	// config file" warning) but the push itself succeeds, because the upstream is
-	// already pre-seeded. Personal preferences go in the agent's writable global
-	// git config in the agent home.
+	// Pre-seed the agent's own branch upstream and push.autoSetupRemote so a BARE
+	// `git push` (no arguments) finds the upstream already set and exits 0; without
+	// the seed a bare `git push` fails with "no upstream branch" (exit 128).
+	// `git push -u <origin> <branch>` exits 0 and reaches the remote with or without
+	// the seed; under the read-only .git it cannot persist the upstream and git
+	// reports an error locking the config (an error, not a warning), but the push
+	// still succeeds. Personal preferences go in the agent's writable global git
+	// config in the agent home.
 	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL
@@ -127,17 +128,18 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 var conservativeBranchName = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // privateConfigUpstreamSeed returns the git config text appended to the private
-// read-only repository config so normal push flows exit 0:
+// read-only repository config so a BARE `git push` (no arguments) exits 0:
 // push.autoSetupRemote=true, and (when branch is known) the agent's own branch
-// upstream set to origin. For an ordinary branch name the block is written in
-// git's canonical form, so `git push -u` finds the upstream already set; under
-// the read-only .git git cannot persist any upstream update (it logs a lock
-// warning) but the push still exits 0. A git refname may legally contain a double
-// quote; such a name is escaped in both the subsection header and the merge value
-// (a bare quote would otherwise break the [branch "..."] header and every key
-// after it); git may attempt a one-time canonical rewrite of such a header, which
-// the read-only .git prevents without failing the push. An empty branch appends
-// only the push setting.
+// upstream set to origin. With the branch upstream already set, a bare push finds
+// it and needs no config write; without any upstream config a bare push fails with
+// "no upstream branch". `git push -u` succeeds with or without this seed; the seed
+// is for the bare-push flow. For an ordinary branch name the block is written in
+// git's canonical form. A git refname may legally
+// contain a double quote; such a name is escaped in both the subsection header and
+// the merge value (a bare quote would otherwise break the [branch "..."] header
+// and every key after it); git may attempt a one-time canonical rewrite of such a
+// header, which the read-only .git prevents without failing the push. An empty
+// branch appends only the push setting.
 func privateConfigUpstreamSeed(branch string) []byte {
 	var b strings.Builder
 	// Disable automatic gc and maintenance: under the read-only .git root they

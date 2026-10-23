@@ -735,7 +735,7 @@ func TestK8sCreateSecretProviderClass_RecreateOnAlreadyExists(t *testing.T) {
 	assertRecreateHandle(t, rec, "create:secretproviderclasses/scion-agent-rs", old.GetUID(), stored)
 }
 
-// TestRun_NFSAgentDir_AsyncPath: the worktree-mode provisioning pod is
+// TestRun_NFSAgentDir_AsyncPath: the clone-per-agent provisioning pod is
 // created the same way with launch hooks set, its handle is reported, and
 // a readiness failure (not a cancelled start) keeps the pod, as on the
 // synchronous path.

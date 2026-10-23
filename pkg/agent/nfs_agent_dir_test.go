@@ -549,8 +549,9 @@ func TestRemoveNFSAgentFiles_AfterSwitchToSharedPlain(t *testing.T) {
 }
 
 // A labelless, pre-existing Kubernetes agent that nfsKeepSharedCheckout keeps on
-// the project's shared checkout is exactly the shape the runtime refuses at start
-// (see pkg/runtime k8sSharedRepoShapeRefusal and TestK8sSharedRepoShapeRefusal).
+// the project's shared checkout is the sticky shared-checkout shape. (The runtime
+// refuses git-backed or undetermined shapes at start; see pkg/runtime
+// k8sSharedRepoShapeRefusal and TestK8sSharedRepoShapeRefusal.)
 // Deleting such a refused agent must leave the shared checkout in place, so any
 // work on it stays recoverable from the workspace storage.
 func TestRemoveNFSAgentFiles_RefusedStickyAgent_LeavesSharedCheckout(t *testing.T) {

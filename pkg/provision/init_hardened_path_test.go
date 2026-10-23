@@ -25,9 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The Kubernetes init container provisions the workspace by running
-// `sciontool provision`, i.e. ProvisionShared -> runGitClone on the host side.
-// This guards that that provisioning clone goes through the hardened path, so a
+// The host-side provisioning path (`sciontool provision`, i.e. ProvisionShared
+// -> runGitClone) clones the repository for a shared checkout. This guards that
+// that provisioning clone goes through the hardened path, so a
 // future change that bypasses it (dropping HostGitEnv, or the LFS skip-smudge) is
 // caught:
 //   - GIT_LFS_SKIP_SMUDGE=1 is set (git-lfs never contacts an endpoint named in a

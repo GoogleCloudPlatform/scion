@@ -389,10 +389,12 @@ func TestBindReadOnlyCreateFirstFile_FailsClosed(t *testing.T) {
 }
 
 // Functional check of the read-only-.git-root layout with real git: with the
-// common .git root made read-only and only the overlay paths writable
-// (objects/refs/logs and the agent's own worktree admin dir), an in-container git
-// can still commit, create and delete a branch, fetch, pull and push, while it
-// cannot create a new root-level file such as .git/commondir. This simulates ONLY
+// common .git root made read-only and its subdirectories left writable (the real
+// container overlays objects/refs/logs and the agent's own worktree admin dir
+// read-write), an in-container git can still commit, create a branch, fetch, pull
+// and push, but it CANNOT delete a branch (that needs packed-refs.lock in the
+// read-only root, which fails cleanly) or create a new root-level file such as
+// .git/commondir. This simulates ONLY
 // the read-only .git root — the real container additionally binds hooks/, info/,
 // objects/info and the private .git/config read-only, which are not simulated
 // here. It exercises the worktree layout; the outside-root fallback mounts a
@@ -714,7 +716,7 @@ func TestReadOnlyGitRoot_RrCacheOnlyIfExists(t *testing.T) {
 	}
 }
 
-// F2: readSmallConfigFile accepts a file exactly at the cap and refuses one a
+// readSmallConfigFile accepts a file exactly at the cap and refuses one a
 // single byte over it, so the whole config is covered by the credential check.
 // Reverting it to read only up to the cap (the silent-truncation form) makes the
 // over-cap case return the truncated prefix with no error — this test goes red.
@@ -743,7 +745,7 @@ func TestReadSmallConfigFile_SizeCap(t *testing.T) {
 	}
 }
 
-// F2: an Apple start is refused when a [credential] section sits past the size
+// An Apple start is refused when a [credential] section sits past the size
 // cap — the over-cap refusal keeps a credential beyond the cap from going
 // unchecked.
 func TestAppleRepoConfigWithSecrets_OverCapRefused(t *testing.T) {
@@ -771,9 +773,11 @@ func TestAppleRepoConfigWithSecrets_OverCapRefused(t *testing.T) {
 }
 
 // Structural: every read-write overlay source in the read-only-root layout is
-// reached through the single ensureOverlayDir refusal, so a symlink planted at any
-// of them is refused (fail closed) rather than followed. If a future overlay were
-// bound without going through ensureOverlayDir, adding its name here would catch it.
+// reached through the single ensureOverlayDir refusal — EXCEPT the agent's own
+// worktree admin overlay, whose source is the broker-trusted trustedWorktreeAdminName,
+// not ensureOverlayDir — so a symlink planted at an ensureOverlayDir source is refused
+// (fail closed) rather than followed. A future overlay bound without going through
+// ensureOverlayDir would be caught by adding its name here.
 func TestReadOnlyGitRoot_AllOverlaysRefuseSymlink(t *testing.T) {
 	// objects/info is a nested read-only source (narrowObjectsInfo) in this layout;
 	// the rest are the read-write overlay roots.

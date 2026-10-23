@@ -78,7 +78,7 @@ func bindTargetIndex(binds []layoutBind, target string) int {
 	return -1
 }
 
-// TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig covers (A): a
+// TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig covers the
 // workspace outside the repository root that IS a registered worktree. Only the
 // base .git (narrowed) and the workspace are mounted — never the whole main
 // checkout — and the worktree's own project .scion is bound read-only. The
@@ -181,9 +181,9 @@ func TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig(t *testing.T)
 }
 
 // nestedProjectConfigCase sets up a workspace whose project configuration lives
-// in a SUBDIRECTORY (<ws>/sub/.scion), returning the run config. layout selects
-// the shared-plain branch (RepoRoot == Workspace) or the config-only branch
-// (RepoRoot == "").
+// in a SUBDIRECTORY (<ws>/sub/.scion), returning the run config. sharedPlain
+// selects the shared-plain branch (RepoRoot == Workspace) or the config-only
+// branch (RepoRoot == ""); withAgents adds a nested agents/ dir to mask.
 func nestedProjectConfigCase(t *testing.T, rt string, sharedPlain, withAgents bool) RunConfig {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
@@ -354,7 +354,7 @@ func TestBuildCommonRunArgs_ConfigOnlyNestedProjectConfigReadOnly(t *testing.T) 
 }
 
 // TestBuildCommonRunArgs_TemplateWorkspacePlainSubdirRefused covers behaviour
-// item (4): a template-supplied /workspace pointing at a plain subdirectory of a
+// A template-supplied /workspace pointing at a plain subdirectory of a
 // repository (not a registered worktree) is refused. There is no broker-recorded
 // worktree admin for a plain subdirectory, so no per-agent private .git surface
 // can be built, and the start fails closed rather than mounting the enclosing
@@ -411,7 +411,7 @@ func registeredOutsideWorktree(t *testing.T) (main, ws string) {
 	return main, ws
 }
 
-// assertNoRepoRootExposure pins the (A) negative property: no mount targets
+// assertNoRepoRootExposure pins the negative property: no mount targets
 // /repo-root (other than /repo-root/.git) and no mount source is the main
 // checkout root or its .scion, and no tmpfs lands under /repo-root. A
 // rw-/repo-root mutant turns this red.
@@ -445,7 +445,7 @@ func assertNoRepoRootExposure(t *testing.T, cfg RunConfig, main string) {
 }
 
 // The outside-root fallback binds a nested <ws>/sub/.scion read-only and
-// masks its agents/ (when present; never created), on docker and Apple, while
+// masks its agents/ (when present), on docker and Apple, while
 // still exposing nothing under /repo-root. (Removing ONLY the fallback
 // applyNestedProjectConfig call turns this red.)
 func TestBuildCommonRunArgs_FallbackNestedProjectConfigReadOnly(t *testing.T) {

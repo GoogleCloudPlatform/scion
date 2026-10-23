@@ -147,7 +147,7 @@ func buildCheckedGitDir(t *testing.T) (gitDir, outside string) {
 
 // TestNarrowSources_RefuseSymlink plants a symlink at each git-metadata bind
 // source (by the function that resolves it) and asserts the start is refused.
-// This is the S1/S3 coverage checklist by function: narrowGitAdminMounts,
+// Coverage checklist by function: narrowGitAdminMounts,
 // narrowSharerRegistryMounts, narrowObjectsInfo, narrowWorktreesDir,
 // narrowModuleAdminDirs.
 func TestNarrowSources_RefuseSymlink(t *testing.T) {
@@ -194,7 +194,7 @@ func TestNarrowSources_RefuseSymlink(t *testing.T) {
 	}
 }
 
-// TestNarrowSources_FileCreateRefusesDanglingSymlink is the S2 write-vector check:
+// TestNarrowSources_FileCreateRefusesDanglingSymlink is the write-vector check:
 // a create-first FILE source that is a symlink to a nonexistent target is refused
 // and nothing is created at the target (no broker-uid host write through a link).
 func TestNarrowSources_FileCreateRefusesDanglingSymlink(t *testing.T) {

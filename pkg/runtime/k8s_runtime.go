@@ -4781,8 +4781,7 @@ func NFSWorktreeContainerPath(name string) string {
 // start — NFSWorktreeName, NFSAgentDirName, NFSAgentDirEmpty and the
 // SCION_WORKSPACE_GIT env hint; the ephemeral GitCloneForInit can only add a
 // refusal, never lift one. So the refusal fires on EVERY start of a shared-repo
-// agent,
-// including a bare restart; and an NFS agent whose shape is unset/unknown is
+// agent, including a bare restart; and an NFS agent whose shape is unset/unknown is
 // refused fail-closed rather than brought up on a writable shared checkout.
 func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
 	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
