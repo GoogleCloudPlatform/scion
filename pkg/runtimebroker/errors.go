@@ -112,6 +112,11 @@ const (
 	// agent the user started again. Nothing was done.
 	ErrCodeStaleDispatch = "stale_dispatch"
 
+	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
+	// project on shared project storage whose share is not mounted on the
+	// broker (ptone/scion#5823).
+	ErrCodeProjectStorageUnavailable = "project_storage_unavailable"
+
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
 	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
@@ -798,6 +803,12 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
+	}
+	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
+		// Its message names only the share's mount point (operator
+		// configuration) and the remedy.
+		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
+		return sce.Status
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
 		code := sce.Code

@@ -41,6 +41,10 @@ const nfsWorkspaceExportHint = "workspace_storage nfs needs the broker to be abl
 // existing one only counts as prepared when it has them too.
 const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
 
+// ErrProjectShareNotMounted refuses a start whose project storage share is
+// not mounted on this broker.
+var ErrProjectShareNotMounted = errors.New("project storage share is not mounted on this broker")
+
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
 // (<subpath_root>/<projectID>/provision, see runtime.NFSProvisionStateSubPath),
@@ -68,9 +72,9 @@ const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
 //
 // It is a no-op unless the runtime is Kubernetes and the workspace is
 // mounted from an NFS PV claim. When the broker has no local mount of the
-// export (the host base does not exist), the previous behavior is kept and
-// the kubelet creates the directories; this is logged so the export
-// requirement is visible. The same fallback applies to a directory the
+// export (the host base does not exist), the start is refused with
+// ErrProjectShareNotMounted: the broker reads and creates project storage
+// through its own mount (fs-cleanup-arch ruling Q6). A directory the
 // broker is not allowed to create (EACCES, EPERM or EROFS): it is logged as
 // a warning and left to the node. Any other failure (a symlink, a regular
 // file in the path, an unexpected path) returns an error so the create
@@ -186,10 +190,11 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 	info, err := os.Stat(resolved.HostBase)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the workspace directory "+
-				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
-				"host_base", resolved.HostBase, "sub_path", workspaceLeaf)
-			return false, false, nil
+			// A broker reads and creates project storage through its own
+			// mount of the share; without it the start is refused rather
+			// than left to the node (fs-cleanup-arch ruling Q6,
+			// ptone/scion#5823).
+			return false, false, fmt.Errorf("%w (%s; mount it or set nfs.auto_mount)", ErrProjectShareNotMounted, resolved.HostBase)
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
 	}

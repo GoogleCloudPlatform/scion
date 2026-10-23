@@ -1821,6 +1821,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 		}
 	}
 
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
+
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
 		projectPaths = append(projectPaths, pd)

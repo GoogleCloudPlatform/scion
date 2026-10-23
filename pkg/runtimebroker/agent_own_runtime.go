@@ -332,7 +332,9 @@ func (s *Server) knownAgentProjectDir(id, projectID, projectPathHint string) str
 		return ""
 	}
 	var candidates []string
-	if dir, err := findAgentInHubManagedProjects(id, projectID); err == nil && dir != "" {
+	if dir := s.findAgentInSharedProject(id, projectID); dir != "" {
+		candidates = append(candidates, dir)
+	} else if dir, err := findAgentInHubManagedProjects(id, projectID); err == nil && dir != "" {
 		candidates = append(candidates, dir)
 	}
 	if dir := linkedProjectAgentDir(projectPathHint, id, projectID); dir != "" {

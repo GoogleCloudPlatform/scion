@@ -963,6 +963,41 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// On a shared storage backend a hub-managed project runs from the
+	// Layout's project root (sharedHubProjectPath). Its configuration is
+	// hub-seeded and never written here: the record of its .scion entry is
+	// checked and kept, nothing is aligned.
+	sharedProjectPath, sharedLayout, sharedErr := "", false, (*startContextError)(nil)
+	if req.ProjectSlug != "" && req.ProjectPath == "" {
+		sharedProjectPath, sharedLayout, sharedErr = s.sharedHubProjectPath(ctx, req.ProjectID)
+	}
+	if sharedErr != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sharedErr))
+		status := s.writeStartContextError(w, sharedErr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sharedErr.Error())
+		return
+	}
+	if sharedLayout {
+		req.ProjectPath = sharedProjectPath
+		if _, statErr := os.Lstat(filepath.Join(sharedProjectPath, "workspace")); os.IsNotExist(statErr) {
+			req.workspaceAbsentAtAdmission = true
+		}
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() {
+			checkErr = s.withCheckedWorkspaceConfig(req.ProjectPath, req.ProjectID, req.ProjectSlug, func() {})
+		}, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -8692,6 +8727,9 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 // equals projectID, so a stale or wrong hint can never redirect deletion to
 // another project's files.
 func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	if dir := s.findAgentInSharedProject(agentName, projectID); dir != "" {
+		return dir, nil
+	}
 	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
 	if err != nil || resolved != "" || projectID == "" {
 		return resolved, err
@@ -8924,6 +8962,15 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			detail := "not checked yet"
 			if ok {
 				detail = st.Message
+			}
+			// The broker reads and creates project storage through its
+			// own mount of the share: on a shared Layout an unmounted share
+			// refuses the dispatch (fs-cleanup-arch ruling Q6,
+			// ptone/scion#5823).
+			if s.config.StorageLayout.Backend.Shared() {
+				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+				return fmt.Errorf(sharedProjectUnmountedFmt, filepath.Join(nfsCfg.MountRoot, shareID))
 			}
 			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
 				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)

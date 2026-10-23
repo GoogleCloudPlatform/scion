@@ -512,15 +512,16 @@ func TestEnsureNFSWorkspaceLeaf_NoOpOutsideKubernetesNFS(t *testing.T) {
 	}
 }
 
-// Without a broker-side mount of the export, the previous behavior is kept:
-// no error, nothing created (the node creates the directory at pod start).
-func TestEnsureNFSWorkspaceLeaf_ExportNotMountedKeepsPreviousBehavior(t *testing.T) {
+// Without a broker-side mount of the export the start is refused and
+// nothing is created (fs-cleanup-arch ruling Q6, ptone/scion#5823).
+func TestEnsureNFSWorkspaceLeaf_ExportNotMountedRefuses(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "not-mounted")
 	res := resolveTestNFSWorkspace(t, mountRoot)
 
 	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
-	require.NoError(t, err)
-	assert.False(t, preCreated, "nothing was created, so the chown must stay strict")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.False(t, preCreated)
 	_, err = os.Stat(mountRoot)
 	assert.True(t, os.IsNotExist(err), "the mount root must never be created")
 }
@@ -602,16 +603,14 @@ func TestStartNFSWorkspace_PreCreatesWorkspaceBeforeRun(t *testing.T) {
 	assert.Equal(t, "projects/"+testNFSWorkspaceProjectID+"/workspace", cfg.NFSSubPath)
 }
 
-// Without a broker mount the previous behavior is kept: Start succeeds,
-// nothing is created, and the chown stays strict.
-func TestStartNFSWorkspace_ExportNotMounted_StaysStrict(t *testing.T) {
+// Without a broker mount Start is refused before the runtime runs.
+func TestStartNFSWorkspace_ExportNotMounted_Refused(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 
-	existedAtRun, ranCount, cfg, err := startNFSWorkspaceAgent(t, "kubernetes", mountRoot)
-	require.NoError(t, err)
-	require.Equal(t, 1, ranCount)
-	assert.False(t, existedAtRun)
-	assert.False(t, cfg.NFSWorkspacePreCreated)
+	_, ranCount, _, err := startNFSWorkspaceAgent(t, "kubernetes", mountRoot)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, 0, ranCount, "the runtime is never called")
 }
 
 // Non-Kubernetes runtimes are unaffected: nothing is created for them and

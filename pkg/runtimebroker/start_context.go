@@ -302,6 +302,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Hub-managed project path resolution ---
+	// On a shared storage backend: the Layout's project root
+	// (sharedHubProjectPath), checked, never written.
+	if in.ProjectSlug != "" && in.ProjectPath == "" {
+		sharedPath, shared, sce := s.sharedHubProjectPath(ctx, in.ProjectID)
+		if sce != nil {
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			return nil, sce
+		}
+		if shared {
+			in.ProjectPath = sharedPath
+		}
+	}
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -2291,7 +2303,8 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	// from the slug before buildStartContext) is checked; a linked
 	// project's own ProjectPath keeps its existing resolution.
 	globalDir, err := config.GetGlobalDir()
-	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+	hubManagedPath := err == nil && filepath.Clean(in.ProjectPath) == filepath.Join(globalDir, "projects", in.ProjectSlug)
+	if !hubManagedPath && !isSharedHubProjectRoot(in.ProjectPath) {
 		return ""
 	}
 	if in.WorkspaceStoragePath != "" {
@@ -2308,6 +2321,16 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 // project directory and creates its split storage directories. The caller
 // holds the workspace lock on in.ProjectPath.
 func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A shared-backend project root's configuration is hub-seeded and
+	// never written by a broker (sharedHubProjectPath checked it). Only the
+	// broker-local external agents root is created.
+	if isSharedHubProjectRoot(in.ProjectPath) {
+		scionDir := filepath.Join(in.ProjectPath, config.DotScion)
+		if root, err := config.AgentsRootForProject(scionDir, false, in.ProjectID); err == nil {
+			_ = os.MkdirAll(root, 0755)
+		}
+		return
+	}
 	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 	// records the hub project ID as its identity; see
 	// recordHubProjectIdentity. Done before the checks below, which
