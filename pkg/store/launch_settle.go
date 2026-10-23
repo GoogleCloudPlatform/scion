@@ -56,10 +56,13 @@ func WithRunAdoptionSource(ctx context.Context, source string) context.Context {
 }
 
 // RunAdoptionSourceFrom returns the source recorded by
-// WithRunAdoptionSource, or AdoptionSourceHeartbeat when there is none:
-// the heartbeat stranded-run adoption calls AdoptAgentRunID without it.
+// WithRunAdoptionSource, or AdoptionSourceHeartbeat when there is none (the
+// heartbeat stranded-run adoption calls AdoptAgentRunID without it) or the
+// recorded value is not one of the closed set of adoption sources, so a
+// contract-invalid adoption_source can never reach the wire.
 func RunAdoptionSourceFrom(ctx context.Context) string {
-	if s, _ := ctx.Value(runAdoptionSourceKey{}).(string); s != "" {
+	switch s, _ := ctx.Value(runAdoptionSourceKey{}).(string); s {
+	case AdoptionSourceCAS, AdoptionSourceHeartbeat:
 		return s
 	}
 	return AdoptionSourceHeartbeat

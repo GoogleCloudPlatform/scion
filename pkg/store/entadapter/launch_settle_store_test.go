@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package entadapter
 
 import (
@@ -190,6 +192,8 @@ func TestRunAdoptionSourceFrom(t *testing.T) {
 	assert.Equal(t, store.AdoptionSourceHeartbeat, store.RunAdoptionSourceFrom(ctx))
 	assert.Equal(t, store.AdoptionSourceCAS, store.RunAdoptionSourceFrom(store.WithRunAdoptionSource(ctx, store.AdoptionSourceCAS)))
 	assert.Equal(t, store.AdoptionSourceHeartbeat, store.RunAdoptionSourceFrom(store.WithRunAdoptionSource(ctx, "")))
+	assert.Equal(t, store.AdoptionSourceHeartbeat, store.RunAdoptionSourceFrom(store.WithRunAdoptionSource(ctx, "not-a-source")),
+		"a value outside the closed set falls back to the default")
 }
 
 // TestLifecycleStore3b_SettleObservedAsCAS: both launch-report settle

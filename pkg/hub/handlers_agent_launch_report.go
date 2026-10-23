@@ -226,7 +226,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// not settled.
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 &&
 		(answer.Result == store.LaunchReportResultApplied || completedReportSettles(answer, &updated)) {
-		s.settleLaunchedRun(ctx, &updated, req.Agent, answer.Result, sr.LaunchID, brokerID)
+		s.settleLaunchedRun(ctx, &updated, req.Agent, launchSettleReport{Result: answer.Result, LaunchID: sr.LaunchID, BrokerID: brokerID})
 	}
 
 	// The broker's effective configuration of the run (WP1 slice 3
@@ -277,6 +277,15 @@ func completedReportSettles(answer store.LaunchReportAnswer, row *store.Agent) b
 		row.LaunchRunID != "" && row.RunID == row.LaunchRunID
 }
 
+// launchSettleReport is what settleLaunchedRun needs of the report: the
+// store's answer, the report's launch, and the authenticated reporting
+// broker (never the row's broker).
+type launchSettleReport struct {
+	Result   string
+	LaunchID string
+	BrokerID string
+}
+
 // settleLaunchedRun settles the run of a launch whose succeeded report the
 // store answered (see the caller). row is the agent as that report's
 // transaction left it, so row.RunID is the run the hub recorded for the
@@ -291,7 +300,7 @@ func completedReportSettles(answer store.LaunchReportAnswer, row *store.Agent) b
 // An applied report swaps with store.AdoptAgentRunID. A completed report
 // swaps with store.SettleLaunchedRun, which also requires the row's
 // launch, launch_run_id, broker (the authenticated reporting broker,
-// brokerID) and generation to be unchanged. Both are observed as a
+// rep.BrokerID) and generation to be unchanged. Both are observed as a
 // run_adopt with adoption_source cas: the Applied path through the
 // context annotation, set only on the context passed to that call.
 //
@@ -307,7 +316,7 @@ func completedReportSettles(answer store.LaunchReportAnswer, row *store.Agent) b
 // delete only a run-scoped refusal or extra 404s, and a completed resend of
 // the report can settle it later. On a swap, row's RunID and
 // PreviousRunIDs are updated to match.
-func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo, result, launchID, brokerID string) {
+func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo, rep launchSettleReport) {
 	if info == nil || info.RunID == "" {
 		return
 	}
@@ -318,12 +327,12 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	}
 	var swapped bool
 	var err error
-	if result == store.LaunchReportResultCompleted {
+	if rep.Result == store.LaunchReportResultCompleted {
 		swapped, err = s.store.SettleLaunchedRun(ctx, row.ID, store.LaunchSettleFence{
-			LaunchID:       launchID,
+			LaunchID:       rep.LaunchID,
 			FromRunID:      row.LaunchRunID,
 			ToRunID:        info.RunID,
-			BrokerID:       brokerID,
+			BrokerID:       rep.BrokerID,
 			Generation:     row.Generation,
 			UnchangedSince: *row.RunIDUpdatedAt,
 		})
@@ -333,12 +342,12 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
-			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", result, "error", err)
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", rep.Result, "error", err)
 		return
 	}
 	if !swapped {
 		s.agentLifecycleLog.Debug("Launch report: another run, launch or broker is recorded, or a delete holds the agent; not settling the launched run",
-			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", result)
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "result", rep.Result)
 		return
 	}
 	minted := row.RunID
@@ -346,7 +355,7 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 	row.PreviousRunIDs = nil
 	if info.RunID != minted {
 		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
-			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID, "result", result)
+			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID, "result", rep.Result)
 	}
 }
 

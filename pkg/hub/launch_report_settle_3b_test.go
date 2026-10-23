@@ -349,6 +349,7 @@ func TestLaunchReportSettle3b_HeartbeatThenApplied(t *testing.T) {
 	beforeApplied := time.Now()
 	assert.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, s3bRunB))
 	f.assertSettledOnB(t)
+	f.assertSameValueAppliedSettle(t)
 
 	e := f.adoptionEvent(t)
 	assert.Equal(t, s3bRunB, e.LaunchID)
@@ -415,8 +416,21 @@ func TestLifecycleEvents_AdoptionSourcePerCaller(t *testing.T) {
 		f.recordBrokerRunCredential(t)
 		f.heartbeatAdopt(t)
 		assert.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, s3bRunB))
+		f.assertSameValueAppliedSettle(t)
 		e := f.adoptionEvent(t)
 		assert.Equal(t, s3bRunM, e.AdoptedFromLaunchID)
 		assert.Equal(t, store.AdoptionSourceHeartbeat, e.AdoptionSource)
 	})
+}
+
+// assertSameValueAppliedSettle checks that the applied report's settle
+// ran as a same-value swap: the heartbeat adopted Rm -> Rb, then the
+// applied settle swapped Rb -> Rb (review r1 O1: the previous runs were
+// already cleared by the heartbeat, so the row alone cannot show it).
+func (f *settle3bFixture) assertSameValueAppliedSettle(t *testing.T) {
+	t.Helper()
+	assert.Equal(t, []adoptCall{
+		{from: s3bRunM, to: s3bRunB, swapped: true}, // the heartbeat adoption
+		{from: s3bRunB, to: s3bRunB, swapped: true}, // the applied same-value settle
+	}, f.hooks.adoptCalls())
 }

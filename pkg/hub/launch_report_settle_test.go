@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,33 @@ type launchSettleStore struct {
 	// SettleLaunchedRun without delegating.
 	beforeSettle func(ctx context.Context, agentID string)
 	settleErr    error
+
+	// adopts records every AdoptAgentRunID call (the applied settle and
+	// the heartbeat adoption), which always delegates.
+	adoptMu sync.Mutex
+	adopts  []adoptCall
+}
+
+// adoptCall is one recorded AdoptAgentRunID call and its result.
+type adoptCall struct {
+	from, to string
+	swapped  bool
+}
+
+// AdoptAgentRunID delegates and records the call.
+func (w *launchSettleStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	ok, err := w.Store.AdoptAgentRunID(ctx, agentID, expectedRunID, newRunID, unchangedSince)
+	w.adoptMu.Lock()
+	w.adopts = append(w.adopts, adoptCall{from: expectedRunID, to: newRunID, swapped: ok && err == nil})
+	w.adoptMu.Unlock()
+	return ok, err
+}
+
+// adoptCalls returns the recorded AdoptAgentRunID calls.
+func (w *launchSettleStore) adoptCalls() []adoptCall {
+	w.adoptMu.Lock()
+	defer w.adoptMu.Unlock()
+	return append([]adoptCall(nil), w.adopts...)
 }
 
 // SettleLaunchedRun runs beforeSettle, or fails with settleErr, while the
