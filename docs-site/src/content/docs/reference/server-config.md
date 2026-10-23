@@ -161,6 +161,8 @@ The Hub reads every one of these sources once, at startup. A change applies afte
 
 `server.hub.gcp_project_id` is settable only in the settings file or the environment: the server-config API refuses it in every mode.
 
+**Upgrade note:** earlier releases ignored `server.hub.gcp_project_id` in `settings.yaml`. A Hub whose `settings.yaml` already sets it now uses that value at the next start: Hub metrics export turns on while `server.hub.observability.metrics_enabled` is unset, metrics and traces go to that project, and service account minting and the Policy Troubleshooter use it instead of the metadata server project. `SCION_SERVER_HUB_GCPPROJECTID` still wins. Remove the key, or set it to the project you want, before upgrading.
+
 **Startup log.** The Hub logs one line for each exporter. The line says whether the exporter is on or off and why, and names the export project when it is on. For example:
 
 ```text
