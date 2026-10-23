@@ -331,14 +331,12 @@ export class ChatStarsController extends EventTarget {
     }
     this.refreshing = true;
     try {
-      let epoch: number;
       // The first pass, and a pass after another invalidation, refetch every
       // known state; a pass that only stale or failed IDs asked for
       // refetches just those.
       let full = true;
       do {
         this.refreshAgain = false;
-        epoch = this.invalidations;
         const ids = full
           ? new Set([...this.states.keys(), ...this.stale, ...this.failed])
           : new Set([...this.stale, ...this.failed]);
@@ -347,11 +345,10 @@ export class ChatStarsController extends EventTarget {
         await this.fetchStates([...ids]);
         full = this.refreshAgain;
       } while (this.refreshAgain || this.stale.size > 0);
-      // The known states caught up with the last invalidation only if
-      // every request of the refresh succeeded.
-      if (epoch === this.invalidations && this.failed.size === 0) {
-        this.appliedInvalidations = epoch;
-      }
+      // The loop ends only after a pass with no new invalidation, so the
+      // known states caught up with the last one if every request of the
+      // refresh succeeded.
+      if (this.failed.size === 0) this.appliedInvalidations = this.invalidations;
     } finally {
       this.refreshing = false;
     }
