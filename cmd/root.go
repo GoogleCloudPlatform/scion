@@ -15,7 +15,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
@@ -52,6 +51,12 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// A command that must not write (server preflight) turns the
+		// no-write switch on before anything below loads settings. Execute
+		// already did, for the real entry point; this covers callers that
+		// run rootCmd directly.
+		applyNoWriteGuard(cmd)
+
 		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
 		// returns, so check them first: a later hook error, such as running
 		// outside a project, must not hide a flag conflict.
@@ -223,9 +228,9 @@ return an error instead of blocking.`,
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
 		}
 
-		// Check for dev auth usage and warn if Hub is enabled
+		// A dev token that is not sent to the selected hub: say so once
 		if !hubOnly {
-			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
+			printDevTokenNotSentNote(cmd.ErrOrStderr(), projectPath)
 		}
 
 		// Hand the normalized root flag values to the command (see
@@ -237,6 +242,17 @@ return an error instead of blocking.`,
 	},
 }
 
+// prepareInvocation finds the command args name (a read-only tree walk:
+// no flags are parsed, nothing executes) and runs the hooks that must come
+// before any settings load: the no-write guard, then the legacy-env
+// warning and global layout migration hook.
+func prepareInvocation(args []string) *cobra.Command {
+	target, _, _ := rootCmd.Find(args)
+	applyNoWriteGuard(target)
+	maybeWarnRemovedLegacyEnv(target)
+	return target
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
@@ -246,13 +262,12 @@ func Execute() {
 	// runs too late for that. rootCmd.Find is a read-only tree walk (no
 	// flags are parsed, nothing executes), so it is safe to call before
 	// ExecuteC(). Skipped for "start" under the "server"/"runtime-broker"
-	// subtree; see maybeWarnRemovedLegacyEnv.
+	// subtree, and for "server preflight"; see maybeWarnRemovedLegacyEnv.
 	var cliArgs []string
 	if len(os.Args) > 1 {
 		cliArgs = os.Args[1:]
 	}
-	target, _, _ := rootCmd.Find(cliArgs)
-	maybeWarnRemovedLegacyEnv(target)
+	target := prepareInvocation(cliArgs)
 
 	// Decide early whether an inherited SCION_DEBUG applies. This call is
 	// load-bearing: the settings loads below and anything else that runs
@@ -568,72 +583,31 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with a hub and
-// prints a warning on stderr (the command's error writer), never on stdout,
-// so it cannot mix into JSON or other machine-read output.
-// This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
+// printDevTokenNotSentNote prints one note on stderr when a dev token set
+// explicitly (SCION_DEV_TOKEN or SCION_DEV_TOKEN_FILE) would be the CLI's
+// credential for the selected hub, but the hub is not a loopback hub, so the
+// token is not sent (isLocalhostEndpoint). It explains why such a hub then
+// sees an unauthenticated request. Nothing is printed for a loopback hub,
+// without a selected hub, when another credential (a login, an agent token,
+// SCION_HUB_TOKEN) applies, or when the token comes only from the
+// ~/.scion/dev-token file, which the local workstation server writes and a
+// user of a remote hub does not mean to send.
+func printDevTokenNotSentNote(stderr io.Writer, projectPath string) {
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" || isLocalhostEndpoint(endpoint) {
+		return
+	}
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
-		// If we can't load settings, skip the warning
 		return
 	}
-
-	// No hub selected: nothing to warn about.
-	if !hubConfigured() {
+	if getAuthInfo(settings, endpoint).MethodType != "devauth" {
 		return
 	}
-
-	// Explicit auth: a token from the environment, or the broker's own
-	// token. Tokens in settings files are not read.
-	if os.Getenv("SCION_HUB_TOKEN") != "" || os.Getenv("SCION_HUB_API_KEY") != "" {
+	if _, source := apiclient.ResolveDevTokenWithSource(); source == apiclient.DevTokenSourceDefaultFile {
 		return
 	}
-	if settings.Hub != nil && settings.Hub.BrokerToken != "" {
-		return
-	}
-
-	// Check if OAuth credentials are available (from scion hub auth login)
-	endpoint := invocationHubEndpoint()
-	if endpoint != "" && credentials.IsAuthenticated(endpoint) {
-		// OAuth credentials available, not using dev auth
-		return
-	}
-
-	// The local workstation server on loopback is reached with its dev token
-	// by design (it is the default hub of every workstation), so the banner
-	// would show on every command without telling the user anything. It
-	// stays for every other hub.
-	if isLocalWorkstationEndpoint(endpoint) {
-		return
-	}
-
-	// Check if a dev token would be used
-	devToken, devTokenSource := apiclient.ResolveDevTokenWithSource()
-	if devToken == "" {
-		// No dev token available
-		return
-	}
-
-	// Only warn if the dev token is explicitly set via environment variable,
-	// or if the hub endpoint is a local address. A stale ~/.scion/dev-token file
-	// should not trigger a warning when connecting to a remote hub, since
-	// the remote hub likely doesn't use dev-auth.
-	if devTokenSource != "SCION_DEV_TOKEN env var" {
-		if !isLocalEndpoint(endpoint) {
-			return
-		}
-	}
-
-	// Dev auth is being used with Hub enabled - print warning to stderr
-	banner := fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)
-	if f, ok := stderr.(*os.File); ok {
-		banner = util.ColorFor(f, banner)
-	} else {
-		banner = util.StripANSI(banner)
-	}
-	_, _ = fmt.Fprint(stderr, banner)
+	_, _ = fmt.Fprintf(stderr, "Note: the dev token is used only for a local hub; it is not sent to %s.\n", config.RedactURL(endpoint))
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent

@@ -86,6 +86,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/runtime-brokers":         "authenticated", // List/create runtime brokers
 	"/api/v1/runtime-brokers/":        "authenticated", // Runtime broker routes
 	"/api/v1/runtime-brokers/connect": "broker-hmac",   // WebSocket control channel — broker HMAC
+	"/api/v1/attachment-deliveries/":  "broker-hmac",   // Attachment delivery capability redemption (broker credential, one 404)
 
 	// ── Templates ──────────────────────────────────────────────────────
 	"/api/v1/templates":  "authenticated", // List/create templates
@@ -244,8 +245,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
-	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
-	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities
@@ -262,8 +263,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search
-	"/api/v1/chat/attachments":    "authenticated", // Chat attachments
-	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID
+	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
+	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
 
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA

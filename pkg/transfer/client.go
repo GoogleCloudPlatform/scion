@@ -25,6 +25,9 @@ import (
 	"strings"
 )
 
+// maxErrorBodyBytes bounds the diagnostic excerpt from a failed HTTP transfer.
+const maxErrorBodyBytes = 1024
+
 // Client handles file transfers using signed URLs.
 type Client struct {
 	// HTTPClient is the HTTP client used for transfers.
@@ -87,8 +90,8 @@ func (c *Client) UploadFileWithMethod(ctx context.Context, signedURL, method str
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -145,8 +148,8 @@ func (c *Client) DownloadFile(ctx context.Context, signedURL string) ([]byte, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 

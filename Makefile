@@ -12,11 +12,15 @@ LDFLAGS            := $(shell ./hack/version.sh)
 SCIONTOOL_LDFLAGS  := $(shell ./hack/version.sh github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands)
 CONTAINER_OS  := linux
 CONTAINER_ARCH := $(shell if [ "$$(uname -m)" = "x86_64" ]; then echo amd64; else echo arm64; fi)
-GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
+# golangci-lint built from source with the go-tools#1839 patch, the same
+# binary CI runs (cr-ci/runner/golangci-lint/README.md). Override with
+# GOLANGCI_LINT=/path/to/golangci-lint to use another binary.
+GOLANGCI_LINT_PATCHED := $(BUILD_DIR)/tools/golangci-lint
+GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-custom golangci-lint web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -215,7 +219,7 @@ test-hub-shards:
 build-hub-shard:
 	@./hack/hubshard/shard.sh build $(SHARD) $(if $(NOSQLITE),--nosqlite)
 
-## vet-hub-shard: go vet pkg/hub test shard SHARD=K with -tags no_sqlite and -tags 'integration volume_test tzcontract'
+## vet-hub-shard: go vet pkg/hub test shard SHARD=K with -tags no_sqlite and -tags 'integration tzcontract'
 # The shards' vets together cover every pkg/hub file that make lint and
 # make vet-integration cover (hubshard-parity checks it). CI vets pkg/hub
 # this way (lint-ci and vet-integration-ci leave the package out).
@@ -555,7 +559,7 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^TestMaintenanceCommandsSchemaShadowGuard_Postgres$$' \
+		-run '^(TestMaintenanceCommandsSchemaShadowGuard_Postgres|TestServerPreflight_Postgres)$$' \
 		./cmd/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-cmd.log; \
 	status=$$(cat "$$st" 2>/dev/null); \
@@ -568,6 +572,10 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if ! grep -qE '^--- PASS: TestMaintenanceCommandsSchemaShadowGuard_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
 		echo "ERROR: the maintenance-command search_path guard Postgres test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestServerPreflight_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: the server preflight Postgres test did not run." >&2; \
 		exit 1; \
 	fi
 
@@ -735,11 +743,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test tzcontract')
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration tzcontract')
 # Catches build breaks in integration-tagged files that other vet/lint
 # targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags 'integration volume_test tzcontract' ./...
+	@go vet -tags 'integration tzcontract' ./...
 
 ## lint-ci: lint without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
 lint-ci:
@@ -748,8 +756,8 @@ lint-ci:
 
 ## vet-integration-ci: vet-integration without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
 vet-integration-ci:
-	@pkgs=$$($(call non_hub_pkgs,integration volume_test tzcontract)) || exit 1; \
-	go vet -tags 'integration volume_test tzcontract' $$pkgs
+	@pkgs=$$($(call non_hub_pkgs,integration tzcontract)) || exit 1; \
+	go vet -tags 'integration tzcontract' $$pkgs
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
@@ -882,15 +890,23 @@ check-sqlite-coverage:
 check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults check-sqlite-coverage
 	@echo "All custom checks passed."
 
-## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
-golangci-lint:
+## golangci-lint-build: Build the patched golangci-lint CI uses into ./build/tools/ (skipped when up to date)
+golangci-lint-build:
+	@./cr-ci/runner/golangci-lint/build.sh $(GOLANGCI_LINT_PATCHED)
+
+## golangci-lint: Run golangci-lint on new issues only (builds the patched binary first, unless GOLANGCI_LINT is set)
+golangci-lint: $(if $(filter $(GOLANGCI_LINT_PATCHED),$(GOLANGCI_LINT)),golangci-lint-build)
 	@if [ ! -x "$(GOLANGCI_LINT)" ]; then \
-		echo "ERROR: golangci-lint not found. Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
+		echo "ERROR: golangci-lint not found at $(GOLANGCI_LINT)"; \
 		exit 1; \
 	fi
-	@echo "Running golangci-lint (new issues vs main)..."
-	@GOGC=50 $(GOLANGCI_LINT) run --new-from-rev=main ./...
+	@echo "Running golangci-lint (new issues vs main; two passes, see hack/golangci-lint-split.sh)..."
+	@GOLANGCI_LINT=$(GOLANGCI_LINT) ./hack/golangci-lint-split.sh --new-from-rev=main
 	@echo "golangci-lint passed."
+
+## golangci-lint-split-selftest: Test hack/golangci-lint-split.sh (bash only, stubs; no lint)
+golangci-lint-split-selftest:
+	@./hack/test-golangci-lint-split.sh
 
 ## web: Build the web frontend
 web:
@@ -987,7 +1003,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast test-fixture-coverage build
+ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 

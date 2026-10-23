@@ -36,11 +36,12 @@
       "fields": [
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
-        "experiments.hub.chat_thread_groups:boolean",
         "experiments.hub.flat_runtime_brokers:boolean",
+        "experiments.web.agent_badges:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.gcs_links:boolean",
+        "experiments.web.sse_hidden_tab_close:boolean",
         "experiments:object"
       ]
     },

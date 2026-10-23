@@ -222,27 +222,24 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 //
-// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// bucket, runtimes, harnesses and profiles are not stored at the project
 // layer: GET never returns them, and a PUT that sets any of them (to a
 // non-null value) is refused with 400. They are configured in server or
-// Runtime Broker settings.
+// Runtime Broker settings, so this type has no fields for them
+// (ptone/scion#5360).
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
 	// keeps the stored value and an empty string clears it, so a client that
 	// does not manage the profile (the web settings page) cannot wipe it.
-	ActiveProfile          *string                `json:"activeProfile,omitempty"`
-	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
-	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
-	DefaultModel           string                 `json:"defaultModel,omitempty"`
-	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
-	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
-	AutoExposePortsEnabled *bool                  `json:"autoExposePortsEnabled,omitempty"`
-	Bucket                 *BucketConfig          `json:"bucket,omitempty"`
-	Runtimes               map[string]interface{} `json:"runtimes,omitempty"`
-	Harnesses              map[string]interface{} `json:"harnesses,omitempty"`
-	Profiles               map[string]interface{} `json:"profiles,omitempty"`
+	ActiveProfile          *string `json:"activeProfile,omitempty"`
+	DefaultTemplate        string  `json:"defaultTemplate,omitempty"`
+	DefaultHarnessConfig   string  `json:"defaultHarnessConfig,omitempty"`
+	DefaultHarnessAuth     string  `json:"defaultHarnessAuth,omitempty"`
+	DefaultModel           string  `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel   *int    `json:"defaultThinkingLevel,omitempty"`
+	TelemetryEnabled       *bool   `json:"telemetryEnabled,omitempty"`
+	AutoExposePortsEnabled *bool   `json:"autoExposePortsEnabled,omitempty"`
 
 	// Default agent limits
 	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
@@ -351,13 +348,6 @@ type ProjectResourceList struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// BucketConfig represents cloud storage configuration.
-type BucketConfig struct {
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
-	Prefix   string `json:"prefix,omitempty"`
-}
-
 // RuntimeBroker represents a runtime broker from the Hub API.
 type RuntimeBroker struct {
 	ID              string              `json:"id"`
@@ -418,10 +408,23 @@ type BrokerCapabilities struct {
 	// AgentMoveRecreate indicates the broker can be the target of a forced
 	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
+	// is its counterpart).
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982;
+	// store.BrokerCapabilities.ChangedFields is its counterpart).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890;
+	// store.BrokerCapabilities.ClearedFields is its counterpart).
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start

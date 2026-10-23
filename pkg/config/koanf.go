@@ -104,25 +104,29 @@ func sameDirForComparison(a, b string) bool {
 // This is useful when you need to read just one project's settings file in isolation,
 // for example to get the project's hub.endpoint without the broker's own env vars
 // overriding it.
+//
+// The result is the read-only Settings view of the versioned loader
+// (settingsViewOf) for that one file: a legacy-format file is converted to
+// the v1 shape first, and a v1 file's hub.project_id is carried to
+// Hub.ProjectID (ptone/scion#5427). No environment variable is read.
 func LoadSettingsFromDir(dir string) (*Settings, error) {
-	k := koanf.New(".")
-	if _, err := loadSettingsFile(k, dir); err != nil {
-		return nil, err
-	}
-	settings := &Settings{
-		Runtimes:  make(map[string]RuntimeConfig),
-		Harnesses: make(map[string]HarnessConfig),
-		Profiles:  make(map[string]ProfileConfig),
-	}
-	settingsUnused, err := decodeCollectingUnused(k, settings)
+	s, err := loadSingleDirSettingsView(dir)
 	if err != nil {
 		return nil, err
 	}
-	warnSettingsUnusedKeys(k, settingsUnused, func() bool {
-		hasVersioned, _ := detectDirSettingsFormat(dir)
-		return hasVersioned
-	}, "settings", settingsHierarchySources(dir))
-	return settings, nil
+	// The unused-key warning reads the file as written. It is only a
+	// warning: a file the legacy probe cannot decode gets none, and the
+	// load does not fail for it.
+	raw := koanf.New(".")
+	if _, err := loadSettingsFile(raw, dir); err == nil {
+		if settingsUnused, err := decodeCollectingUnused(raw, settingsProbeStruct(false)); err == nil {
+			warnSettingsUnusedKeys(raw, settingsUnused, func() bool {
+				hasVersioned, _ := detectDirSettingsFormat(dir)
+				return hasVersioned
+			}, "settings", settingsHierarchySources(dir))
+		}
+	}
+	return s, nil
 }
 
 // settingsHierarchySources resolves each directory to its settings file path
@@ -505,10 +509,9 @@ func settingsProbeStruct(hasVersioned bool) interface{} {
 }
 
 // warnSettingsUnusedKeys warns about unrecognized keys in the settings.yaml
-// data LoadSettingsFromDir decodes into the legacy Settings shape.
-// settingsUnused is the unused-key list from that decode, which the caller
-// already performed for its own result, so this function never decodes into
-// Settings itself.
+// data LoadSettingsFromDir reads as written. settingsUnused is the
+// unused-key list of the caller's decode of that data into the legacy
+// Settings probe, so this function never decodes into Settings itself.
 //
 // Settings does not carry the v1-only fields (schema_version, top-level
 // server/image_registry, runtimes[*].type, profiles[*].image_registry, ...),

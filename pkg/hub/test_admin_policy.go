@@ -436,6 +436,8 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"experiments":       testAdminPolicyDeny,
 	"artifacts":         testAdminPolicyDeny,
 	"profiling":         testAdminPolicyDeny,
+
+	"agent_delegation_policy": testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -460,6 +462,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.protocol":                 testAdminPolicyDeny,
 	"telemetry.cloud.headers":                  testAdminPolicyDeny,
 	"telemetry.cloud.provider":                 testAdminPolicyDeny,
+	"telemetry.cloud.gcp_project_id":           testAdminPolicyDeny,
 	"telemetry.cloud.tls":                      testAdminPolicyDeny,
 	"telemetry.cloud.tls.enabled":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.insecure_skip_verify": testAdminPolicyDeny,
@@ -556,9 +559,10 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
-	experiments.ChatThreadGroups:             testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.AgentBadges:                  testAdminPolicyDeny,
+	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

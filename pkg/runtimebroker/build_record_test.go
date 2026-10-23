@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,7 +155,7 @@ func assertPinnedResolution(t *testing.T, srv *Server, opts api.StartOptions, ma
 		t.Fatalf("restart pin not taken: %+v", pin)
 	}
 	opts.Profile = ""
-	res, err := srv.resolveExistingAgentManager(opts, profileLenient, slog.LevelDebug, pin)
+	res, err := srv.resolveExistingAgentManager(opts, profileLenient, pin)
 	if err != nil {
 		t.Fatalf("resolveExistingAgentManager: %v", err)
 	}
@@ -198,7 +197,7 @@ func TestBuildRecord_BR1_SwapRuntimeReplacesDefaultRecord(t *testing.T) {
 		if rec != newRec {
 			t.Errorf("defaultPair record = %+v, want %+v", rec, newRec)
 		}
-		res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient, slog.LevelWarn)
+		res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +263,7 @@ func TestBuildRecord_BR2_ForcedBranchReturnsHolderRecord(t *testing.T) {
 	f.registerAux(rtB, agent.NewManager(rtB), recB)
 	f.srv.config.ForceRuntime = "kubernetes"
 
-	res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient, slog.LevelWarn)
+	res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +349,7 @@ func TestBuildRecord_BR3_PinnedRestartResolution(t *testing.T) {
 		if pin.record != (config.RuntimeBuildRecord{}) {
 			t.Fatalf("pin record = %+v, want zero (never paired through runtimeOfManager)", pin.record)
 		}
-		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, slog.LevelDebug, pin)
+		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, pin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -366,7 +365,7 @@ func TestBuildRecord_BR3_PinnedRestartResolution(t *testing.T) {
 		if pin != (pinnedRuntime{}) {
 			t.Fatalf("pin = %+v, want the zero pin", pin)
 		}
-		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, slog.LevelDebug, pin)
+		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, pin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -446,7 +445,7 @@ func TestBuildRecord_BR5_HolderWithoutRecordIsZero(t *testing.T) {
 	f.srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(auxRT)] = auxiliaryRuntime{Runtime: auxRT, Manager: agent.NewManager(auxRT)}
 	f.srv.auxiliaryRuntimesMu.Unlock()
 	f.srv.config.ForceRuntime = "kubernetes"
-	res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient, slog.LevelWarn)
+	res, err := f.srv.resolveManagerForOptsStrict(f.opts("local"), profileLenient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +455,7 @@ func TestBuildRecord_BR5_HolderWithoutRecordIsZero(t *testing.T) {
 
 	f2 := newBRFixture(t)
 	f2.srv.resolveAuxiliaryRuntime = withoutRecord(func(_, _, _ string) scionrt.Runtime { return fakeKubernetesRuntime("cluster-a", "ns-a") })
-	res, err = f2.srv.resolveManagerForOptsStrict(f2.opts("k8s-a"), profileLenient, slog.LevelWarn)
+	res, err = f2.srv.resolveManagerForOptsStrict(f2.opts("k8s-a"), profileLenient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +468,7 @@ func TestBuildRecord_BR5_HolderWithoutRecordIsZero(t *testing.T) {
 // build's record.
 func TestBuildRecord_BR6_FullResolutionOverwriteReturnsNewRecord(t *testing.T) {
 	f := newBRFixture(t)
-	first, err := f.srv.resolveManagerForOptsStrict(f.opts("k8s-a"), profileLenient, slog.LevelWarn)
+	first, err := f.srv.resolveManagerForOptsStrict(f.opts("k8s-a"), profileLenient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +479,7 @@ func TestBuildRecord_BR6_FullResolutionOverwriteReturnsNewRecord(t *testing.T) {
 	rebuilt := fakeKubernetesRuntime("cluster-a", "ns-a") // same identity, new build
 	rebuiltRec := config.RuntimeBuildRecord{Present: true, EntryName: "k8s-a", KubeconfigContext: "cluster-a-rebuilt"}
 	f.builds["k8s-a"] = brBuild{rt: rebuilt, rec: rebuiltRec}
-	second, err := f.srv.resolveManagerForOptsStrict(f.opts("k8s-a"), profileLenient, slog.LevelWarn)
+	second, err := f.srv.resolveManagerForOptsStrict(f.opts("k8s-a"), profileLenient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,13 +608,15 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 			want:    want{how: resolutionErrorRuntime, record: zero, profile: "broken", entry: "broken-rt"},
 		},
 		{
-			name: "strict recorded-runtime fallback",
+			// agent-info.json naming the default runtime is not a fallback
+			// to it: the unresolvable profile is refused.
+			name: "strict, no recorded-runtime fallback",
 			setup: func(t *testing.T, f *brFixture) {
 				writeSavedAgentInfo(t, f.projectDir, "agent", "vanished", "docker")
 			},
 			profile: "vanished",
 			mode:    profileStrict,
-			want:    want{how: resolutionStrictFallback, defaultHolder: true, record: brDefaultRecord},
+			want:    want{how: resolutionUnset, record: zero, err: errSavedProfileUnresolved},
 		},
 	}
 	for _, tc := range cases {
@@ -624,7 +625,7 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, f)
 			}
-			res, err := f.srv.resolveManagerForOptsStrict(f.opts(tc.profile), tc.mode, slog.LevelWarn)
+			res, err := f.srv.resolveManagerForOptsStrict(f.opts(tc.profile), tc.mode)
 			if tc.want.err != nil {
 				if !errors.Is(err, tc.want.err) {
 					t.Fatalf("err = %v, want %v", err, tc.want.err)
@@ -656,7 +657,7 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 
 	t.Run("strict without fallback returns no holder", func(t *testing.T) {
 		f := newBRFixture(t)
-		res, err := f.srv.resolveManagerForOptsStrict(f.opts("vanished"), profileStrictProvisioned, slog.LevelWarn)
+		res, err := f.srv.resolveManagerForOptsStrict(f.opts("vanished"), profileStrictProvisioned)
 		if !errors.Is(err, errSavedProfileUnresolved) {
 			t.Fatalf("err = %v, want errSavedProfileUnresolved", err)
 		}
@@ -667,7 +668,7 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 
 	t.Run("flat", func(t *testing.T) {
 		ff := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
-		res, err := ff.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "test-agent-1"}, profileStrict, slog.LevelWarn)
+		res, err := ff.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "test-agent-1"}, profileStrict)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -681,7 +682,7 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 		f := newBRFixture(t)
 		pinRT := fakeKubernetesRuntime("cluster-a", "ns-a")
 		pin := pinnedRuntimeOf(agent.NewManager(pinRT), pinRT, brAuxRecord)
-		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, slog.LevelDebug, pin)
+		res, err := f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, pin)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -690,7 +691,7 @@ func TestBuildRecord_CT1_ResolutionKinds(t *testing.T) {
 		}
 
 		f.srv.config.ForceRuntime = "docker"
-		res, err = f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, slog.LevelDebug, pin)
+		res, err = f.srv.resolveExistingAgentManager(f.opts(""), profileLenient, pin)
 		if err != nil {
 			t.Fatal(err)
 		}
