@@ -778,8 +778,10 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // at repoRoot and nothing else. GIT_DIR and GIT_COMMON_DIR are pinned to
 // repoRoot/.git, so git does not discover the repository from the current
 // directory or follow any worktree's metadata; GIT_* variables inherited
-// from the process are dropped (other than GIT_CONFIG_NOSYSTEM and
-// GIT_CONFIG_GLOBAL) and LC_ALL=C is set; core.hooksPath points at an empty
+// from the process are dropped except the set HostGitEnv keeps (the host
+// user's own config and transport/auth — GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM,
+// GIT_SSH*, GIT_ASKPASS, GIT_SSL_CA*, GIT_ALLOW_PROTOCOL,
+// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set; core.hooksPath points at an empty
 // location (os.DevNull), so hook files in the repository are not run; and
 // the file-system monitor is off. It returns an error, and no command, when
 // repoRoot is not a main repository (baseRepoGitDir).
@@ -797,9 +799,9 @@ func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*
 	}
 	// Host-side git on the base repository runs with the fixed settings and the
 	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
-	// hooks, no fsmonitor, no credential helper and no embedded credential, with
-	// the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than by anything the
-	// worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	// hooks, no fsmonitor, and credential helpers supplied through the environment
+	// are dropped, with the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than
+	// by anything the worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
 	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.WaitDelay = 5 * time.Second
