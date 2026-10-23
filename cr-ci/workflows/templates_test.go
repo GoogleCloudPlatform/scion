@@ -118,7 +118,7 @@ func TestPoCWorkflow(t *testing.T) {
 	s := readFile(t, "cr-runner-poc.yml")
 	ls := lines(s)
 
-	// Triggers: the only key under the top-level on: is workflow_dispatch.
+	// Triggers: push (throwaway cr-ci-poc-* branches only) and workflow_dispatch.
 	var events []string
 	inOn := false
 	for _, l := range ls {
@@ -131,8 +131,11 @@ func TestPoCWorkflow(t *testing.T) {
 			events = append(events, strings.TrimSuffix(strings.TrimSpace(l), ":"))
 		}
 	}
-	if !reflect.DeepEqual(events, []string{"workflow_dispatch"}) {
-		t.Errorf("PoC triggers = %v, want [workflow_dispatch]", events)
+	if !reflect.DeepEqual(events, []string{"push", "workflow_dispatch"}) {
+		t.Errorf("PoC triggers = %v, want [push workflow_dispatch]", events)
+	}
+	if !strings.Contains(s, "on:\n  push:\n    branches: ['cr-ci-poc-*']\n") {
+		t.Error("PoC push trigger must be limited to branches: ['cr-ci-poc-*']")
 	}
 
 	var runsOn []string
@@ -141,12 +144,12 @@ func TestPoCWorkflow(t *testing.T) {
 			runsOn = append(runsOn, strings.TrimSpace(l))
 		}
 	}
-	if want := []string{"runs-on: ${{ inputs.runner-label }}"}; !reflect.DeepEqual(runsOn, want) {
-		t.Errorf("PoC runs-on = %v, want %v (the label alone)", runsOn, want)
+	label := configDefault(t, "RUNNER_LABEL")
+	if want := []string{"runs-on: ${{ inputs.runner-label || '" + label + "' }}"}; !reflect.DeepEqual(runsOn, want) {
+		t.Errorf("PoC runs-on = %v, want %v (the label alone, RUNNER_LABEL's default on push)", runsOn, want)
 	}
 
 	// The runner-label input's default equals RUNNER_LABEL's default.
-	label := configDefault(t, "RUNNER_LABEL")
 	m := regexp.MustCompile(`(?m)^      runner-label:\n(?:        .*\n)*?        default: (\S+)$`).FindStringSubmatch(s)
 	if m == nil {
 		t.Fatal("PoC: no default for the runner-label input")
@@ -157,6 +160,9 @@ func TestPoCWorkflow(t *testing.T) {
 
 	for _, want := range []string{
 		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
+		// memory.peak is NA under gVisor: the lint step samples memory and /scratch.
+		"/proc/meminfo", "df -k --output=used /scratch", "sample peaks:",
+		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}",
 		"id: restore",
 	} {
 		if !strings.Contains(s, want) {
