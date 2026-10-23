@@ -2831,6 +2831,11 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 
+	// deleteHubProjectID is the Hub project ID the delete resolves the
+	// agent's hub-project state directory with; the forced move's rollback
+	// check below uses the same one.
+	deleteHubProjectID := projectID
+
 	// A forced move's rollback delete removes nothing unless every agent
 	// directory it would remove that exists carries that move's marker,
 	// checked under the files lock taken above. Anything else was not
@@ -2838,10 +2843,6 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// logged here only). The check looks up the agent's worktree and sharer
 	// registry entry by the same sharer key the delete below uses, so a
 	// worktree provisioned under the hub agent ID is seen too.
-	// deleteHubProjectID is the Hub project ID the delete resolves the
-	// agent's hub-project state directory with; the forced move's rollback
-	// check below uses the same one.
-	deleteHubProjectID := projectID
 	if moveReincarnationID != "" {
 		checker, ok := target.mgr.(moveMarkerChecker)
 		var paths []string

@@ -299,6 +299,36 @@ func TestProvision_MoveMarkerOnSplitStorageHomeParent(t *testing.T) {
 	assert.Contains(t, paths, filepath.Dir(agentHome))
 }
 
+// A forced move's provision of a shared-workspace agent with a Hub project
+// ID creates its state directory under the Hub project's root (not the
+// project), marks it, and the guarded delete's check, given the same Hub
+// project ID, names that directory and passes (ptone/scion#5955).
+func TestProvision_MoveMarkerOnHubProjectStateDir(t *testing.T) {
+	const hubProjectID = "5955cccc-dddd-4eee-8fff-000000000000"
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "hub-move"
+	ctx := withMoveReincarnationID(api.ContextWithHubProjectID(api.ContextWithSharedWorkspace(context.Background()), hubProjectID), testMoveID)
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", t.TempDir())
+	require.NoError(t, err)
+
+	hubDir, err := config.AgentDirForProject(scionDir, agentName, true, hubProjectID)
+	require.NoError(t, err)
+	projectDir, err := config.GetResolvedProjectDir(scionDir)
+	require.NoError(t, err)
+	var ext string
+	if layout := resolveAgentProjectLayout(projectDir); layout.externalAgentsRoot != "" {
+		ext = filepath.Join(layout.externalAgentsRoot, agentName)
+	}
+	require.Equal(t, hubDir, hubStateDirToRemove(projectDir, agentName, hubProjectID, ext),
+		"setup: the hub-project state dir is a directory of its own, apart from the project's agent dirs")
+	assertMarker(t, hubDir, testMoveID)
+
+	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
+	paths, err := mgr.CheckMoveMarkers(context.Background(), scionDir, "", hubProjectID, agentName, "", testMoveID)
+	require.NoError(t, err, "the move's own hub-project state dir passes the guarded delete's check")
+	assert.Contains(t, paths, hubDir)
+}
+
 // The leaf helper still reports that it created the agent's directory on
 // the export when a later directory then fails, so the start can mark it.
 func TestEnsureNFSAgentWorkspaceLeafClaim_ReportsCreatedOnLaterError(t *testing.T) {
