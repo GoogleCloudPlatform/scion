@@ -844,7 +844,7 @@ func TestHubDelivery_Stage2RejectsNonDeliverPermission(t *testing.T) {
 		c := progenyCandidate(t, principal, action, permissionID)
 		var rejectedBy, detail string
 		policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
-		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, permissionID, nil, c, nil,
+		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, action, permissionID, nil, c, nil,
 			func(kind, d string) { rejectedBy, detail = kind, d })
 		return ok, rejectedBy, detail
 	}

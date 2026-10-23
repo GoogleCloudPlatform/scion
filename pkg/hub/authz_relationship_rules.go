@@ -348,7 +348,7 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 			}
 		}
 
-		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, permissionID, restrictions, c, projectAccess, reject)
+		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, action, permissionID, restrictions, c, projectAccess, reject)
 		if src != nil {
 			res.Source = &RelationshipSource{Kind: src.Kind}
 		}
@@ -381,6 +381,7 @@ func (a *AuthzService) runRelationshipStages(
 	principal PrincipalContext,
 	policyKind string,
 	resource Resource,
+	action Action,
 	permissionID string,
 	restrictions []Restriction,
 	c relationshipCandidate,
@@ -439,15 +440,9 @@ func (a *AuthzService) runRelationshipStages(
 		}
 	}
 
-	// Stage 4: sharing-source owner is active.
+	// Stage 4: sharing-source owner is active and holds the permission.
 	if src != nil {
-		if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
-			reject(RelationshipRejectSourceInactive, detail)
-			return src, false
-		}
-		// An agent-owned source must hold the permission through
-		// its delegation chain.
-		if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
+		if holds, detail := a.relationshipSourceStage(ctx, principal, src, resource, action, permissionID); !holds {
 			reject(RelationshipRejectSourceInactive, detail)
 			return src, false
 		}
@@ -536,6 +531,26 @@ func (a *AuthzService) relationshipProjectAccessStage(
 		return RelationshipRejectProjectAccess, "principal lacks active access to the target project"
 	}
 	return "", ""
+}
+
+// relationshipSourceStage is runRelationshipStages' stage 4 for a resolved
+// sharing source: the owner must be active
+// (relationshipSourceActive), and an agent-owned source must hold the
+// permission through its delegation chain
+// (relationshipSourceDelegationHolds). It returns the candidate detail of
+// the first failing check. principal and action are not read by these two
+// checks; they are passed so the stage has the whole request tuple.
+func (a *AuthzService) relationshipSourceStage(ctx context.Context, principal PrincipalContext, src *SharingSource, resource Resource, action Action, permissionID string) (bool, string) {
+	_, _ = principal, action
+	if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
+		return false, detail
+	}
+	// An agent-owned source must hold the permission through its
+	// delegation chain.
+	if holds, detail := a.relationshipSourceDelegationHolds(ctx, src.OwnerID, resource, permissionID); !holds {
+		return false, detail
+	}
+	return true, ""
 }
 
 // relationshipSourceActive reports whether a sharing-source owner is
