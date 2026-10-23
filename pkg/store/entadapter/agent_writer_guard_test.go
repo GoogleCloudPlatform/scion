@@ -85,7 +85,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.CompareAndSwapAgentRunID":                        {classObserved, "run_adopt (cas): rebind, adoption provenance"},
 	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.RevertAgentRunID":                                {classObserved, "run_revert (step 0)"},
 	"agent_store.go:AgentStore.swapAgentRunID via agent_store.go:AgentStore.AdoptAgentRunID":                                 {classObserved, "run_adopt (heartbeat_adopt): rebind, adoption provenance"},
-	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginLaunch":                                      {classObserved, "fingerprint only"},
+	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginLaunchWithOptions":                           {classObserved, "fingerprint only"},
 	"launch_store.go:AgentStore.beginLaunch via launch_store.go:AgentStore.BeginStartLaunch":                                 {classObserved, "fingerprint only"},
 	"launch_store.go:AgentStore.MarkLaunchAccepted":                                                                          {classObserved, "launch_accepted"},
 	"launch_store.go:AgentStore.endLaunch via launch_store.go:AgentStore.EndLaunch":                                          {classObserved, "launch_failed when coded"},
@@ -96,6 +96,9 @@ var agentWriterClasses = map[string]writerEntry{
 	"launch_reaper.go:reapRow":                                {classObserved, "launch_failed (per savepoint)"},
 	"start_claim_store.go:AgentStore.ClaimAgentReincarnation": {classObserved, "records the reincarnation base run"},
 	"agent_deletion_store.go:applyAgentDeletionFields via agent_deletion_store.go:AgentStore.updateAgentDeletionOnce": {classObserved, "delete claim and rollback (phase, deleted_at)"},
+
+	// Observed in slice 3.
+	"effective_config_store.go:AgentStore.SetAgentEffectiveConfig": {classObserved, "configured (the broker's effective-configuration echo)"},
 
 	// Exempt: cannot change a fingerprint or snapshot input.
 	"run_intent_store.go:AgentStore.SwapRunIntent":                                                  {classExempt, "run_intent is desired state"},

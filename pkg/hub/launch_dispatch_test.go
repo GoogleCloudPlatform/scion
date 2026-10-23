@@ -362,13 +362,13 @@ type claimOnBeginLaunchStore struct {
 	t *testing.T
 }
 
-func (s claimOnBeginLaunchStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
+func (s claimOnBeginLaunchStore) BeginLaunchWithOptions(ctx context.Context, agentID, kind string, timeout time.Duration, opts store.BeginLaunchOptions) (string, error) {
 	row, err := s.GetAgent(ctx, agentID)
 	require.NoError(s.t, err)
 	row.Phase = string(state.PhaseStopping)
 	require.NoError(s.t, s.UpdateAgent(ctx, row))
 	seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
-	return s.Store.BeginLaunch(ctx, agentID, kind, timeout)
+	return s.Store.BeginLaunchWithOptions(ctx, agentID, kind, timeout, opts)
 }
 
 // A delete claim landing between beginRun and BeginLaunch is reported as

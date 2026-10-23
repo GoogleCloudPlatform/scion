@@ -888,6 +888,13 @@ type AgentStore interface {
 	// exist.
 	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
 
+	// BeginLaunchWithOptions is BeginLaunch with the dispatcher's options:
+	// opts.RunID is the run beginRun minted for this launch, bound as the
+	// launch's launch_run_id only when the row still holds it (otherwise
+	// ""). Only opts.RunID is used for a create launch. BeginLaunch is
+	// BeginLaunchWithOptions with zero options (no binding).
+	BeginLaunchWithOptions(ctx context.Context, agentID, kind string, timeout time.Duration, opts BeginLaunchOptions) (launchID string, err error)
+
 	// BeginStartLaunch starts a new start or restart launch for agentID
 	// (ptone/scion#4669), with BeginLaunch's other rules. kind must be
 	// LaunchKindStart or LaunchKindRestart; any other value returns an error

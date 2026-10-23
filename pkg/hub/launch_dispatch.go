@@ -228,7 +228,10 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 	// The timer starts immediately before BeginLaunch, so the remaining
 	// budget sent to the broker never exceeds the stored deadline.
 	began := time.Now()
-	launchID, err := d.store.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, settings.Timeout)
+	// req.RunID is the run beginRun minted for this dispatch (set by the
+	// caller before the send); the launch binds it as launch_run_id.
+	launchID, err := d.store.BeginLaunchWithOptions(ctx, agent.ID, store.LaunchKindCreate, settings.Timeout,
+		store.BeginLaunchOptions{RunID: req.RunID})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidPhase) {
 			// A delete that claimed the row after beginRun moved it out of

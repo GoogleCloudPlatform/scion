@@ -166,6 +166,27 @@ func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
 	assert.Empty(t, agentUpsertCalls(t), "agent upsert outside the generated ent code")
 }
 
+// TestAgentSingleWriterColumnsAreAClosedSet: module-wide, outside the
+// generated ent code, agents.effective_config is written only by
+// SetAgentEffectiveConfig and agents.launch_run_id only by beginLaunch
+// (WP1 slice 3 addendum v12 section 1). The store package's
+// TestAgentColumnSetterGuard checks the same by type inside pkg/store;
+// this scan covers every other package by name. The writer guard's proof
+// package (entadapter testdata) calls both families on purpose.
+func TestAgentSingleWriterColumnsAreAClosedSet(t *testing.T) {
+	skip := []string{filepath.Join("pkg", "ent"), filepath.Join("pkg", "store", "entadapter", "testdata", "writerguardproof")}
+	assert.Equal(t, []string{"pkg/store/entadapter/effective_config_store.go AgentStore.SetAgentEffectiveConfig"},
+		moduleReferences(t, map[string]bool{
+			"SetEffectiveConfig": true, "SetNillableEffectiveConfig": true,
+			"ClearEffectiveConfig": true, "UpdateEffectiveConfig": true,
+		}, skip...))
+	assert.Equal(t, []string{"pkg/store/entadapter/launch_store.go AgentStore.beginLaunch"},
+		moduleReferences(t, map[string]bool{
+			"SetLaunchRunID": true, "SetNillableLaunchRunID": true,
+			"ClearLaunchRunID": true, "UpdateLaunchRunID": true,
+		}, skip...))
+}
+
 // agentUpsertCalls returns the functions outside the generated ent code
 // that put a conflict clause (OnConflict, OnConflictColumns) on a chain
 // starting from an Agent create builder (….Agent.Create() or

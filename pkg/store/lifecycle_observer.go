@@ -64,6 +64,9 @@ const (
 	// AgentWriteRestartStopLeg: RecordRestartStopLeg. It writes no agents
 	// column, so Before and After are the same locked row.
 	AgentWriteRestartStopLeg AgentWriteOp = "restart_stop_leg"
+	// AgentWriteEffectiveConfig: SetAgentEffectiveConfig, the broker's
+	// effective-configuration echo (WP1 slice 3). A config-resolution write.
+	AgentWriteEffectiveConfig AgentWriteOp = "effective_config"
 )
 
 // AgentWriteKind is the write kind K of WP1 design 2.4a.

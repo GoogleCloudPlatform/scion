@@ -41,6 +41,11 @@ type BeginLaunchOptions struct {
 	// RevokeOnFail records whether a failed end of this start revokes the
 	// credential the start issued (launch_revoke_on_fail).
 	RevokeOnFail bool
+	// RunID is the run the dispatcher minted for this launch: the run ID
+	// beginRun returned, never a later read of the agent's mutable run.
+	// BeginLaunch binds it as launch_run_id only when the row still holds
+	// it; "" binds nothing (WP1 slice 3 addendum v12 section 1).
+	RunID string
 }
 
 // LaunchState values for Agent.LaunchState.

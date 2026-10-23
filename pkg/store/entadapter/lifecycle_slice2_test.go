@@ -710,6 +710,15 @@ func TestLifecycleStore2_ObserverErrorRollsBackSliceTwoWriters(t *testing.T) {
 		{"RecordRestartStopLeg", func(f *lifecycleFixture, a *store.Agent) error {
 			return f.cs.RecordRestartStopLeg(ctx, a.ID, "R1")
 		}, func(t *testing.T, b, a *store.Agent) {}},
+		{"SetAgentEffectiveConfig", func(f *lifecycleFixture, a *store.Agent) error {
+			// Give the row a broker with an unobserved direct write, so the
+			// echo passes every fence and reaches the observer.
+			uid, err := parseUUID(a.ID)
+			require.NoError(f.t, err)
+			require.NoError(f.t, f.cs.client.Agent.UpdateOneID(uid).SetRuntimeBrokerID("broker-1").Exec(ctx))
+			_, err = f.cs.SetAgentEffectiveConfig(ctx, a.ID, "R1", effectiveEcho("R1", "broker-1"))
+			return err
+		}, func(t *testing.T, b, a *store.Agent) { assert.Equal(t, b.EffectiveConfig, a.EffectiveConfig) }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

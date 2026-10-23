@@ -54,3 +54,9 @@ func callerB(ctx context.Context, c *ent.Client, id uuid.UUID) error { return sh
 func offPathWithoutLoad(ctx context.Context, c *ent.Client, id uuid.UUID) error {
 	return c.Agent.UpdateOneID(id).SetPhase("running").Exec(ctx)
 }
+
+// setSingleWriterColumns sets the single-writer columns outside their
+// writers; TestAgentColumnSetterGuardProof must report both calls.
+func setSingleWriterColumns(u *ent.AgentUpdateOne) *ent.AgentUpdateOne {
+	return u.SetEffectiveConfig("{}").ClearLaunchRunID()
+}

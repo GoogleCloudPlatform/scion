@@ -138,6 +138,13 @@ func Spec() []TableFixture {
 				"applied_config": nestedConfigJSON,
 				"created_at":     baseTime, "updated_at": baseTime,
 				"phase": "running", "state_version": 1,
+				// WP1 slice 3: the bound launch run and the broker's
+				// effective-configuration echo.
+				"launch_id": "44444444-4444-4444-4444-4444444444aa", "launch_run_id": "55555555-5555-5555-5555-5555555555aa",
+				"run_id": "55555555-5555-5555-5555-5555555555aa",
+				"effective_config": `{"runId":"55555555-5555-5555-5555-5555555555aa","template":"claude",` +
+					`"templateHash":"sha256:ab","harness":"claude","model":"claude-opus","brokerId":"` + brokerID + `",` +
+					`"brokerBuild":"v1.2.3","source":"sync","reportedAt":"2026-01-01T00:00:00Z"}`,
 			},
 			{ // soft-deleted agent (deleted_at populated)
 				"id": "33333333-3333-3333-3333-3333333333aa", "agent_id": "33333333-3333-3333-3333-3333333333aa",

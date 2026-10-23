@@ -131,6 +131,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		ReincarnationState:  a.ReincarnationState,
 		LaunchAsyncOptIn:    a.LaunchAsyncOptIn,
 		LaunchID:            a.LaunchID,
+		LaunchRunID:         a.LaunchRunID,
 		LaunchState:         a.LaunchState,
 		LaunchEndReason:     a.LaunchEndReason,
 		LaunchKind:          a.LaunchKind,
@@ -228,6 +229,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		}
 		sa.AppliedConfig = cfg
 	}
+	sa.EffectiveConfig = parseEffectiveConfig(sa.ID, a.EffectiveConfig)
 	return sa
 }
 

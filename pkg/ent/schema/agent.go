@@ -167,6 +167,13 @@ func (Agent) Fields() []ent.Field {
 		// Ent schema decoupled from the store package's struct definition.
 		field.Text("applied_config").
 			Optional(),
+		// effective_config is the broker's verified effective configuration
+		// echo for one run (store.AgentEffectiveConfig as JSON): written
+		// only by SetAgentEffectiveConfig, fenced on the row's run, broker
+		// and liveness; never by UpdateAgent (WP1 slice 3 addendum v12).
+		field.Text("effective_config").
+			Optional().
+			Nillable(),
 
 		// harness_config is a queryable shadow of applied_config's
 		// "harnessConfig" key, kept in sync by every write to applied_config
@@ -275,6 +282,15 @@ func (Agent) Fields() []ent.Field {
 		// superseded launch and every reader has a stable ID to correlate
 		// against, even once launch_state has moved to "ended".
 		field.String("launch_id").
+			Optional().
+			Default(""),
+		// launch_run_id is the run the current launch dispatched: the run
+		// beginRun minted, bound by BeginLaunch/BeginStartLaunch in the same
+		// update that writes launch_id, and only when the row still holds
+		// it ("" otherwise, and for launches begun by older binaries). It
+		// is replaced by the next launch and never written by UpdateAgent
+		// (WP1 slice 3 addendum v12 section 1; slice 3b design section 3b).
+		field.String("launch_run_id").
 			Optional().
 			Default(""),
 		// run_id is the identity of the agent's current or most recent run

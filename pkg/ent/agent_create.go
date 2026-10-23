@@ -500,6 +500,20 @@ func (_c *AgentCreate) SetNillableAppliedConfig(v *string) *AgentCreate {
 	return _c
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (_c *AgentCreate) SetEffectiveConfig(v string) *AgentCreate {
+	_c.mutation.SetEffectiveConfig(v)
+	return _c
+}
+
+// SetNillableEffectiveConfig sets the "effective_config" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableEffectiveConfig(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetEffectiveConfig(*v)
+	}
+	return _c
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (_c *AgentCreate) SetHarnessConfig(v string) *AgentCreate {
 	_c.mutation.SetHarnessConfig(v)
@@ -684,6 +698,20 @@ func (_c *AgentCreate) SetLaunchID(v string) *AgentCreate {
 func (_c *AgentCreate) SetNillableLaunchID(v *string) *AgentCreate {
 	if v != nil {
 		_c.SetLaunchID(*v)
+	}
+	return _c
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (_c *AgentCreate) SetLaunchRunID(v string) *AgentCreate {
+	_c.mutation.SetLaunchRunID(v)
+	return _c
+}
+
+// SetNillableLaunchRunID sets the "launch_run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchRunID(*v)
 	}
 	return _c
 }
@@ -1432,6 +1460,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchID
 		_c.mutation.SetLaunchID(v)
 	}
+	if _, ok := _c.mutation.LaunchRunID(); !ok {
+		v := agent.DefaultLaunchRunID
+		_c.mutation.SetLaunchRunID(v)
+	}
 	if _, ok := _c.mutation.RunID(); !ok {
 		v := agent.DefaultRunID
 		_c.mutation.SetRunID(v)
@@ -1789,6 +1821,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldAppliedConfig, field.TypeString, value)
 		_node.AppliedConfig = value
 	}
+	if value, ok := _c.mutation.EffectiveConfig(); ok {
+		_spec.SetField(agent.FieldEffectiveConfig, field.TypeString, value)
+		_node.EffectiveConfig = &value
+	}
 	if value, ok := _c.mutation.HarnessConfig(); ok {
 		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
 		_node.HarnessConfig = value
@@ -1844,6 +1880,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchID(); ok {
 		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
 		_node.LaunchID = value
+	}
+	if value, ok := _c.mutation.LaunchRunID(); ok {
+		_spec.SetField(agent.FieldLaunchRunID, field.TypeString, value)
+		_node.LaunchRunID = value
 	}
 	if value, ok := _c.mutation.RunID(); ok {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
@@ -2712,6 +2752,24 @@ func (u *AgentUpsert) ClearAppliedConfig() *AgentUpsert {
 	return u
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (u *AgentUpsert) SetEffectiveConfig(v string) *AgentUpsert {
+	u.Set(agent.FieldEffectiveConfig, v)
+	return u
+}
+
+// UpdateEffectiveConfig sets the "effective_config" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateEffectiveConfig() *AgentUpsert {
+	u.SetExcluded(agent.FieldEffectiveConfig)
+	return u
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (u *AgentUpsert) ClearEffectiveConfig() *AgentUpsert {
+	u.SetNull(agent.FieldEffectiveConfig)
+	return u
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (u *AgentUpsert) SetHarnessConfig(v string) *AgentUpsert {
 	u.Set(agent.FieldHarnessConfig, v)
@@ -2913,6 +2971,24 @@ func (u *AgentUpsert) UpdateLaunchID() *AgentUpsert {
 // ClearLaunchID clears the value of the "launch_id" field.
 func (u *AgentUpsert) ClearLaunchID() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchID)
+	return u
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (u *AgentUpsert) SetLaunchRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchRunID, v)
+	return u
+}
+
+// UpdateLaunchRunID sets the "launch_run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchRunID)
+	return u
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (u *AgentUpsert) ClearLaunchRunID() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchRunID)
 	return u
 }
 
@@ -4376,6 +4452,27 @@ func (u *AgentUpsertOne) ClearAppliedConfig() *AgentUpsertOne {
 	})
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (u *AgentUpsertOne) SetEffectiveConfig(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetEffectiveConfig(v)
+	})
+}
+
+// UpdateEffectiveConfig sets the "effective_config" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateEffectiveConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateEffectiveConfig()
+	})
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (u *AgentUpsertOne) ClearEffectiveConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearEffectiveConfig()
+	})
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (u *AgentUpsertOne) SetHarnessConfig(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4611,6 +4708,27 @@ func (u *AgentUpsertOne) UpdateLaunchID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchID()
+	})
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (u *AgentUpsertOne) SetLaunchRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchRunID(v)
+	})
+}
+
+// UpdateLaunchRunID sets the "launch_run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchRunID()
+	})
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (u *AgentUpsertOne) ClearLaunchRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchRunID()
 	})
 }
 
@@ -6363,6 +6481,27 @@ func (u *AgentUpsertBulk) ClearAppliedConfig() *AgentUpsertBulk {
 	})
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (u *AgentUpsertBulk) SetEffectiveConfig(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetEffectiveConfig(v)
+	})
+}
+
+// UpdateEffectiveConfig sets the "effective_config" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateEffectiveConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateEffectiveConfig()
+	})
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (u *AgentUpsertBulk) ClearEffectiveConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearEffectiveConfig()
+	})
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (u *AgentUpsertBulk) SetHarnessConfig(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6598,6 +6737,27 @@ func (u *AgentUpsertBulk) UpdateLaunchID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchID()
+	})
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (u *AgentUpsertBulk) SetLaunchRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchRunID(v)
+	})
+}
+
+// UpdateLaunchRunID sets the "launch_run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchRunID()
+	})
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (u *AgentUpsertBulk) ClearLaunchRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchRunID()
 	})
 }
 

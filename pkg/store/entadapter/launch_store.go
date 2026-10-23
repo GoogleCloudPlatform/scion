@@ -157,12 +157,19 @@ func storeNow(ctx context.Context, tx *sql.Tx, isPostgres bool) (time.Time, erro
 
 // BeginLaunch implements store.AgentStore.BeginLaunch.
 func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
+	return s.BeginLaunchWithOptions(ctx, agentID, kind, timeout, store.BeginLaunchOptions{})
+}
+
+// BeginLaunchWithOptions implements store.AgentStore.BeginLaunchWithOptions:
+// a create launch whose launch_run_id is bound to opts.RunID when the row
+// still holds it. Only RunID is taken from opts.
+func (s *AgentStore) BeginLaunchWithOptions(ctx context.Context, agentID, kind string, timeout time.Duration, opts store.BeginLaunchOptions) (string, error) {
 	// Start and restart launches go through BeginStartLaunch, which carries
 	// their options (ptone/scion#4669).
 	if kind != store.LaunchKindCreate {
 		return "", fmt.Errorf("%w: BeginLaunch kind must be %q, got %q", store.ErrInvalidInput, store.LaunchKindCreate, kind)
 	}
-	return s.beginLaunch(ctx, agentID, kind, timeout, store.BeginLaunchOptions{})
+	return s.beginLaunch(ctx, agentID, kind, timeout, store.BeginLaunchOptions{RunID: opts.RunID})
 }
 
 // BeginStartLaunch implements store.AgentStore.BeginStartLaunch.
@@ -250,7 +257,8 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchError("").
 		SetLaunchCause("").
 		SetLaunchPriorPhase(opts.PriorPhase).
-		SetLaunchRevokeOnFail(opts.RevokeOnFail)
+		SetLaunchRevokeOnFail(opts.RevokeOnFail).
+		SetLaunchRunID(boundLaunchRunID(current.RunID, opts.RunID))
 	if kind == store.LaunchKindRestart && current.Phase != string(state.PhaseStarting) {
 		// A restart's start leg moves the row to starting, as a phase
 		// change, so it bumps state_version (v11 §3.13).
@@ -475,4 +483,16 @@ func releaseBrokerQuotaTx(ctx context.Context, txClient *ent.Client, row *ent.Ag
 		SetReleasedAt(now).
 		Save(ctx)
 	return err
+}
+
+// boundLaunchRunID is the launch_run_id a new launch records (WP1 slice 3
+// addendum v12 section 1, slice 3b design section 3b): the run the
+// dispatcher minted for it, only while the row still holds that run. A run
+// minted concurrently between beginRun and BeginLaunch, or a caller that
+// passes no run, binds "" (unknown).
+func boundLaunchRunID(rowRunID, mintedRunID string) string {
+	if mintedRunID != "" && rowRunID == mintedRunID {
+		return mintedRunID
+	}
+	return ""
 }

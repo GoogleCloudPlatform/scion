@@ -425,6 +425,10 @@ func writeFacts(ctx context.Context, w store.AgentWrite, f *Facts) {
 		}
 	case store.AgentWriteRestartStopLeg:
 		f.Hint = Hint{Kind: HintRestartStopLeg, StopLegRunID: h.StopLegRunID}
+	case store.AgentWriteEffectiveConfig:
+		// The broker's effective-configuration echo (WP1 slice 3): a
+		// configuration change it commits is configured.
+		f.ConfigResolution = true
 	}
 	if h.LaunchEnd != nil {
 		f.Hint = Hint{Kind: HintLaunchEnd, EndReason: h.LaunchEnd.Reason, ErrorCode: h.LaunchEnd.Code,

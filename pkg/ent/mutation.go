@@ -4592,6 +4592,7 @@ type AgentMutation struct {
 	task_summary               *string
 	message                    *string
 	applied_config             *string
+	effective_config           *string
 	harness_config             *string
 	ancestry                   *[]string
 	appendancestry             []string
@@ -4609,6 +4610,7 @@ type AgentMutation struct {
 	reincarnation_updated_at   *time.Time
 	launch_async_opt_in        *bool
 	launch_id                  *string
+	launch_run_id              *string
 	run_id                     *string
 	previous_run_ids           *[]string
 	appendprevious_run_ids     []string
@@ -6537,6 +6539,55 @@ func (m *AgentMutation) ResetAppliedConfig() {
 	delete(m.clearedFields, agent.FieldAppliedConfig)
 }
 
+// SetEffectiveConfig sets the "effective_config" field.
+func (m *AgentMutation) SetEffectiveConfig(s string) {
+	m.effective_config = &s
+}
+
+// EffectiveConfig returns the value of the "effective_config" field in the mutation.
+func (m *AgentMutation) EffectiveConfig() (r string, exists bool) {
+	v := m.effective_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEffectiveConfig returns the old "effective_config" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldEffectiveConfig(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEffectiveConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEffectiveConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEffectiveConfig: %w", err)
+	}
+	return oldValue.EffectiveConfig, nil
+}
+
+// ClearEffectiveConfig clears the value of the "effective_config" field.
+func (m *AgentMutation) ClearEffectiveConfig() {
+	m.effective_config = nil
+	m.clearedFields[agent.FieldEffectiveConfig] = struct{}{}
+}
+
+// EffectiveConfigCleared returns if the "effective_config" field was cleared in this mutation.
+func (m *AgentMutation) EffectiveConfigCleared() bool {
+	_, ok := m.clearedFields[agent.FieldEffectiveConfig]
+	return ok
+}
+
+// ResetEffectiveConfig resets all changes to the "effective_config" field.
+func (m *AgentMutation) ResetEffectiveConfig() {
+	m.effective_config = nil
+	delete(m.clearedFields, agent.FieldEffectiveConfig)
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (m *AgentMutation) SetHarnessConfig(s string) {
 	m.harness_config = &s
@@ -7212,6 +7263,55 @@ func (m *AgentMutation) LaunchIDCleared() bool {
 func (m *AgentMutation) ResetLaunchID() {
 	m.launch_id = nil
 	delete(m.clearedFields, agent.FieldLaunchID)
+}
+
+// SetLaunchRunID sets the "launch_run_id" field.
+func (m *AgentMutation) SetLaunchRunID(s string) {
+	m.launch_run_id = &s
+}
+
+// LaunchRunID returns the value of the "launch_run_id" field in the mutation.
+func (m *AgentMutation) LaunchRunID() (r string, exists bool) {
+	v := m.launch_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchRunID returns the old "launch_run_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchRunID: %w", err)
+	}
+	return oldValue.LaunchRunID, nil
+}
+
+// ClearLaunchRunID clears the value of the "launch_run_id" field.
+func (m *AgentMutation) ClearLaunchRunID() {
+	m.launch_run_id = nil
+	m.clearedFields[agent.FieldLaunchRunID] = struct{}{}
+}
+
+// LaunchRunIDCleared returns if the "launch_run_id" field was cleared in this mutation.
+func (m *AgentMutation) LaunchRunIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLaunchRunID]
+	return ok
+}
+
+// ResetLaunchRunID resets all changes to the "launch_run_id" field.
+func (m *AgentMutation) ResetLaunchRunID() {
+	m.launch_run_id = nil
+	delete(m.clearedFields, agent.FieldLaunchRunID)
 }
 
 // SetRunID sets the "run_id" field.
@@ -9517,7 +9617,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 92)
+	fields := make([]string, 0, 94)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9629,6 +9729,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.applied_config != nil {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.effective_config != nil {
+		fields = append(fields, agent.FieldEffectiveConfig)
+	}
 	if m.harness_config != nil {
 		fields = append(fields, agent.FieldHarnessConfig)
 	}
@@ -9670,6 +9773,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.launch_id != nil {
 		fields = append(fields, agent.FieldLaunchID)
+	}
+	if m.launch_run_id != nil {
+		fields = append(fields, agent.FieldLaunchRunID)
 	}
 	if m.run_id != nil {
 		fields = append(fields, agent.FieldRunID)
@@ -9876,6 +9982,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case agent.FieldAppliedConfig:
 		return m.AppliedConfig()
+	case agent.FieldEffectiveConfig:
+		return m.EffectiveConfig()
 	case agent.FieldHarnessConfig:
 		return m.HarnessConfig()
 	case agent.FieldAncestry:
@@ -9904,6 +10012,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchAsyncOptIn()
 	case agent.FieldLaunchID:
 		return m.LaunchID()
+	case agent.FieldLaunchRunID:
+		return m.LaunchRunID()
 	case agent.FieldRunID:
 		return m.RunID()
 	case agent.FieldPreviousRunIds:
@@ -10069,6 +10179,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldMessage(ctx)
 	case agent.FieldAppliedConfig:
 		return m.OldAppliedConfig(ctx)
+	case agent.FieldEffectiveConfig:
+		return m.OldEffectiveConfig(ctx)
 	case agent.FieldHarnessConfig:
 		return m.OldHarnessConfig(ctx)
 	case agent.FieldAncestry:
@@ -10097,6 +10209,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchAsyncOptIn(ctx)
 	case agent.FieldLaunchID:
 		return m.OldLaunchID(ctx)
+	case agent.FieldLaunchRunID:
+		return m.OldLaunchRunID(ctx)
 	case agent.FieldRunID:
 		return m.OldRunID(ctx)
 	case agent.FieldPreviousRunIds:
@@ -10447,6 +10561,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAppliedConfig(v)
 		return nil
+	case agent.FieldEffectiveConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEffectiveConfig(v)
+		return nil
 	case agent.FieldHarnessConfig:
 		v, ok := value.(string)
 		if !ok {
@@ -10544,6 +10665,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLaunchID(v)
+		return nil
+	case agent.FieldLaunchRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchRunID(v)
 		return nil
 	case agent.FieldRunID:
 		v, ok := value.(string)
@@ -11030,6 +11158,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldAppliedConfig) {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.FieldCleared(agent.FieldEffectiveConfig) {
+		fields = append(fields, agent.FieldEffectiveConfig)
+	}
 	if m.FieldCleared(agent.FieldHarnessConfig) {
 		fields = append(fields, agent.FieldHarnessConfig)
 	}
@@ -11056,6 +11187,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(agent.FieldLaunchID) {
 		fields = append(fields, agent.FieldLaunchID)
+	}
+	if m.FieldCleared(agent.FieldLaunchRunID) {
+		fields = append(fields, agent.FieldLaunchRunID)
 	}
 	if m.FieldCleared(agent.FieldRunID) {
 		fields = append(fields, agent.FieldRunID)
@@ -11266,6 +11400,9 @@ func (m *AgentMutation) ClearField(name string) error {
 	case agent.FieldAppliedConfig:
 		m.ClearAppliedConfig()
 		return nil
+	case agent.FieldEffectiveConfig:
+		m.ClearEffectiveConfig()
+		return nil
 	case agent.FieldHarnessConfig:
 		m.ClearHarnessConfig()
 		return nil
@@ -11292,6 +11429,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchID:
 		m.ClearLaunchID()
+		return nil
+	case agent.FieldLaunchRunID:
+		m.ClearLaunchRunID()
 		return nil
 	case agent.FieldRunID:
 		m.ClearRunID()
@@ -11526,6 +11666,9 @@ func (m *AgentMutation) ResetField(name string) error {
 	case agent.FieldAppliedConfig:
 		m.ResetAppliedConfig()
 		return nil
+	case agent.FieldEffectiveConfig:
+		m.ResetEffectiveConfig()
+		return nil
 	case agent.FieldHarnessConfig:
 		m.ResetHarnessConfig()
 		return nil
@@ -11567,6 +11710,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchID:
 		m.ResetLaunchID()
+		return nil
+	case agent.FieldLaunchRunID:
+		m.ResetLaunchRunID()
 		return nil
 	case agent.FieldRunID:
 		m.ResetRunID()
