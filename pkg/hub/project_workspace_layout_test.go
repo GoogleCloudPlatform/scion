@@ -852,13 +852,15 @@ func TestCreateSharedWorkspaceProject_SharedBackend_RefusesNonNetworkCloneURL(t 
 
 // TestWriteRootFile_RefusesSymlinkAndSpecialFiles: os.Root follows a
 // symbolic link that stays inside the root even with O_NOFOLLOW, so
-// writeRootFile checks the leaf itself: a symlink (here to a sibling file)
-// and a FIFO are refused without blocking and left unchanged, and a regular
-// file is replaced.
+// writeRootFile checks the leaf itself: a symlink (to a sibling file, or
+// dangling) and a FIFO are refused without blocking and left unchanged,
+// nothing is created through a dangling link, a regular file is replaced
+// and an absent one is created.
 func TestWriteRootFile_RefusesSymlinkAndSpecialFiles(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("keep: me\n"), 0o644))
 	require.NoError(t, os.Symlink("settings.yaml", filepath.Join(dir, "project-slug")))
+	require.NoError(t, os.Symlink("absent-target", filepath.Join(dir, "dangling")))
 	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "project-id"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "existing"), []byte("a much longer old value\n"), 0o644))
 	root, err := os.OpenRoot(dir)
@@ -872,6 +874,10 @@ func TestWriteRootFile_RefusesSymlinkAndSpecialFiles(t *testing.T) {
 	fi, err := os.Lstat(filepath.Join(dir, "project-slug"))
 	require.NoError(t, err)
 	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "the link is left as is")
+
+	require.Error(t, writeRootFile(root, "dangling", "x\n"), "a dangling symlink is refused")
+	_, err = os.Lstat(filepath.Join(dir, "absent-target"))
+	assert.True(t, os.IsNotExist(err), "nothing is created through a dangling symlink")
 
 	require.Error(t, writeRootFile(root, "project-id", "x\n"), "a FIFO is refused without blocking")
 
