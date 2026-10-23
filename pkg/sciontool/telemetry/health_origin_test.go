@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -368,8 +369,10 @@ func TestHealthOriginConcurrentRelocationNeverFalseWithNewHub(t *testing.T) {
 			t.Fatalf("round %d: recordRelocation: %v", round, relocErr)
 		}
 		h.periodic()
+		evs := h.sentEvents(t)
+		sort.Slice(evs, func(i, j int) bool { return evs[i].HealthSeq < evs[j].HealthSeq })
 		falses, seenTrue := 0, false
-		for _, ev := range h.sentEvents(t) {
+		for _, ev := range evs {
 			switch relocatedValue(ev) {
 			case "false":
 				falses++
@@ -579,8 +582,8 @@ func TestHealthOriginOutboxWithNilDrainerUsesCachedMode(t *testing.T) {
 	if err := telemetrycontract.Unmarshal(sent[0], &ev); err != nil {
 		t.Fatal(err)
 	}
-	if ev.HubID != "hub-c" || ev.OutboxPinnedHubID != "" || ev.OutboxRelocated != nil || ev.OutboxHubMismatchTotal != nil {
-		t.Fatalf("nil drainer: hub %q, subject pinned %q relocated %v mismatch %v; want the cached /healthz hub and no subject",
-			ev.HubID, ev.OutboxPinnedHubID, ev.OutboxRelocated, ev.OutboxHubMismatchTotal)
+	if ev.HubID != "hub-c" || ev.OutboxPinnedHubID != "" || ev.OutboxRelocated != nil || ev.OutboxHubMismatchTotal != nil || ev.OutboxRelocatedRefusedTotal != nil {
+		t.Fatalf("nil drainer: hub %q, subject pinned %q relocated %v mismatch %v refused %v; want the cached /healthz hub and no subject",
+			ev.HubID, ev.OutboxPinnedHubID, ev.OutboxRelocated, ev.OutboxHubMismatchTotal, ev.OutboxRelocatedRefusedTotal)
 	}
 }
