@@ -125,8 +125,11 @@ func TestConduitURL(t *testing.T) {
 	}
 }
 
+// A stored login and the development token report hub scope; a token
+// from the environment, which may be a scoped user access token, and an
+// unknown kind report unknown.
 func TestDefaultScope(t *testing.T) {
-	cases := map[string]string{CredentialOAuth: ScopeHub, CredentialDev: ScopeUnknown, CredentialToken: ScopeUnknown, "": ScopeUnknown}
+	cases := map[string]string{CredentialOAuth: ScopeHub, CredentialDev: ScopeHub, CredentialToken: ScopeUnknown, "": ScopeUnknown}
 	for kind, want := range cases {
 		if got := (DefaultScope{}).Scope(Credential{Kind: kind, Token: "secret"}); got != want {
 			t.Errorf("Scope(%q) = %q, want %q", kind, got, want)

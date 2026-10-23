@@ -58,6 +58,8 @@ import {
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
+import { shortId } from '../../client/principal-names.js';
 import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-publish-dialog.js';
 import './not-found.js';
@@ -119,6 +121,7 @@ export class ScionPageArtifacts extends LitElement {
 
   static override styles = [
     listPageStyles,
+    ownerDeletedStyles,
     css`
       .subtitle {
         margin: -1rem 0 1.25rem;
@@ -632,9 +635,12 @@ export class ScionPageArtifacts extends LitElement {
         <td class="hide-mobile">${this.renderProject(a)}</td>
         <td title=${formatInstant(a.updatedAt)}>${formatRelative(a.updatedAt)}</td>
         <td>
+          ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
           ${a.reviewPending
             ? html`<sl-badge variant="warning" pill>Review pending</sl-badge>`
-            : html`<span class="muted">—</span>`}
+            : a.ownerDeleted
+              ? nothing
+              : html`<span class="muted">—</span>`}
         </td>
       </tr>
     `;
@@ -674,11 +680,15 @@ export class ScionPageArtifacts extends LitElement {
     if (a.ownerKind === 'user' && a.ownerRef === this.pageData?.user?.id) {
       return html`<strong>You</strong>`;
     }
-    const name = this.names.get(`${a.ownerKind}:${a.ownerRef}`) || a.ownerRef;
+    // A deleted owner's name may no longer be found: show its short id
+    // then, struck through like the name (mock S1).
+    const known = this.names.get(`${a.ownerKind}:${a.ownerRef}`);
+    const name = known || (a.ownerDeleted ? shortId(a.ownerRef) : a.ownerRef);
+    const shown = a.ownerDeleted ? html`<span class="owner-gone">${name}</span>` : html`${name}`;
     if (a.ownerKind === 'agent') {
-      return html`${name} <span class="agent-tag">(agent)</span>`;
+      return html`${shown} <span class="agent-tag">(agent)</span>`;
     }
-    return html`${name}`;
+    return shown;
   }
 }
 

@@ -218,6 +218,17 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // synchronous whatever its value.
 const AsyncAgentStart = "hub.async_agent_start"
 
+// AgentBadges gates the agent badges (ptone/scion#5503): a harness vendor
+// mark and a model size chip in the upper-left of agent cards, table rows
+// and graph nodes. It is web-only and presentation-only: the hub sends the
+// harnessVendor and modelSize fields whether or not it is on.
+const AgentBadges = "web.agent_badges"
+
+// SSEHiddenTabClose gates closing the web UI's events streams in a tab that
+// has been hidden for 60 s (ptone/scion#5235). It is web-only: the hub
+// serves streams the same way whether or not it is on.
+const SSEHiddenTabClose = "web.sse_hidden_tab_close"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -378,6 +389,28 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-20",
+	},
+	{
+		Name:        AgentBadges,
+		Title:       "Agent badges",
+		Description: "Shows a harness vendor mark and the configured model size (S, M, L, XL) in the upper-left of each agent in the agent list, agent cards and graph views; the tooltip names the harness and the size. Multi-vendor harnesses (OpenCode, Copilot, Hermes) show the harness mark only. Presentation only: the hub sends the fields whether or not it is on.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5503",
+		Owner:       "web",
+		ReviewBy:    "2027-01-19",
+	},
+	{
+		Name:        SSEHiddenTabClose,
+		Title:       "Close live updates in hidden tabs",
+		Description: "A browser tab hidden for 60 seconds closes its live-update streams (page, agent list and terminal metadata) and reopens them, refreshing what it shows, when it is shown again. Terminal connections stay open. Web only; the hub is unaffected.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5235",
+		Owner:       "web",
+		ReviewBy:    "2027-01-22",
 	},
 	{
 		Name:        AgentPlugins,

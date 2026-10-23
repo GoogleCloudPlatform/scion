@@ -194,8 +194,8 @@
 - [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
 - [role.binding.delete](#rolebindingdelete) — Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
 - [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
-- [group.member.remove](#groupmemberremove) — Remove a member from a group
-- [group.delete](#groupdelete) — Delete a group
+- [group.member.remove](#groupmemberremove) — Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
+- [group.delete](#groupdelete) — Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
@@ -2525,9 +2525,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
@@ -7339,7 +7339,7 @@
 
 **Domain:** group
 
-**Description:** Remove a member from a group
+**Description:** Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7377,6 +7377,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_MemberRemoveSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
@@ -7384,7 +7386,7 @@
 
 **Domain:** group
 
-**Description:** Delete a group
+**Description:** Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7417,6 +7419,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_DeleteSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 

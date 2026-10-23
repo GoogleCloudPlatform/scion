@@ -1,6 +1,6 @@
 ---
 title: Hub Monitoring Dashboard
-description: Import the Cloud Monitoring dashboard for Hub database, dispatch, notification and launch reaper metrics.
+description: Import the Cloud Monitoring dashboard for Hub database, dispatch, notification, launch reaper and events stream metrics.
 ---
 
 The Hub exports operational metrics to Google Cloud Monitoring through OpenTelemetry. Scion includes a ready-made Cloud Monitoring dashboard for these metrics at [`deploy/monitoring/dashboards/scion-hub.json`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/monitoring/dashboards/scion-hub.json). The dashboard shows each Hub replica as its own line, which makes it most useful in [HA hosted](/scion/hosted/ha/overview/) deployments with several replicas. It works the same way for a single-node Hub.
@@ -15,6 +15,7 @@ Use the dashboard for rates and per-instance history. The Hub's admin [Health pa
 | Broker dispatch | Claimed, done and failed per second; stuck pending messages; intent-to-done latency (p50, p95, p99) | `scion.dispatch.*` |
 | Event notifications | Publish-to-deliver lag (p50, p95, p99); drops per second by reason | `scion.db.notify.*` |
 | Launch reaper | Ticks per second by outcome; row errors per second; time disarmed | `scion.launch_reaper.*` |
+| Events streams | Open browser events streams by kind; users with an open stream; stream closes per second by reason; stream lifetime (p50, p99); events written per second by kind; events published per second by trigger | `scion.hub.sse.*`, `scion.hub.events.published` |
 
 Every chart is grouped by the `service_instance_id` label, so each Hub replica gets its own line. The dashboard also has a `scion_hub_id` filter at the top. All replicas of one Hub share a Hub ID, so this filter selects one Hub deployment when several Hubs export to the same project.
 
@@ -25,6 +26,8 @@ Every chart is grouped by the `service_instance_id` label, so each Hub replica g
 3. **You can create dashboards.** Importing needs `roles/monitoring.dashboardEditor` (or an equivalent role) on the project.
 
 The notification charts need the Postgres database driver. A Hub on SQLite does not record the `scion.db.notify.*` metrics.
+
+The events stream charts need the web server, which serves the browser's events streams (`/events`). A Hub started without it records no `scion.hub.sse.*` metrics, but still records `scion.hub.events.published`.
 
 ## Import the dashboard
 
@@ -54,7 +57,8 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 - **Metric type:** `workload.googleapis.com/` followed by the OpenTelemetry name, dots included. For example, `scion.dispatch.claimed` becomes `workload.googleapis.com/scion.dispatch.claimed`.
 - **Replica label:** each Hub process sets the `service.instance.id` resource attribute to its own instance ID, a random UUID created at startup (`newInstanceID` in `pkg/hub/server.go`). It is prefixed with the pod name only when the `POD_NAME` environment variable is set. The UUID part is always there, so no two Hub processes share an instance ID: not replicas that share a Hub ID, and not a restarted container that keeps its pod name. Nothing in the configuration sets or overrides it. Hub traces (with `SCION_TRACING_ENABLED`) carry the same `service.instance.id`, so a replica's spans match its metric series. The Helm chart sets `POD_NAME` from the pod's name, so chart legends read as `<pod name>-<UUID>`; other deployments show bare UUIDs unless they set it. The instance ID becomes the metric label `service_instance_id`. You don't configure it. It changes every time a replica restarts, so each restart or rollout starts a new set of series and the old ones stop receiving points.
 - **Deployment labels:** the `scion.hub.id` resource attribute becomes the metric label `scion_hub_id`. It comes from the Hub ID (`server.hub.hub_id`, environment variable `SCION_SERVER_HUB_HUBID`), which every replica of an HA Hub shares. Use it to filter by deployment, not to tell replicas apart. The `scion.hub.name` resource attribute becomes `scion_hub_name`. Don't group by it: when no name is configured it falls back to the host name, which is not a stable replica identity.
-- **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks), `reason` (notification drops) and `pool` (connection pools) are metric labels too.
+- **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks), `reason` (notification drops and events stream closes) and `pool` (connection pools) are metric labels too.
+- **Events stream labels:** `scion.hub.sse.*` points carry `kind` (`view`, `agent-feed`, `terminal-metadata`, or `other` when the browser does not name the kind) and, on closes and lifetimes, `reason` (`client`, `max_age`, `superseded`, `cap`, `publisher`, `shutdown` or `session_ended`). `scion.hub.events.published` carries `subject_class` (the event subject without its resource ID, for example `agent.status`) and `trigger` (`heartbeat` for an agent status event sent for a heartbeat, `change` for everything else). The stream and user gauges count the streams open on each replica, so sum them across replicas for the whole Hub. `scion.hub.sse.events_written` counts update events only. Heartbeats count toward `scion.hub.sse.bytes_written`. The Hub also logs one `events stream closed` line at Info level for every stream, with the same key, its duration, the events and bytes written and the close reason.
 - **Pool label:** the Hub has two connection pools, and every `scion.db.pool.*` point carries a `pool` label naming one: `store` (the main database pool) or `events` (the Postgres event pool). Group or filter pool charts by it so the two pools are not summed.
 - **Monitored resource:** `generic_task`, with `job` set to `scion-hub` and `task_id` set to the replica's instance ID. `location` is `global` and `namespace` is empty.
 - **Kinds:**

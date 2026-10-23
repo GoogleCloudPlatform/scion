@@ -3177,6 +3177,13 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// An agent delegated credential is served only on the route routeGuard
+	// admitted for project.read, for the project in its path
+	// (.design/agent-delegation.md §11.1).
+	if !admitDelegatedHandler(w, r, opProjectRead, projectResource(project)) {
+		return
+	}
+
 	// Ensure associated groups exist (backfill for projects created before
 	// group support was added). These calls are idempotent.
 	s.createProjectGroup(ctx, project)

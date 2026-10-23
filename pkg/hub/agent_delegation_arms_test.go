@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -201,7 +202,7 @@ func TestAgentDelegation_CapabilitiesArePrimaryActionOnly(t *testing.T) {
 	assert.Empty(t, a.ComputeCapabilities(context.Background(), id, agentResource(target)).Actions)
 
 	ctx := contextWithDelegatedAdmission(context.Background(), agentDelegationAdmittedRoutes[0])
-	ctx = withAgentSubRoute(ctx, AgentSubRoute{RouteID: AgentRouteRoot, OperationID: opAgentRead, Method: http.MethodGet, AgentID: target.ID})
+	ctx = contextWithDelegatedTarget(ctx, delegatedRouteTarget{Type: "agent", ID: target.ID})
 	assert.Equal(t, []string{string(ActionRead)}, a.ComputeCapabilities(ctx, id, agentResource(target)).Actions)
 
 	other := &store.Agent{ID: "agent-z", ProjectID: "project-x"}
@@ -229,11 +230,15 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 		assert.True(t, catalogAdmitsDelegated(spec), "catalog operation %s does not admit the delegated pair", entry.Operation)
 		found := false
 		for _, row := range agentSubRouteTable {
-			if row.id == entry.RouteID && row.operation(entry.Method) == entry.Operation {
+			if delegatedRouteID(row.id) == entry.RouteID && row.operation(entry.Method) == entry.Operation {
 				found = true
 			}
 		}
-		assert.True(t, found, "entry %s %s matches no sub-route row with that operation", entry.Method, entry.RouteID)
+		if entry.RouteID == projectResourceRouteID {
+			route, ok := resolveProjectResourceRoute(entry.Method, "/api/v1/projects/p-1")
+			found = ok && route.OperationID == entry.Operation
+		}
+		assert.True(t, found, "entry %s %s matches no exact route resolution with that operation", entry.Method, entry.RouteID)
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),
 			"the primary permission of %s is not delegable", entry.Operation)
@@ -263,7 +268,9 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 // TestAgentDelegablePolicy_NoDurableOrCredentialEffect: no policy key is the
 // base permission of an operation that grants or changes authority,
 // changes ownership, mints, issues or assigns a credential, or creates a
-// resource.
+// resource. Every catalog operation is checked; only the exact pairs in
+// permissions.AgentDelegationSharedKeyExemptions (operations that are never
+// admitted for the delegated credential) are skipped.
 func TestAgentDelegablePolicy_NoDurableOrCredentialEffect(t *testing.T) {
 	forbidden := map[authzop.SecurityEffect]bool{
 		authzop.EffectGrantAuthority: true, authzop.EffectChangeAuthority: true, authzop.EffectChangeOwnership: true,
@@ -274,6 +281,9 @@ func TestAgentDelegablePolicy_NoDurableOrCredentialEffect(t *testing.T) {
 		if _, delegable := permissions.AgentDelegableRegistry[spec.BasePermission]; !delegable {
 			continue
 		}
+		if agentDelegationSharedKeyExempt(spec.BasePermission, spec.ID) {
+			continue
+		}
 		for _, effect := range spec.Effects {
 			assert.False(t, forbidden[effect], "delegable permission %s is the base permission of %s, which has effect %s", spec.BasePermission, spec.ID, effect)
 		}
@@ -281,6 +291,40 @@ func TestAgentDelegablePolicy_NoDurableOrCredentialEffect(t *testing.T) {
 	for _, perm := range []string{"agent.create", "project.create", "agent.lifecycle", "agent.delete", "agent.delegation.create", "agent.delegation.exchange"} {
 		_, delegable := permissions.AgentDelegableRegistry[perm]
 		assert.False(t, delegable, "%s must not be delegable", perm)
+	}
+}
+
+// agentDelegationSharedKeyExempt reports whether (permission, op) is listed
+// in permissions.AgentDelegationSharedKeyExemptions.
+func agentDelegationSharedKeyExempt(permission string, op authzop.OperationID) bool {
+	for _, ex := range permissions.AgentDelegationSharedKeyExemptions {
+		if ex.Permission == permission && ex.Operation == string(op) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAgentDelegationSharedKeyExemptions_NeverAdmitted: every exempted
+// operation exists in the catalog with the listed base permission, a
+// delegable key, does not admit the delegated principal or credential, and
+// has no admission table entry, so admitting it later fails here.
+func TestAgentDelegationSharedKeyExemptions_NeverAdmitted(t *testing.T) {
+	require.NotEmpty(t, permissions.AgentDelegationSharedKeyExemptions)
+	for _, ex := range permissions.AgentDelegationSharedKeyExemptions {
+		assert.NotEmpty(t, ex.Reason, "exemption %s/%s states its reason", ex.Permission, ex.Operation)
+		_, delegable := permissions.AgentDelegableRegistry[ex.Permission]
+		assert.True(t, delegable, "exemption %s/%s names a permission that is not delegable", ex.Permission, ex.Operation)
+		spec, ok := catalogOperationByID(authzop.OperationID(ex.Operation))
+		if !assert.True(t, ok, "exempted operation %s is not in the catalog", ex.Operation) {
+			continue
+		}
+		assert.Equal(t, ex.Permission, spec.BasePermission, "exempted operation %s has another base permission", ex.Operation)
+		assert.NotContains(t, spec.Credentials, authzop.CredentialDelegatedAgent, "exempted operation %s admits the delegated credential", ex.Operation)
+		assert.NotContains(t, spec.Principals, authzop.PrincipalAgentDelegated, "exempted operation %s admits the delegated principal", ex.Operation)
+		for _, entry := range agentDelegationAdmittedRoutes {
+			assert.NotEqual(t, authzop.OperationID(ex.Operation), entry.Operation, "exempted operation %s has an admission table entry", ex.Operation)
+		}
 	}
 }
 
@@ -318,7 +362,10 @@ func adtChainState(standing func(context.Context, string) error) (*AuthzService,
 		audience:         func() string { return "scion-hub:test" },
 		reservedIdentity: func(email string) bool { return email == "reserved@example.com" },
 		standing:         standing,
-		now:              func() time.Time { return now },
+		policy: func() (opsettings.AgentDelegationPolicySettings, error) {
+			return opsettings.AgentDelegationPolicySettings{}, nil
+		},
+		now: func() time.Time { return now },
 	}}
 	st := &delegatedRequestState{
 		identity: id,

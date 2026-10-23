@@ -174,3 +174,18 @@ export const AGENT_EDIT_FLAG = 'web.agent_edit';
  * every hub check is server-side. Default OFF (not in DEFAULT_ON_FLAGS).
  */
 export const FLAT_BROKERS_FLAG = 'hub.flat_runtime_brokers';
+
+/**
+ * Agent badges (ptone/scion#5503): the harness vendor mark and model size
+ * chip in the upper-left of agent cards, table rows and graph nodes.
+ * Presentation only. Default OFF.
+ */
+export const AGENT_BADGES_FLAG = 'web.agent_badges';
+
+/**
+ * Hidden-tab stream close (ptone/scion#5235): a tab hidden for 60 s closes
+ * its events streams (view, agent feed, terminal metadata) and reopens them
+ * with a resync when shown. PTY sockets are unaffected. Presentation only:
+ * the hub behaves the same either way. Default OFF.
+ */
+export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';

@@ -432,6 +432,28 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestAgentBadges_RegisteredDefaultOff pins web.agent_badges
+// (ptone/scion#5503): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentBadges_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentBadges)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentBadges)
+	}
+	if entry.Name != "web.agent_badges" {
+		t.Errorf("Name = %q, want web.agent_badges", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#5503" || entry.Owner != "web" || entry.ReviewBy != "2027-01-19" {
+		t.Errorf("agent badges experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
 // (ptone/scion#4595): it gates the hub's attachment upload path and the web
 // surfaces of later phases, so it has both layers, and it ships off.

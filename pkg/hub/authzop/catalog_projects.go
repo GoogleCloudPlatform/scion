@@ -643,8 +643,8 @@ var projectOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.read",
 		Effects:          []SecurityEffect{EffectReadOne},
