@@ -84,6 +84,7 @@ func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, 
 var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
+	deleteBranchByName  = util.DeleteBranchIn
 )
 
 // DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
@@ -529,6 +530,12 @@ type sharerTeardown struct {
 // or one that resolves outside repoRoot (util.ErrPathNotContained), is
 // never removed: the registry entry is removed and the worktree left in
 // place, as no retry could remove it either.
+//
+// With removeBranch, the registry branch is passed to the removal, which
+// deletes it only when the worktree is on it. It is deleted by name only
+// when the removal was refused (util.ErrPathNotContained); a successful
+// removal that kept the branch (the worktree was off it, or already gone)
+// keeps it.
 func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool, guard *agentFilesGuard) (sharerTeardown, error) {
 	var out sharerTeardown
 	sharers, wtPath, err := provision.ListSharers(repoRoot, projectDir, branch)
@@ -625,17 +632,18 @@ func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool,
 		slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
 			"agent_id", key, "branch", branch, "path", wtPath, "repo_root", repoRoot)
 		wtPath = ""
+		// The removal could not run, so it deleted no branch: delete the
+		// registry branch by name, as the legacy path does on a failed
+		// removal. On success the removal's own decision stands: it
+		// deletes the branch only when the worktree is on it, and a
+		// worktree off that branch, or one already gone, keeps it.
+		if removeBranch && deleteBranchByName(repoRoot, branch) {
+			out.branchDeleted = true
+			util.Debugf("delete: deleted branch %s by name after a refused worktree removal", branch)
+		}
 	default:
 		util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), rmErr)
 		return out, fmt.Errorf("delete: remove the worktree at %s; the sharer registry entry for branch %s is kept: %w", wtPath, branch, rmErr)
-	}
-	if removeBranch && !out.branchDeleted {
-		// The worktree was already gone (a retry), or its removal could not
-		// delete the branch: delete it by name, as the legacy path does.
-		if util.DeleteBranchIn(repoRoot, branch) {
-			out.branchDeleted = true
-			util.Debugf("delete: deleted branch %s by name after the worktree teardown", branch)
-		}
 	}
 	if others == 0 {
 		if _, err := unregister(); err != nil {

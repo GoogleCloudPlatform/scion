@@ -16,6 +16,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // Tests for ptone/scion#3405: DeleteHubAgentFiles finds the worktree and
@@ -296,8 +298,11 @@ func TestDeleteHubAgentFiles_WorktreeEntry(t *testing.T) {
 				t.Fatalf("delete: %v", err)
 			}
 			p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
-			if out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output(); err != nil || strings.TrimSpace(string(out)) != "" {
-				t.Errorf("branch shared not deleted: %q (err %v)", out, err)
+			// The removal found the worktree or its entry already gone,
+			// so it could not confirm the worktree's branch: the
+			// registry branch is kept (no by-name fallback on success).
+			if out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+				t.Errorf("branch shared deleted, want kept: %q (err %v)", out, err)
 			}
 		})
 	}
@@ -406,5 +411,154 @@ func TestDeleteHubAgentFiles_WorktreeAndHubStateDir(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(p.base, "README.md")); err != nil {
 			t.Errorf("call %d: project workspace removed: %v", call, err)
 		}
+	}
+}
+
+// The last sharer's worktree removal gets the registry branch only when the
+// delete asks to remove the branch: with removeBranch false the branch
+// argument is empty and the branch is kept; with true it names the
+// worktree's branch, which is deleted.
+func TestDeleteHubAgentFiles_RemoveBranchArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		removeBranch bool
+		wantArg      string
+		wantKept     bool
+	}{
+		{"keep branch", false, "", true},
+		{"remove branch", true, "shared", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSharerKeyProject(t)
+			wt := p.add(t, "dev-a", "uuid-a", "shared")
+			var gotArg []string
+			orig := removeWorktree
+			setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
+				gotArg = append(gotArg, branch)
+				return orig(base, path, repoRoot, branch)
+			})
+			if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", tc.removeBranch); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if len(gotArg) != 1 || gotArg[0] != tc.wantArg {
+				t.Errorf("removeWorktree branch arguments = %q, want [%q]", gotArg, tc.wantArg)
+			}
+			p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+			out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output()
+			if err != nil {
+				t.Fatalf("git branch --list: %v", err)
+			}
+			if kept := strings.TrimSpace(string(out)) != ""; kept != tc.wantKept {
+				t.Errorf("branch shared kept = %v, want %v", kept, tc.wantKept)
+			}
+		})
+	}
+}
+
+// A removal that succeeds but keeps the branch (the worktree was not on it)
+// is final: the registry branch is not deleted by name.
+func TestDeleteHubAgentFiles_OffBranchRemovalKeepsBranch(t *testing.T) {
+	p := newSharerKeyProject(t)
+	wt := p.add(t, "dev-a", "uuid-a", "shared")
+	setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
+		// As util.RemoveWorktree does for a worktree off its branch:
+		// remove the directory, delete no branch.
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
+	var byName []string
+	setSeam(t, &deleteBranchByName, func(repoRoot, branch string) bool {
+		byName = append(byName, branch)
+		return false
+	})
+	if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(byName) != 0 {
+		t.Errorf("branch deleted by name after a successful removal: %q", byName)
+	}
+	p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+	out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Errorf("branch shared deleted, want kept: %q (err %v)", out, err)
+	}
+}
+
+// A refused removal (the path resolves outside the repository) deletes no
+// branch itself, so the registry branch is deleted by name when the delete
+// asks to remove the branch, and kept otherwise.
+func TestDeleteHubAgentFiles_RefusedRemovalDeletesBranchByName(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		removeBranch bool
+	}{
+		{"remove branch", true},
+		{"keep branch", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSharerKeyProject(t)
+			p.add(t, "dev-a", "uuid-a", "shared")
+			setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
+				return false, fmt.Errorf("forced: %w", util.ErrPathNotContained)
+			})
+			var byName []string
+			setSeam(t, &deleteBranchByName, func(repoRoot, branch string) bool {
+				byName = append(byName, repoRoot+" "+branch)
+				return true
+			})
+			branchDeleted, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", tc.removeBranch)
+			if err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if !tc.removeBranch {
+				if len(byName) != 0 || branchDeleted {
+					t.Errorf("removeBranch false: by-name branch deletes = %q, branchDeleted %v; want none and false", byName, branchDeleted)
+				}
+				return
+			}
+			if want := p.base + " shared"; len(byName) != 1 || byName[0] != want {
+				t.Errorf("by-name branch deletes = %q, want [%q]", byName, want)
+			}
+			if !branchDeleted {
+				t.Error("branch deleted by name, but DeleteHubAgentFiles reported it kept")
+			}
+		})
+	}
+}
+
+// A removal that deleted the branch itself leaves nothing for the by-name
+// fallback.
+func TestDeleteHubAgentFiles_RemovalDeletedBranchNoFallback(t *testing.T) {
+	p := newSharerKeyProject(t)
+	wt := p.add(t, "dev-a", "uuid-a", "shared")
+	orig := removeWorktree
+	var gotArg []string
+	setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
+		gotArg = append(gotArg, branch)
+		return orig(base, path, repoRoot, branch)
+	})
+	var byName []string
+	setSeam(t, &deleteBranchByName, func(repoRoot, branch string) bool {
+		byName = append(byName, branch)
+		return false
+	})
+	branchDeleted, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(gotArg) != 1 || gotArg[0] != "shared" {
+		t.Errorf("removeWorktree branch arguments = %q, want [\"shared\"]", gotArg)
+	}
+	if len(byName) != 0 {
+		t.Errorf("by-name branch deletes after the removal deleted the branch: %q", byName)
+	}
+	if !branchDeleted {
+		t.Error("the removal deleted the branch, but DeleteHubAgentFiles reported it kept")
+	}
+	p.assertTornDown(t, "dev-a", "uuid-a", wt, "shared")
+	if out, err := exec.Command("git", "-C", p.base, "branch", "--list", "shared").Output(); err != nil || strings.TrimSpace(string(out)) != "" {
+		t.Errorf("branch shared kept, want deleted: %q (err %v)", out, err)
 	}
 }
