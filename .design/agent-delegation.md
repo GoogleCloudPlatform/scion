@@ -860,8 +860,11 @@ each, with a test:
 - `catalogListReadBatch` (`authorized_list.go:127`): deny-all, ahead of the default arm.
 - `scopedCursorBinding` (`authorized_list.go:404`): a delegated arm (§11.8).
 - `authorizeAgentMessage` (`authorize_message.go:232`): a delegated arm that runs G's decision for
-  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes. It
-  allows only the agent the route admitted, so mention, group and other fan-out targets are refused,
+  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes. The
+  actor agent's send is then evaluated exactly as the agent's own send would be (both message
+  modes, the same-project mode matrix or every cross-project gate, including the hub setting, the
+  sender's hub mode and the destination's inbound policy, and the agent's standing), and both must
+  allow; a refusal carries the agent send's denial code. It allows only the agent the route admitted, so mention, group and other fan-out targets are refused,
   and a delegated request may carry only a direct text message (the project visitor allow-list: no
   thread, conversation, mention, notification, interrupt or wake field).
 - `authorizeAgentTargetAction` (`authorize.go:429`): deny, because no lifecycle operation is

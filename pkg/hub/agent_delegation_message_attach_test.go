@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// adtCrossProjectOptIn makes a cross-project send from actor into P2 pass
+// the cross-project gates an agent send applies: the hub
+// cross_project_messaging_enabled setting is on, actor is in hub message
+// mode, and P2 accepts any inbound agent message.
+func (f *adtFixture) adtCrossProjectOptIn(t *testing.T, actor *store.Agent) {
+	t.Helper()
+	enableCrossProjectMessaging(t, f.srv)
+	f.mutateAgent(t, actor.ID, func(a *store.Agent) { a.MessageMode = store.MessageModeHub })
+	adtSetInbound(t, f.store, f.other.ID, store.CrossProjectInboundAny)
+}
+
+// adtSetInbound sets projectID's cross-project inbound policy.
+func adtSetInbound(t *testing.T, s store.Store, projectID, policy string) {
+	t.Helper()
+	ctx := context.Background()
+	p, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	_, err = s.UpdateProjectMessagingPolicy(ctx, projectID, policy, p.CrossProjectInboundRevision)
+	require.NoError(t, err)
+}
+
+// adtSetCrossProjectEnabled replaces the server's operational settings with
+// ones whose hub cross_project_messaging_enabled setting is on.
+func adtSetCrossProjectEnabled(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	fake := newFakeHubSettingStore()
+	fake.seed("messaging", json.RawMessage(fmt.Sprintf(`{"cross_project_messaging_enabled": %t}`, on)))
+	ops := NewOperationalSettings(fake, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+}
 
 // adtGrantProjectPermissions binds userID in projectID to a custom project
 // role holding perms (a user keeps its one built-in membership role) and
@@ -64,11 +98,15 @@ func adtGrantProjectPermissions(t *testing.T, s store.Store, userID, projectID s
 
 // adtMessageWorld readies the fixture for delegated message tests: agent B
 // in P2 is running on the fixture's online broker, Alice holds agent.message
-// in P2 through a custom role, and dispatches are recorded. It returns the
-// recording dispatcher.
+// in P2 through a custom role, and dispatches are recorded. A send from A
+// (P1) to B (P2) is cross-project, so it passes the cross-project gates only
+// because the world opts in explicitly (adtCrossProjectOptIn: the hub
+// setting on, A in hub mode, P2 accepting any inbound agent message). It
+// returns the recording dispatcher.
 func (f *adtFixture) adtMessageWorld(t *testing.T) *recordingDispatcher {
 	t.Helper()
 	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.other.ID, "agent.message")
+	f.adtCrossProjectOptIn(t, f.agentA)
 	f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running"; a.RuntimeBrokerID = f.broker.ID })
 	d := &recordingDispatcher{}
 	f.srv.SetDispatcher(d)
@@ -299,6 +337,7 @@ func TestAgentDelegatedMessage_SuperAdminIssuerPiercesNoMode(t *testing.T) {
 	dispatcher := f.adtMessageWorld(t)
 	admin := hubAdminUser(t, f.bypassAgentsFixture)
 	adminAgent, _ := f.createdAgent(t, f.create(t, authUser(admin), CreateAgentRequest{Name: "adt-msg-sa-s"}), "adt-msg-sa-s")
+	f.adtCrossProjectOptIn(t, adminAgent) // the admin's agent sends across projects as an agent
 	rec := f.issue(t, f.session(t, admin), adminAgent.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:message"}, "name": "sa",
 	})
@@ -469,23 +508,34 @@ func TestAgentDelegatedMessage_OnlyTheRouteTarget(t *testing.T) {
 	assert.True(t, allowed, reason)
 	assert.Len(t, decisions.delegated(), 1, "one decision for the route target")
 
-	// Message modes on the route target: hub allows like project; an empty
-	// mode denies, as on the user path; nothing is pierced.
+	// Message modes on the route target, evaluated as for the actor agent's
+	// own send (A is in hub mode): in A's own project, project and hub
+	// allow, and an empty mode, lineage and none deny; across projects a
+	// lineage target fails the cross-project target-mode gate. The issuer
+	// pierces nothing.
+	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.proj.ID, "agent.message")
 	for _, tc := range []struct {
-		mode   string
-		allow  bool
-		reason string
+		name    string
+		project string
+		mode    string
+		allow   bool
+		code    MessageDenialCode
 	}{
-		{store.MessageModeHub, true, "agent delegation"},
-		{"", false, messageReasonDelegatedModeNotPierced},
-		{store.MessageModeLineage, false, messageReasonDelegatedModeNotPierced},
-		{store.MessageModeNone, false, "target agent message_mode is none"},
+		{"same project, hub", f.agentA.ProjectID, store.MessageModeHub, true, ""},
+		{"same project, project", f.agentA.ProjectID, store.MessageModeProject, true, ""},
+		{"same project, empty", f.agentA.ProjectID, "", false, ""},
+		{"same project, lineage", f.agentA.ProjectID, store.MessageModeLineage, false, ""},
+		{"same project, none", f.agentA.ProjectID, store.MessageModeNone, false, ""},
+		{"other project, lineage", b.ProjectID, store.MessageModeLineage, false, MessageDenialCrossProjectTargetMode},
+		{"other project, hub", b.ProjectID, store.MessageModeHub, true, ""},
 	} {
 		moded := *b
+		moded.ProjectID = tc.project
 		moded.MessageMode = tc.mode
-		allowed, reason, _ := f.srv.authorizeAgentMessage(ctx, st.identity, &moded, false)
-		assert.Equal(t, tc.allow, allowed, "mode %q", tc.mode)
-		assert.Equal(t, tc.reason, reason, "mode %q", tc.mode)
+		allowed, reason, d := f.srv.authorizeAgentMessage(ctx, st.identity, &moded, false)
+		assert.Equal(t, tc.allow, allowed, "%s: %s", tc.name, reason)
+		require.NotNil(t, d, tc.name)
+		assert.Equal(t, tc.code, d.Code, tc.name)
 	}
 
 	// The agent read entry does not admit a send.
@@ -519,25 +569,90 @@ func TestAgentDelegatedMessage_OnlyTheRouteTarget(t *testing.T) {
 	}
 }
 
-// TestAgentDelegatedMessage_OrdinaryAgentTokenGainsNothing: agent A's own
-// JWT gets the same answer messaging B in P2 before and after Alice issues
-// and A exchanges a grant for agent:message; with both headers the valid
-// agent token wins and the bearer adds nothing.
+// TestAgentDelegatedMessage_OrdinaryAgentTokenGainsNothing: with P2
+// back at the default inbound policy (none), agent A's own JWT gets the
+// same refusal messaging B in P2 before and after Alice issues and A
+// exchanges a grant for agent:message, and the delegated credential gets
+// that same refusal: the grant adds nothing to the agent's own send. With
+// both headers the valid agent token wins. The delegated credential does
+// send to agent C in A's own project.
 func TestAgentDelegatedMessage_OrdinaryAgentTokenGainsNothing(t *testing.T) {
 	f := newADTFixture(t, "adt-msg-golden")
 	f.adtMessageWorld(t)
+	adtSetInbound(t, f.store, f.other.ID, store.CrossProjectInboundNone)
+	adtGrantProjectPermissions(t, f.store, f.alice.ID, f.proj.ID, "agent.message")
+	f.mutateAgent(t, f.agentC.ID, func(a *store.Agent) { a.Phase = "running"; a.RuntimeBrokerID = f.broker.ID })
 	agentToken := f.agentJWT(t, f.agentA)
 	path := agentMessagePath(f.agentB.ID)
-	send := func(headers map[string]string) int {
-		return f.do(t, http.MethodPost, path, adtText("x"), headers).Code
+	send := func(headers map[string]string) *httptest.ResponseRecorder {
+		return f.do(t, http.MethodPost, path, adtText("x"), headers)
 	}
-	before := send(map[string]string{"X-Scion-Agent-Token": agentToken})
-	require.NotEqual(t, http.StatusOK, before, "the agent JWT cannot message B")
+	asAgent := map[string]string{"X-Scion-Agent-Token": agentToken}
+	before := send(asAgent) // the agent JWT cannot message B: P2 accepts no inbound agent messages
+
+	want := adtAssertAPIError(t, before, http.StatusForbidden, ErrCodeMessageDenied)
+	assert.Equal(t, string(MessageDenialCrossProjectInboundNone), want.Details["reason"])
+	sameRefusal := func(rec *httptest.ResponseRecorder, msg string) {
+		got := adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeMessageDenied)
+		assert.Equal(t, want.Details, got.Details, msg)
+	}
 
 	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
-	assert.Equal(t, before, send(map[string]string{"X-Scion-Agent-Token": agentToken}), "the agent JWT gains nothing from the grant")
-	assert.Equal(t, http.StatusOK, send(adtBearer(cred.Token)))
-	assert.Equal(t, before, send(map[string]string{"X-Scion-Agent-Token": agentToken, "Authorization": "Bearer " + cred.Token}))
+	sameRefusal(send(asAgent), "the agent JWT gains nothing from the grant")
+	sameRefusal(send(adtBearer(cred.Token)), "the delegated credential gets the agent's own refusal")
+	sameRefusal(send(map[string]string{"X-Scion-Agent-Token": agentToken, "Authorization": "Bearer " + cred.Token}), "with both headers the agent token wins")
+	assert.Equal(t, http.StatusOK, f.sendMessage(t, cred.Token, agentMessagePath(f.agentC.ID), adtText("x")).Code)
+}
+
+// TestAgentDelegatedMessage_CrossProjectGatesAsForAnAgentSend: a delegated
+// send to an agent in another project passes every cross-project gate the
+// actor agent's own send must pass, and is refused with the same code and
+// shape when one fails: a destination project at the default inbound
+// policy (none), the hub cross-project setting off, and a sender that is
+// not in hub mode. A destination that opted in is reached.
+func TestAgentDelegatedMessage_CrossProjectGatesAsForAnAgentSend(t *testing.T) {
+	f := newADTFixture(t, "adt-msg-xproj")
+	dispatcher := f.adtMessageWorld(t)
+	cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:message").ID)
+	agentToken := f.agentJWT(t, f.agentA)
+	path := agentMessagePath(f.agentB.ID)
+
+	// refused asserts a delegated refusal with denial code code, identical
+	// in status, error code and details to the agent's own send.
+	refused := func(t *testing.T, code MessageDenialCode) {
+		t.Helper()
+		calls := len(dispatcher.getCalls())
+		delegated := adtAssertAPIError(t, f.sendMessage(t, cred.Token, path, adtText("x")), http.StatusForbidden, ErrCodeMessageDenied)
+		assert.Equal(t, string(code), delegated.Details["reason"])
+		own := adtAssertAPIError(t, f.do(t, http.MethodPost, path, adtText("x"), map[string]string{"X-Scion-Agent-Token": agentToken}),
+			http.StatusForbidden, ErrCodeMessageDenied)
+		assert.Equal(t, own.Details, delegated.Details, "the same refusal as the agent's own send")
+		assert.Len(t, dispatcher.getCalls(), calls, "nothing refused was dispatched")
+	}
+
+	t.Run("destination that opted in is allowed", func(t *testing.T) {
+		require.Equal(t, http.StatusOK, f.sendMessage(t, cred.Token, path, adtText("x")).Code)
+	})
+	t.Run("default-none destination is refused", func(t *testing.T) {
+		adtSetInbound(t, f.store, f.other.ID, store.CrossProjectInboundNone)
+		defer adtSetInbound(t, f.store, f.other.ID, store.CrossProjectInboundAny)
+		refused(t, MessageDenialCrossProjectInboundNone)
+	})
+	t.Run("hub cross-project setting off is refused", func(t *testing.T) {
+		adtSetCrossProjectEnabled(t, f.srv, false)
+		defer adtSetCrossProjectEnabled(t, f.srv, true)
+		refused(t, MessageDenialCrossProjectDisabled)
+	})
+	t.Run("sender not in hub mode is refused", func(t *testing.T) {
+		f.mutateAgent(t, f.agentA.ID, func(a *store.Agent) { a.MessageMode = store.MessageModeProject })
+		defer func() {
+			_ = f.mutateAgent(t, f.agentA.ID, func(a *store.Agent) { a.MessageMode = store.MessageModeHub })
+		}()
+		refused(t, MessageDenialCrossProjectSenderMode)
+	})
+	t.Run("opted-in destination is reached again", func(t *testing.T) {
+		require.Equal(t, http.StatusOK, f.sendMessage(t, cred.Token, path, adtText("x")).Code)
+	})
 }
 
 // adtAttachTarget creates agent E in P1, owned by Carol, with Alice in its
