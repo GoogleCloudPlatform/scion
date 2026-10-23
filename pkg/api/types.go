@@ -972,6 +972,22 @@ func GitCloneFromContext(ctx context.Context) *GitCloneConfig {
 	return gc
 }
 
+type recordedOriginContextKey struct{}
+
+// ContextWithRecordedOrigin attaches the broker-recorded origin URL (the hub
+// project's repository), used to pin the git-lfs endpoint for a linked-checkout
+// worktree whose GitClone was cleared on the linked route. Prefer this over the
+// live remote.origin.url, which an agent can rewrite.
+func ContextWithRecordedOrigin(ctx context.Context, url string) context.Context {
+	return context.WithValue(ctx, recordedOriginContextKey{}, url)
+}
+
+// RecordedOriginFromContext returns the broker-recorded origin URL, or "" if unset.
+func RecordedOriginFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(recordedOriginContextKey{}).(string)
+	return s
+}
+
 type freshProvisionContextKey struct{}
 
 // ContextWithFreshProvision returns a new context marking this dispatch as a
@@ -1354,6 +1370,12 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	// RecordedOriginURL is the broker-recorded origin for the project (the hub
+	// project's repository), captured from GitClone before the linked-checkout
+	// route clears GitClone. It is threaded to worktree creation so the git-lfs
+	// endpoint is pinned from this trusted origin rather than the live,
+	// agent-writable remote.origin.url. Empty when there is no recorded origin.
+	RecordedOriginURL string
 	// TrustedHubEndpoint is the broker's own operator-derived resolution of
 	// the hub endpoint — set only in BrokerMode, only from the request
 	// HubEndpoint, the hub connection endpoint, or this broker's configured

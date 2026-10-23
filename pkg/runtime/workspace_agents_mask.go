@@ -92,6 +92,16 @@ const workspaceProjectConfigDir = ".scion"
 // the agent could point it elsewhere for later starts.
 var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic link; project configuration in a workspace that agents share must be a directory or a project marker file, so that it can be mounted read-only")
 
+// errOutsideRootNotRegistered is returned when a workspace outside the repository
+// root is not a registered worktree of it: the outside-root fallback then mounts
+// nothing and refuses, rather than binding the whole checkout.
+var errOutsideRootNotRegistered = errors.New("workspace is outside the project repository root and is not a registered worktree of it; refusing to mount the whole repository")
+
+// errAppleSharedWorkspaceUnsupported is returned when a shared-workspace git layout
+// is requested on the Apple runtime, which cannot bind a per-agent read-only
+// .git/config without breaking the main worktree.
+var errAppleSharedWorkspaceUnsupported = errors.New("the shared-workspace git layout is not supported on the Apple runtime, which cannot make .git/config read-only without breaking the main worktree; use a worktree-per-agent project or a different runtime")
+
 // errProjectConfigMarkerNoBind is returned for a workspace whose .scion is
 // a project marker file on a runtime that cannot bind a single file: the
 // marker would stay writable, so the agent could replace it.
@@ -181,4 +191,52 @@ func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+// maskAgentsIfPresent requests a tmpfs mask of <tgt>/agents, but ONLY when the
+// broker-side <src>/agents already exists as a directory. It NEVER creates the
+// directory: a read-only .scion bind already prevents an agent from creating it,
+// and the runtime must never create a mount point inside that read-only bind or
+// in the host checkout (the same isDir gate upstream applies for Apple). The
+// mask target is handed to addMask, which the caller emits as a tmpfs AFTER the
+// bind mounts (docker/podman --mount type=tmpfs, Apple --tmpfs), so the mask
+// lands over the bind rather than before it. This is the single code path for
+// the no-create agents mask, shared by the nested and fallback own-.scion cases.
+func maskAgentsIfPresent(src, tgt string, addMask func(maskTarget string)) {
+	if isDir(src) && isDir(filepath.Join(src, "agents")) {
+		addMask(path.Join(tgt, "agents"))
+	}
+}
+
+// applyNestedProjectConfig handles a project whose configuration directory lies
+// in a SUBDIRECTORY of the bound workspace (ProjectConfigPath is not
+// <workspace>/.scion), so that binding the workspace read-write would otherwise
+// leave the real <workspace>/<sub>/.scion (settings, templates, agents/)
+// writable in the container. It binds that nested .scion READ-ONLY and, when it
+// is a directory, requests a tmpfs mask of its agents/ via addMask (emitted
+// after the bind mounts). A symlinked or (on a no-file-bind runtime) marker
+// nested .scion is refused fail-closed (errProjectConfigSymlink /
+// errProjectConfigMarkerNoBind). It is a no-op when the project config is at
+// <workspace>/.scion or absent. containerWorkspace is where the workspace is
+// bound (e.g. "/workspace" or "/repo-root/<rel>").
+func applyNestedProjectConfig(config RunConfig, containerWorkspace string, registerMount func(string, string, bool, bool), addMask func(maskTarget string)) error {
+	rel, ok := nestedProjectConfigRel(config.Workspace, config.ProjectConfigPath)
+	if !ok {
+		return nil
+	}
+	subdir := filepath.Dir(rel) // rel is "<sub>/.scion"
+	projectDir := filepath.Join(config.Workspace, subdir)
+	containerProjectDir := path.Join(containerWorkspace, filepath.ToSlash(subdir))
+	src, tgt, ok, err := workspaceProjectConfigMount(projectDir, containerProjectDir, config.RuntimeName != appleContainerRuntimeName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	registerMount(src, tgt, true, true) // nested .scion read-only (after the /workspace bind)
+	// A bound marker file has no agents/ to mask; maskAgentsIfPresent is a no-op
+	// unless src and src/agents are both directories.
+	maskAgentsIfPresent(src, tgt, addMask)
+	return nil
 }

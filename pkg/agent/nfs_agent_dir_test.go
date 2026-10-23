@@ -548,6 +548,42 @@ func TestRemoveNFSAgentFiles_AfterSwitchToSharedPlain(t *testing.T) {
 	assert.Equal(t, sharedBefore, treeSnapshot(t, ws, ""))
 }
 
+// A labelless, pre-existing Kubernetes agent that nfsKeepSharedCheckout keeps on
+// the project's shared checkout is exactly the shape the runtime refuses at start
+// (see pkg/runtime k8sSharedRepoShapeRefusal and TestK8sSharedRepoShapeRefusal).
+// Deleting such a refused agent must leave the shared checkout in place, so any
+// work on it stays recoverable from the workspace storage.
+func TestRemoveNFSAgentFiles_RefusedStickyAgent_LeavesSharedCheckout(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	ws := nfsTestWorkspaceDir(mountRoot)
+	require.NoError(t, provision.ProvisionShared(provision.ProvisionInput{
+		Resolved:    provision.ResolvedWorkspace{HostPath: ws},
+		ProjectID:   testNFSWorkspaceProjectID,
+		AgentID:     "test-agent",
+		Mode:        store.SharingModeSharedPlain,
+		NFSUID:      os.Getuid(),
+		NFSGID:      os.Getgid(),
+		SentinelDir: ws,
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "unpushed.txt"), []byte("work"), 0o644))
+
+	// The fixture is the refused sticky shape: a broker-side agent dir with no
+	// nfs-agent-dir record, and no agent directory on the export, so
+	// nfsKeepSharedCheckout keeps the shared checkout.
+	brokerAgentDir := t.TempDir()
+	keep, _ := nfsKeepSharedCheckout(false, brokerAgentDir, resolveTestNFSWorkspace(t, mountRoot), "test-agent")
+	require.True(t, keep, "fixture must be the refused sticky shape (keeps the shared checkout)")
+
+	sharedBefore := treeSnapshot(t, ws, "")
+	runAgentWorkspacePurgeInline(t)
+	_, err := kubernetesTestManager("kubernetes").RemoveNFSAgentFiles(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(ws, "unpushed.txt"), "deleting the refused sticky agent must leave the shared checkout")
+	assert.Equal(t, sharedBefore, treeSnapshot(t, ws, ""))
+}
+
 // Mode switch, shared-plain (or worktree-per-agent) then clone-per-agent:
 // the agent being deleted has no agent directory, while other agents do.
 // Nothing outside agents/<agent name> is touched; in particular the

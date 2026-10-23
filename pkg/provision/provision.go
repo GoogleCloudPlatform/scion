@@ -2845,6 +2845,15 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	var args []string
 	if in.HostGitHardened {
 		args = append(args, HostCloneGitArgs()...)
+	} else {
+		// Non-hardened clones still carry the base host-side git pins unconditionally
+		// (no hooks, no fsmonitor, no pager, restricted ext/file transports, no
+		// submodule recursion, no signature checks): a cloned repository's config
+		// cannot change what this host git invocation does. HostCloneGitArgs (the
+		// hardened path) already includes exactly these base pins (hostGitArgs ==
+		// util.HostGitArgs) plus the clone transport/redirect extras, so the base
+		// pins are present on every clone path; neither path duplicates a -c key.
+		args = append(args, util.HostGitArgs()...)
 	}
 	args = append(args, "clone")
 
@@ -2869,8 +2878,10 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	// skipped so git-lfs never contacts an endpoint named in the cloned tracked
 	// .lfsconfig with the host's credentials (agents fetch LFS objects
 	// in-container). This path also runs in the Kubernetes init container (via
-	// `sciontool provision`). http.followRedirects=false and the protocol allow
-	// list are applied as fixed args by HostCloneGitArgs when HostGitHardened.
+	// `sciontool provision`). The host-side git hardening pins (no hooks, no
+	// pager, restricted transports, no submodule recursion) plus
+	// http.followRedirects=false and the protocol allow list are applied as fixed
+	// args by HostCloneGitArgs when HostGitHardened (the hub project-create clone).
 	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	if in.HostGitHardened {
 		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)

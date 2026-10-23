@@ -741,7 +741,10 @@ func TestK8sCreateSecretProviderClass_RecreateOnAlreadyExists(t *testing.T) {
 // synchronous path.
 func TestRun_NFSWorktree_AsyncPath(t *testing.T) {
 	r := newNFSTestK8sRuntime()
-	cfg := nfsWorktreeConfig("scion-wt-async")
+	// Clone-per-agent (an allowed shape): the worktree-per-agent shape is refused
+	// at Run on Kubernetes, so this async-launch-path test uses a shape
+	// that actually builds a pod.
+	cfg := nfsAgentDirConfig("scion-wt-async")
 	rec := &hookRecorder{}
 	rec.apply(&cfg)
 	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
@@ -759,7 +762,7 @@ func TestRun_NFSWorktree_AsyncPath(t *testing.T) {
 		t.Fatalf("pods = %d, want 1 with one init container", len(pods.Items))
 	}
 	ic := pods.Items[0].Spec.InitContainers[0]
-	if v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE"); v != "worktree-per-agent" {
+	if v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE"); v != "clone-per-agent" {
 		t.Fatalf("SCION_WORKSPACE_MODE = %q", v)
 	}
 	_, handles := rec.snapshot()
