@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -163,21 +165,31 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 }
 
 // startEffective starts name with opts on a fresh mock runtime and returns
-// the AgentInfo, failing on a start error.
-func startEffective(t *testing.T, opts api.StartOptions) *api.AgentInfo {
+// the AgentInfo and the container's SCION_HARNESS ("" and false when the
+// container env does not set it), failing on a start error.
+func startEffective(t *testing.T, opts api.StartOptions) (*api.AgentInfo, string, bool) {
 	t.Helper()
+	var captured runtime.RunConfig
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{}, nil
 		},
-		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) { return "mock-id", nil },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
 	}
 	opts.BrokerMode, opts.NoAuth = true, true
 	info, err := NewManager(mockRT).Start(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	return info
+	for _, kv := range captured.Env {
+		if v, ok := strings.CutPrefix(kv, "SCION_HARNESS="); ok {
+			return info, v, true
+		}
+	}
+	return info, "", false
 }
 
 // TestStart_EffectiveHarnessIsTheResolvedHarness (addendum v14 section 5;
@@ -194,16 +206,22 @@ func TestStart_EffectiveHarnessIsTheResolvedHarness(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(other, "config.yaml"), []byte("harness: switched-h\nuser: alpha-user\nimage: alpha-image:v1\ncapabilities: {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	first := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project})
+	first, _, _ := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project})
 	if first.Harness != "generic" {
 		t.Fatalf("first start: Harness = %q, want generic", first.Harness)
 	}
-	switched := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project, HarnessConfig: "other-hc"})
+	switched, containerHarness, _ := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project, HarnessConfig: "other-hc"})
 	if switched.HarnessConfig != "other-hc" {
 		t.Fatalf("fixture: the start did not switch harness-config (%q)", switched.HarnessConfig)
 	}
 	if switched.Harness != "switched-h" || !switched.ConfigResolved {
 		t.Errorf("switched start: Harness = %q, ConfigResolved = %v; want the resolved harness switched-h", switched.Harness, switched.ConfigResolved)
+	}
+	// Known divergence (addendum v15 sections 5 and 17): the container's
+	// SCION_HARNESS (scion.harness on telemetry and usage points) is still
+	// the stored name, and selects the usage-parsing rules.
+	if containerHarness != "generic" {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (generic)", containerHarness)
 	}
 }
 
@@ -218,12 +236,67 @@ func TestStart_EffectiveHarnessGenericFallback(t *testing.T) {
 	if err := os.WriteFile(hc, []byte("harness: named-h\nuser: alpha-user\nimage: alpha-image:v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	info := startEffective(t, api.StartOptions{Name: "eff-fallback", Template: "alpha", ProjectPath: project})
+	info, containerHarness, _ := startEffective(t, api.StartOptions{Name: "eff-fallback", Template: "alpha", ProjectPath: project})
 	if info.HarnessConfig != "test-harness" {
 		t.Fatalf("fixture: harness-config %q", info.HarnessConfig)
 	}
 	if info.Harness != "generic" || !info.ConfigResolved {
-		t.Errorf("Generic fallback: Harness = %q, ConfigResolved = %v; want generic (the harness that ran), true", info.Harness, info.ConfigResolved)
+		t.Errorf("Generic fallback: Harness = %q, ConfigResolved = %v; want generic (the resolved Generic implementation), true", info.Harness, info.ConfigResolved)
+	}
+	// Known divergence (addendum v15): the container keeps the declared name.
+	if containerHarness != "named-h" {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (named-h)", containerHarness)
+	}
+}
+
+// TestStart_EffectiveHarnessLegacyNoHarnessConfig (review wp1s3-r3 O-2): a
+// legacy agent whose stored config names neither a harness nor a
+// harness-config, with no template or settings default, starts on
+// harness.New's Generic (the no-harness-config branch). It reports the
+// resolved Generic as its effective harness, with the marker set; the
+// container gets no SCION_HARNESS (the third divergent case, addendum v15).
+func TestStart_EffectiveHarnessLegacyNoHarnessConfig(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	if first, _, _ := startEffective(t, api.StartOptions{Name: "eff-legacy", Template: "alpha", ProjectPath: project}); first.Harness != "generic" {
+		t.Fatalf("fixture: first start Harness %q", first.Harness)
+	}
+	home := os.Getenv("HOME")
+	if err := os.WriteFile(filepath.Join(home, ".scion", "templates", "alpha", "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\ndefault_harness_config: \"\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stored := filepath.Join(project, "agents", "eff-legacy", "scion-agent.json")
+	data, err := os.ReadFile(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "harness")
+	delete(raw, "harness_config")
+	delete(raw, "default_harness_config")
+	out, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stored, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, containerHarness, set := startEffective(t, api.StartOptions{Name: "eff-legacy", Template: "alpha", ProjectPath: project, Image: "img:legacy"})
+	if info.HarnessConfig != "" {
+		t.Fatalf("fixture: a harness-config resolved (%q)", info.HarnessConfig)
+	}
+	if info.Harness != "generic" || !info.ConfigResolved {
+		t.Errorf("legacy start: Harness = %q, ConfigResolved = %v; want generic, true", info.Harness, info.ConfigResolved)
+	}
+	if set {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 sets none when no harness is stored", containerHarness)
 	}
 }
 

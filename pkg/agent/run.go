@@ -192,10 +192,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					}
 					a.Phase = "running"
 					// This start resolved no configuration, so it reports
-					// none: the effective fields stay unset (WP1 slice 3
-					// addendum v13 section 5), and without Harness the
-					// broker sends no brokerBuild, so the hub records
-					// nothing, as for an older broker.
+					// none: the effective fields stay unset and
+					// ConfigResolved stays false (WP1 slice 3 addendum v14
+					// section 5), so the broker sends no brokerBuild and
+					// the hub records nothing, as for an older broker.
 					a.Harness, a.Model, a.TemplateHash = "", "", ""
 					a.ConfigResolved = false
 					return &a, nil
