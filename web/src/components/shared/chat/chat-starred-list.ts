@@ -70,6 +70,43 @@ export class ScionChatStarredList extends LitElement {
       display: inline-flex;
     }
 
+    /* A native button styled as Shoelace's icon button, so its ARIA state
+       (aria-expanded, aria-controls) is on the focusable control itself and
+       resolves to the panel in the same shadow root. */
+    .trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      background: none;
+      padding: var(--sl-spacing-x-small, 0.5rem);
+      margin: 0;
+      border-radius: var(--sl-border-radius-medium, 0.25rem);
+      font-size: inherit;
+      line-height: 1;
+      color: var(--sl-color-neutral-600, #475569);
+      cursor: pointer;
+      transition: var(--sl-transition-x-fast, 100ms) color;
+      -webkit-appearance: none;
+    }
+
+    .trigger:hover {
+      color: var(--sl-color-primary-600, #2563eb);
+    }
+
+    .trigger:active {
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
+    .trigger:focus {
+      outline: none;
+    }
+
+    .trigger:focus-visible {
+      outline: var(--sl-focus-ring, solid 3px rgba(59, 130, 246, 0.4));
+      outline-offset: var(--sl-focus-ring-offset, 1px);
+    }
+
     .panel {
       position: absolute;
       top: calc(100% + 0.25rem);
@@ -225,7 +262,7 @@ export class ScionChatStarredList extends LitElement {
     document.removeEventListener('pointerdown', this.handleOutsidePointer, true);
     if (restoreFocus) {
       void this.updateComplete.then(() => {
-        this.renderRoot.querySelector<HTMLElement>('sl-icon-button')?.focus();
+        this.renderRoot.querySelector<HTMLElement>('.trigger')?.focus();
       });
     }
   }
@@ -394,14 +431,17 @@ export class ScionChatStarredList extends LitElement {
   override render(): TemplateResult {
     return html`
       <sl-tooltip content="Starred messages in this conversation">
-        <sl-icon-button
-          name="star"
-          label="Starred messages in this conversation"
+        <button
+          type="button"
+          class="trigger"
+          aria-label="Starred messages in this conversation"
           aria-haspopup="dialog"
           aria-expanded=${this.open ? 'true' : 'false'}
           aria-controls=${this.panelId}
           @click=${(): void => this.toggle()}
-        ></sl-icon-button>
+        >
+          <sl-icon name="star" aria-hidden="true"></sl-icon>
+        </button>
       </sl-tooltip>
       ${this.open
         ? html`<div

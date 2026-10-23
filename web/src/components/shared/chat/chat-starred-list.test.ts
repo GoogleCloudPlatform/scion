@@ -65,8 +65,9 @@ async function mount(): Promise<ScionChatStarredList> {
   return el;
 }
 
-function button(el: ScionChatStarredList): HTMLElement {
-  return el.shadowRoot!.querySelector('sl-icon-button')!;
+/** The trigger: the focusable control itself, which carries the ARIA state. */
+function button(el: ScionChatStarredList): HTMLButtonElement {
+  return el.shadowRoot!.querySelector<HTMLButtonElement>('button.trigger')!;
 }
 
 async function openPanel(el: ScionChatStarredList): Promise<void> {
@@ -87,8 +88,12 @@ describe('scion-chat-starred-list', () => {
   it('is a labelled, collapsed button until opened', async () => {
     const el = await mount();
     const b = button(el);
-    expect(b.getAttribute('label')).toBe('Starred messages in this conversation');
+    expect(b).toBeInstanceOf(HTMLButtonElement);
+    expect(b.getAttribute('aria-label')).toBe('Starred messages in this conversation');
+    expect(b.getAttribute('aria-haspopup')).toBe('dialog');
     expect(b.getAttribute('aria-expanded')).toBe('false');
+    b.focus();
+    expect(el.shadowRoot!.activeElement).toBe(b);
     expect(apiFetch).not.toHaveBeenCalled();
     expect(el.shadowRoot!.querySelector('.panel')).toBeNull();
   });
@@ -107,6 +112,8 @@ describe('scion-chat-starred-list', () => {
     expect(panel.getAttribute('role')).toBe('dialog');
     expect(button(el).getAttribute('aria-expanded')).toBe('true');
     expect(button(el).getAttribute('aria-controls')).toBe(panel.id);
+    // aria-controls resolves within the same shadow root.
+    expect(el.shadowRoot!.getElementById(panel.id)).toBe(panel);
     expect(el.shadowRoot!.querySelector('ul')?.getAttribute('aria-label')).toBe(
       'Starred messages in this conversation'
     );
@@ -175,6 +182,7 @@ describe('scion-chat-starred-list', () => {
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('.panel')).toBeNull();
     expect(button(el).getAttribute('aria-expanded')).toBe('false');
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(button(el)));
   });
 
   it('refetches while open on the SSE invalidation and on a local change here', async () => {
