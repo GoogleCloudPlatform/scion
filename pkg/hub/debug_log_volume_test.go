@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -134,8 +135,9 @@ func TestAgentStatusEventPublishWritesNoDebugLine(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		p.PublishAgentStatus(ctx, agent)
 	}
+	p.PublishAgentStatus(eventstreams.WithHeartbeatTrigger(ctx), agent)
 	// Each call publishes on agent.<id>.status and project.<id>.agent.status.
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 8; i++ {
 		<-ch
 	}
 	if n := rec.count("event published"); n != 0 {
