@@ -196,3 +196,74 @@ func listTree(t *testing.T, dir string) []string {
 	}
 	return out
 }
+
+// An agent started before its project's configuration moved to the shared
+// project root, in a mode whose state stayed in the legacy in-project dir,
+// is found there (read-only look-up), but its persisted workspace lies under
+// the legacy broker-local project dir, so a restart from the shared root is
+// refused by the workspace containment check, cleanly: nothing is
+// provisioned in the external root and the legacy state is left as it was.
+func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	root := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
+	mustMkdirAll(t, filepath.Join(root, "workspace"))
+	scionDir := filepath.Join(root, config.DotScion)
+	mustMkdirAll(t, scionDir)
+	for name, content := range map[string]string{
+		projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+		projectkeys.ProjectSlugFile: "web\n",
+		"settings.yaml":             "schema_version: \"1\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(scionDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The pre-move layout: the broker-local hub-managed project dir.
+	legacyRoot := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectsDir, "web")
+	legacyScion := filepath.Join(legacyRoot, config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, testNFSWorkspaceProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyScion, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	start := func(projectPath string) error {
+		mockRT := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc:  func(ctx context.Context, rc runtime.RunConfig) (string, error) { return "mock-id", nil },
+		}
+		_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+			Name:        "test-agent",
+			ProjectPath: projectPath,
+			NoAuth:      true,
+			Env: map[string]string{
+				"SCION_AGENT_ID":   "agent-5823",
+				"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+			},
+		})
+		return err
+	}
+	if err := start(legacyRoot); err != nil {
+		t.Fatalf("pre-move start: %v", err)
+	}
+	legacyAgent := filepath.Join(legacyScion, "agents", "test-agent")
+	before := listTree(t, legacyAgent)
+	if got := config.ResolveAgentDir(scionDir, "test-agent"); got != legacyAgent {
+		t.Fatalf("look-up from the shared root = %q, want the legacy dir %q", got, legacyAgent)
+	}
+
+	err := start(root)
+	if err == nil || !strings.Contains(err.Error(), "outside the permitted workspace root") {
+		t.Fatalf("restart from the shared root = %v, want the workspace containment refusal", err)
+	}
+	ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(testNFSWorkspaceProjectID, "-", "")[:8], config.DotScion, "agents", "test-agent")
+	if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); !os.IsNotExist(err) {
+		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
+	}
+	if after := listTree(t, legacyAgent); strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Errorf("the legacy state changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
