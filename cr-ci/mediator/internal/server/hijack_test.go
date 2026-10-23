@@ -577,3 +577,42 @@ func TestReconcileGuardSharesOneView(t *testing.T) {
 		t.Errorf("result %+v; want both displaced jobs served under the takers' names: %+v", res, h.executions())
 	}
 }
+
+// TestReconcileGuardViewResetAfterKill: in one reconcile pass, a swap, then a
+// hijack kill, then another swap. The kill cancels an execution and launches
+// a recovery runner outside the guard loop's shared view, so the loop starts a
+// fresh view after it: the second swap lists executions again, and capacity
+// stays within MAX_CONCURRENT_RUNNERS. Removing the reset makes it fail.
+func TestReconcileGuardViewResetAfterKill(t *testing.T) {
+	h := newHarness(t, harnessOpts{max: 3})
+	for _, r := range []int64{10, 20, 30} {
+		h.addSameRepoRun(r, fakes.GitHubJob{ID: r * 10, Status: "queued", Labels: []string{testLabel}})
+		h.queued(r*10, r)
+	}
+	// Guard order: 11 swap on cr-job-100, 12 fork job on cr-job-200 (hijack),
+	// 13 swap on cr-job-300.
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-200"}}})
+	// Run 13 is in_progress like the fork run, so the in_progress pass of
+	// discovery visits it after run 12 (run 11 comes in the queued pass).
+	h.gh.AddRun(fakes.GitHubRun{ID: 13, Repo: testRepo, HeadRepo: testRepo, Event: "push", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 130, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-300"}}})
+	before := h.cr.ListCalls
+	res := h.reconcile()
+	if res.HijacksKilled != 1 {
+		t.Fatalf("result %+v, want 1 hijack killed", res)
+	}
+	// 5 lists in this pass; without the post-kill reset the second swap reuses
+	// the guard loop's stale view and the pass makes 4 (checked when this test
+	// was written by removing the reset).
+	if got := h.cr.ListCalls - before; got != 5 {
+		t.Errorf("executions lists in the pass = %d, want 5 (4 means the second swap reused the view from before the kill)", got)
+	}
+	if h.activeFor("cr-job-120") != 1 {
+		t.Errorf("no recovery runner cr-job-120 for job 200: %+v", h.executions())
+	}
+	if n := h.activeExecutions(); n > 3 {
+		t.Errorf("%d active executions, want at most MAX_CONCURRENT_RUNNERS (3)", n)
+	}
+}
