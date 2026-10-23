@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -150,7 +151,7 @@ func TestCollectPublishFiles_SkipsSymlinks(t *testing.T) {
 	sort.Strings(warned)
 	want := make([]string, 0, len(links))
 	for name := range links {
-		want = append(want, name)
+		want = append(want, strconv.Quote(name))
 	}
 	sort.Strings(want)
 	if strings.Join(warned, ",") != strings.Join(want, ",") {
@@ -196,5 +197,26 @@ func TestCollectPublishFiles_SymlinkedRootArgument(t *testing.T) {
 	got := publishFilesByPath(files)
 	if len(got) != 2 || got["scripts/run.sh"].mode != "0755" {
 		t.Fatalf("collected %v, want SKILL.md and scripts/run.sh (0755)", got)
+	}
+}
+
+// TestCollectPublishFiles_WarningQuotesPath pins that the skipped-file
+// warning prints the relative path quoted, so control characters in a file
+// name are escaped and each warning stays on one line.
+func TestCollectPublishFiles_WarningQuotesPath(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillTestFile(t, dir, "SKILL.md", 0o644)
+	name := "odd\nname\x1b[0m"
+	if err := os.Symlink("SKILL.md", filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+
+	var warn bytes.Buffer
+	if _, err := collectPublishFiles(dir, &warn); err != nil {
+		t.Fatal(err)
+	}
+	want := "Warning: skipped non-regular file " + strconv.Quote(name) + "\n"
+	if warn.String() != want {
+		t.Errorf("warning %q, want %q", warn.String(), want)
 	}
 }

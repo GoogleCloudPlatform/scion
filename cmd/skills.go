@@ -423,7 +423,7 @@ func collectPublishFiles(skillDir string, warn io.Writer) ([]publishFile, error)
 	builder := transfer.NewManifestBuilder(root).WithExcludePatterns(skillPublishExcludes)
 	builder.OnSkip = func(relPath string) {
 		if warn != nil {
-			_, _ = fmt.Fprintf(warn, "Warning: skipped non-regular file %s\n", relPath)
+			_, _ = fmt.Fprintf(warn, "Warning: skipped non-regular file %q\n", relPath)
 		}
 	}
 	collected, err := builder.CollectFiles()
