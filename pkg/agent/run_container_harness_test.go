@@ -302,7 +302,7 @@ func TestStart_ContainerHarnessOverrideEqualToLaunchedDoesNotWarn(t *testing.T) 
 
 // TestContainerHarnessEnv pins the precedence of the container's
 // SCION_HARNESS: an SCION_HARNESS already in the start env (the caller's,
-// or the resolved harness-config's env, merged into it earlier) wins over
+// or the settings harness_configs.<name>.env merged into it earlier) wins over
 // the launched harness; the warning fires only when the two differ, at warn
 // level, with fixed text and the two harness names only.
 func TestContainerHarnessEnv(t *testing.T) {

@@ -4060,10 +4060,11 @@ func launchedHarnessName(h api.Harness) string {
 // containerHarnessEnv decides the container's SCION_HARNESS. It returns the
 // value to set and true when env has no SCION_HARNESS and launched is
 // non-empty. An SCION_HARNESS already in env (the caller's env, or the
-// resolved harness-config's env) is an explicit override and is kept; since
-// an intentional parser override cannot be told apart from a stale name,
-// a fixed warning names both harnesses when they differ. sciontool selects
-// its usage-parsing rules and labels usage with this value.
+// settings harness_configs.<name>.env merged into it earlier) is an explicit
+// override and is kept; since an intentional parser override cannot be told
+// apart from a stale name, a fixed warning names both harnesses when they
+// differ. sciontool selects its usage-parsing rules and labels usage with
+// this value.
 func containerHarnessEnv(ctx context.Context, env map[string]string, launched string) (string, bool) {
 	if override, ok := env["SCION_HARNESS"]; ok {
 		if override != launched {
@@ -4087,8 +4088,9 @@ func containerHarnessEnv(ctx context.Context, env map[string]string, launched st
 // (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
 // harness verbatim. An alias neither table resolves is returned in its
 // normalized form (e.g. "large" for "L"). harnessName is the declared harness
-// of the harness-config this launch resolved (not the stored name, which a
-// harness-config switch leaves stale; ptone/scion#5946); empty means no
+// of the harness-config this launch resolved (the stored name when no
+// harness-config resolved), not the stored name of a resolved launch, which a
+// harness-config switch leaves stale (ptone/scion#5946); empty means no
 // built-in table.
 //
 // The broker's config model never replaces a SCION_MODEL value, alias or
