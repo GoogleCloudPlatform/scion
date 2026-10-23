@@ -1473,8 +1473,10 @@ jobs:
       # count, which tells a package from its test variant. It prints a
       # peak summary at the end and does not affect the step's result;
       # the step exits with the split script's exit code.
+      # Called directly, not through make: the cr-ci runner image has no
+      # make, and a direct call keeps the selftest's exit code.
       - name: Test the golangci-lint split script
-        run: make golangci-lint-split-selftest
+        run: ./hack/test-golangci-lint-split.sh
 
       - name: golangci-lint
         shell: bash

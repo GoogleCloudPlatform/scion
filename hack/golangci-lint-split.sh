@@ -24,8 +24,7 @@
 # time. Without it the whole lint takes ~3 min and peaks at ~7 GB.
 # The cost: errcheck, staticcheck, unused and ineffassign no longer see
 # pkg/hub's _test.go files (govet still does, through go vet in the hub shard
-# jobs), and
-# unused reports pkg/hub helpers that only tests use (see
+# jobs), and unused reports pkg/hub helpers that only tests use (see
 # hack/LINT-CONVENTIONS.md, "golangci-lint: two passes").
 #
 # Only ./pkg/hub itself is in pass 2. Its sub-packages (pkg/hub/...) are
