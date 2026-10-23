@@ -109,9 +109,6 @@ func DeleteHubAgentFiles(agentName, sharerKey, projectPath, hubProjectID string,
 }
 
 func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
-	if sharerKey == "" {
-		sharerKey = agentName
-	}
 	// Every path built below joins agentName onto some directory -- the
 	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
@@ -125,12 +122,9 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return false, fmt.Errorf("delete: %w", err)
 	}
-	// The sharer key is joined onto the shared base's worktrees directory
-	// the same way, so it is held to the same rule.
-	if sharerKey != agentName {
-		if _, err := checkAgentDirContained(projectPath, sharerKey, false); err != nil {
-			return false, fmt.Errorf("delete: sharer key: %w", err)
-		}
+	sharerKey, err := validateSharerKey(projectPath, agentName, sharerKey)
+	if err != nil {
+		return false, fmt.Errorf("delete: %w", err)
 	}
 
 	// The agent's files live under its project only. A project path that
@@ -489,6 +483,25 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	}
 
 	return branchDeleted, nil
+}
+
+// validateSharerKey returns the sharer key agentName's files are deleted
+// (and a forced move's rollback checked) under: sharerKey, or agentName
+// when it is "". The key is joined onto the shared base's worktrees
+// directory as the name is joined onto the agent directories, so a key
+// other than the name is held to the same rule (checkAgentDirContained).
+// DeleteHubAgentFiles and CheckMoveMarkers both validate through it, so
+// the delete and its guard accept exactly the same keys.
+func validateSharerKey(projectPath, agentName, sharerKey string) (string, error) {
+	if sharerKey == "" {
+		return agentName, nil
+	}
+	if sharerKey != agentName {
+		if _, err := checkAgentDirContained(projectPath, sharerKey, false); err != nil {
+			return "", fmt.Errorf("sharer key: %w", err)
+		}
+	}
+	return sharerKey, nil
 }
 
 // sharerKeys returns the keys an agent may be registered under in a

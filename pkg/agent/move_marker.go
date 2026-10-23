@@ -143,13 +143,9 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMoveMarkerMismatch, err)
 	}
-	if sharerKey == "" {
-		sharerKey = agentName
-	}
-	if sharerKey != agentName {
-		if _, err := checkAgentDirContained(projectPath, sharerKey, false); err != nil {
-			return nil, fmt.Errorf("%w: sharer key: %v", ErrMoveMarkerMismatch, err)
-		}
+	sharerKey, err := validateSharerKey(projectPath, agentName, sharerKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMoveMarkerMismatch, err)
 	}
 	keys := sharerKeys(sharerKey, agentName)
 	// dirs must each be absent or carry this move's marker; worktrees must

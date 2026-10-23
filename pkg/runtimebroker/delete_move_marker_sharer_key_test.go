@@ -78,23 +78,34 @@ func newMoveSharerFixture(t *testing.T) (*sharerFixture, *moveSharerManager, *by
 
 const sharerMoveDeleteFlags = "&deleteFiles=true&removeBranch=false&" + api.MoveReincarnationIDQueryParam + "=" + sharerMoveID
 
-// A worktree and registry entry provisioned under the hub agent ID predate
-// the move: the rollback delete is refused with move_marker_mismatch and
-// removes nothing, though every agent directory carries the move's marker.
-func TestDeleteAgent_ForcedMoveRollback_HubAgentIDWorktreeRefused(t *testing.T) {
+// A worktree and sharer registry entry provisioned under the hub agent ID
+// predate the move: the rollback delete is refused with
+// move_marker_mismatch and removes nothing, though every agent directory
+// carries the move's marker. The check reports the registration first (it
+// is read before the worktree is looked at); the worktree-only case is
+// covered by TestCheckMoveMarkers_SharerKey in pkg/agent.
+func TestDeleteAgent_ForcedMoveRollback_HubAgentIDSharerStateRefused(t *testing.T) {
 	f, mgr, logs := newMoveSharerFixture(t)
 	wt := f.provision(t, "uuid-a", "shared")
 	before := readFileBytes(t, f.marker("shared"))
 
 	rec := doDelete(t, f.srv, "dev-a", "projectId="+scopeProjB+"&agentId=uuid-a"+sharerMoveDeleteFlags)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("got %d, want 409 for the worktree keyed by the hub agent ID: %s", rec.Code, rec.Body.String())
+		t.Fatalf("got %d, want 409 for the ID-keyed sharer state refused: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"`+api.BrokerErrCodeMoveMarkerMismatch+`"`) {
 		t.Fatalf("body = %s, want code %s", rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
 	}
-	if !strings.Contains(logs.String(), "a worktree exists") {
-		t.Errorf("the refusal is not the ID-keyed worktree; log:\n%s", logs.String())
+	// The refusal comes from the real check finding the ID-keyed sharer
+	// state, not from the handler's fallbacks.
+	log := logs.String()
+	if !strings.Contains(log, "registered on a shared worktree") && !strings.Contains(log, "a worktree exists") {
+		t.Errorf("the refusal does not name the ID-keyed registration or worktree; log:\n%s", log)
+	}
+	for _, fallback := range []string{"cannot check move markers", "no project path"} {
+		if strings.Contains(log, fallback) {
+			t.Errorf("the refusal came from the handler's fallback %q, not the check; log:\n%s", fallback, log)
+		}
 	}
 	if n := mgr.DeleteCalls(); n != 0 {
 		t.Errorf("DeleteTarget called %d times, want 0", n)
@@ -107,6 +118,9 @@ func TestDeleteAgent_ForcedMoveRollback_HubAgentIDWorktreeRefused(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(f.scionDir, "agents", "dev-a", agent.MoveMarkerFile)); err != nil {
 		t.Errorf("agent directory removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(config.GetAgentHomePath(f.scionDir, "dev-a")), agent.MoveMarkerFile)); err != nil {
+		t.Errorf("agent home's parent directory removed: %v", err)
 	}
 }
 
