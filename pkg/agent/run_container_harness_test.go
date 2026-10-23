@@ -1,4 +1,16 @@
-// Copyright 2026 The Scion Authors.
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package agent
 
@@ -24,9 +36,11 @@ import (
 const harnessEnvCasesPath = "testdata/harness_env_cases.json"
 
 type harnessEnvCase struct {
-	Name             string `json:"name"`
-	StoredHarness    string `json:"stored_harness"`
-	Override         string `json:"override"`
+	Name          string `json:"name"`
+	StoredHarness string `json:"stored_harness"`
+	Override      string `json:"override"`
+	// OverrideSource is empty for an override in the start request's env.
+	OverrideSource   string `json:"override_source"`
 	ContainerHarness string `json:"container_harness"`
 }
 
@@ -111,6 +125,20 @@ func (e *policyTestEnv) rewriteStoredHarness(t *testing.T, name, stored string, 
 // machine and project settings, so no settings tier names a harness-config.
 func (e *policyTestEnv) dropDefaultHarnessConfig(t *testing.T) {
 	t.Helper()
+	e.rewriteSettings(t, "", "")
+}
+
+// rewriteSettings sets default_harness_config to defaultHC (empty: none) in
+// the machine and project settings, and appends projectExtra (top-level
+// YAML) to the project settings.
+func (e *policyTestEnv) rewriteSettings(t *testing.T, defaultHC, projectExtra string) {
+	t.Helper()
+	projectYAML := filepath.Join(e.scion, "settings.yaml")
+	if _, err := os.Stat(projectYAML); os.IsNotExist(err) {
+		if err := os.WriteFile(projectYAML, []byte("schema_version: \"1\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, dir := range []string{filepath.Join(filepath.Dir(e.root), ".scion"), e.scion} {
 		for _, base := range []string{"settings.yaml", "settings.json"} {
 			path := filepath.Join(dir, base)
@@ -128,12 +156,18 @@ func (e *policyTestEnv) dropDefaultHarnessConfig(t *testing.T) {
 				}
 				kept = append(kept, line)
 			}
-			// The embedded defaults name one too; an explicit empty
-			// top-level value overrides it.
 			if base == "settings.yaml" {
-				kept = append(kept, `default_harness_config: ""`)
+				// The embedded defaults name one too; an explicit
+				// top-level value (empty included) overrides it.
+				kept = append(kept, "default_harness_config: \""+defaultHC+"\"")
+				if path == projectYAML && projectExtra != "" {
+					if strings.Contains(string(data), "harness_configs:") {
+						t.Fatalf("fixture: %s already has harness_configs", path)
+					}
+					kept = append(kept, projectExtra)
+				}
 			}
-			if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -155,7 +189,7 @@ func (e *policyTestEnv) storedHarness(t *testing.T, name string) string {
 	return cfg.Harness
 }
 
-// captureWarnings routes slog's default logger to a buffer at warn level
+// captureHarnessWarnings routes slog's default logger to a buffer at warn level
 // for the test.
 func captureHarnessWarnings(t *testing.T) *bytes.Buffer {
 	t.Helper()
@@ -182,6 +216,12 @@ func startCase(t *testing.T, c harnessEnvCase) map[string]string {
 	case "switch", "override":
 		e.provisionExisting(t, name, "hc-claude")
 		opts.HarnessConfig = "hc-gemini"
+	case "override-settings-env":
+		// The settings entry's env, merged into the start env before
+		// SCION_HARNESS is set; not an env: in the config.yaml.
+		e.provisionExisting(t, name, "hc-claude")
+		e.rewriteSettings(t, "hc-gemini", "harness_configs:\n  hc-gemini:\n    env:\n      SCION_HARNESS: claude")
+		opts.HarnessConfig = "hc-gemini"
 	case "metadata-less":
 		e.provisionExisting(t, name, "hc-bare")
 	case "legacy-default":
@@ -200,7 +240,7 @@ func startCase(t *testing.T, c harnessEnvCase) map[string]string {
 	if got := e.storedHarness(t, name); got != c.StoredHarness {
 		t.Fatalf("fixture: stored harness = %q, want %q", got, c.StoredHarness)
 	}
-	if c.Override != "" {
+	if c.Override != "" && c.OverrideSource == "" {
 		opts.Env = map[string]string{"SCION_HARNESS": c.Override}
 	}
 	var env map[string]string
@@ -217,7 +257,7 @@ func startCase(t *testing.T, c harnessEnvCase) map[string]string {
 // table.
 func TestStart_ContainerHarnessCases(t *testing.T) {
 	cases := loadHarnessEnvCases(t)
-	for _, name := range []string{"switch", "metadata-less", "legacy", "legacy-default", "legacy-gemini", "override"} {
+	for _, name := range []string{"switch", "metadata-less", "legacy", "legacy-default", "legacy-gemini", "override", "override-settings-env"} {
 		c, ok := cases[name]
 		if !ok {
 			t.Fatalf("case %q missing from %s", name, harnessEnvCasesPath)
@@ -229,7 +269,7 @@ func TestStart_ContainerHarnessCases(t *testing.T) {
 				t.Fatalf("container SCION_HARNESS = %q, want %q", got, c.ContainerHarness)
 			}
 			warned := strings.Contains(warnings.String(), containerHarnessOverrideWarning)
-			if c.Name == "override" {
+			if c.Override != "" {
 				// The override (claude) differs from the launched gemini-cli.
 				if !warned {
 					t.Fatalf("override differing from the launched harness logged no warning; log:\n%s", warnings)
@@ -242,7 +282,7 @@ func TestStart_ContainerHarnessCases(t *testing.T) {
 			}
 		})
 	}
-	if len(cases) != 6 {
+	if len(cases) != 7 {
 		t.Fatalf("%s has %d cases; add a Start setup for each new one", harnessEnvCasesPath, len(cases))
 	}
 }
@@ -382,11 +422,61 @@ func TestResolveEffectiveModel_AliasHarnessKey(t *testing.T) {
 		// legacy stored name with no embedded bundle
 		{name: "legacy gemini", aliasHarness: "gemini", want: "large"},
 		{name: "generic implementation name", aliasHarness: "generic", want: "large"},
+		// legacy-default: no stored harness, the settings default
+		// harness-config (antigravity in the embedded defaults) resolves
+		{name: "legacy default antigravity", aliasHarness: "antigravity", want: harness.DefaultModelAliases("antigravity")["large"]},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := resolveEffectiveModel("L", nil, nil, tt.aliasHarness); got != tt.want {
 				t.Fatalf("resolveEffectiveModel(L, %q) = %q, want %q", tt.aliasHarness, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStart_ModelAliasLegacyDefault: an agent with no stored harness, whose
+// harness-config comes from the settings default. A size alias resolves
+// with that config's own model_aliases when it has them; without them, with
+// the built-in aliases of the harness the config declares (before
+// ptone/scion#5946 the key was the empty stored name, so the alias reached
+// the harness verbatim).
+func TestStart_ModelAliasLegacyDefault(t *testing.T) {
+	builtin := harness.DefaultModelAliases("gemini-cli")["large"]
+	if builtin == "" {
+		t.Fatal("fixture: gemini-cli has no built-in large alias")
+	}
+	tests := []struct {
+		name, hc, want string
+	}{
+		{name: "config with model_aliases", hc: containerHarnessHCGemini + "model_aliases:\n  large: config-large\n", want: "config-large"},
+		{name: "config without model_aliases", hc: containerHarnessHCGemini, want: builtin},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newPolicyTestEnv(t)
+			e.projectHC(t, "hc-claude", containerHarnessHCClaude)
+			e.projectHC(t, "hc-default", tt.hc)
+			e.provisionExisting(t, "legacy-alias", "hc-claude")
+			e.rewriteStoredHarness(t, "legacy-alias", "", true)
+			e.rewriteSettings(t, "hc-default", "")
+			var env map[string]string
+			var args []string
+			_, err := containerEnvManager(&env, &args).Start(context.Background(), api.StartOptions{
+				Name: "legacy-alias", ProjectPath: e.scion, NoAuth: true,
+				Env: map[string]string{"SCION_MODEL": "large"},
+			})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := env["SCION_HARNESS"]; got != "gemini-cli" {
+				t.Errorf("SCION_HARNESS = %q, want gemini-cli (settings default config)", got)
+			}
+			if got := env["SCION_MODEL"]; got != tt.want {
+				t.Fatalf("SCION_MODEL = %q, want %q", got, tt.want)
+			}
+			if !containsModelArg(args, tt.want) {
+				t.Fatalf("argv %q lacks --model %s", args, tt.want)
 			}
 		})
 	}

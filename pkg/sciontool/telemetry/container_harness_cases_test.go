@@ -1,4 +1,6 @@
-// Copyright 2026 The Scion Authors.
+/*
+Copyright 2026 The Scion Authors.
+*/
 
 package telemetry
 
@@ -16,9 +18,9 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
-// containerHarnessCasesPath is the case table pkg/agent's
-// TestStart_ContainerHarnessCases asserts Start against (ptone/scion#5946).
-// It is read from there, not copied.
+// containerHarnessCasesPath is the case table that pkg/agent's
+// TestStart_ContainerHarnessCases checks Start against (ptone/scion#5946).
+// It is read in place, not copied.
 const containerHarnessCasesPath = "../../agent/testdata/harness_env_cases.json"
 
 type containerHarnessCase struct {

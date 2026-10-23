@@ -1,4 +1,6 @@
-// Copyright 2026 The Scion Authors.
+/*
+Copyright 2026 The Scion Authors.
+*/
 
 package handlers
 
@@ -15,9 +17,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// containerHarnessCasesPath is the case table pkg/agent's
-// TestStart_ContainerHarnessCases asserts Start against (ptone/scion#5946),
-// read in place.
+// containerHarnessCasesPath is the case table that pkg/agent's
+// TestStart_ContainerHarnessCases checks Start against (ptone/scion#5946).
+// It is read in place, not copied.
 const containerHarnessCasesPath = "../../../agent/testdata/harness_env_cases.json"
 
 // TestTelemetryHandler_ContainerHarnessCasesLabelHookPoints: for each

@@ -55,6 +55,17 @@
       "fixture": "claude",
       "want_usage": "parsed",
       "stale_usage": "parsed"
+    },
+    {
+      "name": "override-settings-env",
+      "stored_harness": "claude",
+      "override": "claude",
+      "override_source": "settings harness_configs.hc-gemini.env",
+      "container_harness": "claude",
+      "stale_harness": "claude",
+      "fixture": "claude",
+      "want_usage": "parsed",
+      "stale_usage": "parsed"
     }
   ]
 }
