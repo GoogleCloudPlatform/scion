@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package entadapter
 
 // Slice 2 lifecycle scenarios through the real store writers on SQLite
