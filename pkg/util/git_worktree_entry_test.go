@@ -71,7 +71,7 @@ func assertSiblingIntact(t *testing.T, repo, sibling string, restore func()) {
 func TestRemoveWorktree_KeepsHiddenSiblingEntry(t *testing.T) {
 	repo, own, sibling, restore := hiddenSiblingRepo(t)
 
-	if _, err := RemoveWorktree(repo, own, true); err != nil {
+	if _, err := RemoveWorktree(repo, own, repo, true); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	list := worktreeEntries(t, repo)
@@ -103,7 +103,7 @@ func TestRemoveWorktree_NoRepoRoot_DoesNotPrune(t *testing.T) {
 	if err := os.MkdirAll(plain, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RemoveWorktree(base, plain, false); err != nil {
+	if _, err := RemoveWorktree(base, plain, repo, false); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	assertSiblingIntact(t, repo, sibling, restore)
@@ -118,7 +118,7 @@ func TestRemoveWorktree_EntryRemovalFailure_DoesNotPrune(t *testing.T) {
 	if out, err := exec.Command("git", "-C", repo, "worktree", "lock", own).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree lock: %v\n%s", err, out)
 	}
-	if _, err := RemoveWorktree(repo, own, false); err != nil {
+	if _, err := RemoveWorktree(repo, own, repo, false); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if err := RemoveWorktreeEntryIn(repo, own); err == nil {

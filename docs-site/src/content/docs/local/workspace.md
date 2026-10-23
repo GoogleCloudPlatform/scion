@@ -274,6 +274,70 @@ To give agents on a remote Hub git worktrees instead of separate clones, create 
 makes a worktree per agent of its own shared clone. The mode is set when the project is created on
 the Hub and cannot be changed later.
 
+#### Git that Scion runs on the host
+
+The broker and the Hub run git on the host in repositories that agent containers can also write:
+your linked checkout (when it creates or removes an agent's worktree), the shared clone of a
+`worktree-per-agent` project, and the clone of a shared-workspace project. Before each of these
+commands, Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`)
+as data and **refuses the command, naming the key**, if the config contains an `include`/`includeIf`
+directive or any key outside an allow-list. This is deny-by-default: a key that is not known to be
+safe stops the command rather than being ignored.
+
+- **A repository Scion manages** (the shared checkout of a `worktree-per-agent` project, the clone
+  of a shared-workspace project) allows only the keys git and Scion write for it: the core
+  repository format settings, `extensions.*`, a remote's `url`/`fetch`, `branch.<name>` tracking,
+  identity, `gc.auto`, `branch.autoSetupMerge`.
+- **Your own linked checkout** allows those plus a wider set of keys that cannot run a command or
+  redirect network traffic: `core.autocrlf`/`eol` and similar, `pull.*`/`push.*` defaults, a
+  remote's `pushurl`/`tagopt`/`prune`, `branch.<name>` metadata, `color.*`, `advice.*`, `rerere.*`,
+  `status.*`, `maintenance.*`, sparse-checkout toggles, `init.defaultBranch`, inert git-lfs data
+  keys, `gpg.format` and `user.signingKey` (signing data only), and `submodule.<name>.update` **only**
+  as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
+  A few keys that would run a command are allowed here only because a fixed command-line setting
+  overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
+  `submodule.recurse`), so such a repository value never runs a command.
+- **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
+  `credential.*`, `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, any `*.program`,
+  `alias.*`, `core.sshCommand`/`editor`, a remote's `uploadpack`/`receivepack`/`proxy`, diff/merge
+  command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
+  command is refused, the error names the key; remove it from the repository's `.git/config` (or
+  `config.worktree`).
+- **Partial clones and sparse-index checkouts are refused:** `extensions.partialClone` and
+  `index.sparse` are not on the allow-list, so host-side git in such a repository is refused and an
+  agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
+- As defence in depth these commands also run with hooks, the file-system monitor and the pager
+  off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
+  transport disabled and the `file://` transport allowed only for a URL given on the command line,
+  submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
+  config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
+  the host operator overrides the `protocol.*.allow` pins.
+- **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a
+  tracked `.lfsconfig` (which an agent could point at an arbitrary server).
+  - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
+    provisioning clone skip the LFS smudge on the host (`GIT_LFS_SKIP_SMUDGE=1`); agents fetch LFS
+    objects in-container.
+  - Your linked checkout pins the endpoint derived from the `origin` remote URL, with its auth mode
+    pinned to `basic` (`lfs.<endpoint>.access`), when the origin is `http(s)` **and** the committed
+    `.lfsconfig` neither names its own endpoint (`lfs.url`/`pushurl`, `remote.*.lfsurl`) nor sets any
+    `lfs.<url>.access`. If it does either (its objects may legitimately live on a separate server, or
+    it selects an auth mode such as `negotiate`), or the origin is `ssh`/scp or absent, the smudge is
+    skipped and a warning names the pointer files and says to run `git lfs pull` in the checkout.
+    Scion never contacts the `.lfsconfig` endpoint.
+  - The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files read-only.
+  - git-lfs's own config writes are tolerated: `lfs.repositoryformatversion`, and `lfs.<url>.access`
+    (only `basic`/`none`) and `lfs.<url>.locksverify` with an http(s) URL subsection.
+- **Credentials** are never embedded in a clone URL and never left in a workspace's `.git/config`.
+  A git token is supplied only through a credential helper scoped to the clone URL's host (so it is
+  offered to that host and no other, in particular not to an LFS endpoint), and only for an `http(s)`
+  URL; for any other URL the token is ignored. The scoped helper also disables any other configured
+  credential helper for the command, so nothing persists the token.
+- **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
+  from the remote configured in the clone, then fast-forwards the current branch.
+
+Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
+upcoming change gives each agent its own private copy of `.git/config`.
+
 ---
 
 ## 5. Project Shared Directories
