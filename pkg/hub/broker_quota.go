@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -331,6 +332,40 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 		return false, nil
 	}
 	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
+}
+
+// transferBrokerReservationUnchecked moves or records agentID's
+// max_agents_per_broker reservation onto toBroker atomically
+// (store.TransferBrokerReservation) with Cap 0 and no scope locks: it is
+// accounting for a slot the agent already held (rollback, reconcile, sweep
+// repair), not an admission, as reassertBrokerReservation is. The returned
+// bool (limited) is false, and nothing is written, when no limit definition
+// exists.
+func (s *Server) transferBrokerReservationUnchecked(ctx context.Context, agentID, toBroker string, o TransferOpts) (store.BrokerReservationTransferResult, bool, error) {
+	var res store.BrokerReservationTransferResult
+	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return res, false, nil
+		}
+		return res, false, fmt.Errorf("quota: lookup limit definition %q: %w", store.LimitMaxAgentsPerBroker, err)
+	}
+	if def == nil {
+		return res, false, nil
+	}
+	res, err = s.store.TransferBrokerReservation(ctx, store.BrokerReservationTransfer{
+		LimitDefinitionID: def.ID,
+		AgentID:           agentID,
+		ToBrokerID:        toBroker,
+		CreateIfAbsent:    o.CreateIfAbsent,
+		RequireAgentOnTo:  o.RequireAgentOnTo,
+		FromReservationID: o.FromReservationID,
+		Cond:              o.Cond,
+	})
+	if err != nil {
+		return res, true, fmt.Errorf("quota: transfer reservation for %q: %w", store.LimitMaxAgentsPerBroker, err)
+	}
+	return res, true, nil
 }
 
 // reassertBrokerReservation records agent's max_agents_per_broker
