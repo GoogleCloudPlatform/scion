@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetryemit"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -211,6 +212,10 @@ type HTTPAgentDispatcher struct {
 	// dispatch. A nil check exists only for store-only unit tests that
 	// drive a dispatcher without a hub server.
 	requiredStandingCheck func(ctx context.Context, agent *store.Agent) error
+
+	// lifecycleCounters returns the hub's lifecycle counters, for the
+	// stale-echo count of a synchronous answer (WP1 slice 3). Nil: none.
+	lifecycleCounters func() telemetryemit.LifecycleCounters
 
 	// shutdownGate refuses every dispatch once the hub has begun shutting
 	// down (ErrHubShuttingDown, ptone/scion#5054). It runs where each
@@ -515,6 +520,22 @@ func (d *HTTPAgentDispatcher) SetSkillPreResolver(fn func(ctx context.Context, a
 // creator would get, regardless of who starts/restarts the agent.
 func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse) {
 	d.creatorSkillPreResolver = fn
+}
+
+// SetLifecycleCounters registers the accessor of the hub's lifecycle
+// counters, read at each synchronous answer (WP1 slice 3 stale-echo
+// count). Server.SetDispatcher installs it.
+func (d *HTTPAgentDispatcher) SetLifecycleCounters(fn func() telemetryemit.LifecycleCounters) {
+	d.lifecycleCounters = fn
+}
+
+// lifecycleCountersOrNop returns the hub's lifecycle counters, or
+// NopCounters without an accessor.
+func (d *HTTPAgentDispatcher) lifecycleCountersOrNop() telemetryemit.LifecycleCounters {
+	if d.lifecycleCounters == nil {
+		return telemetryemit.NopCounters{}
+	}
+	return d.lifecycleCounters()
 }
 
 // SetRequiredStandingCheck registers the check DispatchAgentStart and
@@ -1542,6 +1563,49 @@ func brokerAgentConfigOf(info *RemoteAgentInfo) store.BrokerAgentConfig {
 		Profile:             info.Profile,
 		Runtime:             info.Runtime,
 	}
+}
+
+// brokerEffectiveConfigOf extracts the broker's effective configuration
+// of a run from its agent answer (WP1 slice 3 addendum v12 sections 2-5):
+// the one conversion the synchronous dispatch and the async launch report
+// share. brokerID is the broker the hub knows the answer came from (the
+// dispatch target, or the authenticated reporting broker), never one the
+// answer names. Each broker string is validated (validEchoString); an
+// invalid one is omitted, with a DEBUG log naming the field. ok reports
+// whether an effective-only field (template hash, harness, model, broker
+// build) survived: without one the answer is from an older broker and is
+// never recorded.
+func brokerEffectiveConfigOf(info *RemoteAgentInfo, brokerID string, log *slog.Logger) (eff store.AgentEffectiveConfig, ok bool) {
+	if info == nil {
+		return store.AgentEffectiveConfig{}, false
+	}
+	eff.BrokerID = brokerID
+	for _, f := range []struct {
+		name string
+		src  string
+		dst  *string
+	}{
+		{"runId", info.RunID, &eff.RunID},
+		{"template", info.Template, &eff.Template},
+		{"templateHash", info.TemplateHash, &eff.TemplateHash},
+		{"harness", info.Harness, &eff.Harness},
+		{"model", info.Model, &eff.Model},
+		{"harnessConfig", info.HarnessConfig, &eff.HarnessConfig},
+		{"harnessConfigRevision", info.HarnessConfigRevision, &eff.HarnessConfigRevision},
+		{"harnessConfigSource", info.HarnessConfigSource, &eff.HarnessConfigSource},
+		{"image", info.Image, &eff.Image},
+		{"profile", info.Profile, &eff.Profile},
+		{"runtime", info.Runtime, &eff.Runtime},
+		{"brokerBuild", info.BrokerBuild, &eff.BrokerBuild},
+	} {
+		if validEchoString(f.src) {
+			*f.dst = f.src
+		} else if log != nil {
+			log.Debug("lifecycle: omitted an invalid broker effective-configuration field",
+				"broker_id", brokerID, "field", f.name, "len", len(f.src))
+		}
+	}
+	return eff, eff.HasEffectiveFields()
 }
 
 // forgetRuntimeTarget drops the agent's recorded runtime target (and any

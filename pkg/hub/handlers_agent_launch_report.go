@@ -222,6 +222,16 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		s.settleLaunchedRun(ctx, &updated, req.Agent)
 	}
 
+	// The broker's effective configuration of the run (WP1 slice 3
+	// addendum v12 section 3), after the settle: for every succeeded
+	// report the store answered without an error, applied or completed,
+	// so a resent report recovers an echo a crash or failure lost (the
+	// writer is fenced and idempotent).
+	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 &&
+		(answer.Result == store.LaunchReportResultApplied || answer.Result == store.LaunchReportResultCompleted) {
+		s.recordLaunchReportEcho(ctx, agentID, brokerID, req.LaunchID, req.Agent)
+	}
+
 	// A write that changed the row (applied, or a 409 stale_launch that
 	// still ended the launch) may have released the launch's claim (a
 	// create, start or restart claim) with the agent already out of a

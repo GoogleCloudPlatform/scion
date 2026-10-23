@@ -443,10 +443,11 @@ func lifecycleDispatchResult(ctx context.Context, agent *store.Agent) context.Co
 // adoptBrokerRunID, where the broker's synchronous answer is visible
 // (r7 N1). It records what the answer said about the run on the request's
 // dispatch collector, for updateAgentAfterDispatch. For the env-gather
-// two-pass the last answer wins. Slice 3 seam: the broker effective-config
-// echo (SetAgentEffectiveConfig) reads the same resp and hooks in here,
-// so httpdispatcher.go is touched once, in slice 3.
-func onSyncDispatchAnswer(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse) {
+// two-pass the last answer wins. It then records the broker's effective
+// configuration of the run (syncDispatchEcho, WP1 slice 3): before the
+// dispatch-result write, so a sync create gives created, configured,
+// [configured,] started.
+func onSyncDispatchAnswer(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent, resp *RemoteAgentResponse) {
 	if agent == nil || agent.ID == "" || resp == nil || resp.Agent == nil {
 		return
 	}
@@ -456,6 +457,9 @@ func onSyncDispatchAnswer(ctx context.Context, agent *store.Agent, resp *RemoteA
 		BrokerPhaseRunning: resp.Agent.Phase == string(state.PhaseRunning),
 		BrokerRunID:        resp.Agent.RunID,
 	})
+	if d != nil {
+		syncDispatchEcho(ctx, d.store, d.lifecycleCountersOrNop(), d.log, agent, resp)
+	}
 }
 
 // lifecycleStopLegTimeout bounds the detached RecordRestartStopLeg write.
