@@ -21,7 +21,7 @@
  * `scion:access-denied` CustomEvent on the window when a 403 response is
  * received, allowing the app shell to display a toast notification.
  *
- * Every request from web/src/client goes through apiFetch(); ESLint
+ * Every request from web/src goes through apiFetch(); ESLint
  * (web/eslint.config.mjs) refuses a direct fetch() there except at the few
  * commented exceptions (ptone/scion#353). A caller with its own handling
  * of 401 and 403 passes `authErrors: 'caller'`.
