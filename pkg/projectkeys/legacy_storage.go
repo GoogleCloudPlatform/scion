@@ -17,7 +17,7 @@ package projectkeys
 // LegacyProjectWorkspaceObjectDir is the last path element of a hub-managed
 // project's retired object-storage workspace copy,
 // [hubs/<hub id>/]workspaces/<project id>/<this>/, written by the GCS
-// workspace sync that phase 2 of ptone/scion#5805 removes. Its only reader
+// workspace sync that ptone/scion#5813 removes. Its only reader
 // is the one-shot project storage migration (ptone/scion#5819), which
 // deletes those objects; both go with ptone/scion#5839.
 const LegacyProjectWorkspaceObjectDir = "grove-workspace"
@@ -26,8 +26,8 @@ const LegacyProjectWorkspaceObjectDir = "grove-workspace"
 // older hub may carry: the project-id file and settings keys from before
 // the project rename. Their only reader is the project storage migration's
 // identity check of slug-keyed legacy trees (ptone/scion#5819), which
-// treats them like the current markers; removed with it in phase 6
-// (ptone/scion#5839).
+// treats them like the current markers; removed with it in
+// ptone/scion#5839.
 const (
 	LegacyProjectIDFile          = "grove-id"
 	LegacyConfigProjectIDKey     = "grove_id"

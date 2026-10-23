@@ -1014,8 +1014,7 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	// The broker has the hub-managed workspace at a local path (a
-	// co-located broker): since project storage phase 2
-	// (ptone/scion#5813) a remote broker that cannot reach the hub's
+	// co-located broker): since ptone/scion#5813 a remote broker that cannot reach the hub's
 	// workspace storage is refused with 409. Tests of that
 	// refusal, and of the CLI workspace bootstrap, clear it
 	// (clearCreateAgentProviderPath).

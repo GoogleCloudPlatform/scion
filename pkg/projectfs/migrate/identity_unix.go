@@ -48,7 +48,7 @@ const maxMarkerBytes = 1 << 20
 // brokers wrote for a hub-local project tree (pkg/config workspace records
 // as of the phase-2 base: hub-workspaces/ by the hub, broker-workspaces/ by
 // a broker), each holding a file named after the slug with the project ID.
-// Phase 2 retires the writers; the records remain on upgraded hubs.
+// ptone/scion#5813 retires the writers; the records remain on upgraded hubs.
 var workspaceRecordDirs = []string{"hub-workspaces", "broker-workspaces"}
 
 // treeIdentity reports whether the legacy tree src belongs to projectID.

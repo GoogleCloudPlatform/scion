@@ -34,7 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Project storage phase 2 (ptone/scion#5813, ptone/scion#5815): the GCS
+// Project storage (ptone/scion#5813, ptone/scion#5815): the GCS
 // upload of a hub-managed workspace on agent create is gone. Agents of a
 // hub-managed or shared-workspace project mount the workspace the hub
 // serves; a remote broker reaches it only through the hub's shared

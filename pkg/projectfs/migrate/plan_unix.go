@@ -46,7 +46,7 @@ const (
 	StepHubProjects   Step = "1-legacy-hub-workspace"
 	StepLocalProjects Step = "2-local-projects"
 	StepSharedDirs    Step = "3-shared-dirs"
-	// StepCloudRunHomes is phase 3's slot (ptone/scion#5825): Cloud Run
+	// StepCloudRunHomes is the slot for ptone/scion#5825: Cloud Run
 	// homes agents/<agentUUID>/{home,secrets} ->
 	// agents/<slug>/{home-,secrets-}<agentUUID>, only for stopped agents.
 	StepCloudRunHomes Step = "5-cloudrun-homes"
@@ -141,7 +141,7 @@ type ProjectInput struct {
 	// (nil: owners are kept).
 	WorkspaceOwner *Ownership
 	SharedDirOwner *Ownership
-	// CloudRunHomes is phase 3's step 5 (ptone/scion#5825); nil in phase 2.
+	// CloudRunHomes is step 5 (ptone/scion#5825); nil until it lands.
 	CloudRunHomes func(opts Options) []Result
 }
 

@@ -36,7 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Project storage phase 2 (ptone/scion#5813, ptone/scion#5814): the hub's
+// Project storage (ptone/scion#5813, ptone/scion#5814): the hub's
 // workspace Files tab, archive and pull resolve through the layout
 // authority. On a shared backend the hub reads and writes the same
 // projects/<uuid>/workspace tree agents mount (no legacy slug-keyed

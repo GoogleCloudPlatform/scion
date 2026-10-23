@@ -21,7 +21,8 @@ Files tab. This change adds the one-shot maintenance migration
   - `CleanObjects` and `LegacyObjectPrefix` handle the object-storage
     cleanup.
   - `LegacyHubProjectsRoot` holds the retired `hub-projects` name as a
-    single constant. This is the only exception to acceptance criterion A2.
+    single constant, the only place the name survives (removed by
+    ptone/scion#5839).
 
   All of the decision logic is tested without pkg/hub.
 - **Hub.** `ProjectStorageMigrateExecutor` (`pkg/hub/project_storage_migrate.go`)
