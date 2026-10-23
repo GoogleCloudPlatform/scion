@@ -21,16 +21,18 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { t, type MessageKey } from '../../i18n/index.js';
+import { LocaleController } from '../../i18n/controller.js';
 import { customElement, property } from 'lit/decorators.js';
 
 /**
  * Route label configuration
  */
-const ROUTE_LABELS: Record<string, string> = {
-  '/': 'Dashboard',
-  '/projects': 'Projects',
-  '/agents': 'Agents',
-  '/settings': 'Settings',
+const ROUTE_LABELS: Record<string, MessageKey> = {
+  '/': 'page.dashboard',
+  '/projects': 'page.projects',
+  '/agents': 'page.agents',
+  '/settings': 'page.settings',
 };
 
 /**
@@ -44,6 +46,7 @@ interface BreadcrumbItem {
 
 @customElement('scion-breadcrumb')
 export class ScionBreadcrumb extends LitElement {
+  readonly locale = new LocaleController(this);
   /**
    * Current path for generating breadcrumbs
    */
@@ -118,7 +121,7 @@ export class ScionBreadcrumb extends LitElement {
 
     // Always start with home
     items.push({
-      label: 'Home',
+      label: t('breadcrumb.home'),
       href: '/',
       current: this.path === '/',
     });
@@ -136,7 +139,8 @@ export class ScionBreadcrumb extends LitElement {
       const isLast = index === segments.length - 1;
 
       // Get label from configuration or format the segment
-      let label = ROUTE_LABELS[currentPath];
+      const key = ROUTE_LABELS[currentPath];
+      let label = key ? t(key) : '';
 
       if (!label) {
         // Check if this is a dynamic segment (like an ID)

@@ -198,3 +198,6 @@ export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
  * checks. Default OFF.
  */
 export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';
+
+/** Web UI localization; presentation-only, default OFF. */
+export const I18N_FLAG = 'web.i18n';

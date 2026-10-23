@@ -163,6 +163,9 @@ const ChatStarredMessages = "web.chat_starred_messages"
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
+// WebI18n gates Web UI language selection and translated presentation.
+const WebI18n = "web.i18n"
+
 // AgentEdit gates what the web Edit agent page (/agents/{id}/edit) adds
 // beyond the retired Configure page: the grouping of its fields by when an
 // edit applies, and the summary strip counting them. The page itself, and
@@ -275,6 +278,17 @@ const ArtifactReviewEditor = "web.artifact_review_editor"
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        WebI18n,
+		Title:       "Web UI internationalization",
+		Description: "Enables browser language preferences and English/Simplified Chinese translations for the application shell. Page bodies are being migrated separately. Presentation only; routes, API values and agent content stay unchanged.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "GoogleCloudPlatform/scion#4085",
+		Owner:       "cy2s",
+		ReviewBy:    "2027-01-23",
+	},
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",

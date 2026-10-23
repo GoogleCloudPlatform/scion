@@ -41,6 +41,10 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import { isLocalizationEnabled, t } from '../../i18n/index.js';
+import { LocaleController } from '../../i18n/controller.js';
+import './language-select.js';
+
 import type { Project, User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
@@ -124,6 +128,7 @@ const rememberedModePaths = {
 
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
+  readonly locale = new LocaleController(this);
   /**
    * Current authenticated user
    */
@@ -822,7 +827,7 @@ export class ScionHeader extends LitElement {
               <button
                 class="mobile-menu-btn"
                 @click=${(): void => this.handleMobileMenuClick()}
-                aria-label="Open navigation menu"
+                aria-label=${t('header.navigation')}
               >
                 <sl-icon name="list" style="font-size: 1.25rem;"></sl-icon>
               </button>
@@ -844,17 +849,18 @@ export class ScionHeader extends LitElement {
       <div class="wide-center">${this.renderModeSwitch()}</div>
 
       <div class="header-right">
+        ${isLocalizationEnabled() ? html`<scion-language-select></scion-language-select>` : nothing}
         ${this.renderPaletteButton()}
         <!-- Wide layout (>1100px): inline actions + user section -->
         <div class="wide-right">
           ${this.user
             ? html`
                 <div class="header-actions">
-                  <sl-tooltip content="Notifications">
+                  <sl-tooltip content=${t('header.notifications')}>
                     <span class="icon-badge-wrapper">
                       <sl-icon-button
                         name="bell"
-                        label="Notifications"
+                        label=${t('header.notifications')}
                         @click=${(): void => this.openNotificationTray()}
                       ></sl-icon-button>
                       ${this.notificationCount > 0
@@ -862,10 +868,10 @@ export class ScionHeader extends LitElement {
                         : nothing}
                     </span>
                   </sl-tooltip>
-                  <sl-tooltip content="Help">
+                  <sl-tooltip content=${t('header.help')}>
                     <sl-icon-button
                       name="question-circle"
-                      label="Help"
+                      label=${t('header.help')}
                       @click=${(): void => {
                         window.open(DOCS_URL, '_blank', 'noopener,noreferrer');
                       }}
@@ -876,7 +882,7 @@ export class ScionHeader extends LitElement {
                     <button
                       class="toggle-track ${this.isDark ? 'dark' : ''}"
                       @click=${(): void => this.toggleTheme()}
-                      aria-label="Toggle dark mode"
+                      aria-label=${t('header.toggleTheme')}
                     >
                       <span class="toggle-knob"></span>
                     </button>
@@ -891,11 +897,11 @@ export class ScionHeader extends LitElement {
                       @click=${(e: Event): void => this.handleProfileClick(e)}
                     >
                       <sl-icon name="person"></sl-icon>
-                      Profile
+                      ${t('header.profile')}
                     </a>
                     <button class="sign-out-button" @click=${(): void => this.handleLogout()}>
                       <sl-icon name="box-arrow-right"></sl-icon>
-                      Sign out
+                      ${t('header.signOut')}
                     </button>
                   </div>
                 </div>
@@ -903,7 +909,7 @@ export class ScionHeader extends LitElement {
             : html`
                 <a href="/auth/login" class="sign-in-link">
                   <sl-icon name="box-arrow-in-right"></sl-icon>
-                  Sign in
+                  ${t('header.signIn')}
                 </a>
               `}
         </div>
@@ -917,7 +923,7 @@ export class ScionHeader extends LitElement {
             : html`
                 <a href="/auth/login" class="sign-in-link">
                   <sl-icon name="box-arrow-in-right"></sl-icon>
-                  Sign in
+                  ${t('header.signIn')}
                 </a>
               `}
         </div>
@@ -958,11 +964,14 @@ export class ScionHeader extends LitElement {
     const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
 
     return html`
-      <sl-tooltip content=${`Jump to agent (${shortcutLabel})`} ?disabled=${isTouch}>
+      <sl-tooltip
+        content=${t('header.jumpToAgent', { shortcut: shortcutLabel })}
+        ?disabled=${isTouch}
+      >
         <button
           type="button"
           class="palette-button"
-          aria-label="Open Jump to agent"
+          aria-label=${t('header.openJumpToAgent')}
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
           @click=${this.handlePaletteButtonClick}
@@ -1003,24 +1012,24 @@ export class ScionHeader extends LitElement {
 
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
-    const terminalsLabel = `Terminals (${this.terminalSessionCount})`;
+    const terminalsLabel = t('header.terminalsCount', { count: this.terminalSessionCount });
     const dashboardHint = this.modeShortcutHint('dashboard');
     const chatHint = this.modeShortcutHint('chat');
     const terminalsHint = this.modeShortcutHint('terminals');
 
     return html`
-      <div class="mode-switch" role="group" aria-label="Switch view">
-        <sl-tooltip content=${withHint('Dashboard', dashboardHint)}>
+      <div class="mode-switch" role="group" aria-label=${t('header.switchView')}>
+        <sl-tooltip content=${withHint(t('page.dashboard'), dashboardHint)}>
           <button
             class=${!isChat && !isTerminal ? 'active' : ''}
             @click=${(): void => {
               void this.handleModeSwitch('dashboard');
             }}
-            aria-label="Dashboard"
+            aria-label=${t('page.dashboard')}
             aria-keyshortcuts=${dashboardHint?.aria ?? nothing}
           >
             <sl-icon name="house"></sl-icon>
-            <span class="mode-label">Dashboard</span>
+            <span class="mode-label">${t('page.dashboard')}</span>
           </button>
         </sl-tooltip>
         ${chatEnabled
@@ -1039,7 +1048,7 @@ export class ScionHeader extends LitElement {
                     <sl-icon name="chat-dots"></sl-icon>
                     ${this.renderChatUnreadBadge()}
                   </span>
-                  <span class="mode-label">Chat</span>
+                  <span class="mode-label">${t('header.chat')}</span>
                 </button>
               </sl-tooltip>
             `
@@ -1054,7 +1063,7 @@ export class ScionHeader extends LitElement {
             aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
           >
             <sl-icon name="terminal"></sl-icon>
-            <span class="mode-label">Terminal</span>
+            <span class="mode-label">${t('page.terminal')}</span>
           </button>
         </sl-tooltip>
       </div>
@@ -1081,8 +1090,8 @@ export class ScionHeader extends LitElement {
           slot="trigger"
           class="mode-trigger"
           aria-label=${this.chatUnreadShown() > 0
-            ? `Switch view mode, ${this.chatUnreadPhrase()}`
-            : 'Switch view mode'}
+            ? t('header.switchModeUnread', { unread: this.chatUnreadPhrase() })
+            : t('header.switchMode')}
         >
           <span class="mode-icon">
             <sl-icon name=${icon}></sl-icon>
@@ -1097,13 +1106,13 @@ export class ScionHeader extends LitElement {
         >
           <sl-menu-item value="dashboard" ?checked=${!isChat && !isTerminal}>
             <sl-icon slot="prefix" name="house"></sl-icon>
-            Dashboard ${this.renderMenuShortcutHint('dashboard')}
+            ${t('page.dashboard')} ${this.renderMenuShortcutHint('dashboard')}
           </sl-menu-item>
           ${chatEnabled
             ? html`
                 <sl-menu-item value="chat" ?checked=${isChat}>
                   <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                  Chat
+                  ${t('header.chat')}
                   ${this.chatUnreadShown() > 0
                     ? html`<span
                         slot="suffix"
@@ -1118,7 +1127,7 @@ export class ScionHeader extends LitElement {
             : ''}
           <sl-menu-item value="terminals" ?checked=${isTerminal}>
             <sl-icon slot="prefix" name="terminal"></sl-icon>
-            Terminal
+            ${t('page.terminal')}
             ${this.terminalSessionCount > 0
               ? html`<span slot="suffix" class="count-badge">${this.terminalSessionCount}</span>`
               : ''}
@@ -1137,12 +1146,14 @@ export class ScionHeader extends LitElement {
   /** "3 unread conversations", for accessible labels. */
   private chatUnreadPhrase(): string {
     const n = this.chatUnreadShown();
-    return `${n} unread conversation${n === 1 ? '' : 's'}`;
+    return t('header.unread', { count: n });
   }
 
   /** The chat selector's accessible label and tooltip. */
   private chatLabel(): string {
-    return this.chatUnreadShown() > 0 ? `Chat, ${this.chatUnreadPhrase()}` : 'Chat';
+    return this.chatUnreadShown() > 0
+      ? t('header.chatUnread', { unread: this.chatUnreadPhrase() })
+      : t('header.chat');
   }
 
   /** The count badge over the chat icon, or nothing at zero. */
@@ -1161,9 +1172,9 @@ export class ScionHeader extends LitElement {
 
   /** Icon and label for the currently active mode. */
   private getCurrentMode(): { icon: string; label: string } {
-    if (this.isChatView()) return { icon: 'chat-dots', label: 'Chat' };
-    if (this.isTerminalView()) return { icon: 'terminal', label: 'Terminal' };
-    return { icon: 'house', label: 'Dashboard' };
+    if (this.isChatView()) return { icon: 'chat-dots', label: t('header.chat') };
+    if (this.isTerminalView()) return { icon: 'terminal', label: t('page.terminal') };
+    return { icon: 'house', label: t('page.dashboard') };
   }
 
   /** Handle mode selection from the dropdown menu. */
@@ -1187,7 +1198,7 @@ export class ScionHeader extends LitElement {
 
     return html`
       <sl-dropdown class="user-dropdown">
-        <button slot="trigger" class="user-trigger" aria-label="Account menu">
+        <button slot="trigger" class="user-trigger" aria-label=${t('header.account')}>
           <sl-icon name="person"></sl-icon>
           <sl-icon class="caret" name="chevron-down"></sl-icon>
           ${hasUnread ? html`<span class="trigger-badge"></span>` : ''}
@@ -1198,7 +1209,7 @@ export class ScionHeader extends LitElement {
         >
           <sl-menu-item value="notifications">
             <sl-icon slot="prefix" name="bell"></sl-icon>
-            Notifications
+            ${t('header.notifications')}
             ${this.notificationCount > 0
               ? html`<span slot="suffix" class="count-badge">${this.notificationCount}</span>`
               : ''}
@@ -1208,22 +1219,22 @@ export class ScionHeader extends LitElement {
 
           <sl-menu-item value="profile">
             <sl-icon slot="prefix" name="person"></sl-icon>
-            Profile
+            ${t('header.profile')}
           </sl-menu-item>
           <sl-menu-item value="help">
             <sl-icon slot="prefix" name="question-circle"></sl-icon>
-            Help
+            ${t('header.help')}
           </sl-menu-item>
           <sl-menu-item value="theme">
             <sl-icon slot="prefix" name=${this.isDark ? 'sun' : 'moon'}></sl-icon>
-            ${this.isDark ? 'Light Mode' : 'Dark Mode'}
+            ${this.isDark ? t('header.lightMode') : t('header.darkMode')}
           </sl-menu-item>
 
           <sl-divider></sl-divider>
 
           <sl-menu-item value="logout">
             <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
-            Sign Out
+            ${t('header.signOutMenu')}
           </sl-menu-item>
         </sl-menu>
       </sl-dropdown>
