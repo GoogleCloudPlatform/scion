@@ -923,7 +923,7 @@ func TestGuardCommitFallbackOnlyForUnsupportedLinks(t *testing.T) {
 		err          syscall.Errno
 		wantFallback bool
 	}{
-		{syscall.EPERM, true}, {syscall.EXDEV, true}, {syscall.ENOTSUP, true}, {syscall.EMLINK, true},
+		{syscall.EPERM, true}, {syscall.EXDEV, true}, {syscall.ENOTSUP, true}, {syscall.EMLINK, true}, {syscall.ENOSYS, true},
 		{syscall.EIO, false}, {syscall.ENOSPC, false}, {syscall.ENOENT, false},
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {
@@ -944,6 +944,26 @@ func TestGuardCommitFallbackOnlyForUnsupportedLinks(t *testing.T) {
 				t.Errorf("sent %d, fallbacks %d, failures %d; want 0, 0, 1", len(c.lines), s.CommitLinkFallbacks, s.FinalizeFailures)
 			}
 		})
+	}
+}
+
+// r4 OPT-1: a fallback whose rename fails is not counted as a fallback;
+// the commit fails (counted, retried) and the finalizing file is held.
+func TestGuardFailedFallbackRenameNotCounted(t *testing.T) {
+	o := testOutbox(t)
+	o.link = func(tmp, _ string) error {
+		_ = os.Remove(tmp) // the rename that follows will fail
+		return &os.LinkError{Op: "link", Err: syscall.EPERM}
+	}
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("a", "rid1:x", outboxTestTS), AppendWritten)
+	c := &capture{}
+	NewAnalyticsDrainer(o, c.send, trustedHub("hub-A")).RunOnce(context.Background())
+	if s := o.MemoryStats(); s.CommitLinkFallbacks != 0 || s.FinalizeFailures != 1 || len(c.lines) != 0 {
+		t.Errorf("fallbacks %d, failures %d, sent %d; want 0, 1, 0", s.CommitLinkFallbacks, s.FinalizeFailures, len(c.lines))
+	}
+	if files, _ := o.finalizingFiles(); len(files) != 1 {
+		t.Errorf("finalizing file must stay held; got %v", files)
 	}
 }
 

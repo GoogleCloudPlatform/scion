@@ -2205,9 +2205,9 @@ func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) e
 
 // linkNoReplace hard-links tmp to dst, failing if dst exists. When the
 // link error means hard links are unsupported here (EPERM, EXDEV, ENOTSUP,
-// EOPNOTSUPP, EMLINK), it falls back to a rename after checking that dst
-// does not exist; any other error is returned (finalize fails, is counted,
-// and is retried). That fallback is
+// EOPNOTSUPP, EMLINK, ENOSYS), it falls back to a rename after checking
+// that dst does not exist; any other error is returned (finalize fails, is
+// counted, and is retried). That fallback is
 // no-replace only because every creator of ready-* files does this under
 // the outbox lock (finalizeFile's commit guard is the only one; Drain only
 // removes or quarantines ready files), so nothing can create dst between
@@ -2230,7 +2230,7 @@ func (o *AnalyticsOutbox) linkNoReplace(tmp, dst string) error {
 // linksUnsupported reports whether a link error means the filesystem does
 // not support hard links here (the only errors linkNoReplace falls back on).
 func linksUnsupported(err error) bool {
-	for _, e := range []error{unix.EPERM, unix.EXDEV, unix.ENOTSUP, unix.EOPNOTSUPP, unix.EMLINK} {
+	for _, e := range []error{unix.EPERM, unix.EXDEV, unix.ENOTSUP, unix.EOPNOTSUPP, unix.EMLINK, unix.ENOSYS} {
 		if errors.Is(err, e) {
 			return true
 		}
