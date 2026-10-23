@@ -48,31 +48,39 @@ func prepareMoveWorkerFixture(t *testing.T, f *moveFixture) {
 	f.disp.startPlacement = api.WorkspacePlacementLocal
 }
 
-// waitForMoveSourceCleanup waits until a completed move has recorded its
-// source cleanup outcome, which the worker writes after the completion.
+// waitForMoveSourceCleanup waits until a settled move (completed or
+// failed) has recorded its source cleanup outcome, and returns the record.
+// On a timeout it names the reincarnation and the last record it read.
 func waitForMoveSourceCleanup(t *testing.T, s store.Store, reincarnationID string) *store.AgentReincarnation {
 	t.Helper()
-	var r *store.AgentReincarnation
-	require.Eventually(t, func() bool {
-		got, err := s.GetAgentReincarnation(context.Background(), reincarnationID)
-		if err != nil {
-			return false
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r, err := s.GetAgentReincarnation(context.Background(), reincarnationID)
+		if err == nil && r.SourceCleanup != "" {
+			return r
 		}
-		r = got
-		return got.SourceCleanup != ""
-	}, 5*time.Second, 5*time.Millisecond, "the source cleanup outcome is recorded")
-	return r
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("timed out waiting for the source cleanup outcome of reincarnation %s: last read failed: %v", reincarnationID, err)
+			}
+			t.Fatalf("timed out waiting for the source cleanup outcome of reincarnation %s: last record state %q, error %q",
+				reincarnationID, r.State, r.Error)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // waitForMoveSettled is waitForReincarnationSettled for a move: it also
-// waits for the record's source cleanup outcome. That outcome is the
-// worker's last write on every path where it won the record's terminal
-// CAS: cleanUpMoveSource after a completed move, the ambiguous-start skip,
-// and reconcileFailedMove after a failed one, which records it only after
-// releasing and restoring the source's broker reservation. A test that
-// counts reservations as soon as the record and agent row settle would
-// otherwise read the count between that release and the restore. A
-// record that is not a move (no source broker) returns at once.
+// waits for the record's source cleanup outcome. On the completed and
+// failed-with-rollback paths that outcome is the worker's last write
+// (cleanUpMoveSource after a completed move; reconcileFailedMove after a
+// failed one, which records it only after releasing and restoring the
+// source's broker reservation). On the ambiguous-start path it is written
+// before the record fails, and the reconcile that follows writes nothing
+// because the agent stays on the target. A test that counts reservations
+// as soon as the record and agent row settle would otherwise read the
+// count between that release and the restore. A record that is not a move
+// (no source broker) returns at once.
 func waitForMoveSettled(t *testing.T, s store.Store, agentID string) *store.AgentReincarnation {
 	t.Helper()
 	r := waitForReincarnationSettled(t, s, agentID)
@@ -109,7 +117,6 @@ func TestReincarnateMove_CompletesOnTarget(t *testing.T) {
 
 	r, a := startMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, r.SourceBrokerID)
 	assert.Equal(t, f.dst.ID, r.TargetBrokerID)
 	assert.Equal(t, store.SourceCleanupDone, r.SourceCleanup)
@@ -160,7 +167,6 @@ func TestReincarnateMove_SourceCleanupFailureRecorded(t *testing.T) {
 
 	r, a := startMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
 	assert.True(t, strings.HasPrefix(r.SourceCleanup, "failed:"), "sourceCleanup = %q", r.SourceCleanup)
 	assert.Contains(t, r.SourceCleanup, "source broker offline")
@@ -174,7 +180,10 @@ func assertRolledBackToSource(t *testing.T, f *moveFixture, r *store.AgentReinca
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	// The failed move's reconcile (reservation, skipped cleanup) runs just
-	// after the agent row settles; wait for its last write.
+	// after the agent row settles; wait for its last write. A no-op after
+	// startMove, which already waited; the callers that settle with
+	// waitForReincarnationSettled directly (RollbackPerStep, the
+	// session-user and image moves) need it.
 	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "kubernetes", a.Runtime, "the source runtime is restored")

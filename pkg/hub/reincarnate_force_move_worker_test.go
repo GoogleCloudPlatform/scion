@@ -70,7 +70,6 @@ func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *s
 func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun, fromState, beforeTask string) {
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "kubernetes", a.Runtime, "the source runtime is restored")
@@ -128,7 +127,6 @@ func TestReincarnateForceMove_CompletesOnTarget(t *testing.T) {
 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, store.SourceCleanupDone, r.SourceCleanup)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
@@ -337,7 +335,6 @@ func TestReincarnateForceMove_AmbiguousStartSkipsCleanupAndNeverDeletes(t *testi
 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, sourceCleanupSkippedAmbiguousStart, r.SourceCleanup)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the agent stays assigned to the target, where a container may run")
@@ -666,7 +663,6 @@ func TestReincarnateForceMove_ProvisionNotSentSendsNoTargetDelete(t *testing.T) 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	assert.Contains(t, r.Error, "GCP service account not mapped on the target profile")
-	waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "run-src", a.RunID)
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
@@ -706,7 +702,6 @@ func TestReincarnateForceMove_RefusedBeforeF4RollbackDeleteIsSkipped(t *testing.
 
 			r, a := startForceMove(t, f)
 			require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-			r = waitForMoveSourceCleanup(t, f.s, r.ID)
 			assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 			assert.Equal(t, "run-src", a.RunID)
 			assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
