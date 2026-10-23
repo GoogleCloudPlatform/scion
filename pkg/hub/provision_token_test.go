@@ -23,13 +23,16 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,18 +76,43 @@ func ptokRequireStructuredDenial(t *testing.T, f *inviteTokenFixture, send func(
 	assertStructuredDenial(t, parseErrorResponse(t, rec.Body.Bytes()), "user", "invite")
 }
 
+// ptokStoredTokenDB returns the store's database for raw row edits.
+func ptokStoredTokenDB(t *testing.T, s store.Store) *sql.DB {
+	t.Helper()
+	db, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store must expose DB()")
+	return db.DB()
+}
+
+// ptokSetStoredCeiling sets the stored ceiling columns of the token row
+// for key: version, and the raw ceiling_permission_ids column value.
+func ptokSetStoredCeiling(t *testing.T, s store.Store, key string, version permissions.CeilingVersion, rawIDs string) {
+	t.Helper()
+	hash := sha256.Sum256([]byte(key))
+	res, err := ptokStoredTokenDB(t, s).ExecContext(context.Background(),
+		"UPDATE user_access_tokens SET ceiling_version = ?, ceiling_permission_ids = ? WHERE key_hash = ?",
+		int32(version), rawIDs, hex.EncodeToString(hash[:]))
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+}
+
 // TestProvisionToken_RequiresInviteSelectorAndHubBoundary pins POST
 // /api/v1/users for user access tokens. The handler decides user.invite
 // at the hub user collection, so a token is admitted only with user:invite,
 // on the hub boundary, and with the holder's live user.invite authority,
 // checked at each request:
-//   - a token without user:invite, and a token on a project boundary, are
-//     refused with details.reason credential_insufficient;
+//   - a token without user:invite, a token on a project boundary, and a
+//     hub token whose stored ceiling is empty, of an unknown version or
+//     malformed (the holder holds user.invite) are refused with
+//     details.reason credential_insufficient;
 //   - a token whose holder lost user.invite gets the structured user/invite
 //     denial;
 //   - refused requests write nothing, and are refused before the body is
 //     read, so a body naming a role still gets 403;
-//   - an admitted token naming a role gets 422, as an admitted session does.
+//   - an admitted token naming any role gets 422, as an admitted session
+//     does.
 //
 // Sessions are decided on the same permission: a hub admin's session is
 // admitted and a hub member's gets the structured denial.
@@ -103,6 +131,20 @@ func TestProvisionToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	// A stored project-boundary row carrying the hub-only selector:
 	// refused at request time for the boundary.
 	legacy := uatpInsertLegacyToken(t, f.s, f.admin.ID, f.project, []string{"user:invite"})
+	// Stored hub-boundary rows of the hub admin whose ceiling does not
+	// allow user.invite: an explicit empty list, an unknown version naming
+	// user.invite, and a column that is not a JSON list.
+	emptyCeiling := uatpInsertHubToken(t, f.s, f.admin.ID, []string{"user:invite"})
+	ptokSetStoredCeiling(t, f.s, emptyCeiling, permissions.CeilingVersionV1, "[]")
+	unknownVersion := uatpInsertHubToken(t, f.s, f.admin.ID, []string{"user:invite"})
+	ptokSetStoredCeiling(t, f.s, unknownVersion, permissions.CeilingVersion(99), `["user.invite"]`)
+	malformedCeiling := uatpInsertHubToken(t, f.s, f.admin.ID, []string{"user:invite"})
+	ptokSetStoredCeiling(t, f.s, malformedCeiling, permissions.CeilingVersionV1, `{"user.invite"`)
+	ceilingRows := map[string]string{
+		"hub row with an empty ceiling":           emptyCeiling,
+		"hub row with an unknown ceiling version": unknownVersion,
+		"hub row with a malformed ceiling":        malformedCeiling,
+	}
 	// A token minted while its holder held user.invite, used after the
 	// holder lost it: refused at request time.
 	former, demote := f.formerAdminToken(t, "ptok-former", "user:invite")
@@ -116,6 +158,9 @@ func TestProvisionToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	itfExpectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without user:invite")
 	itfExpectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
 	itfExpectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with user:invite")
+	for who, key := range ceilingRows {
+		itfExpectRefused(t, rc, f.withToken(t, key, rc.method), who)
+	}
 	itfExpectRefused(t, rc, f.asUser(t, f.member, rc.method), "hub member session")
 	itfExpectAdmitted(t, rc, f.withToken(t, admitted, rc.method), "hub token with user:invite")
 	itfExpectAdmitted(t, rc, f.asUser(t, f.admin, rc.method), "hub admin session")
@@ -124,6 +169,9 @@ func TestProvisionToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	ptokRequireReason(t, f, unrelated, insufficient, "hub token without user:invite")
 	ptokRequireReason(t, f, projectToken, insufficient, "project token")
 	ptokRequireReason(t, f, legacy, insufficient, "project-boundary row with user:invite")
+	for who, key := range ceilingRows {
+		ptokRequireReason(t, f, key, insufficient, who)
+	}
 	ptokRequireStructuredDenial(t, f, func(p string, b interface{}) *httptest.ResponseRecorder {
 		return doRequestWithToken(t, f.srv, former, http.MethodPost, p, b)
 	}, "hub token whose holder lost user.invite")
@@ -134,13 +182,25 @@ func TestProvisionToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	// Admission runs before the body is read; an admitted token gets the
 	// body rules of an admitted session.
 	roleBody := map[string]interface{}{"email": itfUniqueName("ptok-role") + "@example.com", "role": store.UserRoleAdmin}
-	for who, key := range map[string]string{"hub token without user:invite": unrelated, "project token": projectToken, "hub token whose holder lost user.invite": former} {
+	refusedBeforeBody := map[string]string{
+		"hub token without user:invite":           unrelated,
+		"project token":                           projectToken,
+		"project-boundary row with user:invite":   legacy,
+		"hub token whose holder lost user.invite": former,
+	}
+	for who, key := range refusedBeforeBody {
 		assert.Equal(t, http.StatusForbidden, doRequestWithToken(t, f.srv, key, http.MethodPost, provisionPath, roleBody).Code, who)
 	}
-	rec := doRequestWithToken(t, f.srv, admitted, http.MethodPost, provisionPath, roleBody)
-	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
-	_, details := provisionErr(t, rec)
-	assert.Equal(t, provisionReasonPrivilegedRole, details["reason"])
+	for role, reason := range map[string]string{
+		store.UserRoleAdmin:  provisionReasonPrivilegedRole,
+		store.UserRoleMember: provisionReasonRoleNotSupported,
+	} {
+		roleBody["role"] = role
+		rec := doRequestWithToken(t, f.srv, admitted, http.MethodPost, provisionPath, roleBody)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "role %s: %s", role, rec.Body.String())
+		_, details := provisionErr(t, rec)
+		assert.Equal(t, reason, details["reason"], "role %s", role)
+	}
 	assert.False(t, f.userExists(t, roleBody["email"].(string)), "a refused request creates no record")
 }
 
@@ -186,12 +246,12 @@ func TestProvisionToken_DetailViewNeedsReadSelector(t *testing.T) {
 	assert.Empty(t, provisionAudits(t, f.s, ""), "replays and collisions write no audit")
 }
 
-// ptokSetTokenExpiry sets a stored token's expiry directly.
+// ptokSetTokenExpiry sets a stored token's expiry directly, written as an
+// RFC 3339 timestamp.
 func ptokSetTokenExpiry(t *testing.T, s store.Store, tokenID string, at time.Time) {
 	t.Helper()
-	db, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "store must expose DB()")
-	res, err := db.DB().ExecContext(context.Background(), "UPDATE user_access_tokens SET expires_at = ? WHERE id = ?", at, tokenID)
+	res, err := ptokStoredTokenDB(t, s).ExecContext(context.Background(),
+		"UPDATE user_access_tokens SET expires_at = ? WHERE id = ?", at.UTC().Format(time.RFC3339Nano), tokenID)
 	require.NoError(t, err)
 	n, err := res.RowsAffected()
 	require.NoError(t, err)
@@ -203,31 +263,48 @@ func ptokSetTokenExpiry(t *testing.T, s store.Store, tokenID string, at time.Tim
 // lifetime is independent of the token and of its holder: after the token
 // is revoked or expires, the holder is suspended, or the holder loses
 // user.invite, the token is refused, and the record stays invited and
-// admits a sign-in under invite_only like any invited record. The
+// admits a sign-in under invite_only like any invited record. A revoked or
+// expired token gets 401 unauthorized, also when its holder is suspended
+// as well; a suspended holder's token gets 403 user_suspended; a token
+// whose holder lost user.invite gets 403 forbidden. The
 // user_provision audit names the holder and the token (ID, kind and hub
 // boundary), and a record the token created can be withdrawn through the
 // allow list.
 func TestProvisionToken_RecordOutlivesTokenAndHolderAuthority(t *testing.T) {
+	revoke := func(t *testing.T, f *inviteTokenFixture, holderID, tokenID string) {
+		require.NoError(t, f.srv.uatService.RevokeToken(rs4MintContext(holderID), holderID, tokenID))
+	}
+	suspend := func(t *testing.T, f *inviteTokenFixture, holderID string) {
+		u, err := f.s.GetUser(context.Background(), holderID)
+		require.NoError(t, err)
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, f.s.UpdateUser(context.Background(), u))
+	}
 	cases := []struct {
 		name string
 		// change applies the change to the token or its holder.
 		change func(t *testing.T, f *inviteTokenFixture, holderID, tokenID string)
-		// refused is the status of the token's next request.
-		refused int
+		// refused and code are the status and error code of the token's
+		// next request; rejection is the token validation error, or nil
+		// when the token still validates.
+		refused   int
+		code      string
+		rejection error
 	}{
-		{"token revoked", func(t *testing.T, f *inviteTokenFixture, holderID, tokenID string) {
-			require.NoError(t, f.srv.uatService.RevokeToken(rs4MintContext(holderID), holderID, tokenID))
-		}, http.StatusUnauthorized},
+		{"token revoked", revoke, http.StatusUnauthorized, ErrCodeUnauthorized, ErrUATRevoked},
 		{"token expired", func(t *testing.T, f *inviteTokenFixture, _, tokenID string) {
 			ptokSetTokenExpiry(t, f.s, tokenID, time.Date(2001, time.January, 1, 0, 0, 0, 0, time.UTC))
-		}, http.StatusUnauthorized},
+		}, http.StatusUnauthorized, ErrCodeUnauthorized, ErrUATExpired},
 		{"holder suspended", func(t *testing.T, f *inviteTokenFixture, holderID, _ string) {
-			u, err := f.s.GetUser(context.Background(), holderID)
-			require.NoError(t, err)
-			u.Status = store.UserStatusSuspended
-			require.NoError(t, f.s.UpdateUser(context.Background(), u))
-		}, http.StatusForbidden},
-		{"holder lost user.invite", nil, http.StatusForbidden},
+			suspend(t, f, holderID)
+		}, http.StatusForbidden, "user_suspended", ErrUserSuspended},
+		// A revoked token is refused as revoked whatever its holder's
+		// status: 401, not the suspended holder's 403.
+		{"token revoked and holder suspended", func(t *testing.T, f *inviteTokenFixture, holderID, tokenID string) {
+			revoke(t, f, holderID, tokenID)
+			suspend(t, f, holderID)
+		}, http.StatusUnauthorized, ErrCodeUnauthorized, ErrUATRevoked},
+		{"holder lost user.invite", nil, http.StatusForbidden, ErrCodeForbidden, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -266,7 +343,15 @@ func TestProvisionToken_RecordOutlivesTokenAndHolderAuthority(t *testing.T) {
 			}
 			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, provisionPath,
 				map[string]interface{}{"email": itfUniqueName("ptlife-late") + "@gmail.com"})
-			assert.Equal(t, tc.refused, rec.Code, "the token is refused after the change: %s", rec.Body.String())
+			require.Equal(t, tc.refused, rec.Code, "the token is refused after the change: %s", rec.Body.String())
+			code, _ := provisionErr(t, rec)
+			assert.Equal(t, tc.code, code)
+			_, verr := f.srv.uatService.ValidateToken(ctx, key)
+			if tc.rejection == nil {
+				assert.NoError(t, verr, "the token still validates; the decision refuses it")
+			} else {
+				assert.ErrorIs(t, verr, tc.rejection)
+			}
 
 			for _, email := range []string{signIn, withdraw} {
 				u, err := f.s.GetUserByEmail(ctx, email)

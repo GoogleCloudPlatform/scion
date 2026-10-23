@@ -426,15 +426,16 @@ func TestAllowListDeleteToken_LastProjectOwnerProtected(t *testing.T) {
 
 // TestInvitationToken_CreatesNoRoleBindingOrGroupMembership pins that a
 // record a token creates through an invitation route carries no authority:
-// single and bulk invite, allow-list add and import, and user provisioning
-// (POST /api/v1/users) each create a user with status invited and the
-// placeholder role member, with no role binding and no group membership
-// beyond those of an invited user created directly in the store, even when
-// the request body names a role, a project or a group (provisioning refuses
-// such a body, so its case sends only the fields it accepts). An
-// invitation code a token creates is attributed to the token's holder and
-// names no role. The hub runs without dev authentication, on which user
-// provisioning is refused.
+// single invite and allow-list add and import each create a user with
+// status invited and the placeholder role member, with no role binding and
+// no group membership beyond those of an invited user created directly in
+// the store, even when the request body names a role, a project or a
+// group. Bulk invite refuses a body that names a role with 422 and creates
+// nothing. User provisioning (POST /api/v1/users) refuses such a body too,
+// so its case sends only the fields it accepts and gets the same record.
+// An invitation code a token creates is attributed to the token's holder
+// and names no role. The hub runs without dev authentication, because a
+// hub with dev authentication refuses user provisioning.
 func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
 	srv, st := testServerNoDevAuth(t)
 	f := newInviteTokenFixtureOn(t, "inauth", srv, st)
