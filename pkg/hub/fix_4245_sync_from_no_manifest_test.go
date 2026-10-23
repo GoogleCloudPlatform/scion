@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"

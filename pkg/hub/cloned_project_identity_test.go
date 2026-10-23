@@ -19,9 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -477,13 +474,7 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 			assert.Equal(t, alignSkippedUnexpectedIdentity, res.Outcome)
 
 			after := snapshotTree(t, home)
-			recordsDir := filepath.Join(home, config.GlobalDir, config.HubWorkspacesDir)
-			for path := range after {
-				if path == recordsDir || strings.HasPrefix(path, recordsDir+string(filepath.Separator)) {
-					delete(after, path)
-				}
-			}
-			assert.Equal(t, before, after, "no file or directory changed apart from the hub workspace record")
+			assert.Equal(t, before, after, "no file or directory changed")
 		})
 	}
 }
@@ -586,7 +577,7 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			identityTestHome(t)
-			hubSrv, st := testServer(t)
+			_, st := testServer(t)
 			ctx := context.Background()
 
 			project := sharedWorkspaceProject("same-home")

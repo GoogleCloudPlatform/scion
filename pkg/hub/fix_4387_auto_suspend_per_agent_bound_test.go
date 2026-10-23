@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 

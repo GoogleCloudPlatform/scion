@@ -1271,8 +1271,18 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
 		projectkeys.ConfigHubProjectIDKey: project.ID,
 	}
+	// On a shared backend scionDir is <ProjectRoot>/.scion, which holds the
+	// project-id file: it is written in place (UpdateSettingInDir), never
+	// resolved to an external project config directory on the hub's disk.
+	shared := s.workspaceBackendShared()
 	for key, value := range settingsUpdates {
-		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
+		var err error
+		if shared {
+			err = config.UpdateSettingInDir(scionDir, key, value)
+		} else {
+			err = config.UpdateSetting(scionDir, key, value, false)
+		}
+		if err != nil {
 			s.projectsLogger().Warn("failed to update hub-managed project setting",
 				"project_id", project.ID, "key", key, "error", err.Error())
 		}
@@ -1340,15 +1350,16 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if err != nil {
 		return storageErr("host base", err)
 	}
-	// A project root this create made is removed again when provisioning
-	// fails, as the local backend removes its failed clone.
+	// A project root this create made is removed again, with everything
+	// under it, when provisioning fails, as the local backend removes its
+	// failed clone. A root that existed before this create is left as is.
 	_, statErr := os.Lstat(filepath.Join(base, pr.RelPath))
 	createdRoot := errors.Is(statErr, fs.ErrNotExist)
 	cleanup := func() {
 		if !createdRoot {
 			return
 		}
-		if err := shareddirs.DeleteProjectTree(base, pr.SubPathRoot, project.ID); err != nil {
+		if err := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); err != nil {
 			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
 				"project_id", project.ID, "error", err)
 		}

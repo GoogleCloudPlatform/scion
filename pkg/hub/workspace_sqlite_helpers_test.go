@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/stretchr/testify/require"
 )
 
 func nfsConfig(mountRoot string) *config.V1WorkspaceStorageConfig {

@@ -287,6 +287,8 @@ func TestInitHubManagedProject_SharedBackend_SeedsProjectRoot(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "no .scion is created inside the workspace agents mount")
 	_, err = os.Stat(filepath.Join(f.home, ".scion", "projects", project.Slug))
 	assert.True(t, os.IsNotExist(err), "nothing is seeded on the hub's local disk")
+	_, err = os.Stat(filepath.Join(f.home, ".scion", config.ProjectConfigsDir))
+	assert.True(t, os.IsNotExist(err), "the hub connection settings are not redirected to an external project config directory on the hub's disk")
 
 	dir, err := f.srv.projectConfigDir(project)
 	require.NoError(t, err)
@@ -940,4 +942,27 @@ func TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote(t
 		map[string]string{store.LabelCloneURL: "https://mirror.example.invalid/team/mirror.git"})
 	assert.Equal(t, "ghe.example.invalid/team/mirror", in.CloneTokenRemote, "the record, never the label")
 	assert.Equal(t, "https://mirror.example.invalid/team/mirror.git", in.GitClone.URL)
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureKeepsExistingRoot:
+// the rollback of a failed provisioning removes only a project root that
+// this create made; a root that already existed (content another writer
+// put there) is left with its content.
+func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureKeepsExistingRoot(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	cloneLocalFixture(t, filepath.Join(t.TempDir(), "no-such-repo"))
+	const id = "aaaaaaaa-0000-4000-8000-0000000000c7"
+	root := filepath.Join(f.shareBase, "projects", id)
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "keep.txt"), []byte("existing"), 0o644))
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		ID: id, Name: "Existing Root NFS", GitRemote: "github.com/test/existing-root-nfs", WorkspaceMode: store.WorkspaceModeShared,
+		Labels: map[string]string{store.LabelCloneURL: "https://git.example.invalid/test/existing-root-nfs.git"},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(root, "keep.txt"))
+	require.NoError(t, err, "a project root that existed before the create is not removed")
+	assert.Equal(t, "existing", string(got))
 }
