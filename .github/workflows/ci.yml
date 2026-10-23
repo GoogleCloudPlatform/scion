@@ -1370,7 +1370,7 @@ jobs:
 
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     # Bounds a hang only. With the patched golangci-lint and the two-pass
     # split (hack/golangci-lint-split.sh) the whole job took 4m40s-4m53s on
     # ubuntu-latest (lint step 166-177 s, plus a 46-58 s cold build of the
@@ -1733,7 +1733,7 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the tests run anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
