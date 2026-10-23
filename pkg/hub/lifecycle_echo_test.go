@@ -504,8 +504,9 @@ func newEchoReportFixture(t *testing.T, name string) *echoReportFixture {
 	require.Equal(t, "run-m", mustGetAgent(t, raw, agent.ID).LaunchRunID, "the launch binds its minted run")
 	logs := &syncBuffer{}
 	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	wrap := &echoFaultStore{Store: raw}
-	srv.store = wrap
+	wrap, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *echoFaultStore {
+		return &echoFaultStore{Store: inner}
+	})
 	return &echoReportFixture{srv: srv, raw: raw, ls: ls, sink: sink, counters: counters, wrap: wrap, logs: logs,
 		agent: agent, brokerID: brokerID, launchID: launchID}
 }
