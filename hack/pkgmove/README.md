@@ -487,6 +487,9 @@ marker, a whole comment line followed by a comment line that gives the reason:
 - **Placement:** anywhere in the file; put it next to the directory
   enumeration it describes. A file may carry several markers (one per line),
   for example one per move it has been checked for.
+  `hack/check-scan-coverage.sh` (CI) is stricter for `pkg/hub`: every
+  enumeration call needs its own claim in the same function (see
+  [Per-call-site check](#per-call-site-check-hackcheck-scan-coveragesh)).
 
 **List form (`guardScanSubdirs`).** A test that reads the source package
 through shared helpers driven by a list of subdirectories (in `pkg/hub`:
@@ -523,6 +526,37 @@ the INFO also names the list entry and where the list is declared. Otherwise
 the HIGH stays (and fails `-strict`); when the file has markers for other
 directories, malformed markers, markers without a reason line or list
 markers that miss the target, the HIGH lists them.
+
+### Per-call-site check (`hack/check-scan-coverage.sh`)
+
+pkgmove checks scan coverage per file: once one scan in a test file is
+marked, a second, unmarked scan in the same file is not reported. The CI
+guard `hack/check-scan-coverage.sh` closes that gap for `pkg/hub`, where
+each area move otherwise starts with a round of marker fixes. In every
+`pkg/hub/*_test.go` file that imports `go/parser`, `go/ast` or
+`golang.org/x/tools/go/packages`, each enumeration call (`filepath.Glob`,
+`filepath.Walk`, `filepath.WalkDir`, `os.ReadDir`, `os.Getwd`,
+`ioutil.ReadDir`, `parser.ParseDir`, `packages.Load`, `fs.WalkDir`,
+`fs.Glob`, `fs.ReadDir`) needs, in the same top-level function and at most
+15 lines above it, one of:
+
+- `// pkgmove:scan-covers pkg/hub/...` plus a reason line, for a walk that
+  recurses into every `pkg/hub` subdirectory (`./...`, `pkg/...` and `...`
+  are accepted too);
+- `// pkgmove:scan-covers guardScanSubdirs` plus a reason line, in a function
+  that uses one of the guardScanSubdirs helpers (`guardScanDirs`,
+  `mustGuardScanDirs`, `readGuardScanDirs`, `globGuardScanDirs`,
+  `parseNonTestGoFiles`), for example to read another package's directory
+  next to them;
+- `// scan-coverage:exempt <reason>`, for a call that reads no `pkg/hub`
+  sources (`../store`, the module-root lookup).
+
+Calls inside the helpers themselves are exempt. A per-area marker
+(`pkg/hub/apierr`) does not satisfy the guard, because it would need a new
+marker at the next move. So a new scan test carries a claim that holds for
+every future area from the day it lands, and the move's prep is one
+`guardScanSubdirs` entry. Run `hack/check-scan-coverage.sh --self-test` after
+changing the script.
 
 ### What counts as a pure initialiser call
 
@@ -680,7 +714,7 @@ Each is phrased as a check for the reviewer of a generated PR.
   x_test`) use the source package beyond plain selectors, run them; they are
   rewritten syntactically.
 - **Source-scanning guard tests:** if the report lists "source-scanning test does not cover the target", extend each listed test to scan the target directory as well. For example, use the package directory from `go list`, or walk both directories. Then check that it still fails on a planted violation in a moved file. pkg/hub has dozens of these, such as the `*_resource_literal_guard_test.go`, `*_enumeration_test.go` and `*_callsite*_test.go` files.
-- **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target. For a `guardScanSubdirs` marker, verify the site reads through the guardScanSubdirs helpers (the tool trusts the list literal).
+- **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target. For a `guardScanSubdirs` marker, verify the site reads through the guardScanSubdirs helpers (the tool trusts the list literal; in `pkg/hub`, `hack/check-scan-coverage.sh` checks that the function uses one of the helpers).
 - **Working-directory paths in moved tests:** if moved tests build paths from the working directory (`..`, `../`, `os.Getwd`, a `find...Dir` helper walking up to the module root), check that each path still resolves from the target directory, which is one level deeper. A test that skips when a file is missing passes silently.
 - **Assets read at run time:** if moved code reads files relative to the
   working directory or the package directory (beyond `testdata/` and `./`

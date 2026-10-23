@@ -508,6 +508,7 @@ var storeResponseRedactionCallers = map[string][]string{
 // visibility input.
 func assertStoreResponseRedactionChain(t *testing.T) {
 	t.Helper()
+	// scan-coverage:exempt reads pkg/store only; the pkg/hub sites are scanned through guardScanSubdirs above.
 	files, err := filepath.Glob(filepath.Join("..", "store", "*.go"))
 	require.NoError(t, err)
 	fset := token.NewFileSet()

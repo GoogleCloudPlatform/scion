@@ -560,6 +560,7 @@ func tiFuncCalls(census map[string]map[string][]tiCall, fn string) []string {
 func tiStoreUserCreators(t *testing.T, re *regexp.Regexp) []string {
 	t.Helper()
 	dir := filepath.Join("..", "store")
+	// scan-coverage:exempt reads pkg/store only.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	fset := token.NewFileSet()

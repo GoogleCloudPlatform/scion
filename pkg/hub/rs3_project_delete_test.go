@@ -868,6 +868,7 @@ func findCallSitesInFile(t *testing.T, filePath, relPath, symbol string) []callS
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	// Walk up from the test file to find the repository root.
+	// scan-coverage:exempt locates the module root; enumerates no files.
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	for {

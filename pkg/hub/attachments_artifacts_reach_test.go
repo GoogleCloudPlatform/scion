@@ -86,6 +86,8 @@ func moduleSymbolReferences(t *testing.T, root, name string) []string {
 	}
 	var out []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: skips only dot, testdata, vendor and node_modules directories and nested modules, so it covers every package directory below pkg/hub.
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
