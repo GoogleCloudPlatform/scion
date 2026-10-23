@@ -403,6 +403,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		if err := s.cloneSharedWorkspaceProject(ctx, clone); err != nil {
 			slog.Error("project clone: shared workspace clone failed",
 				"clone_id", clone.ID, "error", err)
+			if writeSharedCloneSourceRefused(w, err) {
+				return
+			}
 			if writeWorkspaceStorageUnavailable(w, err) {
 				return
 			}

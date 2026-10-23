@@ -259,6 +259,15 @@ type ProvisionInput struct {
 	// CloneWithToken.
 	CloneToken string
 
+	// HostGitHardened runs the clone as host-side git on a project-supplied
+	// URL: with HostCloneGitArgs ahead of the subcommand and
+	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
+	// ssh and git transports can be used (no local path, file://, ext:: or
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub
+	// sets it when it clones a project's shared workspace at create; the
+	// caller also checks the URL first (CheckHostCloneURL).
+	HostGitHardened bool
+
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
 	NFSUID int
@@ -2832,7 +2841,11 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
-	args := []string{"clone"}
+	var args []string
+	if in.HostGitHardened {
+		args = append(args, HostCloneGitArgs()...)
+	}
+	args = append(args, "clone")
 
 	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
 	depth := 1
@@ -2845,10 +2858,15 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if gc.Branch != "" {
 		args = append(args, "--branch", gc.Branch)
 	}
-	args = append(args, gc.URL, in.Resolved.HostPath)
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args = append(args, "--", gc.URL, in.Resolved.HostPath)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if in.HostGitHardened {
+		cmd.Env = append(cmd.Env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
+	}
 	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
 	if in.CloneToken != "" {
 		withToken, token = true, in.CloneToken

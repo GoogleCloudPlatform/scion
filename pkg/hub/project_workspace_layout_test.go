@@ -499,6 +499,28 @@ func newSourceRepo(t *testing.T) string {
 	return dir
 }
 
+// cloneLocalFixture makes the hub's shared-workspace provisioning clone the
+// local repository src in place of the project's https clone URL, which the
+// URL check requires (and a hardened clone refuses local paths). It records
+// every provisioning input the hub passed and returns them.
+func cloneLocalFixture(t *testing.T, src string) *[]provision.ProvisionInput {
+	t.Helper()
+	var seen []provision.ProvisionInput
+	orig := provisionSharedClone
+	provisionSharedClone = func(in provision.ProvisionInput) error {
+		seen = append(seen, in)
+		if in.GitClone != nil {
+			gc := *in.GitClone
+			gc.URL = src
+			in.GitClone = &gc
+		}
+		in.HostGitHardened = false
+		return orig(in)
+	}
+	t.Cleanup(func() { provisionSharedClone = orig })
+	return &seen
+}
+
 // TestCreateSharedWorkspaceProject_SharedBackend_HubProvisionsUUIDWorkspace
 // pins hub-side provisioning: on a shared backend the hub
 // provisions the uuid workspace at project create through
@@ -510,15 +532,21 @@ func TestCreateSharedWorkspaceProject_SharedBackend_HubProvisionsUUIDWorkspace(t
 	f := newWorkspaceLayoutFixture(t)
 	f.useNFS()
 	src := newSourceRepo(t)
+	seen := cloneLocalFixture(t, src)
+	const cloneURL = "https://git.example.invalid/test/shared-git-nfs.git"
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name: "Shared Git NFS", GitRemote: "github.com/test/shared-git-nfs", WorkspaceMode: store.WorkspaceModeShared,
-		Labels: map[string]string{store.LabelCloneURL: src, store.LabelDefaultBranch: "main"},
+		Labels: map[string]string{store.LabelCloneURL: cloneURL, store.LabelDefaultBranch: "main"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 	require.True(t, project.IsSharedWorkspace(), "fixture check")
+	require.Len(t, *seen, 1)
+	assert.True(t, (*seen)[0].HostGitHardened, "the hub clones with host-git hardening")
+	require.NotNil(t, (*seen)[0].GitClone)
+	assert.Equal(t, cloneURL, (*seen)[0].GitClone.URL, "the checked URL is the one cloned")
 
 	projectRoot := filepath.Join(f.shareBase, "projects", project.ID)
 	ws := filepath.Join(projectRoot, "workspace")
@@ -552,10 +580,11 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 	f := newWorkspaceLayoutFixture(t)
 	f.useNFS()
 	missing := filepath.Join(t.TempDir(), "no-such-repo")
+	cloneLocalFixture(t, missing)
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name: "Bad Clone NFS", GitRemote: "github.com/test/bad-clone-nfs", WorkspaceMode: store.WorkspaceModeShared,
-		Labels: map[string]string{store.LabelCloneURL: missing},
+		Labels: map[string]string{store.LabelCloneURL: "https://git.example.invalid/test/bad-clone-nfs.git"},
 	})
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code,
 		"a missing clone source is a not-found git error (422), body: %s", rec.Body.String())
@@ -616,9 +645,10 @@ func TestProjectWorkspacePull_ConfinedAndNoHostPaths(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	f.useNFS()
 	src := newSourceRepo(t)
+	cloneLocalFixture(t, src)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name: "Pull NFS", GitRemote: "github.com/test/pull-nfs", WorkspaceMode: store.WorkspaceModeShared,
-		Labels: map[string]string{store.LabelCloneURL: src, store.LabelDefaultBranch: "main"},
+		Labels: map[string]string{store.LabelCloneURL: "https://git.example.invalid/test/pull-nfs.git", store.LabelDefaultBranch: "main"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var project store.Project
@@ -762,4 +792,59 @@ func TestProjectWorkspaceFiles_ShareRootMissing_503(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodGet, workspaceFilesURL(project.ID), nil)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), f.home)
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_RefusesNonNetworkCloneURL:
+// on a shared backend the hub clones the project-supplied URL on its own
+// host, so a local path, file://, ext:: or any scheme other than https, ssh
+// and git is refused with a fixed 422 before anything is created: no
+// project row, no project tree, no clone attempted.
+func TestCreateSharedWorkspaceProject_SharedBackend_RefusesNonNetworkCloneURL(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	src := newSourceRepo(t)
+	seen := cloneLocalFixture(t, src)
+
+	for i, cloneURL := range []string{
+		src,
+		"file://" + src,
+		"ext::git-remote-probe",
+		"http://git.example.invalid/test/repo.git",
+		"ftp://git.example.invalid/test/repo.git",
+	} {
+		name := fmt.Sprintf("Refused Clone %d", i)
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+			Name: name, GitRemote: fmt.Sprintf("github.com/test/refused-clone-%d", i), WorkspaceMode: store.WorkspaceModeShared,
+			Labels: map[string]string{store.LabelCloneURL: cloneURL},
+		})
+		if rec.Code == http.StatusBadRequest {
+			// The clone-url label validation refused it even earlier.
+			continue
+		}
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "%s: body: %s", cloneURL, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), provision.ErrHostCloneURLRefused.Error())
+		assert.NotContains(t, rec.Body.String(), src, "the refused URL is not echoed")
+		result, err := f.s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		for _, p := range result.Items {
+			assert.NotEqual(t, name, p.Name, "the project row is rolled back")
+		}
+	}
+	assert.Empty(t, *seen, "no clone was attempted")
+	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
+	if err == nil {
+		assert.Empty(t, entries, "no project tree was created")
+	} else {
+		assert.True(t, os.IsNotExist(err), "projects/: %v", err)
+	}
+
+	// The accepted schemes reach the clone.
+	for _, cloneURL := range []string{
+		"https://git.example.invalid/test/ok.git",
+		"ssh://git@git.example.invalid/test/ok.git",
+		"git://git.example.invalid/test/ok.git",
+		"git@git.example.invalid:test/ok.git",
+	} {
+		require.NoError(t, provision.CheckHostCloneURL(cloneURL), cloneURL)
+	}
 }

@@ -582,6 +582,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			s.projectsLogger().Error("shared workspace clone failed, rolling back project creation",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 			rollbackCreatedProject()
+			if writeSharedCloneSourceRefused(w, err) {
+				return
+			}
 			// Workspace storage did not respond: 503, with no clone wording
 			// and no filesystem path in the body.
 			if writeWorkspaceStorageUnavailable(w, err) {
@@ -1232,7 +1235,32 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 // Errors returned to the caller carry no host path: a storage failure
 // wraps errWorkspaceStorageUnavailable, a clone failure is a *util.GitError
 // with fixed text and the classified kind (details are logged).
+// provisionSharedClone runs the hub's shared-workspace provisioning. A
+// variable so tests can observe the input and clone a local fixture
+// repository, which the URL check and the hardened clone refuse.
+var provisionSharedClone = provision.ProvisionShared
+
+// writeSharedCloneSourceRefused answers 422 with fixed text when err is the
+// refusal of a project's clone URL for a hub-side clone, and reports whether
+// it wrote the response.
+func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, provision.ErrHostCloneURLRefused) {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
+	return true
+}
+
 func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Project) error {
+	// The clone URL is project-supplied and the clone runs on the hub host:
+	// it is checked before any filesystem work, and refused (never
+	// rewritten) unless it is an https, ssh or git URL.
+	cloneCfg := sharedWorkspaceCloneConfig(project)
+	if cloneCfg != nil {
+		if err := provision.CheckHostCloneURL(cloneCfg.URL); err != nil {
+			return err
+		}
+	}
 	layout, err := s.workspaceLayout()
 	if err != nil {
 		return err
@@ -1288,17 +1316,18 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		return storageErr("provisioning state directory", err)
 	}
 
-	err = provision.ProvisionShared(provision.ProvisionInput{
-		Ctx:         ctx,
-		Resolved:    provision.ResolvedWorkspace{HostPath: res.HostPath},
-		ProjectID:   project.ID,
-		Mode:        store.SharingModeSharedPlain,
-		GitClone:    sharedWorkspaceCloneConfig(project),
-		CloneToken:  s.resolveCloneToken(ctx, project),
-		NFSUID:      layout.UID,
-		NFSGID:      layout.GID,
-		SentinelDir: stateDir,
-		LegacyDir:   res.HostPath,
+	err = provisionSharedClone(provision.ProvisionInput{
+		Ctx:             ctx,
+		Resolved:        provision.ResolvedWorkspace{HostPath: res.HostPath},
+		ProjectID:       project.ID,
+		Mode:            store.SharingModeSharedPlain,
+		GitClone:        cloneCfg,
+		CloneToken:      s.resolveCloneToken(ctx, project),
+		HostGitHardened: true,
+		NFSUID:          layout.UID,
+		NFSGID:          layout.GID,
+		SentinelDir:     stateDir,
+		LegacyDir:       res.HostPath,
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",
