@@ -141,3 +141,42 @@ func TestScionConfigClearedFieldsWireOnly(t *testing.T) {
 		t.Errorf("a YAML template set ClearedFields: %v", fromYAML.ClearedFields)
 	}
 }
+
+// TestRerenderableConfigKeys pins the provision-rendered keys a
+// changed_fields entry may name: exactly the system prompt, the agent
+// instructions, the skills and the services.
+func TestRerenderableConfigKeys(t *testing.T) {
+	want := []string{"agent_instructions", "services", "skills", "system_prompt"}
+	if got := RerenderableConfigKeys(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RerenderableConfigKeys() = %v, want %v", got, want)
+	}
+	for _, k := range want {
+		if _, ok := scionConfigFieldIndex[k]; !ok {
+			t.Errorf("%q is not a ScionConfig json key", k)
+		}
+	}
+}
+
+// TestRerenderConfigKeys: the keys a start re-renders are the rerenderable
+// entries of changed_fields and of cleared_fields, deduplicated and sorted;
+// anything else is dropped.
+func TestRerenderConfigKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *ScionConfig
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"none", &ScionConfig{SystemPrompt: "x"}, nil},
+		{"changed", &ScionConfig{ChangedFields: []string{"skills", "system_prompt"}}, []string{"skills", "system_prompt"}},
+		{"cleared rerenderable", &ScionConfig{ClearedFields: []string{"system_prompt", "max_turns", "env.FOO"}}, []string{"system_prompt"}},
+		{"union and dedupe", &ScionConfig{ChangedFields: []string{"system_prompt", "services"}, ClearedFields: []string{"system_prompt"}}, []string{"services", "system_prompt"}},
+		{"other keys dropped", &ScionConfig{ChangedFields: []string{"model", "secrets", "agent_plugins", ""}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RerenderConfigKeys(tc.cfg); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("RerenderConfigKeys = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -47,7 +47,8 @@ func TestStart_CloudRunStoppedInstancePreCleanedWithItsRun(t *testing.T) {
 				RunID:           "run-a",
 				Name:            "projects/p/locations/l/instances/agent-tz-agent-0123456789",
 				ContainerStatus: "CONDITION_SUCCEEDED",
-				Labels:          map[string]string{"scion_name": "tz-agent", "scion_run_id": "run-a", "agent_id": "agent-1"},
+				ProjectID:       identityProjB,
+				Labels:          map[string]string{"scion_name": "tz-agent", "scion_run_id": "run-a", "agent_id": "agent-1", "scion_project_id": identityProjB},
 			}}, nil
 		},
 		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
@@ -62,6 +63,7 @@ func TestStart_CloudRunStoppedInstancePreCleanedWithItsRun(t *testing.T) {
 	}
 	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -73,13 +75,11 @@ func TestStart_CloudRunStoppedInstancePreCleanedWithItsRun(t *testing.T) {
 	}
 }
 
-// Stop then start with the entry CloudRunRuntime.List reports for an
-// instance whose Ready condition succeeded (ptone/scion#5270). That
-// condition may also be what a stopped instance reports (ptone/scion#5295),
-// so List must not report it as running: Start's pre-clean keeps a running
-// entry, and the stopped instance would be returned instead of recreated.
-// The pre-clean must delete it with its own run, then Run the new run.
-func TestStart_CloudRunSucceededInstanceFromListPreCleaned(t *testing.T) {
+// Stop then start with the entry CloudRunRuntime.List reports for a
+// stopped instance, in the shape recorded after StopInstance
+// (ptone/scion#5295): List reports it as stopped, so Start's pre-clean
+// must delete it with its own run, then Run the new run.
+func TestStart_CloudRunStoppedInstanceFromListPreCleaned(t *testing.T) {
 	projectScionDir, _ := startTZFixture(t, "", `""`)
 	const instance = "projects/test-project/locations/us-central1/instances/agent-tz-agent-0123456789"
 	fake := &crStopInstances{instances: []*runpb.Instance{{
@@ -89,8 +89,15 @@ func TestStart_CloudRunSucceededInstanceFromListPreCleaned(t *testing.T) {
 			"scion_agent":  "true",
 			"scion_name":   "tz-agent",
 			"scion_run_id": "run-a",
+			// The project ID a hub-dispatched instance carries, under its
+			// GCP-sanitized key; List reports it as ProjectID.
+			"scion_project_id": identityProjB,
 		},
-		TerminalCondition: &runpb.Condition{Type: "Ready", State: runpb.Condition_CONDITION_SUCCEEDED},
+		TerminalCondition: &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_FAILED, Message: "Instance stopped."},
+		Conditions: []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 2.66s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+		},
 	}}}
 	cr, err := runtime.NewCloudRunRuntimeForTest(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"},
 		func(context.Context) (cloudrun.InstancesAPI, error) { return fake, nil })
@@ -119,6 +126,7 @@ func TestStart_CloudRunSucceededInstanceFromListPreCleaned(t *testing.T) {
 	}
 	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -127,5 +135,65 @@ func TestStart_CloudRunSucceededInstanceFromListPreCleaned(t *testing.T) {
 	}
 	if deleted.ID != "agent-tz-agent-0123456789" || deleted.RunID != "run-a" {
 		t.Errorf("pre-clean deleted %+v, want the listed instance with run-a", deleted)
+	}
+}
+
+// Start with no task, for an agent whose Cloud Run instance is running, in
+// the shape recorded for a started instance (ptone/scion#5295): List
+// reports it as running, so Start returns it as is, with no delete and no
+// new Run. Before, List reported a running instance as provisioning and
+// Start deleted and recreated it.
+func TestStart_CloudRunRunningInstanceFromListKept(t *testing.T) {
+	projectScionDir, _ := startTZFixture(t, "", `""`)
+	const instance = "projects/test-project/locations/us-central1/instances/agent-tz-agent-0123456789"
+	fake := &crStopInstances{instances: []*runpb.Instance{{
+		Name: instance,
+		Labels: map[string]string{
+			"agent_id":     "agent-1",
+			"scion_agent":  "true",
+			"scion_name":   "tz-agent",
+			"scion_run_id": "run-a",
+			// The project ID a hub-dispatched instance carries, under its
+			// GCP-sanitized key; List reports it as ProjectID. Start's
+			// pre-clean keeps only entries of its project (matchAgentProject).
+			"scion_project_id": identityProjB,
+		},
+		TerminalCondition: &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Started instance in 2.54s."},
+		Conditions: []*runpb.Condition{
+			{Type: "Retry", State: runpb.Condition_CONDITION_SUCCEEDED, Reasons: &runpb.Condition_Reason{Reason: runpb.Condition_WAITING_FOR_OPERATION}, Message: "System will retry after 01:00 from lastTransitionTime for polling interval", Severity: runpb.Condition_INFO},
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 2.66s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+		},
+	}}}
+	cr, err := runtime.NewCloudRunRuntimeForTest(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"},
+		func(context.Context) (cloudrun.InstancesAPI, error) { return fake, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	rt := &runtime.MockRuntime{
+		ListFunc: cr.List,
+		DeleteFunc: func(context.Context, runtime.RunRef) error {
+			calls = append(calls, "delete")
+			return nil
+		},
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			calls = append(calls, "run:"+cfg.Labels[api.LabelRunID])
+			return "agent-tz-agent-0123456789", nil
+		},
+	}
+	got, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("runtime calls = %v, want none: the running instance is kept", calls)
+	}
+	if got.ContainerID != "agent-tz-agent-0123456789" || got.RunID != "run-a" {
+		t.Errorf("Start returned ContainerID=%q RunID=%q, want the running instance with run-a", got.ContainerID, got.RunID)
 	}
 }

@@ -52,6 +52,7 @@ jobs:
       starter_hub: ${{ steps.diff.outputs.starter_hub }}
       web: ${{ steps.diff.outputs.web }}
       web_checks: ${{ steps.diff.outputs.web_checks }}
+      go: ${{ steps.diff.outputs.go }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -77,6 +78,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -89,6 +91,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -130,6 +133,27 @@ jobs:
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
+          fi
+          # go gates the golangci-lint job (ptone/scion#4208): its load of
+          # pkg/hub can exhaust the runner's memory, so PRs that cannot change
+          # lint results skip it. Deliberately wide; it matches anything that
+          # can change what golangci-lint loads or reports:
+          #   - Go sources and modules (*.go, go.mod, go.sum, go.work, in any
+          #     directory, extras/ included) and cgo/assembly sources;
+          #   - golangci-lint config (.golangci*; none today, defaults apply);
+          #   - go:embed inputs of the root module: harnesses/ (all:*),
+          #     resources/, pkg/config/embeds/, pkg/config/schemas/ and
+          #     third_party/ (ateapi.proto). A removed embedded file fails
+          #     type-checking, which golangci-lint reports;
+          #   - web/dist/ (web/embed.go embeds all:dist/client; only its
+          #     .gitkeep is in git, the rest is a build output);
+          #   - this workflow and the Go cache actions the lint job uses.
+          # Keep this regex in sync when a new go:embed reads files that do
+          # not match it.
+          if grep -qE '(\.(go|c|h|s|S|syso)$|(^|/)go\.(mod|sum|work)$|^\.golangci|^(harnesses|resources|third_party)/|^pkg/config/(embeds|schemas)/|^web/dist/|^\.github/actions/(setup|save)-go-cache/|^\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
   build-and-test:
@@ -1346,6 +1370,12 @@ jobs:
     # in the worst case, plus checkout and cache restore, so 60 leaves margin
     # without falling back to the 360-minute default.
     timeout-minutes: 60
+    needs: changes
+    # Runs only when a PR changes Go-relevant files (changes.outputs.go, see
+    # the regex in the changes job), and always on push to main. Fails open:
+    # if the changes job did not succeed, lint runs anyway. A job skipped by
+    # its `if:` still reports the golangci-lint check, as success.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

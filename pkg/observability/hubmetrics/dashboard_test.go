@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 )
 
 // hubDashboardPath is the importable Cloud Monitoring dashboard for the hub.
@@ -46,6 +47,11 @@ var pointAttributeLabels = map[string]map[string]bool{
 	dbmetrics.MetricPoolConnectionsIdle:   {dbmetrics.AttrPool: true},
 	dbmetrics.MetricPoolConnectionsWaits:  {dbmetrics.AttrPool: true},
 	dbmetrics.MetricPoolConnectionsMax:    {dbmetrics.AttrPool: true},
+	ssemetrics.MetricStreams:              {ssemetrics.AttrKind: true},
+	ssemetrics.MetricCloses:               {ssemetrics.AttrKind: true, ssemetrics.AttrReason: true},
+	ssemetrics.MetricStreamDuration:       {ssemetrics.AttrKind: true, ssemetrics.AttrReason: true},
+	ssemetrics.MetricEventsWritten:        {ssemetrics.AttrKind: true},
+	ssemetrics.MetricEventsPublished:      {ssemetrics.AttrSubjectClass: true, ssemetrics.AttrTrigger: true},
 }
 
 // --- instrument discovery --------------------------------------------------
@@ -192,6 +198,9 @@ func hubHistogramUnits(t *testing.T) map[string]string {
 	if _, err := reapermetrics.New(p); err != nil {
 		t.Fatalf("reapermetrics.New: %v", err)
 	}
+	if _, err := ssemetrics.New(p); err != nil {
+		t.Fatalf("ssemetrics.New: %v", err)
+	}
 	return p.units
 }
 
@@ -209,6 +218,9 @@ func hubRecorderInstruments(t *testing.T) map[string]instrumentKind {
 	}
 	if _, err := reapermetrics.New(p); err != nil {
 		t.Fatalf("reapermetrics.New: %v", err)
+	}
+	if _, err := ssemetrics.New(p); err != nil {
+		t.Fatalf("ssemetrics.New: %v", err)
 	}
 	if len(p.unsupported) > 0 {
 		t.Fatalf("observable instruments are not handled by this test: %v", p.unsupported)
@@ -739,6 +751,11 @@ func TestHubDashboardJSON(t *testing.T) {
 		dbmetrics.MetricNotificationsDropped,
 		reapermetrics.MetricLaunchReaperTicks,
 		reapermetrics.MetricLaunchReaperRowErrors,
+		ssemetrics.MetricStreams,
+		ssemetrics.MetricUsers,
+		ssemetrics.MetricCloses,
+		ssemetrics.MetricStreamDuration,
+		ssemetrics.MetricEventsPublished,
 	} {
 		if !charted["workload.googleapis.com/"+name] {
 			t.Errorf("dashboard is missing a chart for %s", name)

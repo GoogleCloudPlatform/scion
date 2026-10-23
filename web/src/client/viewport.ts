@@ -45,11 +45,26 @@
  * It does nothing while the page is pinch-zoomed, so it never fights a
  * user's zoom-and-pan. On desktop, and on Android (where
  * `interactive-widget=resizes-content` shrinks the layout viewport itself),
- * the layout and visual viewports have the same height, so it is a no-op.
+ * the layout and visual viewports have the same height, so none of the
+ * above applies.
+ *
+ * Android still gets `html[data-keyboard="open"]`, so light-DOM chrome can
+ * give way to the keyboard there too (the terminal workspace does). It is
+ * inferred, on a touch-primary device only, from a text field holding focus
+ * while the layout height is more than `KEYBOARD_MIN_INSET_PX` below the
+ * tallest layout height seen at the current width. Each width keeps its own
+ * tallest height, so a rotation starts from that orientation's own
+ * baseline; one opened before the keyboard was ever closed in that
+ * orientation is missed until it closes. The focus check keeps a
+ * split-screen resize from counting, and the touch check a desktop window
+ * resize or a docked devtools panel. Only the attribute is set: no frame
+ * height, `--scion-kb-open` or frame-size state, since the frame already
+ * follows the layout viewport.
  *
  * State it exposes while the keyboard is open:
  * - an inline `--scion-app-height: <visual viewport height>px` on `<html>`;
- * - `html[data-keyboard="open"]`, for light-DOM styles;
+ * - `html[data-keyboard="open"]`, for light-DOM styles (also set on Android,
+ *   as described above);
  * - `--scion-kb-open: 1` on `<html>`, which inherits into shadow roots, so a
  *   component can drop its bottom safe-area padding with
  *   `calc(env(safe-area-inset-bottom) * (1 - var(--scion-kb-open, 0)))`.
@@ -66,6 +81,7 @@
  */
 
 import { APP_FRAME_CLASS } from '../components/shared/app-frame.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
 /**
  * How far the visual viewport must fall short of the layout viewport, in CSS
@@ -111,6 +127,23 @@ const ZOOM_1_TOLERANCE = 0.01;
  */
 const SCROLL_TOLERANCE_PX = 0.5;
 
+/** `<input>` types that take text and so raise an on-screen keyboard. */
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+
+/**
+ * Whether the focused element, looked up through open shadow roots, takes
+ * typed text: a textarea (xterm's own input is one), a text-like input, or
+ * an editable element.
+ */
+function editableFocused(doc: Document): boolean {
+  let el: Element | null = doc.activeElement;
+  while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+  if (!el) return false;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName === 'INPUT') return TEXT_INPUT_TYPES.has((el as HTMLInputElement).type);
+  return (el as HTMLElement).isContentEditable === true;
+}
+
 /**
  * Delay, in ms, before the follow-up read after a keyboard-state change:
  * long enough for an accessory bar that follows the keyboard to settle.
@@ -137,6 +170,15 @@ export function installViewportFrame(win: Window = window): () => void {
   // with the keyboard closed never touches the DOM.
   let appliedHeight: string | null = null;
 
+  // Android keyboard state (see the module comment). The tallest layout
+  // height seen at each layout width: a rotation changes the width, so each
+  // orientation keeps its own baseline.
+  const tallestAtWidth = new Map<number, number>();
+  // Only a touch-primary device has an on-screen keyboard to infer from a
+  // shrinking layout viewport; on a desktop that is a window resize.
+  const touchPrimary = win.matchMedia?.(TOUCH_PRIMARY_QUERY) ?? null;
+  let layoutKeyboardOpen = false;
+
   // The pending follow-up read, scheduled after a keyboard-state change.
   let settleTimer: number | null = null;
   const scheduleSettleRecheck = (): void => {
@@ -161,11 +203,19 @@ export function installViewportFrame(win: Window = window): () => void {
     set('--scion-kb-tight-visibility', 'hidden', size === 'tight');
   };
 
+  const setLayoutKeyboard = (open: boolean): boolean => {
+    if (open === layoutKeyboardOpen) return false;
+    layoutKeyboardOpen = open;
+    if (open) root.dataset['keyboard'] = 'open';
+    else if (appliedHeight === null) delete root.dataset['keyboard'];
+    return true;
+  };
+
   const clearKeyboardState = (): boolean => {
     if (appliedHeight === null) return false;
     root.style.removeProperty(APP_HEIGHT_PROPERTY);
     root.style.removeProperty(KEYBOARD_OPEN_PROPERTY);
-    delete root.dataset['keyboard'];
+    if (!layoutKeyboardOpen) delete root.dataset['keyboard'];
     applyFrameSize(null);
     appliedHeight = null;
     return true;
@@ -195,6 +245,25 @@ export function installViewportFrame(win: Window = window): () => void {
     } else {
       changed = clearKeyboardState();
     }
+
+    // Android: the keyboard shrinks the layout viewport itself, so the two
+    // viewports stay equal and the check above never fires. Infer it from a
+    // text field holding focus while the layout height sits well below the
+    // tallest seen at this width. Only the attribute is set: the frame
+    // already follows the smaller layout viewport through 100dvh.
+    // Keyed on the whole-pixel width, so a fractional width (a high-DPI
+    // screen, or a zoom) neither misses its orientation's baseline nor adds
+    // an entry per sub-pixel step.
+    const width = Math.round(win.innerWidth);
+    const tallest = Math.max(tallestAtWidth.get(width) ?? 0, win.innerHeight);
+    tallestAtWidth.set(width, tallest);
+    const layoutKeyboard =
+      !keyboardOpen &&
+      atZoom1 &&
+      touchPrimary?.matches === true &&
+      tallest - win.innerHeight > KEYBOARD_MIN_INSET_PX &&
+      editableFocused(doc);
+    if (setLayoutKeyboard(layoutKeyboard)) changed = true;
     // A change can be followed by another the browser does not announce (a
     // late accessory bar), so look once more after it settles.
     if (changed) scheduleSettleRecheck();
@@ -244,5 +313,6 @@ export function installViewportFrame(win: Window = window): () => void {
       settleTimer = null;
     }
     clearKeyboardState();
+    setLayoutKeyboard(false);
   };
 }
