@@ -87,6 +87,15 @@ func TestBuildPod_DoesNotModifyCallerAnnotations(t *testing.T) {
 			wantPod:     map[string]string{"user.key": "v"},
 		},
 		{
+			name:        "empty map with gcs volume",
+			annotations: map[string]string{},
+			volumes:     gcs,
+			wantPod: map[string]string{
+				"gke-gcsfuse/volumes": "true",
+				"scion.gcs_volumes":   testGCSVolumesAnnotation,
+			},
+		},
+		{
 			name:    "nil map with gcs volume",
 			volumes: gcs,
 			wantPod: map[string]string{
