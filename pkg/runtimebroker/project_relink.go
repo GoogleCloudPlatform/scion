@@ -211,6 +211,11 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", reason)
 		return nil
 	}
+	// A hub-managed workspace is named by its slug; without the dispatch's
+	// slug nothing is carried over (no other slug stands in for it).
+	if projectSlug == "" && isHubManagedProjectPath(workspace) {
+		return skip("the dispatch names no project slug for a hub-managed workspace")
+	}
 	// gitListed: a git project whose recorded ID the Hub names as an
 	// earlier ID of this project (the git rule above).
 	gitListed := false
@@ -656,6 +661,30 @@ func directlyUnderProjectConfigs(dir string) bool {
 	clean := filepath.Clean(dir)
 	base := filepath.Base(clean)
 	return filepath.Dir(clean) == root && base != "." && base != ".." && !strings.ContainsAny(base, "/\\\x00")
+}
+
+// relinkSharedProjectIdentityChecked runs relinkSharedProjectIdentity under
+// the workspace lock on projectPath and inside withCheckedWorkspaceConfig,
+// so that for a hub-managed workspace the .scion entry is checked against
+// the broker's record before the re-link, the re-link's marker or
+// project-id rewrite is validated as a broker change, and the result is
+// recorded. The workspace lock is taken before the re-link's own lock
+// (lockRelinkWorkspace); nothing takes them in the other order.
+//
+// lockErr reports that the workspace lock could not be taken (nothing ran);
+// checkErr, a *workspaceConfigChangedError, that the entry was not in the
+// recorded state before (the re-link did not run) or changed in a way the
+// broker does not make; relinkErr is relinkSharedProjectIdentity's error.
+func (s *Server) relinkSharedProjectIdentityChecked(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) (lockErr, checkErr, relinkErr error) {
+	if projectPath == "" {
+		return nil, nil, s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+	}
+	lockErr = s.withWorkspaceLock(ctx, func() {
+		checkErr = s.withCheckedWorkspaceConfig(projectPath, hubProjectID, projectSlug, func() {
+			relinkErr = s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+		})
+	}, projectPath)
+	return lockErr, checkErr, relinkErr
 }
 
 // projectRelinkStartContextError wraps a relinkSharedProjectIdentity
