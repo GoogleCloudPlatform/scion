@@ -82,6 +82,32 @@ func TestSettleLaunchedRunFence(t *testing.T) {
 		assert.False(t, ok, "a resend after a settle changes nothing")
 	})
 
+	t.Run("a start launch bound to its minted run settles", func(t *testing.T) {
+		// Async start and restart launches bind launch_run_id too (slice 3
+		// 22bb022), so the completed settle applies to them as to a create.
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "settle-start")
+		a.Phase, a.RuntimeBrokerID, a.Generation = "starting", "broker-1", 1
+		require.NoError(t, s.CreateAgent(ctx, a))
+		rm := "rm-" + uuid.NewString()
+		_, err := s.SetAgentRunID(ctx, a.ID, rm, nil)
+		require.NoError(t, err)
+		launchID, err := s.BeginStartLaunch(ctx, a.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{RunID: rm})
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.Equal(t, rm, got.LaunchRunID)
+		require.Equal(t, store.LaunchKindStart, got.LaunchKind)
+		rb := "rb-" + uuid.NewString()
+		ok, err := s.SettleLaunchedRun(ctx, a.ID, store.LaunchSettleFence{
+			LaunchID: launchID, FromRunID: rm, ToRunID: rb, BrokerID: "broker-1",
+			Generation: got.Generation, UnchangedSince: *got.RunIDUpdatedAt,
+		})
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, rb, mustGetRunID(t, s, a.ID))
+	})
+
 	t.Run("same run is a same-value settle", func(t *testing.T) {
 		s, projectID := newTestAgentStore(t)
 		a, f := settleSetup(t, s, projectID, "settle-same")
@@ -237,4 +263,11 @@ func TestLifecycleStore3b_SettleObservedAsCAS(t *testing.T) {
 			assert.NotEmpty(t, evs[2].AdoptedAt)
 		})
 	}
+}
+
+func mustGetRunID(t *testing.T, s *AgentStore, id string) string {
+	t.Helper()
+	got, err := s.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+	return got.RunID
 }

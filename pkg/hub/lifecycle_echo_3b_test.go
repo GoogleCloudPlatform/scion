@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -191,7 +193,7 @@ func TestLifecycleEvents_3bAlreadyRunningStartSettlesWithoutEcho(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newEchoReportFixture(t, "lc-3b-kept")
 			tt.before(t, f)
-			assert.Equal(t, tt.result, f.report(t, "run-b", true))
+			assert.Equal(t, tt.result, reportAlreadyRunning(t, f, "run-b"))
 			row := mustGetAgent(t, f.raw, f.agent.ID)
 			assert.Equal(t, "run-b", row.RunID, "the kept entry's run is adopted")
 			assert.Nil(t, row.EffectiveConfig, "no echo to record")
@@ -203,17 +205,66 @@ func TestLifecycleEvents_3bAlreadyRunningStartSettlesWithoutEcho(t *testing.T) {
 			evs := f.events(t)
 			assert.Empty(t, configuredWithEcho(evs), lcSeqFull(evs))
 			assertNoEffective(t, evs)
-			var adopted *tc.LifecycleEvent
+			var carriers []*tc.LifecycleEvent
 			for _, e := range evs {
 				if e.AdoptedFromLaunchID != "" {
-					adopted = e
-					break
+					carriers = append(carriers, e)
 				}
 			}
-			require.NotNil(t, adopted, "an event carries the adoption: %s", lcSeqFull(evs))
+			require.Len(t, carriers, 1, "exactly one event carries the adoption: %s", lcSeqFull(evs))
+			adopted := carriers[0]
+			assert.Equal(t, tc.TransitionStopped, adopted.Transition, "the next event naming run-b, the stop, carries it")
 			assert.Equal(t, "run-b", adopted.LaunchID)
 			assert.Equal(t, "run-m", adopted.AdoptedFromLaunchID)
 			assert.Equal(t, store.AdoptionSourceCAS, adopted.AdoptionSource)
 		})
 	}
+}
+
+// reportAlreadyRunning sends the succeeded report of a start that found the
+// agent already running, shaped like the real one (runtimebroker
+// run_launch.go): the kept run, with the requested configuration the broker
+// still reports (template, image, runtime, profile, harness config and its
+// revision), and none of the fields agent.Start's early return clears
+// (TemplateHash, Harness, Model) and no BrokerBuild (ConfigResolved false).
+// It returns the 200 result.
+func reportAlreadyRunning(t *testing.T, f *echoReportFixture, run string) string {
+	t.Helper()
+	info := &RemoteAgentInfo{
+		ID: f.agent.Slug, Slug: f.agent.Slug, RunID: run, Phase: string(state.PhaseRunning),
+		Template: "default", Image: "example/agent:1", Runtime: "docker", Profile: "default",
+		HarnessConfig: "claude-default", HarnessConfigSource: "broker-resolved", HarnessConfigRevision: "rev-kept",
+	}
+	rec := postLaunchReport(t, f.srv, f.brokerID, f.agent.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: f.launchID, InstanceID: "i1", Seq: 1, State: store.LaunchReportStateSucceeded, Agent: info,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body agentLaunchReportAppliedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body.Result
+}
+
+// TestLifecycleEvents_3bAsyncStartLaunchSettles: an async start launch binds
+// its minted run (slice 3 22bb022, after upstream added the async start
+// caller), so a start observed running before its succeeded report is
+// settled on the completed answer exactly like a create: run-b adopted, the
+// echo recorded for it, one configured with the adoption provenance.
+func TestLifecycleEvents_3bAsyncStartLaunchSettles(t *testing.T) {
+	f := newEchoReportFixture(t, "lc-3b-start")
+	ctx := context.Background()
+	row := mustGetAgent(t, f.raw, f.agent.ID)
+	row.Phase = string(state.PhaseStarting)
+	require.NoError(t, f.raw.UpdateAgent(ctx, row))
+	launchID, err := f.raw.BeginStartLaunch(ctx, f.agent.ID, store.LaunchKindStart, 5*time.Minute,
+		store.BeginLaunchOptions{RunID: "run-m"})
+	require.NoError(t, err)
+	f.launchID = launchID
+	started := mustGetAgent(t, f.raw, f.agent.ID)
+	require.Equal(t, store.LaunchKindStart, started.LaunchKind)
+	require.Equal(t, "run-m", started.LaunchRunID, "the start launch binds its minted run")
+	f.runningObserved(t)
+
+	assert.Equal(t, store.LaunchReportResultCompleted, f.report(t, "run-b", false))
+	assertEchoForRunB(t, f)
+	assertNoStaleEcho(t, f.counters)
 }

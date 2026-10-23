@@ -712,9 +712,9 @@ type AgentStore interface {
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
 	// of a stranded run (ptone/scion#3661) and for the settle of an applied
 	// succeeded launch report (ptone/scion#2965). The adoption is observed
-	// with the adoption_source RunAdoptionSourceFrom(ctx) returns. It swaps only while
-	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
-	// that changed and changed back after the caller's read is not
+	// with the adoption_source RunAdoptionSourceFrom(ctx) returns. It swaps
+	// only while RunIDUpdatedAt is set and no later than unchangedSince, so a
+	// run_id that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
 	// soft-deleted or a delete holds it, so a delete's claim snapshot never
 	// misses the adopted run. It reports whether it swapped; a missing
