@@ -484,7 +484,7 @@ Two diagnostic commands help troubleshoot auth and connectivity:
   - init's last heartbeat, refresh and start-up check results, with times;
   - whether init's credential has expired or is refused.
 
-  The check fails when init's credential has expired or its requests are refused (401/403). When the hub refused them, doctor says how to reload the credential.
+  The check fails when init's credential has expired or its requests are refused (401/403). When the credential has expired or the Hub refused it, doctor says how to reload the credential.
   In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
   Init publishes this state in a root-owned file. Where init does not run as root, doctor reports the state as unavailable.
 
