@@ -591,22 +591,61 @@ func scopeDevAuth(info authInfo, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
-	// With a hub profile selected, the client comes only from the profile:
-	// none of the credentials below is read, and there is no fallback.
-	if hubProfileSelected() {
-		return openHubProfileClient()
-	}
-	endpoint := invocationHubEndpoint()
-	if endpoint == "" {
-		return nil, errHubNotConfigured
-	}
-	return hubClientForEndpoint(settings, endpoint)
+	c, _, err := getHubClientWithAuthSource(settings)
+	return c, err
 }
 
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
 // credential getHubClient would choose for that endpoint.
 func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+	c, _, err := hubClientAndAuthSourceForEndpoint(settings, endpoint)
+	return c, err
+}
+
+// Hub credential sources, as "scion doctor" reports them (hub.auth.source
+// in its JSON output). Each names where the credential came from, never
+// the credential itself.
+const (
+	hubAuthSourceHubProfile     = "hub_profile"
+	hubAuthSourceStoredLogin    = "stored_login"
+	hubAuthSourceAgentTokenFile = "agent_token_file"
+	hubAuthSourceEnvAuthToken   = "env_auth_token"
+	hubAuthSourceEnvHubToken    = "env_hub_token"
+	hubAuthSourceDev            = "dev"
+	// hubAuthSourceTransport: no Hub credential, only the transport
+	// (proxy) credential that hubclient.New adds from the environment.
+	hubAuthSourceTransport = "transport"
+	hubAuthSourceNone      = "none"
+)
+
+// transportAuthActive reports whether hubclient.New will add a transport
+// (proxy) credential from the environment, as noCredentialAuthInfo does.
+func transportAuthActive() bool {
+	src, err := transportauth.FromEnv()
+	return err == nil && src != nil
+}
+
+// getHubClientWithAuthSource is getHubClient that also names the source
+// of the credential the client sends (a hubAuthSource value).
+func getHubClientWithAuthSource(settings *config.Settings) (hubclient.Client, string, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
+	if hubProfileSelected() {
+		c, err := openHubProfileClient()
+		return c, hubAuthSourceHubProfile, err
+	}
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" {
+		return nil, "", errHubNotConfigured
+	}
+	return hubClientAndAuthSourceForEndpoint(settings, endpoint)
+}
+
+// hubClientAndAuthSourceForEndpoint is hubClientForEndpoint that also
+// names the source of the credential it chose (a hubAuthSource value).
+func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, string, error) {
 	var opts []hubclient.Option
+	source := ""
 
 	// Get auth info for logging
 	info := getAuthInfo(settings, endpoint)
@@ -625,6 +664,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		source = hubAuthSourceStoredLogin
 	}
 
 	// Check for agent auth token from canonical token file, then bootstrap env var
@@ -634,15 +674,18 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					source = hubAuthSourceDev
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				source = hubAuthSourceAgentTokenFile
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvAuthToken
 		}
 	}
 
@@ -651,6 +694,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvHubToken
 		}
 	}
 
@@ -660,6 +704,16 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	// it, so it is sent only to a loopback hub (as scopeDevAuth reports).
 	if !authConfigured && isLocalhostEndpoint(endpoint) {
 		opts = append(opts, hubclient.WithAutoDevAuth())
+		// WithAutoDevAuth sends no Hub credential when it finds no dev
+		// token; transport auth (hubclient.New) may still add one.
+		switch {
+		case apiclient.ResolveDevToken() != "":
+			source = hubAuthSourceDev
+		case transportAuthActive():
+			source = hubAuthSourceTransport
+		default:
+			source = hubAuthSourceNone
+		}
 	}
 
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
@@ -667,7 +721,8 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 
 	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
 
-	return hubclient.New(endpoint, opts...)
+	c, err := hubclient.New(endpoint, opts...)
+	return c, source, err
 }
 
 // hubClientTimeout is the client timeout of hub requests. A synchronous
