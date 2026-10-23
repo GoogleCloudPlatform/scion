@@ -155,8 +155,8 @@ func (s *Server) runAutoSuspendWorker() {
 }
 
 // runAutoSuspendBatch runs one batch and then removes its agents from the
-// queued set. A panic in the batch (dispatcher, store, harness or
-// sync-back) is recovered and logged, as the scheduler did when the batch
+// queued set. A panic in the batch (dispatcher, store or harness) is
+// recovered and logged, as the scheduler did when the batch
 // ran on its goroutine: the hub keeps running, the batch's agents are
 // still removed from the queued set, and the worker goes on with the next
 // batch or exits normally, so later hand-offs are still processed. The

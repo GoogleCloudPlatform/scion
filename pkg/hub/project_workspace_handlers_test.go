@@ -1797,7 +1797,7 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 	// Initialize a hub workspace whose .scion marker records the project's own
 	// identity. This simulates a shared-workspace project that was cloned by
 	// the hub.
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, os.MkdirAll(workspacePath, 0o755))
@@ -1860,7 +1860,7 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 
 	// Initialize a hub workspace whose .scion marker records the project's own
 	// identity.
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, os.MkdirAll(workspacePath, 0o755))
@@ -1919,7 +1919,7 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

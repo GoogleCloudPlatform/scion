@@ -258,6 +258,11 @@ type CreateAgentRequest struct {
 	// project path ~/.scion/projects/<slug> did not exist when the request
 	// arrived. It is never read from the wire.
 	workspaceAbsentAtAdmission bool
+	// workspaceAdmissionChecked is set by createAgent when it checked the
+	// hub-managed project path at admission (the slug-dispatch case that
+	// sets workspaceAbsentAtAdmission). Without the check, a workspace
+	// bootstrap is never treated as finding an existing workspace.
+	workspaceAdmissionChecked bool
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting

@@ -307,7 +307,7 @@ func TestApplyHubAgentDefaults_HarnessAuthDoesNotAffectHCProvenance(t *testing.T
 // the hub default must warn and continue with no template.
 func TestCreateAgent_HubDefaultTemplate_MissingTemplate_DoesNotFailCreate(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
@@ -342,7 +342,7 @@ func TestCreateAgent_HubDefaultTemplate_MissingTemplate_DoesNotFailCreate(t *tes
 // or neither counts.
 func TestCreateAgent_RequestedTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 	logs := captureHarnessLogs(srv)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -496,7 +496,7 @@ func TestCreateAgent_HubDefaultTemplate_Pending_DoesNotFailCreate(t *testing.T) 
 // set on the hub-default branch only.
 func TestCreateAgent_ProjectAnnotationTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 	setProjectAnnotations(t, s, project, map[string]string{
 		projectSettingDefaultTemplate: "annotation-ghost",
 	})
@@ -663,7 +663,7 @@ func TestCreateAgent_ImplicitDefaultTemplate_HC_FlowsFromTemplate(t *testing.T) 
 // create succeeds with no template (graceful degradation, not an error).
 func TestCreateAgent_ImplicitDefaultTemplate_MissingDoesNotFail(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 
 	// No template named "default" exists, no hub defaults.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -712,7 +712,7 @@ func TestCreateAgent_ExplicitTemplate_StillWorks(t *testing.T) {
 // for user-requested templates).
 func TestCreateAgent_ExplicitTemplate_Missing_Still404s(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, _, project := setupLadderServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "missing-explicit-agent",
@@ -939,7 +939,7 @@ func TestCreateAgent_HubDefaultHarnessConfig_ProvenanceNotInferredFromTheSetting
 // a simulation of it.
 func TestCreateAgent_FileMode_NoHubDefaultRungFires(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupLadderServer(t, disp)
 
 	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
 		"file-mode precondition: no hub agent defaults are cached")
@@ -1309,4 +1309,19 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 	assert.Empty(t, created.Template)
 	require.NotNil(t, created.AppliedConfig)
 	assert.Empty(t, created.AppliedConfig.HarnessConfig)
+}
+
+// setupLadderServer is setupCreateAgentServer with the fixture broker as
+// the co-located (embedded) broker and no project path on its provider row.
+// The hub then resolves the template itself: for a broker with a project
+// path it assumes a missing template comes from the broker's own checkout
+// and does not answer 404. The co-located broker also reaches the
+// hub-managed workspace, so the create is not refused for workspace
+// storage (ptone/scion#5813).
+func setupLadderServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
+	t.Helper()
+	srv, s, project := setupCreateAgentServer(t, disp)
+	clearCreateAgentProviderPath(t, s, project)
+	srv.SetEmbeddedBrokerID(project.DefaultRuntimeBrokerID)
+	return srv, s, project
 }
