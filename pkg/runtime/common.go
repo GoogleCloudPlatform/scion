@@ -589,10 +589,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				return nil, err
 			}
 			// Mount the project's .scion read-only and mask its agents dir (the
-			// shared-workspace project-config protection). Apple already refused
-			// above, so this runs only on docker/podman: the broker creates the
-			// (git-excluded) agents dir first so the read-only mount leaves a mount
-			// point for the mask, and the mask is required (true).
+			// shared-workspace project-config protection). A git-backed shared workspace
+			// was already refused above on Apple; a non-git shared workspace reaches here
+			// on every runtime. On docker/podman the broker creates the (git-excluded)
+			// agents dir first so the read-only mount leaves a mount point for the mask;
+			// Apple masks only an existing agents dir.
 			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
 			if err != nil {
 				return nil, err

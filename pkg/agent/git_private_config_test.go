@@ -144,11 +144,14 @@ func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
 	}
 }
 
-// The pre-seeded branch upstream + push.autoSetupRemote must let `git push -u`
-// for the agent's own branch exit 0 WITHOUT writing the (read-only) repo config:
-// git finds the upstream already set and skips the write. This is the mitigation
-// that keeps normal push flows working while the repository config is read-only.
-func TestSeedPrivateGitConfig_PushUExitsZeroNoWrite(t *testing.T) {
+// Under the agent's real read-only .git root, `git push -u` for the agent's own
+// branch exits 0 and the push reaches the remote, even though git cannot persist
+// the upstream (it logs "could not lock config file" / "unable to write upstream
+// branch configuration" and continues). This is the mitigation: the upstream is
+// pre-seeded, so the push targets the right remote/branch and succeeds without
+// needing a writable config. The config is left unchanged because the write is
+// blocked, not because git skips it.
+func TestSeedPrivateGitConfig_PushUExitsZeroUnderReadOnlyGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -197,15 +200,31 @@ func TestSeedPrivateGitConfig_PushUExitsZeroNoWrite(t *testing.T) {
 	run(repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "x")
 
 	before, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
+	// Simulate the agent's layout: the .git ROOT is read-only (so config.lock
+	// cannot be created and the config cannot be rewritten), while refs/objects/
+	// logs stay writable (they are overlaid read-write in the real container).
+	gitRoot := filepath.Join(repo, ".git")
+	if err := os.Chmod(gitRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gitRoot, 0o755) })
 	cmd := exec.Command("git", "push", "-u", "origin", "agent-x")
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
+	// push -u exits 0 even though the upstream write is blocked by the read-only root.
 	if err != nil {
-		t.Fatalf("git push -u should exit 0 with the upstream pre-seeded, got: %v\n%s", err, out)
+		t.Fatalf("git push -u should exit 0 under the read-only .git with the upstream pre-seeded, got: %v\n%s", err, out)
 	}
+	// The push actually reached the remote (the mitigation keeps push working).
+	ls := exec.Command("git", "-C", bare, "rev-parse", "--verify", "refs/heads/agent-x")
+	if lsout, lserr := ls.CombinedOutput(); lserr != nil {
+		t.Fatalf("push -u did not create the branch on the remote: %v\n%s", lserr, lsout)
+	}
+	// The config was not persisted (the read-only root blocked the write); this is
+	// the documented limitation, not "git skipped the write".
 	after, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
 	if string(before) != string(after) {
-		t.Errorf("push -u modified the repo config despite the pre-seeded upstream:\nbefore:\n%s\nafter:\n%s", before, after)
+		t.Errorf("read-only .git config changed unexpectedly:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 

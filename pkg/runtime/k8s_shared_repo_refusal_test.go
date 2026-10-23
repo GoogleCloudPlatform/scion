@@ -36,13 +36,6 @@ func TestK8sSharedRepoShapeRefusal(t *testing.T) {
 	// a git-backed NFS shared workspace with no worktree/agent-dir — i.e. nfsBaseConfig.
 	sticky := nfsBaseConfig("sticky")
 
-	// An NFS shared-workspace shape with no clone input (e.g. a bare restart, or
-	// an agent whose shape is otherwise unset): the shared-workspace shape is a
-	// shared git checkout regardless of the ephemeral GitCloneForInit, so it is
-	// refused fail-closed.
-	sharedNoClone := nfsBaseConfig("plain")
-	sharedNoClone.GitCloneForInit = nil
-
 	cases := []struct {
 		name    string
 		cfg     RunConfig
@@ -53,7 +46,6 @@ func TestK8sSharedRepoShapeRefusal(t *testing.T) {
 		{"#3998 sticky shared checkout", sticky, true},
 		{"clone-per-agent", nfsAgentDirConfig("cpa"), false},
 		{"empty-per-agent", nfsEmptyAgentDirConfig("epa"), false},
-		{"shared workspace, no clone input (fail closed)", sharedNoClone, true},
 		{"local emptyDir", minimalRunConfig(), false},
 	}
 	for _, tc := range cases {
@@ -136,10 +128,13 @@ func TestK8sGitAdminReadOnlyMounts(t *testing.T) {
 	}
 }
 
-// The shape is derived from the re-sent workspace mode, not the ephemeral
-// GitCloneForInit, so the refusal fires on a bare restart (GitCloneForInit nil)
-// of a shared-repo agent, while clone-per-agent and empty-per-agent are not
-// refused. An unset shape on an NFS agent is refused fail-closed.
+// The shape is derived from the re-sent per-agent workspace fields
+// (NFSWorktreeName / NFSAgentDirName / NFSAgentDirEmpty, and the
+// SCION_WORKSPACE_GIT env hint); the ephemeral GitCloneForInit can only add a
+// refusal, never lift one, so the refusal fires on a bare restart
+// (GitCloneForInit nil) of a shared-repo agent,
+// while clone-per-agent and empty-per-agent are not refused. An NFS shared shape
+// with no positive non-git signal is refused fail-closed.
 func TestK8sSharedRepoShapeRefusal_Restart(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -160,9 +155,6 @@ func TestK8sSharedRepoShapeRefusal_Restart(t *testing.T) {
 			c.NFSAgentDirName = "empty"
 			c.NFSAgentDirEmpty = true
 		}, false},
-		{"unset shape, git-ness undeterminable (fail closed)", func(c *RunConfig) {
-			c.GitCloneForInit = nil
-		}, true},
 		{"shared-workspace restart, git via env (no GitClone)", func(c *RunConfig) {
 			c.GitCloneForInit = nil
 			c.Env = append(c.Env, "SCION_WORKSPACE_GIT=true")

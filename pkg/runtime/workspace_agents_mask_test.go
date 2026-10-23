@@ -485,9 +485,9 @@ func TestAppleCLIVersion(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback the Apple runtime masks /repo-root/.scion
-// with --tmpfs and checks after the start that the mask is mounted
-// (different device from /repo-root).
+// An unregistered workspace outside the repo root is refused on the Apple runtime
+// before any mount or run: the start fails fail-closed and no container is created
+// (the removed full-repo-root fallback no longer masks /repo-root/.scion).
 func TestAppleContainerRuntime_Run_FallbackScionMask(t *testing.T) {
 	// #5865 removed the full-repo-root fallback: an unregistered workspace outside
 	// the repo root is refused, so the Apple run never reaches a /repo-root/.scion

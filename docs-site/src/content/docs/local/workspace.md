@@ -346,7 +346,9 @@ The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already ex
 creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
 `.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
 the private copy has credential-bearing settings stripped and is pre-seeded so that `git push` and
-`git push -u origin <branch>` for the agent's own branch succeed without needing to write the config.
+`git push -u origin <branch>` for the agent's own branch exit 0. Under the read-only `.git` git cannot
+persist the upstream (it logs a "could not lock config file" warning), but the upstream is pre-seeded,
+so the push still targets the right remote and branch.
 That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
 commands do not try to write lock files in the read-only root. Personal git preferences inside the
 agent go in the agent's own global git config, which is writable, not in the repository config. On the

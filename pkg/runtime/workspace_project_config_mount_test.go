@@ -371,9 +371,10 @@ func TestBuildCommonRunArgs_SubdirProjectWorktreeBranchRefused(t *testing.T) {
 		cfg.RepoRoot, cfg.Workspace = root, ws
 		return cfg
 	}
-	// A subdirectory project where an agent created a .git gitfile: the
-	// trusted resolver ignores that agent-writable file, so the start is still
-	// refused (no broker-recorded admin back-link).
+	// A subdirectory project where an agent created a .git gitfile: this fixture
+	// has no .git/worktrees admin dir, so the start is refused for want of a
+	// broker-recorded admin back-link. (That the resolver ignores the agent-writable
+	// gitfile specifically is proven in TestWorktreeAdmin_IgnoresAgentWritableGitfile.)
 	gitFile := func(t *testing.T, cfg RunConfig) RunConfig {
 		cfg = subdirProjectLayout(t, cfg, true)
 		writeFile(t, filepath.Join(cfg.Workspace, ".git"), "gitdir: ../.git/worktrees/x\n")
@@ -412,10 +413,10 @@ func TestBuildCommonRunArgs_SubdirProjectWorktreeBranchRefused(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback (workspace outside the repo root) the
-// repo's .scion is shadowed with a tmpfs on every runtime: --mount on
-// Docker and Podman, --tmpfs on Apple, which drops --mount arguments. On
-// Apple the mask is added only when the directory exists.
+// An UNREGISTERED workspace outside the repo root is refused fail-closed on
+// every runtime (errOutsideRootNotRegistered): there is no full-repo-root mount
+// and no .scion mask. A REGISTERED outside-root worktree is covered by
+// TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig.
 func TestBuildCommonRunArgs_FallbackScionMask(t *testing.T) {
 	// #5865 removed the full-repo-root fallback: an UNREGISTERED workspace outside
 	// the repo root is refused fail-closed (errOutsideRootNotRegistered), so there
@@ -497,8 +498,10 @@ func TestWorkspaceProjectConfigMount(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback on Apple, a .scion marker file can be
-// neither masked nor bound read-only, so the start is refused.
+// On Apple, an unregistered workspace outside the repo root is refused as not a
+// registered worktree, before any .scion-marker handling. (The Apple marker
+// refusal for a registered worktree's own .scion is covered by
+// TestBuildCommonRunArgs_FallbackOwnScionMarkerAndSymlink.)
 func TestBuildCommonRunArgs_FallbackAppleMarkerRefused(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := filepath.Join(t.TempDir(), "repo")
@@ -572,11 +575,10 @@ func TestErrProjectConfigMarkerNoBindText(t *testing.T) {
 	}
 }
 
-// In the full-repo-root fallback, a project kept in a subdirectory of the
-// repository has its own .scion below the repo root: it is masked (a
-// directory, with its agents root and homes) or bound read-only (a marker
-// file; refused on Apple). A project .scion at the repo root itself gets
-// only the existing /repo-root/.scion mask.
+// An unregistered workspace outside the repo root is refused regardless of where
+// the project's .scion sits. The nested-.scion read-only mask for the registered
+// layouts is covered by the shared-plain, config-only, non-own worktree and
+// registered outside-root fallback nested tests.
 func TestBuildCommonRunArgs_FallbackNestedProjectConfig(t *testing.T) {
 	// #5865 removed the full-repo-root fallback, so an unregistered workspace
 	// outside the repo root is refused regardless of where the project's .scion

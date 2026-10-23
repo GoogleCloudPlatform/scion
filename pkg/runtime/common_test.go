@@ -530,10 +530,10 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 		},
 		{
-			// Note: the "git relative workspace" case above shares repoRoot and
-			// creates repoRoot/.git (narrowing creates hooks/info), so this shared
-			// workspace is git-backed and gets the shared-plain narrowing + private
-			// config. The key assertion is still that /repo-root is never mounted.
+			// Note: repoRoot/.git already exists (from setupWorktreeAdmin in the
+			// fixture), so this shared workspace is git-backed and gets the shared-plain
+			// narrowing + private config. The key assertion is still that /repo-root is
+			// never mounted.
 			name: "shared workspace (workspace equals repo root)",
 			config: RunConfig{
 				Harness:                &harness.Generic{},
@@ -1612,9 +1612,8 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 }
 
 func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
-	// Part B: for a hub-native worktree-per-agent base, Docker runs must
-	// layer read-only mounts over the sharer registry directory and this
-	// worktree's admin back-link file, alongside Part A's broader surface.
+	// For a hub-native worktree-per-agent base, Docker runs layer read-only mounts
+	// over the sharer registry directory and this worktree's admin back-link file.
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	gitDir := filepath.Join(repoRoot, ".git")
 	backLinkDir := filepath.Join(gitDir, "worktrees", "agent-1")
@@ -1659,8 +1658,8 @@ func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
 }
 
 func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
-	// Part B's two low-risk paths extend to LOCAL (non-hub-managed) bases —
-	// unlike Part A's broader admin surface, which must stay hub-native-only.
+	// The sharer-registry and worktree-admin back-link read-only mounts also apply
+	// to LOCAL (non-hub-managed / linked) bases, not only hub-native ones.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 

@@ -4777,9 +4777,11 @@ func NFSWorktreeContainerPath(name string) string {
 // each get their own agent directory and do not share a .git; the local/emptyDir
 // backends do not either. Everything else on the NFS backend is a shared checkout.
 //
-// The shape is derived from the workspace sharing mode (SharedWorkspace /
-// WorkspaceMode), which is re-sent on every start, not from the ephemeral
-// GitCloneForInit. So the refusal fires on EVERY start of a shared-repo agent,
+// The shape is derived from the per-agent workspace fields re-sent on every
+// start — NFSWorktreeName, NFSAgentDirName, NFSAgentDirEmpty and the
+// SCION_WORKSPACE_GIT env hint; the ephemeral GitCloneForInit can only add a
+// refusal, never lift one. So the refusal fires on EVERY start of a shared-repo
+// agent,
 // including a bare restart; and an NFS agent whose shape is unset/unknown is
 // refused fail-closed rather than brought up on a writable shared checkout.
 func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {

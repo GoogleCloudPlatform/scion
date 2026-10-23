@@ -1821,7 +1821,7 @@ func TestRefuseRootCommonDirRedirect(t *testing.T) {
 	}
 }
 
-// R1: host-side git refuses, through HostGitCommand's policy check, to run in a
+// Host-side git refuses, through HostGitCommand's policy check, to run in a
 // repository whose .git directory carries a root-level commondir or gitdir (a
 // redirect of the common git dir). The command is refused before any git runs.
 func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {

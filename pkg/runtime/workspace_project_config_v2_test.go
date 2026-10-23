@@ -277,12 +277,13 @@ func assertNestedProjectConfigAt(t *testing.T, cfg RunConfig, containerWorkspace
 		t.Errorf("no nested agents dir, but a tmpfs mask was added; tmpfs targets: %q", masks)
 	}
 
-	// C1 (O-a): every tmpfs mask present in these args must be emitted AFTER all
+	// Every tmpfs mask present in these args must be emitted AFTER all
 	// -v binds, so each tmpfs lands over its read-only .scion bind rather than
-	// before it. In this helper the nested mask is what's present; the
-	// shared-workspace mask block (sharedWorkspaceAgentsMask) is exercised by the
-	// callers that create <ws>/.scion/agents — WorktreeNotOwnNested (own + nested)
-	// and FallbackOwnScionAgentsMask — which also call assertMasksAfterBinds.
+	// before it. In this helper the nested mask is what's present. The two mask
+	// emit paths are each covered by a caller that also calls assertMasksAfterBinds:
+	// WorktreeNotOwnNested (which creates <ws>/.scion/agents) exercises the
+	// sharedWorkspaceAgentsMask block; FallbackOwnScionAgentsMask exercises the
+	// nested/own no-create mask flush (maskAgentsIfPresent).
 	if withAgents {
 		assertMasksAfterBinds(t, args)
 	}
@@ -443,7 +444,7 @@ func assertNoRepoRootExposure(t *testing.T, cfg RunConfig, main string) {
 	}
 }
 
-// R1: the outside-root fallback binds a nested <ws>/sub/.scion read-only and
+// The outside-root fallback binds a nested <ws>/sub/.scion read-only and
 // masks its agents/ (when present; never created), on docker and Apple, while
 // still exposing nothing under /repo-root. (Removing ONLY the fallback
 // applyNestedProjectConfig call turns this red.)
@@ -475,7 +476,7 @@ func TestBuildCommonRunArgs_FallbackNestedProjectConfigReadOnly(t *testing.T) {
 	}
 }
 
-// R1: the outside-root fallback binds the bound workspace's OWN <ws>/.scion
+// The outside-root fallback binds the bound workspace's OWN <ws>/.scion
 // read-only and masks its agents/ ONLY when it already exists (never created).
 // (Removing ONLY the fallback maskAgentsIfPresent call turns the with-agents
 // case red.)
@@ -542,7 +543,7 @@ func TestBuildCommonRunArgs_FallbackOwnScionAgentsMask(t *testing.T) {
 				}
 				if withAgents {
 					// The fallback own-.scion mask (via maskAgentsIfPresent) is
-					// emitted after all binds (RQ3/O-a).
+					// emitted after all binds.
 					assertMasksAfterBinds(t, args)
 				}
 				if !withAgents {
@@ -556,7 +557,7 @@ func TestBuildCommonRunArgs_FallbackOwnScionAgentsMask(t *testing.T) {
 	}
 }
 
-// R1: the non-own in-repo worktree branch binds a nested <ws>/sub/.scion
+// The non-own in-repo worktree branch binds a nested <ws>/sub/.scion
 // read-only at /repo-root/<rel>/sub/.scion and masks its agents/. (Removing
 // ONLY the worktree-branch applyNestedProjectConfig call turns this red.)
 func TestBuildCommonRunArgs_WorktreeNotOwnNestedProjectConfigReadOnly(t *testing.T) {
@@ -573,7 +574,7 @@ func TestBuildCommonRunArgs_WorktreeNotOwnNestedProjectConfigReadOnly(t *testing
 					mkdirs(t, filepath.Join(ws, "sub", ".scion", "agents", "other"))
 					// Also give the workspace its OWN .scion/agents so this layout
 					// sets sharedWorkspaceAgentsMask (the create-path mask), exercising
-					// that mask block's emit-order alongside the nested mask (RQ3/O-a).
+					// that mask block's emit-order alongside the nested mask.
 					mkdirs(t, filepath.Join(ws, ".scion", "agents", "other"))
 				}
 				cfg := minimalRunConfig()
@@ -618,7 +619,7 @@ func TestBuildCommonRunArgs_WorktreeNotOwnNestedProjectConfigReadOnly(t *testing
 	}
 }
 
-// R2: a nested .scion that is a symlink is refused fail-closed on both the
+// A nested .scion that is a symlink is refused fail-closed on both the
 // shared-plain and config-only branches.
 func TestBuildCommonRunArgs_NestedProjectConfigSymlinkRefused(t *testing.T) {
 	for _, sharedPlain := range []bool{true, false} {
@@ -660,7 +661,7 @@ func TestBuildCommonRunArgs_NestedProjectConfigSymlinkRefused(t *testing.T) {
 	}
 }
 
-// R2: a nested .scion marker FILE is bound read-only on docker/podman and
+// A nested .scion marker FILE is bound read-only on docker/podman and
 // refused on Apple (cannot bind a single file), on both branches.
 func TestBuildCommonRunArgs_NestedProjectConfigMarker(t *testing.T) {
 	for _, sharedPlain := range []bool{true, false} {
@@ -725,7 +726,7 @@ func TestBuildCommonRunArgs_NestedProjectConfigMarker(t *testing.T) {
 	}
 }
 
-// R2: ProjectConfigPath given as the project ROOT (not its .scion) still
+// ProjectConfigPath given as the project ROOT (not its .scion) still
 // resolves and binds the nested <ws>/sub/.scion read-only.
 func TestBuildCommonRunArgs_NestedProjectConfigPathAsRoot(t *testing.T) {
 	for _, sharedPlain := range []bool{true, false} {
@@ -769,7 +770,7 @@ func hasROTarget(binds []layoutBind, target string) bool {
 	return false
 }
 
-// O1: the shared-plain nested mask also holds for a real git-backed shared
+// The shared-plain nested mask also holds for a real git-backed shared
 // workspace (docker; Apple shared-plain is refused separately).
 func TestBuildCommonRunArgs_SharedPlainNestedProjectConfigReadOnly_GitBacked(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -791,7 +792,7 @@ func TestBuildCommonRunArgs_SharedPlainNestedProjectConfigReadOnly_GitBacked(t *
 	assertNestedProjectConfig(t, cfg, true)
 }
 
-// RQ1: the registered outside-root fallback binds the bound workspace's OWN
+// The registered outside-root fallback binds the bound workspace's OWN
 // .scion when it is a marker FILE (read-only on docker/podman; refused on Apple,
 // which cannot bind a single file) and refuses a symlinked own .scion on every
 // runtime. The code lives at the fallback own-.scion block; dropping its err

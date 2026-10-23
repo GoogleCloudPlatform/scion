@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,9 +149,13 @@ func TestSharedPlainGitMounts_RefusedOnApple(t *testing.T) {
 		RuntimeName:  appleContainerRuntimeName,
 		RepoRoot:     repoRoot,
 		Workspace:    repoRoot, // shared-plain: workspace == repo root
+		// Seed the private config source so the ONLY reason to refuse is the
+		// Apple shared-plain branch: removing that branch would then start, so
+		// the errors.Is below pins it (not a missing-source error).
+		PrivateGitConfigSource: seedTestPrivateGitConfig(t),
 	})
-	if err == nil {
-		t.Fatal("expected the shared-plain git layout to be refused on Apple, got nil")
+	if !errors.Is(err, errAppleSharedWorkspaceUnsupported) {
+		t.Fatalf("expected errAppleSharedWorkspaceUnsupported for the shared-plain Apple layout, got %v", err)
 	}
 }
 
@@ -384,13 +389,14 @@ func TestBindReadOnlyCreateFirstFile_FailsClosed(t *testing.T) {
 }
 
 // Functional check of the read-only-.git-root layout with real git: with the
-// common .git root made read-only (as the container mount does) and only the
-// overlay paths writable (objects/refs/logs and the agent's own worktree admin
-// dir), an in-container git can still commit, create and delete a branch, fetch,
-// pull and push, while it cannot create a new root-level file such as
-// .git/commondir. This exercises the worktree layout; the outside-root fallback
-// mounts the same shape (a registered worktree of the same common .git), so its
-// git behaviour is identical.
+// common .git root made read-only and only the overlay paths writable
+// (objects/refs/logs and the agent's own worktree admin dir), an in-container git
+// can still commit, create and delete a branch, fetch, pull and push, while it
+// cannot create a new root-level file such as .git/commondir. This simulates ONLY
+// the read-only .git root — the real container additionally binds hooks/, info/,
+// objects/info and the private .git/config read-only, which are not simulated
+// here. It exercises the worktree layout; the outside-root fallback mounts a
+// registered worktree of the same common .git, so its git behaviour is identical.
 func TestReadOnlyGitRoot_Functional(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -438,7 +444,9 @@ func TestReadOnlyGitRoot_Functional(t *testing.T) {
 	mustGit(wt, "push", "-q", "-u", "origin", "agent-1")
 
 	// Make the common .git root read-only, leaving its subdirectories (objects,
-	// refs, logs, worktrees) writable — exactly the container mount shape.
+	// refs, logs, worktrees) writable. This simulates only the read-only .git ROOT;
+	// the real container also binds hooks/, info/, objects/info and the private
+	// .git/config read-only, which this functional check does not reproduce.
 	commonGit := filepath.Join(main, ".git")
 	if err := os.Chmod(commonGit, 0o555); err != nil {
 		t.Fatal(err)
@@ -572,8 +580,9 @@ func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected the start to be refused for a config with %s secrets", tc.section)
 				}
-				if !strings.Contains(err.Error(), "holds credentials") || !strings.Contains(err.Error(), tc.section) {
-					t.Errorf("refusal should name the section %q and no value, got: %v", tc.section, err)
+				_, sections, named := strings.Cut(err.Error(), "section(s) ")
+				if !strings.Contains(err.Error(), "holds credentials") || !named || !strings.Contains(sections, tc.section) {
+					t.Errorf("refusal should name the section %q in the section(s) list and no value, got: %v", tc.section, err)
 				}
 				// The refusal must not echo a secret value.
 				for _, secret := range []string{"s3cret", "QUJD", "store", "alice:"} {
@@ -588,7 +597,7 @@ func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
 	}
 }
 
-// R3: ensureOverlayDir is the single fail-closed inspection for overlay sources.
+// ensureOverlayDir is the single fail-closed inspection for overlay sources.
 // With createIfMissing it creates a missing directory; without it it reports a
 // missing source absent (skip, no create). A symlink or a non-directory is always
 // refused, and a real directory is reported present.
@@ -644,7 +653,7 @@ func TestEnsureOverlayDir(t *testing.T) {
 	}
 }
 
-// R4: rr-cache is overlaid read-write only if it already exists; it is never
+// rr-cache is overlaid read-write only if it already exists; it is never
 // created host-side (creating it would enable rerere in the user's checkout).
 func TestReadOnlyGitRoot_RrCacheOnlyIfExists(t *testing.T) {
 	// Absent: no rr-cache overlay, and it is not created on the host.
@@ -830,7 +839,7 @@ func setupOutsideRootWorktree(t *testing.T) (string, string) {
 	return repoRoot, workspace
 }
 
-// R2: the outside-root fallback layout mounts the .git root read-only with the
+// The outside-root fallback layout mounts the .git root read-only with the
 // bounded read-write overlay set (docker/podman), and no root-level entry can be
 // created, mirroring the in-repo worktree layout.
 func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
@@ -838,6 +847,20 @@ func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
 		t.Run(rt, func(t *testing.T) {
 			repoRoot, workspace := setupOutsideRootWorktree(t)
 			gitDir := filepath.Join(repoRoot, ".git")
+			// Add a SIBLING worktree so there is a second worktrees/<name> admin
+			// dir that MUST NOT be read-write bound: only the agent's OWN overlay
+			// may be. A fallback that passed a sibling or empty admin name would
+			// bind the wrong (or no) overlay, which the exact-own + sibling-negative
+			// assertions below catch.
+			sibling := filepath.Join(filepath.Dir(workspace), "sibling-wt")
+			if out, err := exec.Command("git", "-C", repoRoot, "worktree", "add", "-q", "-b", "sibling", sibling).CombinedOutput(); err != nil {
+				t.Fatalf("git worktree add sibling: %v\n%s", err, out)
+			}
+			ownName, ok := trustedWorktreeAdminName(gitDir, workspace)
+			if !ok {
+				t.Fatal("fixture: cannot resolve the own worktree admin name")
+			}
+			ownTarget := "/repo-root/.git/worktrees/" + ownName
 			args, err := buildCommonRunArgs(RunConfig{
 				Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
 				Image: "scion-agent:latest", RuntimeName: rt, RepoRoot: repoRoot,
@@ -853,11 +876,13 @@ func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
 			if strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git ") {
 				t.Fatalf("the .git root must not be read-write")
 			}
-			// Only the bounded overlay set is read-write under /repo-root/.git.
+			// Only the bounded overlay set is read-write under /repo-root/.git, and
+			// the ONLY read-write worktrees/* overlay is the agent's own.
 			allowed := map[string]bool{
 				"/repo-root/.git/objects": true, "/repo-root/.git/refs": true,
 				"/repo-root/.git/logs": true, "/repo-root/.git/lfs": true,
 			}
+			sawOwnOverlay := false
 			for i, a := range args {
 				if a != "-v" || i+1 >= len(args) {
 					continue
@@ -868,17 +893,27 @@ func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
 					continue
 				}
 				target := spec[j+1:]
-				if target == "/repo-root/.git" {
+				switch {
+				case target == "/repo-root/.git":
 					t.Errorf(".git root must not be read-write: %s", spec)
-				} else if !allowed[target] && !strings.HasPrefix(target, "/repo-root/.git/worktrees/") {
+				case target == ownTarget:
+					sawOwnOverlay = true
+				case strings.HasPrefix(target, "/repo-root/.git/worktrees/"):
+					// A worktrees/* overlay other than the agent's own (e.g. the
+					// sibling, or an empty/sibling admin name) is forbidden.
+					t.Errorf("read-write bind of a non-own worktree admin dir: %s (own is %s)", spec, ownTarget)
+				case !allowed[target]:
 					t.Errorf("unexpected read-write bind under /repo-root/.git: %s", spec)
 				}
+			}
+			if !sawOwnOverlay {
+				t.Errorf("the agent's own worktree overlay %s is not mounted read-write; args: %s", ownTarget, argStr)
 			}
 		})
 	}
 }
 
-// R2 (Apple I3 on the outside-root path): an Apple agent on the fallback path is
+// On the outside-root path, an Apple agent on the fallback path is
 // refused when the repository config holds credentials, and starts on a clean one.
 func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
 	repoRoot, workspace := setupOutsideRootWorktree(t)
@@ -901,7 +936,9 @@ func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
 		Image: "scion-agent:latest", RuntimeName: appleContainerRuntimeName,
 		RepoRoot: repoRoot, Workspace: workspace,
 	})
-	if err == nil || !strings.Contains(err.Error(), "holds credentials") || !strings.Contains(err.Error(), "credential") {
-		t.Errorf("Apple outside-root must refuse a credential-bearing config naming the section, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "holds credentials") {
+		t.Errorf("Apple outside-root must refuse a credential-bearing config, got: %v", err)
+	} else if _, sections, named := strings.Cut(err.Error(), "section(s) "); !named || !strings.Contains(sections, "credential") {
+		t.Errorf("refusal must name the credential section in the section(s) list, got: %v", err)
 	}
 }
