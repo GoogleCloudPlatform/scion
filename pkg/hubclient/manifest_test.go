@@ -37,6 +37,12 @@ func TestTemplateManifest_RecursiveExcludeBoundary(t *testing.T) {
 		{"custom_directory", []string{"**/cache"},
 			[]string{"mycache/keep.txt", "nested/mycache/keep.txt"},
 			[]string{"cache/drop.txt", "nested/cache/drop.txt"}},
+		{"recursive_glob", []string{"**/*.log"},
+			[]string{"debug.log.txt", "nested/debug.log.txt"},
+			[]string{"debug.log", "nested/debug.log", "a/b/debug.log"}},
+		{"recursive_compound_glob", []string{"**/logs/*.json"},
+			[]string{"mylogs/data.json", "nested/logs/deep/data.json", "logs/data.json.txt"},
+			[]string{"logs/data.json", "a/b/logs/data.json"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

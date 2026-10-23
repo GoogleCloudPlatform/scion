@@ -17,6 +17,7 @@ package transfer
 import (
 	"fmt"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -163,10 +164,20 @@ func (b *ManifestBuilder) shouldExclude(relPath string, isDir bool) bool {
 			if strings.HasPrefix(relPath, prefix+"/") || relPath == prefix {
 				return true
 			}
-			// Match the suffix at a path-component boundary, including the root.
+			// Match the suffix glob at each path-component boundary, including the root.
+			// Paths are slash-normalized, so use path.Match on every platform.
 			suffix := strings.TrimPrefix(pattern, "**/")
-			if suffix != pattern && (relPath == suffix || strings.HasSuffix(relPath, "/"+suffix)) {
-				return true
+			if suffix != pattern {
+				for candidate := relPath; candidate != ""; {
+					matched, err := path.Match(suffix, candidate)
+					if err != nil {
+						break
+					}
+					if matched {
+						return true
+					}
+					_, candidate, _ = strings.Cut(candidate, "/")
+				}
 			}
 			continue
 		}
