@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -885,4 +886,58 @@ func TestWriteRootFile_RefusesSymlinkAndSpecialFiles(t *testing.T) {
 	got, err = os.ReadFile(filepath.Join(dir, "fresh"))
 	require.NoError(t, err)
 	assert.Equal(t, "f\n", string(got))
+}
+
+// userTokenSecretBackend returns value as every user-scope GITHUB_TOKEN (the
+// project creator's token, resolveCloneToken's last fallback).
+type userTokenSecretBackend struct {
+	mockSecretBackend
+	value string
+}
+
+func (b *userTokenSecretBackend) Get(_ context.Context, name, scope, _ string) (*secret.SecretWithValue, error) {
+	if name == "GITHUB_TOKEN" && scope == "user" {
+		return &secret.SecretWithValue{Value: b.value}, nil
+	}
+	return nil, nil
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote:
+// the hub binds the project's git token to the project's own recorded
+// remote (CloneTokenRemote from the project record, never the clone-url
+// label). A non-GitHub remote (here a GitHub Enterprise-style host) gets the
+// creator's token through the user GITHUB_TOKEN path.
+func TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	const token = "test-clone-token-bound-to-remote"
+	f.srv.SetSecretBackend(&userTokenSecretBackend{value: token})
+	seen := cloneLocalFixture(t, newSourceRepo(t))
+
+	create := func(name, remote string, labels map[string]string) provision.ProvisionInput {
+		t.Helper()
+		before := len(*seen)
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+			Name: name, GitRemote: remote, WorkspaceMode: store.WorkspaceModeShared, Labels: labels,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "%s: body: %s", name, rec.Body.String())
+		require.Len(t, *seen, before+1, "%s: one provisioning call", name)
+		return (*seen)[before]
+	}
+
+	in := create("Token Own Remote", "ghe.example.invalid/team/app", nil)
+	assert.Equal(t, token, in.CloneToken, "the creator's token is resolved for a non-GitHub remote")
+	assert.Equal(t, "ghe.example.invalid/team/app", in.CloneTokenRemote, "bound to the recorded remote")
+	require.NotNil(t, in.GitClone)
+	assert.Equal(t, "https://ghe.example.invalid/team/app.git", in.GitClone.URL)
+	assert.True(t, in.HostGitHardened)
+
+	// A clone-url label naming another host: the token stays bound to the
+	// recorded remote, so the clone of the label's URL gets none (the
+	// binding itself is pinned by pkg/provision's
+	// TestRunGitClone_TokenBoundToRecordedRemoteAndNoRedirects).
+	in = create("Token Mirror Host", "ghe.example.invalid/team/mirror",
+		map[string]string{store.LabelCloneURL: "https://mirror.example.invalid/team/mirror.git"})
+	assert.Equal(t, "ghe.example.invalid/team/mirror", in.CloneTokenRemote, "the record, never the label")
+	assert.Equal(t, "https://mirror.example.invalid/team/mirror.git", in.GitClone.URL)
 }

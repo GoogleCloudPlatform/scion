@@ -19,9 +19,13 @@ package provision
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -95,10 +99,14 @@ func fakeGit(t *testing.T) string {
 	script := "#!/bin/sh\n" +
 		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '" + record + "'\n" +
 		"printf 'ALLOW=%s\\n' \"$GIT_ALLOW_PROTOCOL\" >> '" + record + "'\n" +
+		"printf 'TOKEN=%s\\n' \"$GITHUB_TOKEN\" >> '" + record + "'\n" +
+		"printf 'CFG=%s\\n' \"$GIT_CONFIG_COUNT\" >> '" + record + "'\n" +
 		"exit 1\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_ALLOW_PROTOCOL", "")
+	t.Setenv(GitTokenEnv, "")
+	t.Setenv("GIT_CONFIG_COUNT", "")
 	return record
 }
 
@@ -109,6 +117,9 @@ func readArgv(t *testing.T, record string) (argv []string, allow string) {
 	for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		if v, ok := strings.CutPrefix(l, "ALLOW="); ok {
 			allow = v
+			continue
+		}
+		if strings.HasPrefix(l, "TOKEN=") || strings.HasPrefix(l, "CFG=") {
 			continue
 		}
 		argv = append(argv, l)
@@ -188,4 +199,180 @@ func TestRunGitClone_HardenedRefusesLocalTransports(t *testing.T) {
 		Resolved: ResolvedWorkspace{HostPath: dest},
 	}))
 	assert.FileExists(t, filepath.Join(dest, "README.md"))
+}
+
+func TestCloneTokenHost_BoundToRecordedRemote(t *testing.T) {
+	for _, tc := range []struct {
+		remote, cloneURL, host string
+	}{
+		{"github.com/org/repo", "https://github.com/org/repo.git", "github.com"},
+		{"github.com/org/repo", "https://github.com/Org/Repo", "github.com"},
+		{"github.com/org/repo", "https://GitHub.COM/org/repo.git/", "github.com"},
+		{"https://github.com/org/repo.git", "https://github.com/org/repo.git", "github.com"},
+		{"ghe.example.com/team/app", "https://ghe.example.com/team/app.git", "ghe.example.com"},
+		{"gitlab.example.com:8443/group/sub/app", "https://gitlab.example.com:8443/group/sub/app.git", "gitlab.example.com:8443"},
+		{"git@github.com:org/repo.git", "https://github.com/org/repo.git", "github.com"},
+	} {
+		host, ok := cloneTokenHost(tc.remote, tc.cloneURL)
+		assert.True(t, ok, "%s / %s", tc.remote, tc.cloneURL)
+		assert.Equal(t, tc.host, host, "%s / %s", tc.remote, tc.cloneURL)
+	}
+	for _, tc := range []struct{ remote, cloneURL string }{
+		{"github.com/org/repo", "https://mirror.example.com/org/repo.git"},      // another host
+		{"github.com/org/repo", "https://github.com/other/repo.git"},            // another owner
+		{"github.com/org/repo", "https://github.com/org/other.git"},             // another repo
+		{"github.com/org/repo", "https://github.com/org/repo/extra.git"},        // another path
+		{"github.com/org/repo", "http://github.com/org/repo.git"},               // not https
+		{"github.com/org/repo", "ssh://git@github.com/org/repo.git"},            // not https
+		{"github.com/org/repo", "git@github.com:org/repo.git"},                  // scp-style
+		{"github.com/org/repo", "https://user:pw@github.com/org/repo.git"},      // user info
+		{"github.com/org/repo", "https://github.com/org/repo.git?x=1"},          // query
+		{"github.com/org/repo", "https://github.com:8443/org/repo.git"},         // another port
+		{"github.com:8443/org/repo", "https://github.com/org/repo.git"},         // another port
+		{"", "https://github.com/org/repo.git"},                                 // no remote
+		{"github.com", "https://github.com"},                                    // no repository path
+		{"github.com/org/repo", "https://github.com.evil.example/org/repo.git"}, // look-alike host
+	} {
+		_, ok := cloneTokenHost(tc.remote, tc.cloneURL)
+		assert.False(t, ok, "%s / %s must get no token", tc.remote, tc.cloneURL)
+	}
+}
+
+func TestHostScopedTokenHelperEnv(t *testing.T) {
+	got := hostScopedTokenHelperEnv([]string{"PATH=/bin", "GIT_CONFIG_COUNT=2"}, "ghe.example.com")
+	assert.Equal(t, []string{
+		"GIT_CONFIG_COUNT=4",
+		"GIT_CONFIG_KEY_2=credential.helper",
+		"GIT_CONFIG_VALUE_2=",
+		"GIT_CONFIG_KEY_3=credential.https://ghe.example.com.helper",
+		"GIT_CONFIG_VALUE_3=" + GitTokenCredentialHelper,
+	}, got)
+	for _, e := range got {
+		assert.NotContains(t, e, testCloneToken, "the helper text never holds the token")
+	}
+}
+
+// tlsGitServer serves bareRepo over https (dumb HTTP) at /org/<name>,
+// demanding the test token, and records every request and whether any
+// request presented the token.
+type tlsGitServer struct {
+	url      string
+	host     string
+	requests atomic.Int32
+	sawToken atomic.Bool
+}
+
+func newTLSGitServer(t *testing.T, bareRepo string) *tlsGitServer {
+	t.Helper()
+	run(t, "git", "-C", bareRepo, "update-server-info")
+	files := http.StripPrefix("/org/", http.FileServer(http.Dir(filepath.Dir(bareRepo))))
+	g := &tlsGitServer{}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.requests.Add(1)
+		_, pass, ok := r.BasicAuth()
+		if ok && pass == testCloneToken {
+			g.sawToken.Store(true)
+		}
+		if !ok || pass != testCloneToken {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	g.url = srv.URL + "/org/" + filepath.Base(bareRepo)
+	g.host = u.Host
+	return g
+}
+
+// hardenedTokenClone clones cloneURL as the hub does at create: hardened,
+// with the token bound to the project's recorded remote.
+func hardenedTokenClone(t *testing.T, cloneURL, recordedRemote string) (string, error) {
+	t.Helper()
+	depth := 0
+	dest := filepath.Join(t.TempDir(), "ws")
+	return dest, runGitClone(context.Background(), ProvisionInput{
+		GitClone:         &api.GitCloneConfig{URL: cloneURL, Depth: &depth},
+		Resolved:         ResolvedWorkspace{HostPath: dest},
+		CloneToken:       testCloneToken,
+		CloneTokenRemote: recordedRemote,
+		HostGitHardened:  true,
+	})
+}
+
+// remoteOf is the recorded-remote form of a clone URL (host/owner/repo).
+func remoteOf(cloneURL string) string {
+	return strings.TrimPrefix(cloneURL, "https://")
+}
+
+// The token is bound to the project's recorded remote: a clone of that
+// remote (a GitHub Enterprise-style host) gets it, scoped to that host; a
+// clone URL naming another host than the record (as a clone-url label can),
+// or another repository on the recorded host, gets no token; and a redirect
+// is not followed, so its target never sees the token.
+func TestRunGitClone_TokenBoundToRecordedRemoteAndNoRedirects(t *testing.T) {
+	isolateGitConfig(t)
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	t.Setenv(GitTokenEnv, "")
+	bare := initBareGitRepo(t)
+
+	own := newTLSGitServer(t, bare)
+	dest, err := hardenedTokenClone(t, own.url, remoteOf(own.url))
+	require.NoError(t, err, "the recorded remote's clone gets the token")
+	assert.FileExists(t, filepath.Join(dest, "README.md"))
+	assert.True(t, own.sawToken.Load())
+
+	// The clone URL (a label) names another host than the record.
+	other := newTLSGitServer(t, bare)
+	_, err = hardenedTokenClone(t, other.url, "ghe.example.com/org/"+filepath.Base(bare))
+	require.Error(t, err, "a host other than the recorded remote's gets no credential")
+	assert.NotContains(t, err.Error(), testCloneToken)
+	assert.False(t, other.sawToken.Load(), "the token is never offered to another host")
+	assert.Positive(t, other.requests.Load(), "fixture check: git reached the server")
+
+	// Same host as the record, another repository.
+	sameHost := newTLSGitServer(t, bare)
+	_, err = hardenedTokenClone(t, sameHost.url, sameHost.host+"/org/other-repo")
+	require.Error(t, err, "another repository on the recorded host gets no credential")
+	assert.False(t, sameHost.sawToken.Load())
+
+	target := newTLSGitServer(t, bare)
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, strings.TrimSuffix(target.url, "/org/"+filepath.Base(bare))+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(redirect.Close)
+	redirectURL := redirect.URL + "/org/" + filepath.Base(bare)
+	_, err = hardenedTokenClone(t, redirectURL, remoteOf(redirectURL))
+	require.Error(t, err, "a redirect is not followed")
+	assert.Zero(t, target.requests.Load(), "the redirect target is never contacted")
+	assert.False(t, target.sawToken.Load())
+}
+
+// A clone of a non-https URL never gets the token or a credential helper,
+// even when it names the recorded remote; the matching https URL gets both.
+func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
+	depth := 0
+	clone := func(cloneURL string) string {
+		t.Helper()
+		record := fakeGit(t)
+		err := runGitClone(context.Background(), ProvisionInput{
+			GitClone:         &api.GitCloneConfig{URL: cloneURL, Depth: &depth},
+			Resolved:         ResolvedWorkspace{HostPath: filepath.Join(t.TempDir(), "ws")},
+			CloneToken:       testCloneToken,
+			CloneTokenRemote: "git.example.com/org/repo",
+		})
+		require.Error(t, err, "the fake git fails")
+		data, err := os.ReadFile(record)
+		require.NoError(t, err)
+		return string(data)
+	}
+	got := clone("http://git.example.com/org/repo.git")
+	assert.Contains(t, got, "TOKEN=\n", "no token in the environment")
+	assert.Contains(t, got, "CFG=\n", "no credential helper")
+	got = clone("https://git.example.com/org/repo.git")
+	assert.Contains(t, got, "TOKEN="+testCloneToken+"\n", "fixture check: the matching URL gets the token")
+	assert.Contains(t, got, "CFG=2\n")
 }

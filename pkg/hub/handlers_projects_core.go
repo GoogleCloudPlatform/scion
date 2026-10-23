@@ -1374,18 +1374,27 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		return storageErr("provisioning state directory", err)
 	}
 
+	// The project's token is bound to its own recorded remote
+	// (CloneTokenRemote, from the project record, never the clone-url
+	// label): the clone gets it only when its URL is that remote over https,
+	// and only for that host.
+	var cloneToken string
+	if cloneCfg != nil && project.GitRemote != "" {
+		cloneToken = s.resolveCloneToken(ctx, project)
+	}
 	err = provisionSharedClone(provision.ProvisionInput{
-		Ctx:             ctx,
-		Resolved:        provision.ResolvedWorkspace{HostPath: res.HostPath},
-		ProjectID:       project.ID,
-		Mode:            store.SharingModeSharedPlain,
-		GitClone:        cloneCfg,
-		CloneToken:      s.resolveCloneToken(ctx, project),
-		HostGitHardened: true,
-		NFSUID:          layout.UID,
-		NFSGID:          layout.GID,
-		SentinelDir:     stateDir,
-		LegacyDir:       res.HostPath,
+		Ctx:              ctx,
+		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
+		ProjectID:        project.ID,
+		Mode:             store.SharingModeSharedPlain,
+		GitClone:         cloneCfg,
+		CloneToken:       cloneToken,
+		CloneTokenRemote: project.GitRemote,
+		HostGitHardened:  true,
+		NFSUID:           layout.UID,
+		NFSGID:           layout.GID,
+		SentinelDir:      stateDir,
+		LegacyDir:        res.HostPath,
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",

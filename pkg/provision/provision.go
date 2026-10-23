@@ -259,6 +259,15 @@ type ProvisionInput struct {
 	// CloneWithToken.
 	CloneToken string
 
+	// CloneTokenRemote, when set with CloneToken, binds the token to the
+	// project's recorded git remote: the clone gets the token only when
+	// GitClone.URL is https and its normalized host and owner/repo equal this
+	// remote, and then only for that host (credential.https://<host>.helper,
+	// constant helper text, the token only in the clone command's
+	// environment). Any other URL is cloned without a token. The hub sets it
+	// to the project's GitRemote for its clone at create.
+	CloneTokenRemote string
+
 	// HostGitHardened runs the clone as host-side git on a project-supplied
 	// URL: with HostCloneGitArgs ahead of the subcommand and
 	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
@@ -2868,11 +2877,21 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 		cmd.Env = append(cmd.Env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
 	}
 	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
+	tokenHost := ""
 	if in.CloneToken != "" {
-		withToken, token = true, in.CloneToken
-		cmd.Env = append(cmd.Env, GitTokenEnv+"="+in.CloneToken)
+		bound := in.CloneTokenRemote == ""
+		if !bound {
+			tokenHost, bound = cloneTokenHost(in.CloneTokenRemote, gc.URL)
+		}
+		if bound {
+			withToken, token = true, in.CloneToken
+			cmd.Env = append(cmd.Env, GitTokenEnv+"="+in.CloneToken)
+		}
 	}
-	if withToken {
+	switch {
+	case withToken && tokenHost != "":
+		cmd.Env = append(cmd.Env, hostScopedTokenHelperEnv(cmd.Env, tokenHost)...)
+	case withToken:
 		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
 	}
 	output, err := cmd.CombinedOutput()
