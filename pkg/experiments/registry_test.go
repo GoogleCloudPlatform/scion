@@ -515,7 +515,7 @@ func TestLifecycleEventsExperimentRegistered(t *testing.T) {
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
-	if e.Issue != "ptone/scion#333" || e.Stage != StageAlpha || e.Owner != "telemetry" {
+	if e.Issue != "ptone/scion#5900" || e.Stage != StageAlpha || e.Owner != "telemetry" {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
