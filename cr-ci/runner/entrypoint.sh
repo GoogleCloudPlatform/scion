@@ -14,13 +14,22 @@
 #      token>", "X-Runner-Claim: <RUNNER_CLAIM_TOKEN>" and an empty body.
 #      200 returns {"jit_config":"..."}; 401 means the identity was rejected,
 #      410 that the claim is unknown/expired/used; 5xx is transient.
-#   4. exec ./run.sh --jitconfig <config> so that the runner is PID 1 and runs
-#      exactly one job.
+#   4. Run ./run.sh --jitconfig <config> as a child that runs exactly one job,
+#      forward SIGTERM/SIGINT to it, and exit with the runner's real exit code
+#      (section 5).
 #
 # Neither the claim token, the ID token nor the JIT config is ever printed,
 # logged or written to disk. Do NOT add `set -x` or debug echoes of them. The
 # claim and ID tokens reach curl on stdin (not argv), and responses stay in
 # shell memory.
+#
+# Warm-up: RUNNER_WARMUP=1 (deploy-job.sh --warm-up) runs only the checks in
+# sections 1-3 (HOME, /scratch, HOME links, run.sh present) and exits 0 before any
+# claim; none of the env below is needed then.
+#
+# Optional env (set on the job by deploy-job.sh from config.env):
+#   RUNNER_BUILD_CACHE_IN_RAM  true: keep ~/.cache (Go build cache, analysis cache) in
+#                              RAM instead of on /scratch (section 3); default false
 #
 # Required env (set by the mediator as Cloud Run Job overrides):
 #   RUNNER_CLAIM_TOKEN  32 lowercase hex chars, single use
@@ -28,11 +37,14 @@
 #   GH_JOB_ID           GitHub workflow job ID (logging only)
 #   RUNNER_NAME         cr-job-<GH_JOB_ID> (logging only)
 #
-# Exit codes (run.sh's own exit code once it is exec'd):
+# Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), /scratch missing or
 #      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
+#   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
+#   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
+#      run-helper.sh reported as unknown (for example 134 after an abort)
 #
 # Overrides, for the offline test harness (runner/entrypoint_test.go) only;
 # production leaves them unset:
@@ -43,6 +55,10 @@
 #   CR_EXPECTED_HOME         required value of HOME       (default /home/runner)
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
+#   CR_FIFO_TMPDIR           where the runner-output FIFOs go (default /tmp)
+#   CR_RAM_CACHE_DIR         RAM target of /scratch/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
+#                            (default /tmp/cr-ci-build-cache)
+#   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
 
@@ -56,24 +72,76 @@ runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
 backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
 metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
 expected_home=${CR_EXPECTED_HOME:-/home/runner}
+ram_cache_dir=${CR_RAM_CACHE_DIR:-/tmp/cr-ci-build-cache}
 
 log() { printf 'cr-ci-entrypoint: %s\n' "$*" >&2; }
 die() {
   local code=$1
   shift
   log "FATAL: $*"
+  [[ -n ${fifo_dir:-} ]] && rm -rf -- "$fifo_dir"
   exit "$code"
+}
+
+# Signals. Cloud Run sends SIGTERM to PID 1 (this script) on CancelExecution or the task
+# timeout. Before run.sh runs, a TERM or INT is recorded and the script stops at the next
+# checkpoint without starting the runner (exit 128+n; /reconcile reaps an unused
+# registration). Once run.sh runs, it is forwarded to it (section 5). Trapped from the
+# start: as PID 1, an untrapped TERM would simply be dropped.
+runner_pid=""
+pending_signal=""
+# shellcheck disable=SC2317,SC2329 # invoked by the traps below (SC2317: shellcheck <0.10, SC2329: >=0.10)
+on_signal() {
+  if [[ -n $runner_pid ]]; then
+    log "received SIG$1; forwarding it to run.sh (graceful job cancel)"
+    kill -s "$1" "$runner_pid" 2>/dev/null || true
+  else
+    pending_signal=$1
+    log "received SIG$1 before run.sh started; stopping without starting the runner"
+  fi
+}
+trap 'on_signal TERM' TERM
+trap 'on_signal INT' INT
+# exit_if_signalled: a checkpoint before run.sh starts.
+exit_if_signalled() {
+  if [[ -n $pending_signal ]]; then
+    [[ -n ${fifo_dir:-} ]] && rm -rf -- "$fifo_dir"
+    exit $((128 + $(kill -l "$pending_signal")))
+  fi
 }
 
 # --- 1. Required env ----------------------------------------------------------
 
-for var in RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME; do
+# Warm-up mode (deploy-job.sh --warm-up): an execution with RUNNER_WARMUP=1 and no
+# claim env pulls and imports the image, runs the /scratch and HOME checks below,
+# and exits 0 before any claim, so the first real job does not pay the image import.
+warmup=0
+case ${RUNNER_WARMUP:-} in
+  "" | 0) ;;
+  1) warmup=1 ;;
+  *) die "$EXIT_CONFIG" "RUNNER_WARMUP must be 1 or unset" ;;
+esac
+
+case ${RUNNER_BUILD_CACHE_IN_RAM:-false} in
+  true) cache_in_ram=1 ;;
+  false) cache_in_ram=0 ;;
+  *) die "$EXIT_CONFIG" "RUNNER_BUILD_CACHE_IN_RAM must be true or false" ;;
+esac
+
+if ((warmup)); then
+  required_vars=(HOME)
+else
+  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME)
+fi
+for var in "${required_vars[@]}"; do
   if [[ -z ${!var:-} ]]; then
     die "$EXIT_CONFIG" "required environment variable $var is not set"
   fi
 done
 
-if [[ ! $RUNNER_CLAIM_TOKEN =~ ^[0-9a-f]{32}$ ]]; then
+if ((warmup)); then
+  : # no claim env to check
+elif [[ ! $RUNNER_CLAIM_TOKEN =~ ^[0-9a-f]{32}$ ]]; then
   # Never echo the value, not even a malformed one.
   die "$EXIT_CONFIG" "RUNNER_CLAIM_TOKEN is not 32 lowercase hex characters"
 fi
@@ -81,15 +149,16 @@ fi
 if [[ $HOME != "$expected_home" ]]; then
   die "$EXIT_CONFIG" "HOME is '$HOME', want $expected_home (cache paths must match ubuntu-latest)"
 fi
-if [[ ! $GH_JOB_ID =~ ^[0-9]+$ ]]; then
-  die "$EXIT_CONFIG" "GH_JOB_ID must be numeric"
-fi
-
-claim_base=${MEDIATOR_URL%/}
-# https only; plain http is accepted for loopback so the offline harness works.
-if [[ ! $claim_base =~ ^https://[^/?#[:space:]]+$ &&
-  ! $claim_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
-  die "$EXIT_CONFIG" "MEDIATOR_URL must be an https origin with no path, got '$MEDIATOR_URL'"
+if ((!warmup)); then
+  if [[ ! $GH_JOB_ID =~ ^[0-9]+$ ]]; then
+    die "$EXIT_CONFIG" "GH_JOB_ID must be numeric"
+  fi
+  claim_base=${MEDIATOR_URL%/}
+  # https only; plain http is accepted for loopback so the offline harness works.
+  if [[ ! $claim_base =~ ^https://[^/?#[:space:]]+$ &&
+    ! $claim_base =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
+    die "$EXIT_CONFIG" "MEDIATOR_URL must be an https origin with no path, got '$MEDIATOR_URL'"
+  fi
 fi
 
 if [[ $metadata_base != http://metadata.google.internal &&
@@ -101,10 +170,14 @@ if [[ ! $backoff =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   die "$EXIT_CONFIG" "CR_CLAIM_BACKOFF_SECONDS must be a non-negative number"
 fi
 
-if [[ $RUNNER_NAME != "cr-job-$GH_JOB_ID" ]]; then
-  log "warning: RUNNER_NAME '$RUNNER_NAME' does not match cr-job-$GH_JOB_ID"
+if ((warmup)); then
+  log "warm-up execution: checking the image, /scratch and the HOME links; no claim"
+else
+  if [[ $RUNNER_NAME != "cr-job-$GH_JOB_ID" ]]; then
+    log "warning: RUNNER_NAME '$RUNNER_NAME' does not match cr-job-$GH_JOB_ID"
+  fi
+  log "starting runner $RUNNER_NAME for job $GH_JOB_ID"
 fi
-log "starting runner $RUNNER_NAME for job $GH_JOB_ID"
 
 # --- 2. /scratch must be a mounted, writable volume ---------------------------
 
@@ -196,6 +269,17 @@ ensure_link() {
 }
 
 ensure_link "$HOME/work" "$scratch/_work"
+if ((cache_in_ram)); then
+  # Optional RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true) for a small /scratch:
+  # /scratch/.cache itself becomes a link to a directory on the in-memory root
+  # filesystem. ~/.cache still points to /scratch/.cache, so cache parity holds:
+  # tar follows links in parent components, and an archive entry
+  # ../../../.cache/go-build/X lands in RAM. Everything under ~/.cache (the Go build
+  # cache, golangci-lint's analysis cache) then counts against the container's
+  # memory limit; see docs/architecture.md, "Constraints".
+  ensure_link "$scratch/.cache" "$ram_cache_dir"
+  log "build cache in RAM: $scratch/.cache -> $ram_cache_dir (counts against the memory limit)"
+fi
 ensure_link "$HOME/.cache" "$scratch/.cache"
 ensure_link "$HOME/go" "$scratch/go"
 unset XDG_CACHE_HOME
@@ -208,8 +292,9 @@ export GOCACHE="$HOME/.cache/go-build"
 export GOMODCACHE="$HOME/go/pkg/mod"
 export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
 
-# _diag is the target of the runner's _diag symlink (runner logs; see Dockerfile).
-mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE" "$scratch/_diag"
+# The runner's _diag (its own logs) is NOT on /scratch (see Dockerfile): a job that
+# fills /scratch must not take the runner, and the job's log, down with it.
+mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE"
 log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go}"
 
 # Check the runner before spending the single-use token.
@@ -217,6 +302,20 @@ if [[ ! -x $runner_dir/run.sh ]]; then
   die "$EXIT_CONFIG" "$runner_dir/run.sh not found or not executable"
 fi
 cd -- "$runner_dir"
+
+if ((warmup)); then
+  log "warm-up OK: image imported, $scratch mounted and writable, HOME links in place; exiting 0 before any claim"
+  exit 0
+fi
+
+# The runner-output FIFOs (section 5) are created before the claim, so a failure here
+# still exits 2 with the single-use token unspent.
+fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
+  die "$EXIT_CONFIG" "cannot create a private temp directory"
+out_fifo="$fifo_dir/runner-output"
+done_fifo="$fifo_dir/watcher-done"
+listener_code_file="$fifo_dir/listener-exit-code"
+mkfifo -m 600 -- "$out_fifo" "$done_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
 
 # --- 4. Claim exchange (claim contract v2) -----------------------------------
 
@@ -289,7 +388,9 @@ retry_or_die() {
     die "$EXIT_CLAIM" "claim failed after $attempt attempts (last: $1 status $http_code); not starting the runner"
   fi
   log "attempt $attempt: $1 status $http_code; retrying in ${delay}s"
+  exit_if_signalled
   sleep "$delay"
+  exit_if_signalled
   attempt=$((attempt + 1))
   delay=$(awk -v d="$delay" 'BEGIN { print d * 2 }')
 }
@@ -297,6 +398,7 @@ retry_or_die() {
 attempt=1
 delay=$backoff
 while :; do
+  exit_if_signalled
   # The ID token is fetched once (valid for an hour) and reused on claim retries.
   if [[ -z $id_token ]]; then
     identity_once
@@ -354,7 +456,90 @@ id_token=""
 # The token is spent; keep it out of the job's environment.
 unset RUNNER_CLAIM_TOKEN
 
-# --- 5. Hand over to the runner as PID 1 --------------------------------------
+# --- 5. Run the runner and report its real exit code --------------------------
+# run.sh is started as a child, not exec'd, for two reasons:
+#   - actions/runner's run-helper.sh maps any Runner.Listener exit code it does not
+#     know (an abort, 134, included) to 0, and run.sh then exits 0 too. An aborted
+#     runner would therefore look like a successful Cloud Run execution. The output
+#     is watched for run-helper's "Exiting with unknown error code: N" line, and N
+#     becomes this script's exit code when run.sh itself exits 0.
+#   - Cloud Run delivers SIGTERM (cancel, task timeout) to PID 1, this script. It is
+#     forwarded to run.sh, whose RUNNER_MANUALLY_TRAP_SIG handler turns it into a
+#     graceful job cancel (SIGINT to the runner's process group). Job control (set -m)
+#     starts run.sh in its own process group with SIGINT NOT ignored; a plain
+#     background job would inherit an ignored SIGINT, and the graceful cancel would
+#     silently stop working.
+# The JIT config is in run.sh's argv (the runner requires it); it is single use and
+# never printed.
+# Opened read-write, so neither side ever blocks on open.
+exec {done_fd}<>"$done_fifo"
 
-log "exec run.sh (ephemeral JIT runner)"
-exec ./run.sh --jitconfig "$jit_config"
+# Copies the runner's output to stdout line by line and records the exit code that
+# run-helper.sh reports as unknown. Signals a done marker at end of input.
+watch_runner_output() {
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "$line"
+    # Exactly run-helper.sh's line (anchored, a decimal number without leading zeros,
+    # so (( )) never reads it as octal); nothing else is captured.
+    if [[ $line =~ ^Exiting\ with\ unknown\ error\ code:\ (0|[1-9][0-9]{0,2})$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}" >"$listener_code_file"
+    fi
+  done <"$out_fifo"
+  printf 'done\n' >&"$done_fd"
+}
+
+# Last checkpoint before anything is started: an early signal must not leave the
+# watcher behind, blocked on the FIFO.
+exit_if_signalled
+watch_runner_output &
+watcher_pid=$!
+
+log "starting run.sh (ephemeral JIT runner)"
+set -m
+# {done_fd}>&-: the watcher's done FIFO is not passed on to run.sh or the job steps.
+./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 {done_fd}>&- &
+runner_pid=$!
+set +m
+jit_config=""
+# A signal between the last checkpoint and runner_pid being set was only recorded.
+if [[ -n $pending_signal ]]; then
+  log "forwarding SIG$pending_signal, which arrived while run.sh was starting"
+  kill -s "$pending_signal" "$runner_pid" 2>/dev/null || true
+fi
+
+runner_rc=0
+while :; do
+  if wait "$runner_pid"; then runner_rc=0; else runner_rc=$?; fi
+  # wait returns early (128+n) when a trapped signal arrives while run.sh still runs.
+  kill -0 "$runner_pid" 2>/dev/null || break
+done
+# If a trapped signal interrupted wait and run.sh exited before the kill -0 check,
+# runner_rc holds the interrupted wait's 128+n. Waiting once more returns run.sh's
+# real status, which bash keeps; 127 means it was already collected above.
+if wait "$runner_pid" 2>/dev/null; then
+  runner_rc=0
+else
+  rc=$?
+  ((rc == 127)) || runner_rc=$rc
+fi
+trap - TERM INT
+
+# Let the watcher drain the last lines (bounded: a process left holding the pipe
+# open must not keep the execution alive).
+read -r -t "${CR_WATCHER_GRACE_SECONDS:-5}" -u "$done_fd" _ || log "warning: runner output watcher did not finish in time"
+listener_code=""
+[[ -s $listener_code_file ]] && listener_code=$(<"$listener_code_file")
+kill "$watcher_pid" 2>/dev/null || true
+rm -rf -- "$fifo_dir"
+
+if ((runner_rc != 0)); then
+  log "run.sh exited $runner_rc"
+  exit "$runner_rc"
+fi
+if [[ $listener_code =~ ^[0-9]+$ ]] && ((listener_code != 0)); then
+  log "run.sh exited 0, but run-helper.sh reported the runner's unknown exit code $listener_code; exiting $listener_code so the execution shows as failed"
+  exit $((listener_code > 255 ? 1 : listener_code))
+fi
+log "run.sh exited 0"
+exit 0
