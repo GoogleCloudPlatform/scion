@@ -227,8 +227,11 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
   use), `MEDIATOR_URL` (https origin, no trailing slash), `GH_JOB_ID` (the job
   the runner is launched to serve), `RUNNER_NAME` (normally
   `cr-job-<GH_JOB_ID>`; after a swap or a hijack it carries another job's ID,
-  and the runner only logs the mismatch) and `GH_REPO` (the repository it
-  serves, which the runner's job guard binds jobs to). The JIT config is never in env,
+  and the runner only logs the mismatch) and `GH_REPOS` (comma-separated
+  `owner/name` list of the repositories whose jobs the runner may be handed:
+  the one repository in repo scope, every `TARGET_REPOS` entry of the owner in
+  org scope, since org-level runners take any of those jobs; the runner's job
+  guard refuses a job of any other repository). The JIT config is never in env,
   args or labels: execution env overrides are visible to anyone with
   `roles/run.viewer`.
 - The runner fetches a Google ID token for itself from the metadata server
@@ -267,7 +270,7 @@ Runner.Worker reads it from its own environment and runs the hook after the job
 is assigned and before any of its steps, checkout included. The hook allows only
 `push`, or `pull_request` whose head repository is the repository (the same
 allowlist as the routing expression and the fork guard), and only jobs of the
-repository the runner was launched for (`GH_REPO`). Anything else is a
+repositories the runner serves (`GH_REPOS`: its registration scope). Anything else is a
 **hard stop**: the hook kills the worker and the runner's process group, so no
 step of the job runs. A failed hook alone would not do: the runner would still
 run steps marked `if: always()` or `failure()`. For the same reason the

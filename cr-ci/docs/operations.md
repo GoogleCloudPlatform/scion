@@ -308,10 +308,17 @@ logged (a unit test enforces this).
   `ignoring CR_...: test overrides take effect only in test mode` means a test
   override was set on the job; remove it.
 - **Runner execution exits 5 with `ERROR job_guard_refused`:** GitHub assigned the
-  runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of
-  another repository; typically one queued on the label), and the runner's
-  job-started hook stopped the runner before any of the job's steps. The log line
-  names the reason, event, head, job and served repository. The mediator's hijack guard deletes the registration, and the job
+  runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of a
+  repository outside the runner's served list, `GH_REPOS`; typically one queued on
+  the label), and the runner's job-started hook stopped the runner before any of the
+  job's steps. The log line names the reason, event, head, the job's repository and
+  the served list (`served=`, commas shown as `_`). In org scope the served list is
+  every `TARGET_REPOS` entry of the owner, so a job of another served repository
+  runs; `reason=repository_not_served` then means a repository of the org that is
+  not in `TARGET_REPOS` queued a job on the label (add it to `TARGET_REPOS`, or drop
+  the label from its workflow). `served_repositories_missing` or
+  `served_repositories_malformed` means a launch without a valid `GH_REPOS`, which
+  the mediator never produces (the entrypoint exits 2 first). The mediator's hijack guard deletes the registration, and the job
   shows as failed in GitHub. This is the guard working; look at who queued that job
   on the label (`SECURITY_REJECT_FORK_PR` in the mediator log for the same run).
 - **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop
