@@ -26,7 +26,14 @@
  * Last-Event-ID resume support (handled natively by EventSource).
  *
  * Reconnection retries indefinitely; a tab that becomes visible reconnects
- * immediately.
+ * immediately. The first retry after a server-initiated close (`reconnect`,
+ * or `superseded` with reason max_age) or a drop of a live connection waits
+ * a full-jitter delay, random(0, 2 s), so the clients of a restarting hub
+ * instance do not all come back, and refetch their lists, in the same second.
+ *
+ * With the experiment web.sse_hidden_tab_close on, a tab hidden for 60 s
+ * closes its stream and does not reconnect until it is shown again; the
+ * reopen is reported as a drop and recovery, so listeners resync.
  *
  * A stream can also die without the browser noticing: after a mobile PWA
  * returns from the background, EventSource may still report OPEN although
@@ -37,6 +44,7 @@
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { setPreferredTimeZone } from '../utils/time.js';
+import { isFeatureEnabled, SSE_HIDDEN_TAB_CLOSE_FLAG } from '../utils/feature-flags.js';
 import type { AuthMeResponse } from '../shared/types.js';
 
 /** Data shape for SSE 'update' events from the server */
@@ -52,6 +60,27 @@ type SSEClientEventMap = {
   'handshake-failed': CustomEvent<void>;
   reconnecting: CustomEvent<{ attempt: number }>;
 };
+
+/** Injectable dependencies and timings, for tests. */
+export interface SSEClientOptions {
+  /** Random source in [0, 1) for reconnect jitter. Defaults to Math.random. */
+  random?: () => number;
+  /**
+   * Whether a hidden tab closes its stream after hiddenCloseMs. Read each
+   * time the tab is hidden. Defaults to the web.sse_hidden_tab_close
+   * experiment.
+   */
+  hiddenCloseEnabled?: () => boolean;
+  /** How long a tab stays hidden before its stream is closed. */
+  hiddenCloseMs?: number;
+  /** Upper bound of the full-jitter delay before the first reconnect. */
+  firstReconnectJitterMs?: number;
+}
+
+/** How long a hidden tab keeps its stream open (ptone/scion#5235). */
+export const SSE_HIDDEN_CLOSE_MS = 60_000;
+/** Upper bound of the first reconnect's full-jitter delay (ptone/scion#5236). */
+export const SSE_FIRST_RECONNECT_JITTER_MS = 2_000;
 
 export class SSEClient extends EventTarget {
   private eventSource: EventSource | null = null;
@@ -132,8 +161,29 @@ export class SSEClient extends EventTarget {
    */
   private suspendedAt: number | null = null;
 
-  constructor(private readonly endpoint = '/events') {
+  private readonly random: () => number;
+  private readonly hiddenCloseEnabled: () => boolean;
+  private readonly hiddenCloseMs: number;
+  private readonly firstReconnectJitterMs: number;
+  /** Armed while the tab is hidden; closes the stream when it fires. */
+  private hiddenCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Whether the stream was closed because the tab stayed hidden. While set,
+   * no retry is scheduled; the next openConnection (on return to the tab, or
+   * connect()) clears it.
+   */
+  private hiddenClosed = false;
+
+  constructor(
+    private readonly endpoint = '/events',
+    options: SSEClientOptions = {}
+  ) {
     super();
+    this.random = options.random ?? ((): number => Math.random());
+    this.hiddenCloseEnabled =
+      options.hiddenCloseEnabled ?? ((): boolean => isFeatureEnabled(SSE_HIDDEN_TAB_CLOSE_FLAG));
+    this.hiddenCloseMs = options.hiddenCloseMs ?? SSE_HIDDEN_CLOSE_MS;
+    this.firstReconnectJitterMs = options.firstReconnectJitterMs ?? SSE_FIRST_RECONNECT_JITTER_MS;
   }
 
   /**
@@ -171,6 +221,14 @@ export class SSEClient extends EventTarget {
     }
 
     this.watchVisibility();
+    // Any reopen (shown again, a bfcache restore, connect()) ends a
+    // hidden-tab close.
+    this.hiddenClosed = false;
+    // A connection opened while the tab is already hidden (a scope change in
+    // a background tab) is subject to the same hidden-tab close.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      this.armHiddenClose();
+    }
 
     // Any connection still held here would be orphaned by the assignment
     // below: nothing else tracks it, so disconnect() could not close it and
@@ -225,7 +283,9 @@ export class SSEClient extends EventTarget {
         this.dispatchEvent(new CustomEvent('handshake-failed'));
         void this.checkAuthAndReconnect();
       } else {
-        this.scheduleReconnect();
+        // A live connection dropped: the hub instance may have gone away,
+        // taking every client with it, so spread the first retry.
+        this.scheduleReconnect(true);
       }
     };
 
@@ -242,8 +302,10 @@ export class SSEClient extends EventTarget {
     });
 
     // Handle server-initiated reconnect (e.g. before a clean shutdown).
-    // Report the gap immediately so snapshot consumers invalidate in-flight work.
-    this.eventSource.addEventListener('reconnect', () => {
+    // Report the gap immediately so snapshot consumers invalidate in-flight
+    // work. Every client of the instance gets this at about the same time, so
+    // the reopen waits a full-jitter delay rather than happening at once.
+    const onServerClose = (): void => {
       if (es !== this.eventSource) return;
       if (this.connectionOpen) {
         this.connectionOpen = false;
@@ -252,7 +314,27 @@ export class SSEClient extends EventTarget {
       this.reconnectAttempts = 0;
       es.close();
       this.eventSource = null;
-      this.openConnection();
+      this.scheduleReconnect(true);
+    };
+    this.eventSource.addEventListener('reconnect', onServerClose);
+
+    // The hub closes a stream that reached its maximum age with
+    // `event: superseded` and reason max_age (phase 1 of ptone/scion#5219).
+    // Every stream of an instance can reach it in the same window, so it
+    // takes the same jittered reopen as `reconnect`. Any other reason is not
+    // handled here: when the hub then ends the stream, onerror sees a live
+    // connection drop and reconnects through scheduleReconnect(true), within
+    // 0-2 s. Phase 1 must handle the same-tab supersede case itself (a
+    // reconnect with the same tab id would supersede the newer stream).
+    this.eventSource.addEventListener('superseded', (event) => {
+      if (es !== this.eventSource) return;
+      let reason: unknown;
+      try {
+        reason = (JSON.parse(event.data as string) as { reason?: unknown })?.reason;
+      } catch {
+        return;
+      }
+      if (reason === 'max_age') onServerClose();
     });
 
     // A heartbeat sent as a named event (not a comment) is visible here and
@@ -329,21 +411,22 @@ export class SSEClient extends EventTarget {
 
   /**
    * Queue the next connection attempt with exponential backoff.
+   *
+   * fullJitter marks the first attempt after a server-initiated close or a
+   * drop of a live connection: it waits random(0, firstReconnectJitterMs)
+   * instead (ptone/scion#5236). Later attempts keep the proportional jitter.
    */
-  private scheduleReconnect(): void {
-    // A retry already queued, or a deliberate disconnect, cancels this one.
-    if (this.reconnectTimer !== null || this.subjects.length === 0) {
+  private scheduleReconnect(fullJitter = false): void {
+    // A retry already queued, a deliberate disconnect, or a stream closed
+    // for a hidden tab cancels this one.
+    if (this.reconnectTimer !== null || this.subjects.length === 0 || this.hiddenClosed) {
       return;
     }
 
-    const cap =
-      this.reconnectAttempts < this.fastReconnectAttempts
-        ? this.fastReconnectCap
-        : this.slowReconnectCap;
-    const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
-    // Proportional jitter (up to 10 percent either way), so open tabs spread
-    // out at every cap rather than clustering within a fixed 500ms window.
-    const delay = base + (Math.random() * 2 - 1) * base * 0.1;
+    const delay =
+      fullJitter && this.reconnectAttempts === 0
+        ? this.random() * this.firstReconnectJitterMs
+        : this.backoffDelay();
     this.reconnectAttempts++;
 
     console.info(
@@ -357,6 +440,20 @@ export class SSEClient extends EventTarget {
       this.reconnectTimer = null;
       this.openConnection();
     }, delay);
+  }
+
+  /**
+   * The exponential backoff for the current attempt, with proportional
+   * jitter (up to 10 percent either way), so open tabs spread out at every
+   * cap rather than clustering within a fixed 500ms window.
+   */
+  private backoffDelay(): number {
+    const cap =
+      this.reconnectAttempts < this.fastReconnectAttempts
+        ? this.fastReconnectCap
+        : this.slowReconnectCap;
+    const base = Math.min(cap, this.baseReconnectDelay * 2 ** this.reconnectAttempts);
+    return base + (this.random() * 2 - 1) * base * 0.1;
   }
 
   /**
@@ -489,6 +586,52 @@ export class SSEClient extends EventTarget {
   }
 
   /**
+   * Start the hidden-tab countdown (ptone/scion#5235) when the experiment is
+   * on. Hiding again while it runs does not restart it.
+   */
+  private armHiddenClose(): void {
+    if (this.hiddenCloseTimer !== null || this.hiddenClosed || this.subjects.length === 0) return;
+    if (!this.hiddenCloseEnabled()) return;
+    this.hiddenCloseTimer = setTimeout(() => {
+      this.hiddenCloseTimer = null;
+      this.closeForHiddenTab();
+    }, this.hiddenCloseMs);
+  }
+
+  private clearHiddenClose(): void {
+    if (this.hiddenCloseTimer !== null) {
+      clearTimeout(this.hiddenCloseTimer);
+      this.hiddenCloseTimer = null;
+    }
+  }
+
+  /**
+   * Close the stream of a tab that has stayed hidden, and stop every retry
+   * until it is shown again. Reported as a drop, so the reopen on return is
+   * a recovery and listeners resync (agents-resync, terminal metadata
+   * refetch). The resume listeners stay registered to notice the return.
+   */
+  private closeForHiddenTab(): void {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') return;
+    if (this.subjects.length === 0) return;
+    console.info('[SSE] Tab hidden, closing the stream until it is shown');
+    // Supersede an in-flight auth probe, which would otherwise reconnect.
+    this.generation++;
+    this.hiddenClosed = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.stopStaleCheck();
+    this.clearResumeCheck();
+    this.closeEventSource();
+    if (this.connectionOpen) {
+      this.connectionOpen = false;
+      this.dispatchEvent(new CustomEvent('disconnected'));
+    }
+  }
+
+  /**
    * Check a visible tab's connection for staleness every so often. Armed by
    * the connection's first heartbeat event; a new connection disarms it.
    */
@@ -519,9 +662,13 @@ export class SSEClient extends EventTarget {
     }
     this.onVisibilityChange = (): void => {
       if (document.visibilityState === 'visible') {
+        this.clearHiddenClose();
+        // A stream closed for the hidden tab is not connected, so onResume
+        // reopens it at once with a fresh backoff.
         this.onResume();
       } else {
         this.markSuspended();
+        this.armHiddenClose();
       }
     };
     // Every load fires pageshow; only a restore from the back/forward cache
@@ -577,6 +724,8 @@ export class SSEClient extends EventTarget {
 
     this.stopStaleCheck();
     this.clearResumeCheck();
+    this.clearHiddenClose();
+    this.hiddenClosed = false;
     this.heartbeatSeen = false;
     this.suspendedAt = null;
 

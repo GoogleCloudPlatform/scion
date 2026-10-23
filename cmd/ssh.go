@@ -23,8 +23,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
-	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -57,7 +58,10 @@ remote command and is passed to ssh unchanged, flags included.
 
 scion ssh never prompts for authentication, registration or sync. It returns
 the remote command's exit status, or 255 for a local or connection failure,
-including a usage or flag error, with the reason on one stderr line.`,
+including a usage or flag error, with the reason on one stderr line.
+
+A hangup (SIGHUP) or termination request (SIGTERM) sent to scion ssh is
+passed on to ssh, and scion ssh exits with ssh, with status 129 or 143.`,
 	Args: cobra.ArbitraryArgs,
 	RunE: runSSHCommand,
 }
@@ -129,22 +133,67 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 	c.Stdin = env.stdin
 	c.Stdout = env.stdout
 	c.Stderr = env.stderr
+	// Bound the wait for output a leftover ProxyCommand still holds open
+	// after ssh has exited.
+	c.WaitDelay = time.Second
 
-	// The terminal's interrupt goes to ssh, which forwards it to the remote
-	// session; scion stays alive to return ssh's status.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT)
+	// Signals are caught before ssh starts, so none can end scion while
+	// ssh outlives it.
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, append(append([]os.Signal{}, sshTerminalSignals...), sshEndSignals...)...)
 	defer signal.Stop(sigs)
 
-	if err := c.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-			return exitErr.ExitCode()
-		}
+	if err := c.Start(); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
 		return sshExitFailure
 	}
-	return tunnelclient.ExitOK
+	return waitSSH(c, sigs, env.stderr)
+}
+
+// sshSignalGrace is how long ssh has to exit after a passed-on signal before
+// it is killed.
+var sshSignalGrace = 5 * time.Second
+
+// waitSSH waits for the started ssh process and returns scion ssh's exit
+// code. A terminal signal is left to ssh, which forwards it to the remote
+// session, and scion returns ssh's status. A hangup or termination request
+// is passed on to ssh, which is killed if it has not exited within
+// sshSignalGrace, and scion returns 128 plus the signal number of the first
+// one (129 or 143).
+func waitSSH(c *exec.Cmd, sigs <-chan os.Signal, stderr io.Writer) int {
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	var ended os.Signal
+	var kill <-chan time.Time
+	for {
+		select {
+		case err := <-done:
+			if ended != nil {
+				return tunnelclient.SignalExit(ended)
+			}
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+					return exitErr.ExitCode()
+				}
+				_, _ = fmt.Fprintf(stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
+				return sshExitFailure
+			}
+			return tunnelclient.ExitOK
+		case sig := <-sigs:
+			if !slices.Contains(sshEndSignals, sig) {
+				continue
+			}
+			forwardSSHSignal(c.Process, sig)
+			if ended == nil {
+				ended = sig
+				kill = time.After(sshSignalGrace)
+			}
+		case <-kill:
+			_ = c.Process.Kill()
+			kill = nil
+		}
+	}
 }
 
 // prepareSSH resolves the agent and its host key and returns the ssh

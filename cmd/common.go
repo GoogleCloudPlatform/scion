@@ -302,7 +302,10 @@ func getHubAccessToken(endpoint string) string {
 		return token
 	}
 
-	// Priority 3: Dev auth token
+	// Priority 3: Dev auth token, for a loopback hub only (see scopeDevAuth)
+	if !isLocalhostEndpoint(endpoint) {
+		return ""
+	}
 	return apiclient.ResolveDevToken()
 }
 
@@ -1711,7 +1714,17 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	})
 }
 
+// hubCreateRequestTimeout is the client timeout of the agent create request
+// that scion start and scion create send, and of the env submit that
+// carries the launch when the hub gathers env first. With async launch off,
+// the hub answers only once the runtime has created the agent, which can
+// take well over hubClientTimeout (a Cloud Run instance create, for
+// example), so these requests get a longer timeout. Other hub requests keep
+// theirs.
+var hubCreateRequestTimeout = 3 * time.Minute
+
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+	createCtx := apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout)
 	for {
 		if debugMode {
 			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (project=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
@@ -1722,7 +1735,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			}
 		}
 
-		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(ctx, req)
+		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(createCtx, req)
 		if err == nil {
 			if debugMode {
 				if resp.EnvGather != nil {
@@ -2083,7 +2096,9 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	if !cleanup.markSubmitted() {
 		return nil, errEnvGatherInterrupted
 	}
-	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
+	// The submit carries the launch, which the hub can run synchronously,
+	// so it gets the create request's longer timeout.
+	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout), agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {

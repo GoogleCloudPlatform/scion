@@ -352,11 +352,18 @@ func shareAuthorityOf(authority string) string {
 // capabilities fills the caller's rights on a, an artifact it can read
 // (readableArtifact checked it), into resp: CanManage (owner or admin
 // grant), CanShare (CanManage or a steward) and ShareAuthority (the steward
-// clause) from adminAuthorityWith,
+// clause) from adminAuthorityWith, CanRetire from the same authority
+// through retireAuthorityFrom (the delete route's decision),
 // CanPublish and CanReview from canWriteErr (reviewCapability), and
 // CanGrantReview from mayGrantReview (only when CanManage is false), the
 // decisions the management, write and grant routes make for the same
 // request. A failed grants read answers 500 and returns false.
+//
+// It must run only after readableArtifact: a caller that cannot read the
+// artifact gets the 404 of a missing one and learns none of these. The
+// flags are advice: each route decides again when it is called (the
+// delete route through retireAuthority), so a flag that went stale since
+// the GET never authorizes anything.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
 	authority, ok := s.manageable(w, r, b, a)
 	if !ok {
@@ -365,6 +372,7 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 	resp.CanManage = authority == AuthorityOwner || authority == AuthorityAdminGrant
 	resp.CanShare = authority != ""
 	resp.ShareAuthority = shareAuthorityOf(authority)
+	resp.CanRetire = s.retireAuthorityFrom(r.Context(), a, authority) != ""
 	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)

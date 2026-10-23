@@ -167,7 +167,9 @@ func TestHubAuthLoginHelpDocumentsPrecedence(t *testing.T) {
 		"4. the current hub ('scion use --hub <name>')",
 		"--hub-url is a deprecated alias of --hub",
 		"A login never changes settings files.",
-		"To make it the current hub, run 'scion use --hub <name>'.",
+		"To make hub <name> the current hub, run 'scion use --hub <name>'.",
+		"the hub logged in to becomes the current hub",
+		"A login never switches a hub that is already current.",
 	} {
 		assert.Contains(t, long, want)
 	}
