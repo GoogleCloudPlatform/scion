@@ -258,8 +258,9 @@ func TestTemplateFileMode_RoundTripsThroughHub(t *testing.T) {
 }
 
 // TestTemplateFileMode_ChmodOnlyCommitRehydrates pins that a commit that
-// only sets an executable bit (same content, so the same content hash) is
-// not served from the cache entry of the earlier version.
+// only sets an executable bit (same content; the v2 content hash changes,
+// ptone/scion#5658) is not served from the cache entry of the earlier
+// version.
 func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	ctx := context.Background()
 	stor, rt := modeBackends()[0].new(t)
@@ -291,7 +292,7 @@ func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	require.NoError(t, err)
 	v2, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: modeManifestFiles(files)}, v1.ContentHash, "")
 	require.NoError(t, err)
-	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: a mode-only commit keeps the content hash")
+	require.NotEqual(t, v1.ContentHash, v2.ContentHash, "a mode-only commit changes the v2 content hash (ptone/scion#5658)")
 	// The commit is neither refused by the content-hash precondition nor
 	// skipped as unchanged: the row records the new mode.
 	for _, f := range getTemplate(t, s, id).Files {
@@ -432,7 +433,7 @@ func TestNewFileMode(t *testing.T) {
 
 // TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates is the harness-config
 // variant of TestTemplateFileMode_ChmodOnlyCommitRehydrates: a finalize
-// that only sets an executable bit (same content and content hash, no
+// that only sets an executable bit (same content, a new v2 content hash, no
 // upload) is persisted by commitHarnessConfigFiles and not served from
 // the earlier version's cache entry.
 func TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
@@ -466,7 +467,7 @@ func TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	require.NoError(t, err)
 	v2, err := client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: modeManifestFiles(files)}, "", "")
 	require.NoError(t, err)
-	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: a mode-only commit keeps the content hash")
+	require.NotEqual(t, v1.ContentHash, v2.ContentHash, "a mode-only commit changes the v2 content hash (ptone/scion#5658)")
 	for _, f := range getHC(t, s, id).Files {
 		if f.Path == "provision.py" {
 			require.Equal(t, "0755", f.Mode, "mode-only finalize was not persisted")
