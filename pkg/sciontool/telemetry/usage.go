@@ -55,6 +55,17 @@ type usageIncrement struct {
 	// increment, which dedupes on the log record itself (see
 	// UsageDeriver.fingerprint) instead.
 	dedupeKey string
+
+	// Metric-sourced increments only: the source interval and temporality
+	// (analytics interval_start/interval_end; see usage_analytics.go). For
+	// a delta converted from a cumulative stream, intervalStartNanos is the
+	// cumulative stream's start -- a superset of the delta's true interval.
+	intervalStartNanos, intervalEndNanos uint64
+	temporality                          string
+	// rawTokens are a metric rule's raw per-type deltas before
+	// canonicalization (copilot: inclusive input), for the analytics event,
+	// which derives input only when every subtracted field was reported.
+	rawTokens map[string]int64
 }
 
 // usageRule matches one per-request native event to a usageIncrement. Rules
@@ -625,6 +636,12 @@ type UsageDeriver struct {
 	// session metrics aggregator (see SessionUsageSink). Set by the
 	// Pipeline before the deriver is published.
 	sessionUsage func(SessionUsage)
+
+	// analytics, if set, receives one agent.usage event per accepted
+	// increment, appended to the outbox BEFORE the counters are updated
+	// (WP2 design section 2). Set by the Pipeline before the deriver is
+	// published, only when the GCP exporter is active.
+	analytics *UsageAnalytics
 }
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
@@ -738,11 +755,12 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 				continue
 			}
 			scopeName := sl.GetScope().GetName()
+			resourceAttrs := rl.GetResource().GetAttributes()
 			for _, record := range sl.LogRecords {
 				if record == nil {
 					continue
 				}
-				if d.observe(ctx, scopeName, record) {
+				if d.observeRecord(ctx, scopeName, resourceAttrs, record) {
 					recorded = true
 				}
 			}
@@ -846,10 +864,18 @@ func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchD
 			continue
 		}
 		fingerprint := d.metricFingerprint("", increment.dedupeKey)
+		var obs UsageObservation
+		if d.analytics != nil {
+			obs = metricObservation(increment, fingerprint)
+		}
 		if d.seen.SeenBefore(fingerprint) {
 			d.duplicate.Add(1)
+			// The event path still sees the repeat; the outbox's persisted
+			// index reports it as an ambiguous occurrence (design section 4).
+			d.recordAnalytics(obs)
 			continue
 		}
+		d.recordAnalytics(obs)
 		d.record(ctx, increment)
 		d.derived.Add(1)
 		recorded = true
@@ -878,6 +904,12 @@ func (d *UsageDeriver) metricFingerprint(scopeName, dedupeKey string) string {
 // attribute read: a native SDK may carry the event name in LogRecord's own
 // EventName field instead, and this must recognize either.
 func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *logspb.LogRecord) bool {
+	return d.observeRecord(ctx, scopeName, nil, record)
+}
+
+// observeRecord is observe with the record's resource attributes, which
+// the analytics event reads the harness version from.
+func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, resourceAttrs []*commonpb.KeyValue, record *logspb.LogRecord) bool {
 	eventName, err := normalizedLogEventName(record, scopeName)
 	if err != nil || eventName == "" {
 		return false
@@ -910,10 +942,19 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 			return false
 		}
 		fingerprint := d.fingerprint(scopeName, eventName, record)
+		var obs UsageObservation
+		if d.analytics != nil {
+			obs = logObservation(rule.Harness(), scopeName, eventName, record, resourceAttrs, increment)
+		}
 		if d.seen.SeenBefore(fingerprint) {
 			d.duplicate.Add(1)
+			// See observeMetricBatch: the outbox decides whether a repeat is
+			// a certain duplicate (verified request ID) or ambiguous.
+			d.recordAnalytics(obs)
 			return false
 		}
+		// Outbox first, then counters (design section 2).
+		d.recordAnalytics(obs)
 		d.record(ctx, increment)
 		d.derived.Add(1)
 		return true
@@ -930,18 +971,41 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 	h.Write([]byte{0})
 	h.Write([]byte(scopeName))
 	h.Write([]byte{0})
+	// time_unix_nano, else observed_time_unix_nano: a source that sets only
+	// the observed time (codex) would otherwise key on 0 and merge distinct
+	// same-millisecond calls with identical attributes. A retransmitted
+	// record keeps both times, so replays still dedupe.
+	recordTime := record.GetTimeUnixNano()
+	if recordTime == 0 {
+		recordTime = record.GetObservedTimeUnixNano()
+	}
 	var timeBuf [8]byte
-	binary.BigEndian.PutUint64(timeBuf[:], record.GetTimeUnixNano())
+	binary.BigEndian.PutUint64(timeBuf[:], recordTime)
 	h.Write(timeBuf[:])
 	h.Write([]byte{0})
 	h.Write([]byte(eventName))
 	h.Write([]byte{0})
-	if requestID := logAttrString(record.Attributes, "request_id"); requestID != "" {
+	// Only a request ID that passes the source's shape check identifies a
+	// request; a placeholder or redacted value would merge distinct calls,
+	// so those fall back to the canonical attributes (which include it).
+	if requestID := trustedRequestID(scopeName, record.Attributes); requestID != "" {
 		h.Write([]byte("request_id\x00" + requestID))
 	} else if key, err := canonicalAttrs(record.Attributes); err == nil {
 		h.Write([]byte(key))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// recordAnalytics appends obs to the analytics outbox when analytics is
+// enabled. A failure is counted by the outbox and never blocks the
+// counters (design section 2: monitoring keeps working).
+func (d *UsageDeriver) recordAnalytics(obs UsageObservation) {
+	if d.analytics == nil {
+		return
+	}
+	if _, err := d.analytics.Record(obs); err != nil {
+		log.Debug("Usage analytics event not recorded: %v", err)
+	}
 }
 
 // record emits the canonical increments. Point labels are exactly the

@@ -161,6 +161,21 @@ const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 // or not it is on.
 const AgentEdit = "web.agent_edit"
 
+// AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
+// a config edit of an agent with a live or transitional container is kept
+// as the agent's pending config and applied at its next start, a
+// provision-rendered key is kept pending, and DELETE
+// /api/v1/agents/{id}/pending-config discards pending edits. A
+// reincarnation does not apply pending edits yet (ptone/scion#3978), so it
+// must stay off until that lands. While it is off the hub refuses a config
+// edit of such an agent, as before, and applies no stored pending config;
+// a config edit it writes removes the pending keys that edit names, so a
+// stale pending value cannot later override it. It has its own default-off
+// switch
+// because the Edit page experiment (AgentEdit) is turned on separately; the
+// web layer only mirrors the hub's check.
+const AgentEditHeld = "hub.agent_edit_held"
+
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
 // the grant issuance and credential exchange routes, the delegated
 // credential middleware arm, and the delegated decision procedure. While it
@@ -363,6 +378,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        AgentEditHeld,
+		Title:       "Held edits for running agents",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits; a reincarnation does not apply pending edits yet, so what a start does not apply stays pending, and the rest is applied at the next start after a reincarnation, over the values it set. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are kept but not applied, except that an edit saved while off removes the pending keys it names.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-20",
 	},
 	{
 		Name:        AgentBadges,

@@ -71,6 +71,7 @@ type Pipeline struct {
 	meter            otelmetric.Meter
 	retryConfig      RetryConfig
 	usageDeriver     atomic.Pointer[UsageDeriver]
+	analytics        analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	sessionUsageSink atomic.Pointer[SessionUsageSink]
 	intakeMu         sync.Mutex
 	intakeClosed     bool
@@ -224,6 +225,7 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 		return "", fmt.Errorf("creating usage deriver: %w", err)
 	}
 	deriver.sessionUsage = p.forwardSessionUsage
+	deriver.analytics = p.analytics.native
 	if len(deriver.rules) == 0 {
 		return UsageActivationNoHarnessRule, nil
 	}
@@ -301,6 +303,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 					p.markDeliveryDegraded()
 				}
 			}
+			p.analytics.start(ctx, exporter.gcpExporter)
 			mode := "OTLP"
 			if p.config.IsGCP() {
 				mode = "GCP-native"
@@ -333,6 +336,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	if err := p.receiver.Start(ctx); err != nil {
 		p.deliveryState.Store("failed")
 		p.logDeliverySnapshot(true)
+		p.analytics.stop(ctx)
 		if p.exporter != nil {
 			_ = p.exporter.Shutdown(ctx)
 		}
@@ -362,6 +366,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
 		deriver.sessionUsage = p.forwardSessionUsage
+		deriver.analytics = p.analytics.native
 		p.usageDeriver.Store(deriver)
 	}
 
@@ -522,6 +527,9 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	if unconfirmed := p.spanDiagnostics.unconfirmed.Load() + p.metricDiagnostics.unconfirmed.Load() + p.logDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
 		errs = append(errs, fmt.Errorf("telemetry delivery unconfirmed for %d admitted records", unconfirmed))
 	}
+
+	// Final bounded analytics drain while the exporter is still open.
+	p.analytics.stop(ctx)
 
 	// Shutdown exporter to flush any buffered spans
 	if p.exporter != nil {
