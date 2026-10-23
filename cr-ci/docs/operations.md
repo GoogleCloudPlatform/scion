@@ -311,8 +311,10 @@ logged (a unit test enforces this).
   runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of a
   repository outside the runner's served list, `GH_REPOS`; typically one queued on
   the label), and the runner's job-started hook stopped the runner before any of the
-  job's steps. The log line names the reason, event, head, the job's repository and
-  the served list (`served=`, commas shown as `_`). In org scope the served list is
+  job's steps. The execution's log line (Cloud Logging) names the reason, event,
+  head, the job's repository and the served list (`served=`, comma-separated). The
+  job's own log in GitHub shows only the reason code: it may be public, and under org
+  scope the served list can name private repositories. In org scope the served list is
   every `TARGET_REPOS` entry of the owner, so a job of another served repository
   runs; `reason=repository_not_served` then means a repository of the org that is
   not in `TARGET_REPOS` queued a job on the label (add it to `TARGET_REPOS`, or drop

@@ -327,9 +327,9 @@ Checked against actions/runner v2.338.0:
   job's `env:` only shapes step environments, and no step has run yet.
 - **A failed hook alone does not stop the job:** later steps with `if: always()`,
   `failure()` or `!cancelled()` would still run (`src/Runner.Worker/StepsRunner.cs`
-  L200-235). So a refusal is a **hard stop**: the hook writes the marker (sanitized
-  reason, event, head, job and served repository; never a token or the JIT config),
-  then SIGKILLs, in this order, its parent (the worker), the parent's process group,
+  L200-235). So a refusal is a **hard stop**: the hook writes the marker (the reason
+  and the job's own sanitized event, head and repository; never the served list, a
+  token or the JIT config), prints the reason code into the job's log, then SIGKILLs, in this order, its parent (the worker), the parent's process group,
   and its own group unless that group is its alone. The runner spawns its children
   without a new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so
   normally both are run.sh's group (listener, worker, hook) and the hook dies last.
@@ -347,8 +347,16 @@ Checked against actions/runner v2.338.0:
   (Residual, rated very unlikely by sec-review-3: if every SIGKILL and the marker write
   all fail, the enforcer has nothing to act on.)
 
-The entrypoint then logs `ERROR job_guard_refused: ... (reason=... event=... head=...
-repository=... served=...)` and exits **5**. The mediator's hijack guard deletes the registration
+- **What the job's log shows:** only `job refused by the cr-ci runner's job guard
+  (reason=<code>)`. The refused job's log may be public (a fork pull request), and under
+  org scope the served list can name private repositories, so the hook prints no
+  repository name. The marker sits in the entrypoint's private temp dir; the job runs as
+  the same uid but no step of it ever runs to read it.
+
+After `run.sh` has died, the entrypoint logs, to its own stderr (the container log in
+Cloud Logging, never the job's log), `ERROR job_guard_refused: ... (reason=... event=...
+head=... repository=... served=<GH_REPOS>)`, adding the served list itself, and exits
+**5**. The mediator's hijack guard deletes the registration
 when GitHub reports the job.
 
 ## Testing

@@ -39,8 +39,14 @@
 # command may end the hook before or during the stop sequence. Nothing here relies on
 # errexit; every check is explicit.
 #
-# Needs bash and jq (in the image). The marker holds only sanitized fields (reason,
-# event, head, job and served repository), never a token or the JIT config.
+# Needs bash and jq (in the image). What this hook prints goes to the REFUSED job's log,
+# which anyone who can see the job may read (for a fork pull request, the public), so it
+# prints only the reason code, one of the fixed words below. The marker gets the reason
+# and the job's own sanitized event, head and repository, which entrypoint.sh logs on the
+# runner host (Cloud Logging) after run.sh has died, never to the job. The served list
+# (under org scope it can name private repositories) is written by this hook nowhere:
+# entrypoint.sh appends it from its own GH_REPOS to that host-side line. Neither output
+# ever holds a token or the JIT config.
 set +e -o pipefail
 
 event=${GITHUB_EVENT_NAME:-}
@@ -89,15 +95,17 @@ fi
 
 [[ -z $reason ]] && exit 0
 
-# clean VALUE: at most 100 characters from a fixed safe set, for log and marker lines
+# clean VALUE: at most 100 characters from a fixed safe set, for the marker line
 # (event and head come from GitHub, the head repository name from a fork).
 clean() { printf '%s' "${1:0:100}" | tr -c 'A-Za-z0-9._/:-' '_'; }
 
-line="reason=$reason event=$(clean "$event") head=$(clean "$head") repository=$(clean "$repo") served=$(clean "$served")"
-echo "::error title=cr-ci job guard::this runner runs only same-repo push and pull_request jobs of the repository it serves; refused ($line)"
+# Host side only (the marker): the job's own details, no served list.
+line="reason=$reason event=$(clean "$event") head=$(clean "$head") repository=$(clean "$repo")"
 if [[ -n ${CR_JOB_GUARD_MARKER:-} ]]; then
   printf '%s\n' "$line" >"$CR_JOB_GUARD_MARKER" 2>/dev/null
 fi
+# Job log: the reason code only.
+echo "::error title=cr-ci job guard::job refused by the cr-ci runner's job guard (reason=$reason)"
 
 # pgid PID: the process group of PID (field 5 of /proc/PID/stat; the command name in
 # field 2 is in parentheses and may hold spaces, so cut after the last ')').

@@ -191,7 +191,7 @@ func TestJobGuardRefuses(t *testing.T) {
 		{"unknown event", "some_future_event", "", testRepoFull, "reason=event_not_allowed event=some_future_event"},
 		{"no event", "", "", testRepoFull, "reason=event_not_allowed event= "},
 		{"no repository", "push", "", "", "reason=repository_missing"},
-		{"another repository's push", "push", "", "other-owner/example-repo", "reason=repository_not_served event=push head= repository=other-owner/example-repo served=example-owner/example-repo"},
+		{"another repository's push", "push", "", "other-owner/example-repo", "reason=repository_not_served event=push head= repository=other-owner/example-repo"},
 		{"another repository's same-repo pull_request", "pull_request", prPayload("other-owner/other-repo"), "other-owner/other-repo", "reason=repository_not_served"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -598,7 +598,7 @@ func TestEntrypointJobGuardOrgScope(t *testing.T) {
 		h.env["GH_REPOS"] = list
 		h.setRunSh(guardRunShRepo("push", "{}", "example-owner/third-repo"))
 		res := h.run()
-		if res.exitCode != 5 || !strings.Contains(res.stderr, "reason=repository_not_served event=push head= repository=example-owner/third-repo served=example-owner/second-repo_example-owner/example-repo") {
+		if res.exitCode != 5 || !strings.Contains(res.stderr, "reason=repository_not_served event=push head= repository=example-owner/third-repo served=example-owner/second-repo,example-owner/example-repo") {
 			t.Errorf("exit code %d, want 5 with repository_not_served; stderr:\n%s", res.exitCode, res.stderr)
 		}
 		if _, err := os.Stat(filepath.Join(h.stubOut, "always-step-ran")); err == nil {
@@ -624,5 +624,88 @@ func TestEntrypointJobGuardEnvFixed(t *testing.T) {
 		if !strings.Contains(env+"\n", want+"\n") {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
 		}
+	}
+}
+
+// TestJobGuardJobLogShowsOnlyReason: what the hook prints goes to the refused job's log,
+// which may be public (a fork pull request). It carries only the reason code, no
+// repository name. The served list (under org scope it can name private repositories) is
+// in neither the job log nor the marker; the entrypoint adds it from GH_REPOS to its own
+// host-side line after run.sh has died (TestEntrypointJobGuardServedListHostOnly).
+func TestJobGuardJobLogShowsOnlyReason(t *testing.T) {
+	requireTools(t)
+	const served = "example-owner/example-repo,example-owner/private-repo"
+	for _, tc := range []struct {
+		name   string
+		env    map[string]string
+		reason string
+	}{
+		{"fork pull request", map[string]string{
+			"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REPOSITORY": testRepoFull, "CR_JOB_GUARD_REPOS": served,
+		}, "head_repository_differs"},
+		{"org scope non-member", map[string]string{
+			"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "example-owner/other-repo", "CR_JOB_GUARD_REPOS": served,
+		}, "repository_not_served"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobLog := filepath.Join(t.TempDir(), "job-log")
+			tc.env["HOOK_OUT"] = jobLog
+			if tc.env["GITHUB_EVENT_NAME"] == "pull_request" {
+				tc.env["GITHUB_EVENT_PATH"] = writePayload(t, t.TempDir(), prPayload("contributor/example-repo"))
+			}
+			survived, _, marker := runGuard(t, tc.env, `"$HOOK_SHELL" -e "$HOOK" >"$HOOK_OUT" 2>&1`)
+			if survived {
+				t.Fatal("the stand-in worker survived the refusal")
+			}
+			b, err := os.ReadFile(jobLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := string(b)
+			if want := "::error title=cr-ci job guard::job refused by the cr-ci runner's job guard (reason=" + tc.reason + ")\n"; !strings.HasPrefix(out, want) {
+				t.Errorf("job log = %q, want it to start with %q", out, want)
+			}
+			for _, leak := range []string{"private-repo", "served=", "repository=", "head=", "event=", "contributor", "other-repo", "example-owner"} {
+				if strings.Contains(out, leak) {
+					t.Errorf("job log %q contains %q", out, leak)
+				}
+			}
+			// The marker (read by the entrypoint, host side) has the reason but no served
+			// list either: the entrypoint adds that from its own GH_REPOS.
+			if !strings.Contains(marker, "reason="+tc.reason) || strings.Contains(marker, "served=") || strings.Contains(marker, "private-repo") {
+				t.Errorf("marker %q: want the reason and no served list", marker)
+			}
+		})
+	}
+}
+
+// TestEntrypointJobGuardServedListHostOnly: the served list appears only in the
+// entrypoint's own stderr (container log), written after run.sh has died; the job's
+// output (run.sh's stdout, where the hook's job-log line goes) has the reason code only.
+func TestEntrypointJobGuardServedListHostOnly(t *testing.T) {
+	const list = "example-owner/example-repo,example-owner/private-repo"
+	h := newSuccessHarness(t)
+	h.env["GH_REPOS"] = list
+	h.setRunSh(guardRunShRepo("push", "{}", "example-owner/other-repo"))
+	res := h.run()
+	if res.exitCode != 5 {
+		t.Fatalf("exit code %d, want 5; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	// stdout is what run.sh (and so the job) printed, relayed by the watcher.
+	if !strings.Contains(res.stdout, "::error title=cr-ci job guard::job refused by the cr-ci runner's job guard (reason=repository_not_served)") {
+		t.Errorf("job output lacks the reason-only line:\n%s", res.stdout)
+	}
+	for _, leak := range []string{"private-repo", "served="} {
+		if strings.Contains(res.stdout, leak) {
+			t.Errorf("job output contains %q:\n%s", leak, res.stdout)
+		}
+	}
+	if !strings.Contains(res.stderr, "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner (reason=repository_not_served event=push head= repository=example-owner/other-repo served="+list+"); runner stopped") {
+		t.Errorf("entrypoint log lacks the host-side line with the served list:\n%s", res.stderr)
+	}
+	// The entrypoint writes that line only after its wait for run.sh returns (section 5);
+	// here, at least, it comes after run.sh was started.
+	if i, j := strings.Index(res.stderr, "starting run.sh"), strings.Index(res.stderr, "ERROR job_guard_refused"); i < 0 || j < i {
+		t.Errorf("guard line not after run.sh start:\n%s", res.stderr)
 	}
 }

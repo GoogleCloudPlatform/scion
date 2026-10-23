@@ -715,6 +715,10 @@ guard_refused=""
 if [[ -e $guard_marker ]]; then
   # Written by the hook; sanitized again here (letters, digits, ._/:=- and spaces only,
   # at most 300 characters), since its fields come from GitHub and from a fork's name.
+  # It holds the reason and the refused job's own event, head and repository, never the
+  # served list. It sits in this script's private temp dir; the job runs as the same uid
+  # but never gets to read it: the hook writes it and then kills the worker before any
+  # step of the refused job runs.
   guard_refused=$(head -n 1 -- "$guard_marker" | tr -d '\n' | head -c 300 | tr -c 'A-Za-z0-9._/:= -' '_')
   [[ -n $guard_refused ]] || guard_refused="(empty marker)"
 fi
@@ -723,8 +727,12 @@ rm -rf -- "$fifo_dir"
 
 if [[ -n $guard_refused ]]; then
   # The job-started hook refused the job GitHub assigned to this runner (not a same-repo
-  # push or pull_request) and the runner was stopped before any of its steps ran.
-  log "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner ($guard_refused); runner stopped before any step; exiting $EXIT_JOB_REFUSED"
+  # push or pull_request of a served repository) and the runner was stopped before any of
+  # its steps ran. This line goes to the container log (Cloud Logging) only, after run.sh
+  # has died, never to the job's log; so only here is the served list (GH_REPOS, validated
+  # in section 1; under org scope it can name private repositories) added. The hook
+  # prints only the reason code into the job's log.
+  log "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner ($guard_refused served=$GH_REPOS); runner stopped before any step; exiting $EXIT_JOB_REFUSED"
   exit "$EXIT_JOB_REFUSED"
 fi
 if ((idle_stopped && job_started)); then
