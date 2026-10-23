@@ -508,16 +508,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				}
 				if ok {
 					registerMount(src, tgt, true, true)
-					if isDir(src) {
-						if config.RuntimeName != appleContainerRuntimeName {
-							if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-								runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-									"agent", config.Name, "error", err)
-							}
-						}
-						if isDir(filepath.Join(src, "agents")) {
-							sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
-						}
+					if err := ensureAgentsMaskPoint(config, src); err != nil {
+						return nil, err
+					}
+					if isDir(filepath.Join(src, "agents")) {
+						sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 					}
 				}
 			}
@@ -560,11 +555,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
-					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-							"agent", config.Name, "error", err)
-					}
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
 				}
 			}
 			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
@@ -598,11 +590,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
-					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-							"agent", config.Name, "error", err)
-					}
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
 				}
 				if isDir(filepath.Join(src, "agents")) {
 					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
