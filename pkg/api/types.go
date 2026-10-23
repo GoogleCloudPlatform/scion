@@ -686,6 +686,12 @@ type AgentInfo struct {
 	// records them as the run's effective configuration (WP1 slice 3).
 	Harness string `json:"harness,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// ConfigResolved marks an AgentInfo returned by one of Start's return
+	// paths that resolved the agent's configuration (WP1 slice 3 addendum
+	// v14 section 5). Never on the wire: the broker reads it in-process to
+	// decide whether to echo its build. False on the already-running
+	// return and on every listing.
+	ConfigResolved bool `json:"-"`
 
 	// Project association
 	Project string `json:"project"` // Project name (standard field)

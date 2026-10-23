@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -97,6 +99,9 @@ func TestStart_ReportsEffectiveHarnessAndModel(t *testing.T) {
 			if info.Model != "model-x-1" {
 				t.Errorf("Model = %q, want model-x-1", info.Model)
 			}
+			if !info.ConfigResolved {
+				t.Error("ConfigResolved = false on a resolving return path")
+			}
 		})
 	}
 }
@@ -133,6 +138,7 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 			return []api.AgentInfo{{
 				ContainerID: "running-id", Name: "eff-agent", Phase: "running", RunID: "run-b",
 				Harness: "listed-harness", Model: "listed-model", TemplateHash: "sha256:listed",
+				ConfigResolved: true,
 			}}, nil
 		},
 		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
@@ -152,5 +158,162 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 	}
 	if info.Harness != "" || info.Model != "" || info.TemplateHash != "" {
 		t.Errorf("an already-running start reports effective fields: harness %q model %q template hash %q", info.Harness, info.Model, info.TemplateHash)
+	}
+	if info.ConfigResolved {
+		t.Error("ConfigResolved = true on the already-running return")
+	}
+}
+
+// startEffective starts name with opts on a fresh mock runtime and returns
+// the AgentInfo and the container's SCION_HARNESS ("" and false when the
+// container env does not set it), failing on a start error.
+func startEffective(t *testing.T, opts api.StartOptions) (*api.AgentInfo, string, bool) {
+	t.Helper()
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	opts.BrokerMode, opts.NoAuth = true, true
+	info, err := NewManager(mockRT).Start(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, kv := range captured.Env {
+		if v, ok := strings.CutPrefix(kv, "SCION_HARNESS="); ok {
+			return info, v, true
+		}
+	}
+	return info, "", false
+}
+
+// TestStart_EffectiveHarnessIsTheResolvedHarness (addendum v14 section 5;
+// vm-deploy and token-analyst-2 ACK 07:19-07:20): the effective harness is
+// Name() of the harness Start resolved and launched with, not the stored
+// harness name. A start that switches harness-config reports the new
+// harness although the agent's stored config still names the old one.
+func TestStart_EffectiveHarnessIsTheResolvedHarness(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	other := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "alpha", "harness-configs", "other-hc")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "config.yaml"), []byte("harness: switched-h\nuser: alpha-user\nimage: alpha-image:v1\ncapabilities: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project})
+	if first.Harness != "generic" {
+		t.Fatalf("first start: Harness = %q, want generic", first.Harness)
+	}
+	switched, containerHarness, _ := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project, HarnessConfig: "other-hc"})
+	if switched.HarnessConfig != "other-hc" {
+		t.Fatalf("fixture: the start did not switch harness-config (%q)", switched.HarnessConfig)
+	}
+	if switched.Harness != "switched-h" || !switched.ConfigResolved {
+		t.Errorf("switched start: Harness = %q, ConfigResolved = %v; want the resolved harness switched-h", switched.Harness, switched.ConfigResolved)
+	}
+	// Known divergence (addendum v15 sections 5 and 17): the container's
+	// SCION_HARNESS (scion.harness on telemetry and usage points) is still
+	// the stored name, and selects the usage-parsing rules.
+	if containerHarness != "generic" {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (generic)", containerHarness)
+	}
+}
+
+// TestStart_EffectiveHarnessGenericFallback (token-analyst-2 fixture 2): a
+// harness-config with no declarative metadata resolves to the plain
+// Generic harness (harness.Resolve's legacy fallback), whatever harness it
+// names. The effective harness is the one that ran, "generic", not the
+// stored name the config declared.
+func TestStart_EffectiveHarnessGenericFallback(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	hc := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "alpha", "harness-configs", "test-harness", "config.yaml")
+	if err := os.WriteFile(hc, []byte("harness: named-h\nuser: alpha-user\nimage: alpha-image:v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, containerHarness, _ := startEffective(t, api.StartOptions{Name: "eff-fallback", Template: "alpha", ProjectPath: project})
+	if info.HarnessConfig != "test-harness" {
+		t.Fatalf("fixture: harness-config %q", info.HarnessConfig)
+	}
+	if info.Harness != "generic" || !info.ConfigResolved {
+		t.Errorf("Generic fallback: Harness = %q, ConfigResolved = %v; want generic (the resolved Generic implementation), true", info.Harness, info.ConfigResolved)
+	}
+	// Known divergence (addendum v15): the container keeps the declared name.
+	if containerHarness != "named-h" {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 leaves it the stored name (named-h)", containerHarness)
+	}
+}
+
+// TestStart_EffectiveHarnessLegacyNoHarnessConfig (review wp1s3-r3 O-2): a
+// legacy agent whose stored config names neither a harness nor a
+// harness-config, with no template or settings default, starts on
+// harness.New's Generic (the no-harness-config branch). It reports the
+// resolved Generic as its effective harness, with the marker set; the
+// container gets no SCION_HARNESS (the third divergent case, addendum v15).
+func TestStart_EffectiveHarnessLegacyNoHarnessConfig(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	if first, _, _ := startEffective(t, api.StartOptions{Name: "eff-legacy", Template: "alpha", ProjectPath: project}); first.Harness != "generic" {
+		t.Fatalf("fixture: first start Harness %q", first.Harness)
+	}
+	home := os.Getenv("HOME")
+	if err := os.WriteFile(filepath.Join(home, ".scion", "templates", "alpha", "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\ndefault_harness_config: \"\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stored := filepath.Join(project, "agents", "eff-legacy", "scion-agent.json")
+	data, err := os.ReadFile(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "harness")
+	delete(raw, "harness_config")
+	delete(raw, "default_harness_config")
+	out, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stored, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, containerHarness, set := startEffective(t, api.StartOptions{Name: "eff-legacy", Template: "alpha", ProjectPath: project, Image: "img:legacy"})
+	if info.HarnessConfig != "" {
+		t.Fatalf("fixture: a harness-config resolved (%q)", info.HarnessConfig)
+	}
+	if info.Harness != "generic" || !info.ConfigResolved {
+		t.Errorf("legacy start: Harness = %q, ConfigResolved = %v; want generic, true", info.Harness, info.ConfigResolved)
+	}
+	if set {
+		t.Errorf("container SCION_HARNESS = %q; slice 3 sets none when no harness is stored", containerHarness)
+	}
+}
+
+// TestStart_FailedResolutionReportsNothing (token-analyst-2 fixture 3): a
+// start whose harness resolution fails (an unusable provisioner) returns
+// no AgentInfo at all, so there is no echo and no evidence to invent.
+func TestStart_FailedResolutionReportsNothing(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-bad", unusableBuiltinHC)
+	runs := 0
+	info, err := policyTestManager(&runs).Start(context.Background(), api.StartOptions{
+		Name: "fresh", ProjectPath: e.scion, HarnessConfig: "hc-bad", NoAuth: true,
+	})
+	if err == nil || info != nil {
+		t.Fatalf("Start = (%+v, %v); want an error and no AgentInfo", info, err)
+	}
+	if runs != 0 {
+		t.Errorf("container ran %d times; want none", runs)
 	}
 }
