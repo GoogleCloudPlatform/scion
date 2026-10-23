@@ -22,11 +22,15 @@
  *
  * - Journey 1, single-file page: single.html renders and its inline script
  *   writes #probe.
- * - Journey 2, multi-file page: index.html loads, but its stylesheet,
- *   module script and image are answered with the plain-text 401 that
- *   names the cause (X-Scion-Proxy-Error: no-credentials), so the module
- *   never runs and #probe stays empty. The bare .../proxy URL answers 308
- *   to .../proxy/ with the query kept.
+ * - Journey 2, multi-file page: index.html loads; its stylesheet, module
+ *   script and image are requested without the session cookie. The module
+ *   script (a CORS request) gets the plain-text 401 that names the cause
+ *   (X-Scion-Proxy-Error: no-credentials); the browser blocks the
+ *   stylesheet and image answers (no-cors loads of a plain-text answer), so
+ *   those requests fail without a response. The module never runs and
+ *   #probe stays empty. The hub's body for the same module request, sent
+ *   without credentials, names the cause and links the docs. The bare
+ *   .../proxy URL answers 308 to .../proxy/ with the query kept.
  *
  * Later journeys (the page view experiment, isolation checks, a
  * legacy-only agent) reuse the same rig: fixture/index.html already does a
@@ -34,7 +38,15 @@
  * work, and fixture/abs.html loads its script by root-relative URL.
  */
 
-import { type BrowserContext, expect, type Page, type Response, test } from '@playwright/test';
+import {
+  type BrowserContext,
+  expect,
+  type Page,
+  type Request,
+  request as apiRequest,
+  type Response,
+  test,
+} from '@playwright/test';
 
 import { assertTestIdentity } from '../harness/auth.js';
 import { type HubState, readHubState } from '../harness/hub.js';
@@ -48,6 +60,10 @@ import {
 
 /** The multi-file page's sub-resources, relative to the proxy root. */
 const SUBRESOURCES = ['site.css', 'app.js', 'img/dot.png'] as const;
+/** The module script: a CORS request, whose answer the page can see. */
+const CORS_SUBRESOURCE = 'app.js';
+/** The no-cors loads, whose plain-text answers the browser blocks. */
+const NO_CORS_SUBRESOURCES = ['site.css', 'img/dot.png'] as const;
 
 /** Parts of the no-credentials answer's body: its start and the docs section it points to. */
 const NO_CREDENTIALS_BODY_START = 'Scion port proxy: ';
@@ -104,16 +120,48 @@ async function waitServed(agentId: string): Promise<void> {
 }
 
 /** Opens a page and records the response of each proxied sub-resource. */
+/** What the browser exposed for one proxied sub-resource of a page. */
+interface SubRecord {
+  request?: Request;
+  response?: Response;
+  /** The browser's failure text when the request failed. */
+  failure?: string;
+}
+
+/**
+ * Opens a page and records, for each proxied sub-resource, its request,
+ * its response (when the browser exposes one) and its failure (when the
+ * request fails).
+ */
 async function openRecorded(
   url: string,
   agentId: string
-): Promise<{ page: Page; nav: Response | null; subs: Map<string, Response> }> {
+): Promise<{ page: Page; nav: Response | null; subs: Map<string, SubRecord> }> {
   const page = await context.newPage();
-  const subs = new Map<string, Response>();
+  const subs = new Map<string, SubRecord>();
   const prefix = new URL(`${proxyBase(agentId)}/`).pathname;
+  const record = (requestUrl: string): SubRecord | undefined => {
+    const { pathname } = new URL(requestUrl);
+    if (!pathname.startsWith(prefix)) return undefined;
+    const name = pathname.slice(prefix.length);
+    let rec = subs.get(name);
+    if (!rec) {
+      rec = {};
+      subs.set(name, rec);
+    }
+    return rec;
+  };
+  page.on('request', (req) => {
+    const rec = record(req.url());
+    if (rec) rec.request = req;
+  });
   page.on('response', (res) => {
-    const { pathname } = new URL(res.url());
-    if (pathname.startsWith(prefix)) subs.set(pathname.slice(prefix.length), res);
+    const rec = record(res.url());
+    if (rec) rec.response = res;
+  });
+  page.on('requestfailed', (req) => {
+    const rec = record(req.url());
+    if (rec) rec.failure = req.failure()?.errorText ?? 'failed without an error text';
   });
   const nav = await page.goto(url, { waitUntil: 'load' });
   return { page, nav, subs };
@@ -170,36 +218,70 @@ for (const transport of TRANSPORTS) {
       const agentId = agentFor(transport);
       const { page, nav, subs } = await openRecorded(`${proxyBase(agentId)}/index.html`, agentId);
       expect(nav?.status()).toBe(200);
-      await expect
-        .poll(() => SUBRESOURCES.filter((name) => !subs.has(name)), {
-          message: 'sub-resources not requested yet',
-        })
-        .toEqual([]);
+      // Each sub-resource is requested and settles: the module script with
+      // a response, the no-cors loads with a failure.
+      const pending = (): string[] =>
+        SUBRESOURCES.filter((name) => {
+          const rec = subs.get(name);
+          if (!rec?.request) return true;
+          return name === CORS_SUBRESOURCE ? !rec.response : !rec.failure;
+        });
+      await expect.poll(pending, { message: 'sub-resources not settled yet' }).toEqual([]);
 
       for (const name of SUBRESOURCES) {
-        const res = subs.get(name)!;
-        const headers = await res.allHeaders();
-        const sent = await res.request().allHeaders();
-        expect.soft(res.status(), `${name} status`).toBe(401);
-        expect
-          .soft(headers['content-type'], `${name} content type`)
-          .toBe('text/plain; charset=utf-8');
-        expect.soft(headers['x-scion-proxy-error'], `${name} error header`).toBe('no-credentials');
-        expect
-          .soft(headers['x-scion-proxy-hint'], `${name} hint header`)
-          .toBe('sandboxed-subresource');
-        expect.soft(headers['x-content-type-options'], `${name} nosniff`).toBe('nosniff');
-        expect.soft(headers['cache-control'], `${name} cache control`).toBe('no-store');
-        expect.soft(headers['access-control-allow-origin'], `${name} allow origin`).toBe('*');
+        const sent = await subs.get(name)!.request!.allHeaders();
         expect.soft(sent['cookie'], `${name} request cookie`).toBeUndefined();
       }
-      // The body is read from the module script's answer only: it is a CORS
-      // request, so its body reaches the page. The stylesheet and image are
-      // no-cors requests from an opaque origin, whose bodies the browser may
-      // withhold.
-      const body = await subs.get('app.js')!.text();
-      expect.soft(body.startsWith(NO_CREDENTIALS_BODY_START), 'app.js body start').toBe(true);
-      expect.soft(body, 'app.js body docs link').toContain(NO_CREDENTIALS_DOCS_ANCHOR);
+
+      // The module script's answer, as the browser exposed it.
+      const res = subs.get(CORS_SUBRESOURCE)!.response!;
+      const headers = await res.allHeaders();
+      expect.soft(res.status(), 'app.js status').toBe(401);
+      expect.soft(headers['content-type'], 'app.js content type').toBe('text/plain; charset=utf-8');
+      expect.soft(headers['x-scion-proxy-error'], 'app.js error header').toBe('no-credentials');
+      expect
+        .soft(headers['x-scion-proxy-hint'], 'app.js hint header')
+        .toBe('sandboxed-subresource');
+      expect.soft(headers['x-content-type-options'], 'app.js nosniff').toBe('nosniff');
+      expect.soft(headers['cache-control'], 'app.js cache control').toBe('no-store');
+      expect.soft(headers['access-control-allow-origin'], 'app.js allow origin').toBe('*');
+
+      // The no-cors loads: the browser blocks their plain-text answers, so
+      // they fail without a response. The failure text depends on the
+      // browser build, so it is recorded, not pinned.
+      for (const name of NO_CORS_SUBRESOURCES) {
+        const rec = subs.get(name)!;
+        expect.soft(rec.response, `${name} response`).toBeUndefined();
+        test
+          .info()
+          .annotations.push({ type: 'blocked load', description: `${name}: ${rec.failure}` });
+        console.info(`[port-proxy] ${transport} ${name} failed: ${rec.failure}`);
+      }
+
+      // The hub's answer to the same module request, sent without
+      // credentials from a fresh request context (not the browser, which
+      // aborts the module load before the page could read the body).
+      const api = await apiRequest.newContext();
+      try {
+        const replay = await api.get(res.url(), {
+          maxRedirects: 0,
+          headers: {
+            Accept: '*/*',
+            Origin: 'null',
+            'Sec-Fetch-Site': 'cross-site',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Dest': 'script',
+          },
+        });
+        const body = await replay.text();
+        expect.soft(replay.status(), 'hub answer status').toBe(401);
+        expect.soft(body.startsWith(NO_CREDENTIALS_BODY_START), 'hub answer body start').toBe(true);
+        expect.soft(body, 'hub answer body docs link').toContain(NO_CREDENTIALS_DOCS_ANCHOR);
+        await replay.dispose();
+      } finally {
+        await api.dispose();
+      }
+
       // The module never ran and the stylesheet never applied.
       await expect(page.locator('#probe')).toHaveText('');
       await expect(page.locator('#title')).not.toHaveCSS('color', 'rgb(0, 0, 255)');
