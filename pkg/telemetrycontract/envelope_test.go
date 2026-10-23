@@ -1168,3 +1168,89 @@ func TestMarshalRejectsHugeUint64(t *testing.T) {
 		t.Errorf("uint64 1<<63: err = %v", err)
 	}
 }
+
+// --- upstream review (gemini, #4019): single-decode checkWire -------------
+
+const wireBase = `"schema_version":1,"event_type":"agent.usage","producer_namespace":"ns","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:05:00Z"`
+
+// checkWire binds the envelope only from exact keys. Case variants of an
+// envelope key (ASCII or Unicode simple folding, which encoding/json would
+// accept) are rejected even when their value matches; duplicate exact keys
+// resolve last-wins, except that a null envelope value is rejected (the
+// old per-field rebuild accepted a trailing null that matched an empty
+// field), and the result must still equal the event's envelope.
+func TestCheckWireExactKeysSingleDecode(t *testing.T) {
+	env := NewEnvelope(EventTypeUsage, "u", "ns", testEventTS, testEventTS)
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"exact keys", `{` + wireBase + `,"event_id":"u"}`, true},
+		{"case variant alongside exact, same value", `{` + wireBase + `,"event_id":"u","Event_ID":"u"}`, false},
+		{"case variant instead of exact", `{` + wireBase + `,"EVENT_ID":"u"}`, false},
+		{"unicode fold variant (long s)", `{"schema_version":1,"event_type":"agent.usage","producer_name` + "ſ" + `pace":"ns","event_ts":"2026-10-22T00:05:00Z","observed_ts":"2026-10-22T00:05:00Z","event_id":"u"}`, false},
+		{"duplicate exact key, last matches", `{` + wireBase + `,"event_id":"x","event_id":"u"}`, true},
+		{"duplicate exact key, last differs", `{` + wireBase + `,"event_id":"u","event_id":"x"}`, false},
+		{"duplicate exact key, last null", `{` + wireBase + `,"event_id":"u","event_id":null}`, false},
+		{"null envelope field", `{` + wireBase + `,"event_id":"u","hub_id":null}`, false},
+		{"case variant of a payload key is not an envelope concern", `{` + wireBase + `,"event_id":"u","count":1,"Count":2}`, true},
+	}
+	for _, tc := range cases {
+		err := checkWire([]byte(tc.body), &env)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+	// Unmarshal applies the same rule to input: a case-variant envelope key
+	// is rejected rather than silently bound.
+	var ev testEvent
+	if err := Unmarshal([]byte(`{`+wireBase+`,"event_id":"u","Event_ID":"u","count":0,"labels":[]}`), &ev); err == nil || !strings.Contains(err.Error(), "case variant") {
+		t.Errorf("Unmarshal with a case-variant envelope key: err = %v", err)
+	}
+	if err := Unmarshal([]byte(`{`+wireBase+`,"event_id":"u","event_id":null,"count":0,"labels":[]}`), &ev); err == nil || !strings.Contains(err.Error(), "is null") {
+		t.Errorf("Unmarshal with a trailing null duplicate: err = %v", err)
+	}
+}
+
+// The produced bytes of a full event still pass after the change (golden
+// round trip is covered by TestMarshalGolden; this pins checkWire on it).
+func TestCheckWireAcceptsMarshalOutput(t *testing.T) {
+	ev := fullTestEvent()
+	data, err := Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWire(data, &ev.Envelope); err != nil {
+		t.Errorf("checkWire rejected Marshal output: %v", err)
+	}
+}
+
+// Labels in the value walk are read through a type assertion (exported
+// allowlisted fields are always interfaceable).
+func TestCheckValuesLabelsTyped(t *testing.T) {
+	env := NewEnvelope(EventTypeLifecycle, "l", "ns", testEventTS, testEventTS)
+	ev := &testEvent{Envelope: env, Labels: Labels{{"k", "v\xff"}}}
+	if err := checkValues(reflect.ValueOf(ev), ""); err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Errorf("invalid label value: err = %v", err)
+	}
+	ok := &testEvent{Envelope: env, Labels: Labels{{"k", "v"}}}
+	if err := checkValues(reflect.ValueOf(ok), ""); err != nil {
+		t.Errorf("valid labels: %v", err)
+	}
+	// Every label is iterated: an invalid one after a valid one is found.
+	second := &testEvent{Envelope: env, Labels: Labels{{"a", "ok"}, {"b", "bad\xfe"}}}
+	if err := checkValues(reflect.ValueOf(second), ""); err == nil || !strings.Contains(err.Error(), "[1]") {
+		t.Errorf("invalid second label: err = %v, want it to name index [1]", err)
+	}
+}
+
+func BenchmarkMarshal(b *testing.B) {
+	ev := fullTestEvent()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Marshal(ev); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
