@@ -22,6 +22,10 @@ import (
 
 var outboxTestTS = time.Date(2026, 10, 22, 0, 5, 0, 0, time.UTC)
 
+// contentionLockWait is the test-scoped lock wait for concurrency tests
+// that are not about lock timeouts (slow or -race runs).
+const contentionLockWait = 60 * time.Second
+
 func testOutbox(t *testing.T) *AnalyticsOutbox {
 	t.Helper()
 	o, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "outbox"))
@@ -426,6 +430,11 @@ func TestOutboxConcurrentWritersAndDrainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This test checks ordering, seq and duplicate correctness under
+	// contention, not lock timeouts (covered by their own tests): a long
+	// test-scoped lock wait keeps a slow or race-instrumented run from
+	// turning contention into counted append_failed losses.
+	drainer.lockWait = contentionLockWait
 	_, _ = drainer.PinHubID("hub")
 	const writers, perWriter = 4, 25
 	c := &capture{}
@@ -449,6 +458,7 @@ func TestOutboxConcurrentWritersAndDrainer(t *testing.T) {
 				t.Error(err)
 				return
 			}
+			o.lockWait = contentionLockWait
 			for i := 0; i < perWriter; i++ {
 				if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:%d-%d", w, i), 1)); err != nil {
 					t.Error(err)
@@ -461,6 +471,9 @@ func TestOutboxConcurrentWritersAndDrainer(t *testing.T) {
 	<-drained
 	_, _ = drainer.finalize(context.Background(), drainer.PinnedHubID())
 	_, _ = drainer.Drain(context.Background(), c.send)
+	if l, err := drainer.LedgerSnapshot(); err != nil || l.AppendFailedTotal != 0 {
+		t.Fatalf("append_failed = %d (%v), want 0", l.AppendFailedTotal, err)
+	}
 
 	byID := map[string]string{}
 	var seqs []int
