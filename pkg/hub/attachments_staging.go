@@ -149,6 +149,9 @@ func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, fi
 		return "", err
 	}
 	defer func() { _ = root.Remove(tmpPath) }()
+	if stagingAfterTemp != nil {
+		stagingAfterTemp()
+	}
 	if err := root.Link(tmpPath, destPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			// Staged concurrently (fan-out); reuse only an identical copy.
@@ -161,6 +164,10 @@ func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, fi
 	}
 	return agentPath, nil
 }
+
+// stagingAfterTemp, when set (tests only), runs after the temporary copy
+// is written and before it is linked to the final name.
+var stagingAfterTemp func()
 
 // writeStagingTemp copies what open returns into a new temporary file in
 // dir (inside root, created with O_EXCL under a random name next to the

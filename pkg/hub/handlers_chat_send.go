@@ -222,12 +222,13 @@ const (
 
 // chatKeyReadAudience classifies key by how reading it is authorized: a
 // "dm:" key by its participant list, any other key as a topic, read by
-// read access to its project (the topic is returned). It is the one
-// classification the send authorization (authorizeChatSend), the
-// conversation access check (authorizeConversationAccess) and the
-// attachment projection decision (projectionAudienceIsProject) share, so
-// the three cannot disagree. A topic that cannot be loaded is
-// chatAudienceNone.
+// read access to its project (the topic is returned). It is the
+// read-authorization classifier shared by the send authorization
+// (authorizeChatSend), the conversation access check
+// (authorizeConversationAccess) and the attachment projection decision
+// (projectionAudienceIsProject), so those three cannot disagree. Other
+// handlers still test the "dm:" prefix for their own key-shape handling.
+// A topic that cannot be loaded is chatAudienceNone.
 func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic) {
 	if strings.HasPrefix(key, "dm:") {
 		return chatAudienceParticipants, nil

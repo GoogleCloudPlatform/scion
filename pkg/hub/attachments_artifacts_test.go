@@ -556,8 +556,22 @@ func TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM(t *testing.T) {
 	inTopic := f.uploadAs(t, f.ua, f.projA.ID, "topic.txt", "topic bytes")
 	setAttachmentExperiments(t, f.srv, false, false)
 
-	f.sendWith(t, f.ua, dm, inDM)
+	resp := f.sendWith(t, f.ua, dm, inDM)
 	assert.NoDirExists(t, filepath.Join(stagingDir, inDM), "an artifact attachment in a DM gets no scratchpad copy, experiment on or off")
+
+	// It is still delivered: bound to the message, and planned for the
+	// agent recipient with an inbox path and no scratchpad copy.
+	info, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{resp.ID})
+	require.NoError(t, err)
+	require.Len(t, info[resp.ID], 1, "the attachment is bound to the DM message")
+	assert.Equal(t, inDM, info[resp.ID][0].ID)
+	dels := attachmentDeliveries(resp.ID, []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])})
+	require.Len(t, dels, 1)
+	plan := f.srv.attachmentDelivery().Plan(context.Background(), f.aa, dels)
+	require.Len(t, plan, 1)
+	assert.NotEqual(t, messages.AttachmentWithheld, plan[0].State, "the recipient reads the attachment")
+	assert.Equal(t, attachmentInboxPath(resp.ID, "dm.txt"), plan[0].InboxPath)
+	assert.Empty(t, plan[0].ProjectedPath)
 
 	f.sendWith(t, f.ua, f.topicA, inTopic)
 	got, err := os.ReadFile(filepath.Join(stagingDir, inTopic, "topic.txt"))

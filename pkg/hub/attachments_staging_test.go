@@ -201,6 +201,44 @@ func TestAttachmentStaging_InterruptedCopyLeavesNoFinalName(t *testing.T) {
 	assert.Equal(t, "hello agent", string(got))
 }
 
+// TestAttachmentStaging_ConcurrentStagingAtLink: when the final name is
+// taken between the existence check and the link (another staging of the
+// same attachment, or a planted file), the link never replaces it: an
+// identical copy is reused, anything else is refused and left untouched,
+// and the temporary file is removed either way.
+func TestAttachmentStaging_ConcurrentStagingAtLink(t *testing.T) {
+	for _, tc := range []struct {
+		name, planted string
+		wantErr       bool
+	}{
+		{"identical copy reused", "hello agent", false},
+		{"different file refused", "planted by an agent", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newLocalTestStaging(t.TempDir(), false)
+			dest := filepath.Join(st.hostDir(), "att-1", "notes.txt")
+			stagingAfterTemp = func() {
+				require.NoError(t, os.WriteFile(dest, []byte(tc.planted), 0o644))
+			}
+			t.Cleanup(func() { stagingAfterTemp = nil })
+
+			p, err := st.stage(writeTempFile(t, "notes.txt", "hello agent"), "att-1", "notes.txt")
+			if tc.wantErr {
+				require.ErrorIs(t, err, errStagedCopyMismatch)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", p)
+			}
+			got, err := os.ReadFile(dest)
+			require.NoError(t, err)
+			assert.Equal(t, tc.planted, string(got), "the existing file is never replaced")
+			entries, err := os.ReadDir(filepath.Dir(dest))
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "the temporary file is removed")
+		})
+	}
+}
+
 func TestSameContent(t *testing.T) {
 	big := strings.Repeat("x", 70<<10)
 	for _, tc := range []struct {
