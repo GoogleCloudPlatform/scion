@@ -784,7 +784,7 @@ func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
 	}))
 
 	err = srv.moveBrokerQuota(context.Background(), agent, &reincarnationMove{SourceBrokerID: brokerA.ID, TargetBrokerID: brokerB.ID})
-	require.ErrorIs(t, err, injected)
+	require.ErrorIs(t, err, injected, "the injected transfer failure fails the move")
 	assert.Equal(t, []string{"locked", "released", "before_insert"}, steps, "the source row was released inside the transaction")
 	got := activeReservation(t, s, def.ID, agent.ID)
 	require.NotNil(t, got)

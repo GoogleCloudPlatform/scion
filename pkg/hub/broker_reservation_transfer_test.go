@@ -153,7 +153,7 @@ func TestMoveBrokerQuota_SourceAtCapTargetFull_ConcurrentReserveRefused(t *testi
 
 	err := srv.moveBrokerQuota(context.Background(), f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
 	var exceeded *QuotaExceededError
-	require.ErrorAs(t, err, &exceeded)
+	require.ErrorAs(t, err, &exceeded, "AC1: the full target refuses the move")
 	assert.Equal(t, f.dst.ID, exceeded.ScopeID)
 	require.True(t, ran, "the hook ran")
 	assert.ErrorIs(t, reserveErr, store.ErrQuotaExceeded, "the source had no free slot at any point")
@@ -172,7 +172,7 @@ func TestTransferBroker_TargetAtCapRefused(t *testing.T) {
 	_, limited, err := srv.quotaService.TransferBroker(context.Background(), f.agent.ID, f.dst.ID, TransferOpts{})
 	assert.True(t, limited)
 	var exceeded *QuotaExceededError
-	require.ErrorAs(t, err, &exceeded)
+	require.ErrorAs(t, err, &exceeded, "AC2a: the full target refuses the transfer")
 	assert.ErrorIs(t, err, store.ErrQuotaExceeded)
 	assert.Equal(t, store.LimitMaxAgentsPerBroker, exceeded.Limit)
 	assert.Equal(t, store.QuotaScopeBroker, exceeded.ScopeType)
@@ -222,7 +222,7 @@ func TestTransferBroker_LockContentionEnforced(t *testing.T) {
 
 	_, limited, err := srv.quotaService.TransferBroker(context.Background(), f.agent.ID, f.dst.ID, TransferOpts{})
 	assert.True(t, limited)
-	require.ErrorIs(t, err, ErrQuotaLockContention)
+	require.ErrorIs(t, err, ErrQuotaLockContention, "a contended target lock refuses the transfer")
 	assert.EqualValues(t, 1, attempts.Load())
 	f.requireOnSource(t)
 	assert.Zero(t, brokerReservationCount(t, s, f.dst.ID))
@@ -258,7 +258,7 @@ func TestTransferBroker_EnforcementOffMovesUnchecked(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, limited)
 		assert.Equal(t, store.TransferMoved, res.Outcome)
-		assert.EqualValues(t, 1, attempts.Load())
+		assert.EqualValues(t, 1, attempts.Load(), "enforcement off still tries the target lock")
 		f.requireOnTarget(t)
 	})
 }
