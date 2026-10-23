@@ -686,8 +686,10 @@ func TestChatStars_StateUnresolvedConversation(t *testing.T) {
 		ID: driftMsg, ProjectID: f.projA, Sender: "user:" + f.admin + "@test.com", SenderID: f.admin, Recipient: "chat",
 		Msg: "drifted", Type: "chat", Channel: "web", ThreadID: drift, CreatedAt: time.Now().UTC(),
 	}))
-	_, _, err := f.stars.AddMessageStar(ctx, f.admin, StarTarget{MessageID: driftMsg, ProjectID: f.projA,
-		Selector: StarSelector{ConversationKey: drift, Channel: "web", ThreadID: drift}})
+	// Stored directly: the guarded add refuses a key with no webchat_topic
+	// row, and creating the topic would link a conversation (no drift).
+	_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+		f.admin, driftMsg, drift, f.projA, sqliteStarTime(time.Now()))
 	require.NoError(t, err)
 	f.srv.SetWebChatStore(fs)
 
