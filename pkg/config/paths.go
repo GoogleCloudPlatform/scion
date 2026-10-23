@@ -148,6 +148,11 @@ func GetProjectDir() (string, error) {
 
 // GetProjectName returns the slugified name of the project.
 func GetProjectName(projectDir string) string {
+	// A shared project configuration (<ProjectRoot>/.scion) is named by
+	// its hub-written project-slug, never by its directory (a UUID).
+	if slug, ok := SharedProjectSlug(projectDir); ok && slug != "" {
+		return slug
+	}
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
 		return "unknown"

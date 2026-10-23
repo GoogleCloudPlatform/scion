@@ -59,6 +59,9 @@ func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
 	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 		roots = append(roots, extDir)
 	}
+	if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+		roots = append(roots, filepath.Dir(legacy))
+	}
 
 	// Every root is checked, so an error on one root does not hide a
 	// directory in another; the first such error is returned only when no
