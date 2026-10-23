@@ -238,7 +238,7 @@ func TestContainerHarnessCasesResourceLabels(t *testing.T) {
 					continue
 				}
 				if a[i] != b[i] {
-					t.Fatalf("resource attribute %q depends on SCION_HARNESS: %v vs %v", a[i].Key, a[i].Value.Emit(), b[i].Value.Emit())
+					t.Fatalf("resource attribute %q depends on SCION_HARNESS: %v vs %v", a[i].Key, a[i].Value.String(), b[i].Value.String())
 				}
 			}
 		})
