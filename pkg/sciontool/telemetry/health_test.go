@@ -938,20 +938,16 @@ func TestPipelineStopEmitsFinalHealth(t *testing.T) {
 	d := bareUsageDeriver(claudeUsageRule{})
 	feed(d, claudeLogs(claudeRecord("req_011CUabcdefghijklmnopq", "1", 5, fullClaudeTokens)))
 	p.usageDeriver.Store(d)
-	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)})
-	p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "enabled")
 	// A dirty stream that the tight stop deadline cannot export.
+	// Seed the stop residual BEFORE startHealth: the health loop reads
+	// QueueDepth and the metric stream state, so no write may overlap it.
 	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
 		t.Fatal(err)
 	}
-	// The health loop is already running (it reads QueueDepth under
-	// budget.mu): seed the residual under the same locks production uses.
-	p.metricStateMu.Lock()
 	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
-	p.metricStateMu.Unlock()
-	p.budget.mu.Lock()
 	p.budget.records, p.budget.entries = 1, 1
-	p.budget.mu.Unlock()
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{native: NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)})
+	p.SettleUsageSource(map[string]string{"SCION_USAGE_SOURCE": "native"}, "enabled")
 	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_ = p.Stop(stopCtx) // reports the residual as an error
@@ -1067,18 +1063,14 @@ func TestPipelineStopFinalReportsDegraded(t *testing.T) {
 	p.health.sendOverride = func(_ context.Context, line []byte) error { sent = append(sent, line); return nil }
 	p.health.hubIDOverride = func(context.Context) string { return "hub-1" }
 	p.health.periodic, p.health.retry = time.Hour, time.Hour
-	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable})
+	// Seed the stop residual BEFORE startHealth: the health loop reads
+	// QueueDepth and the metric stream state, so no write may overlap it.
 	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
 		t.Fatal(err)
 	}
-	// The health loop is already running (it reads QueueDepth under
-	// budget.mu): seed the residual under the same locks production uses.
-	p.metricStateMu.Lock()
 	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
-	p.metricStateMu.Unlock()
-	p.budget.mu.Lock()
 	p.budget.records, p.budget.entries = 1, 1
-	p.budget.mu.Unlock()
+	p.startHealth(context.Background(), &GCPExporter{}, analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledOutboxUnavailable})
 	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_ = p.Stop(stopCtx)
