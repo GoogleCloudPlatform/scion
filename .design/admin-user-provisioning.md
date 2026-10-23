@@ -1045,7 +1045,7 @@ confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it
 `DenialCredentialInsufficient` to the catalog entry for rows 6-7.
 
 **Phase 2 shipped** (H.2 PR-3, with [ptone/scion#2124](https://github.com/ptone/scion/issues/2124)).
-`POST /api/v1/users` admits a hub UAT under the rule of the invitation routes:
+`POST /api/v1/users` admits a hub user access token under the rule of the invitation routes:
 
 - The catalog entry is `AdmitOn(BearerTargetHubCollection, BearerBoundaryHub)` and lists
   `CredentialScopedUAT`. The decision keeps `hubCollectionEvidence("user.invite")` on
