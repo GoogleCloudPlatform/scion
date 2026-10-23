@@ -8965,8 +8965,7 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			}
 			// The broker reads and creates project storage through its
 			// own mount of the share: on a shared Layout an unmounted share
-			// refuses the dispatch (fs-cleanup-arch ruling Q6,
-			// ptone/scion#5823).
+			// refuses the dispatch (ptone/scion#5823).
 			if s.config.StorageLayout.Backend.Shared() {
 				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
 					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)

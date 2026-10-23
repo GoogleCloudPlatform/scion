@@ -26,7 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
-// Shared project configuration (design-v7 §P1a, ptone/scion#5823).
+// Shared project configuration (ptone/scion#5823).
 //
 // On a shared storage backend a hub-managed project's configuration lives
 // at <ProjectRoot>/.scion, where ProjectRoot is <host base>/<subpath

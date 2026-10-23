@@ -116,7 +116,7 @@ func TestStartNFSEmptyAgentDir_RestartKeepsFiles(t *testing.T) {
 }
 
 // The export not mounted on the broker: the start is refused
-// (fs-cleanup-arch ruling Q6, ptone/scion#5823).
+// (ptone/scion#5823).
 func TestStartNFSEmptyAgentDir_ExportNotMounted(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	_, _, _, err := startNFSAgentDirAgentNamed(t, "test-agent", "kubernetes", mountRoot, emptyPerAgentEnv, nil)

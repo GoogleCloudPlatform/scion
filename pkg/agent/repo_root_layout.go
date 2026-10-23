@@ -22,7 +22,7 @@ import (
 )
 
 // Candidate roots for detectRepoRoot come from the layout authority
-// (pkg/projectfs, design-v7 §P1 invariants, ptone/scion#5826): the broker
+// (pkg/projectfs, ptone/scion#5826): the broker
 // knows where a project's workspace is from the Layout, and git only checks
 // that answer.
 

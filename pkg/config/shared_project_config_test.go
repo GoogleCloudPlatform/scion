@@ -131,7 +131,7 @@ func TestSharedProjectName(t *testing.T) {
 	}
 }
 
-// Configuration is the shared directory itself (design-v7 P1a rule 1): no
+// Configuration is the shared directory itself (ptone/scion#5823): no
 // external config dir, and its settings.yaml wins over a broker-local
 // project-configs file of the same name.
 func TestSharedProjectConfigIsTheDirectory(t *testing.T) {

@@ -25,8 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
-// Hub-managed projects on a shared storage backend (design-v7 §P1a rule 1,
-// ptone/scion#5823 option (a)).
+// Hub-managed projects on a shared storage backend (ptone/scion#5823).
 //
 // A hub-managed project dispatched by slug runs from the broker's Layout's
 // project root, <host base>/<subpath root>/<project UUID>
@@ -41,8 +40,7 @@ import (
 // mode (config.AgentsRootForProject), and the ownership store and launch
 // journal are keyed by project ID and agent, never by the project path.
 
-// Refusal texts for a shared-backend dispatch (fs-cleanup-arch rulings Q6,
-// Q8, Q9). They name no host path except the share's mount point, which is
+// Refusal texts for a shared-backend dispatch (ptone/scion#5823). They name no host path except the share's mount point, which is
 // the operator's own configuration.
 const (
 	sharedProjectNoIDText     = "a hub-managed project on shared project storage needs the project ID; upgrade the Hub"
@@ -107,7 +105,7 @@ func checkSharedProjectConfig(projectRoot, projectID string) *startContextError 
 // host base: for nfs through the broker's NFS mount reconciler when it has
 // one (EnsureShareMounted, which mounts only with auto_mount on), otherwise
 // by the host base being a directory. A broker without the mount refuses
-// shared-backend dispatches (fs-cleanup-arch ruling Q6).
+// shared-backend dispatches (ptone/scion#5823).
 func (s *Server) ensureLayoutShareMounted(ctx context.Context, layout projectfs.Layout) error {
 	if layout.Backend == projectfs.BackendNFS && s.nfsMountReconciler != nil {
 		if err := s.nfsMountReconciler.EnsureShareMounted(ctx, layout.Share.ID); err != nil {

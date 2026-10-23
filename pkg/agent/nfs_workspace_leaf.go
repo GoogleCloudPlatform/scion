@@ -74,7 +74,7 @@ var ErrProjectShareNotMounted = errors.New("project storage share is not mounted
 // mounted from an NFS PV claim. When the broker has no local mount of the
 // export (the host base does not exist), the start is refused with
 // ErrProjectShareNotMounted: the broker reads and creates project storage
-// through its own mount (fs-cleanup-arch ruling Q6). A directory the
+// through its own mount (ptone/scion#5823). A directory the
 // broker is not allowed to create (EACCES, EPERM or EROFS): it is logged as
 // a warning and left to the node. Any other failure (a symlink, a regular
 // file in the path, an unexpected path) returns an error so the create
@@ -192,8 +192,7 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		if errors.Is(err, fs.ErrNotExist) {
 			// A broker reads and creates project storage through its own
 			// mount of the share; without it the start is refused rather
-			// than left to the node (fs-cleanup-arch ruling Q6,
-			// ptone/scion#5823).
+			// than left to the node (ptone/scion#5823).
 			return false, false, fmt.Errorf("%w (%s; mount it or set nfs.auto_mount)", ErrProjectShareNotMounted, resolved.HostBase)
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)

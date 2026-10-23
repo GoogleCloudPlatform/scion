@@ -177,7 +177,7 @@ func TestCreateAgent_SharedLayoutRunsFromProjectRoot(t *testing.T) {
 	}
 }
 
-// Refusals (fs-cleanup-arch rulings Q6, Q8, Q9): nothing is created or
+// Refusals (ptone/scion#5823): nothing is created or
 // repaired, and Provision is never called.
 func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 	cases := []struct {
@@ -345,7 +345,7 @@ func TestSharedProjectsWithLocalAgents(t *testing.T) {
 }
 
 // On a shared Layout a warn-only (Kubernetes, Cloud Run) dispatch whose share
-// is not mounted on the broker is refused (fs-cleanup-arch ruling Q6); on a
+// is not mounted on the broker is refused (ptone/scion#5823); on a
 // local Layout it is still only warned about.
 func TestCheckNFSForDispatch_WarnOnlyRefusedOnSharedLayout(t *testing.T) {
 	for _, shared := range []bool{true, false} {

@@ -299,7 +299,7 @@ func TestNFSKeepSharedCheckout(t *testing.T) {
 }
 
 // The export not mounted on the broker: the start is refused before any
-// pod or directory exists (fs-cleanup-arch ruling Q6, ptone/scion#5823);
+// pod or directory exists (ptone/scion#5823);
 // the node is never left to create project storage.
 func TestStartNFSAgentDir_ExportNotMounted(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")

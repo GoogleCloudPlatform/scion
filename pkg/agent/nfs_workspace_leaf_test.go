@@ -513,7 +513,7 @@ func TestEnsureNFSWorkspaceLeaf_NoOpOutsideKubernetesNFS(t *testing.T) {
 }
 
 // Without a broker-side mount of the export the start is refused and
-// nothing is created (fs-cleanup-arch ruling Q6, ptone/scion#5823).
+// nothing is created (ptone/scion#5823).
 func TestEnsureNFSWorkspaceLeaf_ExportNotMountedRefuses(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "not-mounted")
 	res := resolveTestNFSWorkspace(t, mountRoot)
