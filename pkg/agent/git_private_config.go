@@ -94,9 +94,8 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	// the seed a bare `git push` fails with "no upstream branch" (exit 128).
 	// `git push -u <origin> <branch>` exits 0 and reaches the remote with or without
 	// the seed; under the read-only .git it cannot persist the upstream and git
-	// reports an error locking the config (an error, not a warning), but the push
-	// still succeeds. Personal preferences go in the agent's writable global git
-	// config in the agent home.
+	// reports an error locking the config, but the push still succeeds. Personal
+	// preferences go in the agent's writable global git config in the agent home.
 	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL

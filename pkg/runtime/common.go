@@ -581,10 +581,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			addArg("--workdir", "/workspace")
 			// Narrow the shared checkout's .git admin surface and bind a
 			// per-agent private .git/config (#5865). The .git root itself stays
-			// read-write (the main worktree's HEAD/index live there); root-level
-			// files an agent could create (commondir, config.worktree) are
-			// covered by the host-side controls (#5733 policy, SafeGitCommand,
-			// detectRepoRoot). Refuses on Apple (cannot bind single files).
+			// read-write (the main worktree's HEAD/index live there); a root
+			// commondir/gitdir redirect is refused host-side
+			// (refuseRootCommonDirRedirect) and config.worktree is bound read-only;
+			// a root-level `shallow` remains a documented residual. Refuses on Apple
+			// (cannot bind single files).
 			if err := registerSharedPlainGitMounts(registerMount, config); err != nil {
 				return nil, err
 			}
@@ -1473,10 +1474,10 @@ func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, c
 // this container, closing sibling HEAD modification and commondir/gitdir
 // redirection — and a sibling's config.worktree, which that sibling's
 // in-container git honors (#5733 covers only host-side git). The agent's own
-// worktrees/<name>/ stays writable for its HEAD/index/logs; its gitdir and
-// config.worktree are pinned read-only by narrowSharerRegistryMounts and
-// narrowGitAdminMounts respectively (nested binds). All directory binds, so this
-// works on every runtime.
+// worktrees/<name>/ stays writable for its HEAD/index/logs; its gitdir, commondir
+// and config.worktree are pinned read-only here (file binds, below). The whole
+// worktrees/ dir is a directory bind, so the sibling protection works on every
+// runtime.
 // worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
 // or "" for a layout with no own per-agent worktree (shared-plain).
 func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
@@ -1521,9 +1522,10 @@ func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, 
 // agent on every runtime: the agent reads a redacted, per-agent copy, and any
 // write (git config --local, remote add) fails because the mount point cannot be
 // renamed over. The copy is pre-seeded with the agent's own branch upstream and
-// push.autoSetupRemote so `git push`/`git push -u` for that branch find the
-// upstream already set and exit 0 without a write. Personal preferences go in the
-// per-agent writable global git config in the agent home.
+// push.autoSetupRemote so a bare `git push` finds the upstream already set and
+// exits 0 without a config write; `git push -u` also exits 0 but cannot persist
+// the upstream and prints an error. Personal preferences go in the per-agent
+// writable global git config in the agent home.
 //
 // Immediately before the bind the source is re-checked: it must be a regular
 // file, not a symlink, with link count 1, owned by this (broker) process.
@@ -1778,9 +1780,10 @@ func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool
 // /workspace). The .git root stays read-write — the main worktree's HEAD/index
 // live there and the agent legitimately writes them — so only the admin surface
 // (hooks/info/objects-info/sibling-worktrees, modules) is pinned read-only and a
-// per-agent private .git/config is bound over the shared one. Root-level files an
-// agent could still create (commondir, config.worktree, shallow) are covered by
-// the host-side controls. The Apple runtime is refused: it cannot bind
+// per-agent private .git/config is bound over the shared one. A root commondir/gitdir
+// redirect is refused host-side (refuseRootCommonDirRedirect) and config.worktree is
+// bound read-only (create-first); a root-level `shallow` an agent creates is a
+// documented residual (no host-side control for it). The Apple runtime is refused: it cannot bind
 // single files to make .git/config private, and a read-only .git would break the
 // main worktree's HEAD/index writes.
 func registerSharedPlainGitMounts(registerMount func(string, string, bool, bool), config RunConfig) error {

@@ -2852,7 +2852,9 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 		// cannot change what this host git invocation does. HostCloneGitArgs (the
 		// hardened path) already includes exactly these base pins (hostGitArgs ==
 		// util.HostGitArgs) plus the clone transport/redirect extras, so the base
-		// pins are present on every clone path; neither path duplicates a -c key.
+		// pins are present on every clone path. The hardened path intentionally
+		// repeats protocol.file.allow, overriding the base =user with =never (the
+		// last -c wins), so file:// transport is fully denied on that path.
 		args = append(args, util.HostGitArgs()...)
 	}
 	args = append(args, "clone")

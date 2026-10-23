@@ -140,8 +140,8 @@ func TestBuildCommonRunArgs_LinkedWorktreeProjectPointerNotWritable(t *testing.T
 				Workspace:    ws,
 				// Both layouts (the in-repo worktree and the registered
 				// outside-root worktree) now bind a per-agent private
-				// .git/config on docker; seed its source so the start is not
-				// refused for the reason under test.
+				// .git/config on docker; seed its source so a missing config
+				// source does not refuse the start and mask the layout under test.
 				PrivateGitConfigSource: seedTestPrivateGitConfig(t),
 			})
 			if err != nil {

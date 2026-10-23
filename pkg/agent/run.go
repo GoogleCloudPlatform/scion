@@ -2398,11 +2398,13 @@ authDone:
 	// For git-backed worktree / shared-plain / fallback
 	// layouts on the bind-mount runtimes (docker/podman/apple), seed a per-agent
 	// private copy of the repository's .git/config in the agent's state dir, for
-	// the runtime to bind read-write over the container's .git/config so in-container
-	// git stays usable without writes reaching the host or siblings. Fail closed:
-	// a seeding error refuses the start (the runtime also refuses if the source is
-	// missing or unsafe). The Kubernetes/NFS runtimes seed on the export instead
-	// (not here); clone-per-agent and empty-per-agent have no shared .git to protect.
+	// the runtime to bind read-only over the container's .git/config so in-container
+	// git reads a credential-stripped config without writes reaching the host or
+	// siblings. Fail closed: a seeding error refuses the start (the runtime also
+	// refuses if the source is missing or unsafe). Kubernetes has no per-agent
+	// private config yet; its shared-repo shapes are refused at start
+	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
+	// shared .git to protect.
 	privateGitConfigSource := ""
 	switch m.Runtime.Name() {
 	case "docker", "podman", "container", "apple-container":
@@ -2410,7 +2412,9 @@ authDone:
 			if fi, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr == nil && fi.IsDir() {
 				// The agent's own branch (worktree-per-agent uses the slugified
 				// agent name when no explicit branch) is pre-seeded as the upstream
-				// so push/push -u exit 0 without writing the read-only config.
+				// so a bare `git push` finds the upstream already set and exits 0
+				// without a config write; `git push -u` also exits 0 but cannot
+				// persist the upstream and prints an error.
 				seedBranch := opts.Branch
 				if seedBranch == "" {
 					seedBranch = api.Slugify(opts.Name)

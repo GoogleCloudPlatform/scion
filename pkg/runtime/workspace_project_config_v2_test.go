@@ -84,8 +84,8 @@ func bindTargetIndex(binds []layoutBind, target string) int {
 // checkout — and the worktree's own project .scion is bound read-only. The
 // negative assertions pin that nothing above the project root is exposed: no
 // mount targets /repo-root (other than /repo-root/.git) and no mount source is
-// the main checkout root or its .scion. (A rw-/repo-root mutant must turn these
-// red.)
+// the main checkout root or its .scion. (A regression that made /repo-root
+// read-write would turn these red.)
 func TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig(t *testing.T) {
 	for _, rt := range []string{"docker", appleContainerRuntimeName} {
 		t.Run(rt, func(t *testing.T) {
@@ -353,9 +353,9 @@ func TestBuildCommonRunArgs_ConfigOnlyNestedProjectConfigReadOnly(t *testing.T) 
 	}
 }
 
-// TestBuildCommonRunArgs_TemplateWorkspacePlainSubdirRefused covers behaviour
-// A template-supplied /workspace pointing at a plain subdirectory of a
-// repository (not a registered worktree) is refused. There is no broker-recorded
+// TestBuildCommonRunArgs_TemplateWorkspacePlainSubdirRefused covers the refusal of
+// a template-supplied /workspace pointing at a plain subdirectory of a
+// repository (not a registered worktree). There is no broker-recorded
 // worktree admin for a plain subdirectory, so no per-agent private .git surface
 // can be built, and the start fails closed rather than mounting the enclosing
 // repository or leaving the project config writable.
@@ -413,8 +413,8 @@ func registeredOutsideWorktree(t *testing.T) (main, ws string) {
 
 // assertNoRepoRootExposure pins the negative property: no mount targets
 // /repo-root (other than /repo-root/.git) and no mount source is the main
-// checkout root or its .scion, and no tmpfs lands under /repo-root. A
-// rw-/repo-root mutant turns this red.
+// checkout root or its .scion, and no tmpfs lands under /repo-root. A regression
+// that made /repo-root read-write would turn this red.
 func assertNoRepoRootExposure(t *testing.T, cfg RunConfig, main string) {
 	t.Helper()
 	args, err := buildCommonRunArgs(cfg)

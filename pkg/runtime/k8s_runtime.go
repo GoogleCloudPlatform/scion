@@ -4831,7 +4831,7 @@ const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects 
 	"the project's shared checkout on the workspace storage."
 
 // k8sGitAdminReadOnlyMounts returns the read-only subPath volumeMounts that
-// narrow the shared .git admin surface for a worktree-per-agent agent container
+// narrow the shared .git admin surface for a worktree-per-agent agent container.
 // The shared .git subPath itself is mounted read-write
 // elsewhere (objects and refs must be writable for commit); these layer
 // read-only over hooks/, info/, objects/info/ and worktrees/, with the agent's
@@ -4861,9 +4861,9 @@ func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.Volu
 	if ownWorktreeName != "" {
 		// The agent's own worktree admin dir is read-write on top of the
 		// read-only worktrees/ dir (its gitdir/config.worktree are not singled
-		// out read-only here — unlike the bind-mount runtimes — because k8s
-		// cannot bind single files; the shared-config follow-up addresses the
-		// remaining per-worktree config write).
+		// out read-only here — unlike the bind-mount runtimes; the shared-repo
+		// shape is refused at start and the shared-config follow-up adds the
+		// per-worktree file pins).
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      "workspace",
 			MountPath: path.Join(base, "worktrees", ownWorktreeName),

@@ -238,8 +238,7 @@ func TestWorktreeAdmin_IgnoresAgentWritableGitfile(t *testing.T) {
 	}
 }
 
-// checkPrivateGitConfigSource refuses a hard-linked source
-// (link count > 1) — disabling the check previously survived every test.
+// checkPrivateGitConfigSource refuses a hard-linked source (link count > 1).
 func TestCheckPrivateGitConfigSource_RefusesHardLink(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "config")
@@ -255,11 +254,16 @@ func TestCheckPrivateGitConfigSource_RefusesHardLink(t *testing.T) {
 	}
 }
 
-// Regression for the overlay-selection bypass: the workspace .git gitfile is
-// agent-writable, so an agent could replace it with a symlink to a sibling's
-// gitfile. If the agent's own back-link is stale, only the sibling would then
-// resolve to the (symlink-followed) target. The resolver must refuse a
-// non-regular <workspace>/.git rather than let a sibling admin dir be selected.
+// Pins the os.Lstat regular-file guard in trustedWorktreeAdminName. The workspace
+// .git gitfile is agent-writable, so an agent could replace it with a symlink. The
+// resolver's lexical canonicalisation (canonicalGitfilePath names the final ".git"
+// component without following it) already stops a symlink from *redirecting* the
+// match to a sibling admin dir. This test exercises the SECOND barrier: the agent's
+// OWN back-link legitimately matches <ws>/.git, so without the regular-file guard a
+// symlinked <ws>/.git would still select the own admin dir; the guard refuses a
+// non-regular <ws>/.git outright (fail closed). Disabling the os.Lstat ... IsRegular
+// guard makes this test return "agent-1"/true instead of refusing — i.e. the guard,
+// not the lexical step, is what fails this fixture closed.
 func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
 	repoRoot := t.TempDir()
 	gitDir := filepath.Join(repoRoot, ".git")
@@ -270,8 +274,6 @@ func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
 	// A legitimate sibling worktree admin whose back-link points at its own gitfile.
 	setupWorktreeAdmin(t, repoRoot, "other", siblingWs)
 
-	// The agent's own workspace, with a STALE own back-link (points elsewhere),
-	// and a <ws>/.git that is a symlink to the sibling's gitfile.
 	ws := filepath.Join(repoRoot, "wt")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -280,10 +282,12 @@ func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
 	if err := os.MkdirAll(ownAdmin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Stale: points at a path that no longer exists / is not this workspace.
-	if err := os.WriteFile(filepath.Join(ownAdmin, "gitdir"), []byte(filepath.Join(repoRoot, "gone", ".git")+"\n"), 0o644); err != nil {
+	// The own back-link MATCHES <ws>/.git (lexically), so the regular-file guard is
+	// the only thing standing between a symlinked <ws>/.git and selecting this admin.
+	if err := os.WriteFile(filepath.Join(ownAdmin, "gitdir"), []byte(filepath.Join(ws, ".git")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The agent replaces <ws>/.git with a symlink (here, at the sibling's gitfile).
 	if err := os.Symlink(filepath.Join(siblingWs, ".git"), filepath.Join(ws, ".git")); err != nil {
 		t.Fatal(err)
 	}
@@ -395,9 +399,9 @@ func TestBindReadOnlyCreateFirstFile_FailsClosed(t *testing.T) {
 // and push, but it CANNOT delete a branch (that needs packed-refs.lock in the
 // read-only root, which fails cleanly) or create a new root-level file such as
 // .git/commondir. This simulates ONLY
-// the read-only .git root — the real container additionally binds hooks/, info/,
-// objects/info and the private .git/config read-only, which are not simulated
-// here. It exercises the worktree layout; the outside-root fallback mounts a
+// the read-only .git root — in the real container hooks/ and info/ are read-only by
+// inheritance from that root (not separate binds), objects/info is pinned read-only,
+// and the private .git/config is bound read-only; none of that is simulated here. It exercises the worktree layout; the outside-root fallback mounts a
 // registered worktree of the same common .git, so its git behaviour is identical.
 func TestReadOnlyGitRoot_Functional(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -696,8 +700,8 @@ func TestReadOnlyGitRoot_RrCacheOnlyIfExists(t *testing.T) {
 
 	// A symlink at .git/rr-cache is refused (fail closed via Lstat): following it
 	// would bind a directory outside the repository read-write into the agent.
-	// Reverting ensureOverlayDir to os.Stat (which follows the link) makes this
-	// case bind the link target instead of refusing — the os.Stat-revert mutant.
+	// Reverting ensureOverlayDir to os.Stat (which follows the link) would make this
+	// case bind the link target instead of refusing.
 	repoRoot3, workspace3 := setupHubManagedBaseRepo(t, "agent-1")
 	outside := filepath.Join(t.TempDir(), "outside")
 	if err := os.MkdirAll(outside, 0o755); err != nil {

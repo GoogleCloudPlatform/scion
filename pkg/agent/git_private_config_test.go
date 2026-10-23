@@ -146,11 +146,12 @@ func TestSeedPrivateGitConfig_MissingBaseSeedsDefaultsOnly(t *testing.T) {
 
 // Under the agent's real read-only .git root, the pre-seed keeps normal pushes
 // working:
-//   - a BARE `git push` exits 0 because the upstream is pre-seeded; without the
-//     seed a bare push exits 128, "no upstream branch" — this is what the seed buys.
-//   - `git push -u origin <branch>` exits 0 and reaches the remote regardless of
-//     the seed, and cannot persist the upstream under the read-only .git (git
+//   - `git push -u origin <branch>` (run first, remote empty) exits 0 and reaches
+//     the remote — it creates the branch there, pinned by comparing the remote ref
+//     to local HEAD — and cannot persist the upstream under the read-only .git (git
 //     reports an error locking the config), but the push still succeeds.
+//   - a BARE `git push` then exits 0 because the upstream is pre-seeded; without the
+//     seed a bare push exits 128, "no upstream branch" — this is what the seed buys.
 //
 // The repo config is left unchanged because the write is blocked, not skipped.
 func TestSeedPrivateGitConfig_PushUnderReadOnlyGit(t *testing.T) {
@@ -214,25 +215,35 @@ func TestSeedPrivateGitConfig_PushUnderReadOnlyGit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(gitRoot, 0o755) })
 
-	// The seed's actual effect: a BARE `git push` exits 0 under the read-only .git
-	// because the upstream is already set. Without the seed this is what fails, so
-	// this is the assertion that exercises the seed.
+	// `git push -u origin <branch>` under the read-only .git exits 0 and REACHES the
+	// remote (it creates the branch there), even though it cannot persist the upstream
+	// config. Run it FIRST, while the remote has no agent-x, so its remote effect is
+	// pinned (a new commit cannot be made under the read-only root to re-test it later,
+	// and a push -u against an already-present branch would only say "up-to-date").
+	lh, lherr := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if lherr != nil {
+		t.Fatalf("rev-parse HEAD: %v", lherr)
+	}
+	localHead := strings.TrimSpace(string(lh))
+	pushU := exec.Command("git", "push", "-u", "origin", "agent-x")
+	pushU.Dir = repo
+	if out, err := pushU.CombinedOutput(); err != nil {
+		t.Fatalf("git push -u should exit 0 under the read-only .git, got: %v\n%s", err, out)
+	}
+	rh, rherr := exec.Command("git", "-C", bare, "rev-parse", "--verify", "refs/heads/agent-x").CombinedOutput()
+	if rherr != nil {
+		t.Fatalf("git push -u did not create the branch on the remote: %v\n%s", rherr, rh)
+	}
+	if remoteHead := strings.TrimSpace(string(rh)); remoteHead != localHead {
+		t.Errorf("git push -u did not reach the remote: remote agent-x = %q, want local HEAD %q", remoteHead, localHead)
+	}
+	// The seed's effect: a BARE `git push` (no args) now exits 0 because the upstream
+	// is pre-seeded. Without the seed a bare push fails with "no upstream branch"
+	// (exit 128) even when the remote is up to date — so this exercises the seed.
 	barePush := exec.Command("git", "push")
 	barePush.Dir = repo
 	if out, err := barePush.CombinedOutput(); err != nil {
 		t.Fatalf("bare `git push` should exit 0 under the read-only .git with the upstream pre-seeded, got: %v\n%s", err, out)
-	}
-	// `git push -u` exits 0 and reaches the remote regardless of the seed; it just
-	// cannot persist the upstream here.
-	cmd := exec.Command("git", "push", "-u", "origin", "agent-x")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git push -u should exit 0 under the read-only .git, got: %v\n%s", err, out)
-	}
-	// The push reached the remote.
-	ls := exec.Command("git", "-C", bare, "rev-parse", "--verify", "refs/heads/agent-x")
-	if lsout, lserr := ls.CombinedOutput(); lserr != nil {
-		t.Fatalf("push did not create the branch on the remote: %v\n%s", lserr, lsout)
 	}
 	// The config was not persisted (the read-only root blocked the write).
 	after, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))

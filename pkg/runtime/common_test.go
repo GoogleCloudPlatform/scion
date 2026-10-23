@@ -1380,7 +1380,7 @@ func setupWorktreeAdmin(t *testing.T, repoRoot, adminName, workspace string) {
 // seedTestPrivateGitConfig writes a broker-owned, regular private-config file in
 // a temp dir and returns its path, for use as RunConfig.PrivateGitConfigSource in
 // worktree/shared-plain/fallback tests. Without it buildCommonRunArgs
-// refuses those layouts on the bind-mount runtimes.
+// refuses those layouts on docker/podman.
 func seedTestPrivateGitConfig(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "private-config")
@@ -1493,8 +1493,9 @@ func TestWorktreeGitMounts_AppliesToLinkedProject(t *testing.T) {
 }
 
 func TestWorktreeGitMounts_AppliesToPodman(t *testing.T) {
-	// Podman gets the same read-only-root layout as docker (read-only .git root,
-	// read-write objects/refs/logs overlays, private config over .git/config).
+	// Podman gets the same read-only-root layout as docker (read-only .git root +
+	// private config over .git/config; the rw objects/refs/logs overlays are
+	// asserted in TestReadOnlyGitRoot_WorktreeLayout_BoundedRwOverlays).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	priv := seedTestPrivateGitConfig(t)
 	args, err := buildCommonRunArgs(RunConfig{
@@ -1733,7 +1734,7 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 // directory name for that worktree (the last path element of the gitdir
 // pointer in <workspace>/.git) does not have to match agentName — `git
 // worktree add` appends a numeric suffix on a name collision, so
-// resolveWorktreeAdminName reads the real name from that gitfile rather than
+// trustedWorktreeAdminName reads the real name from that gitfile rather than
 // assuming filepath.Base(workspace). This test builds exactly that gitfile
 // (naming admin dir "workspace1", distinct from the agent name "agent-1")
 // and confirms the back-link mount follows the resolved name, not the agent
@@ -1756,7 +1757,7 @@ func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
 	}
 
 	// The admin dir's resolved name ("workspace1") intentionally differs from
-	// the agent name ("agent-1") — this is what forces resolveWorktreeAdminName
+	// the agent name ("agent-1") — this is what forces trustedWorktreeAdminName
 	// to actually read the gitfile rather than fall back to filepath.Base.
 	adminDir := filepath.Join(gitDir, "worktrees", "workspace1")
 	if err := os.MkdirAll(adminDir, 0755); err != nil {

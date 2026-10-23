@@ -110,13 +110,15 @@ type RunConfig struct {
 	// read-only, over the container's .git/config, so in-container git reads a
 	// credential-stripped config and never writes the host repository's or a
 	// sibling agent's config. The copy is pre-seeded with the agent's own branch
-	// upstream and push.autoSetupRemote so `git push` / `git push -u` succeed
-	// without a config write. Immediately before the bind the source is
-	// re-checked (regular file, not a symlink, link count 1, broker-owned); a
-	// missing or unsafe source refuses the start. The broker never reads this
-	// file back as configuration. Empty when the layout does not use a private
-	// config (clone-per-agent, empty-per-agent, or the Apple read-only-.git
-	// layout, which cannot bind single files).
+	// upstream and push.autoSetupRemote so a bare `git push` finds the upstream
+	// already set and exits 0 without a config write; `git push -u` also exits 0
+	// but cannot persist the upstream and prints an error. Immediately before the
+	// bind the source is re-checked (regular file, not a symlink, link count 1,
+	// broker-owned); a missing or unsafe source refuses the start. The broker
+	// never reads this file back as configuration. Empty when the layout does not
+	// use a private config (clone-per-agent, empty-per-agent). On Apple it is
+	// seeded but not bound (the Apple read-only-.git layout cannot bind single
+	// files).
 	PrivateGitConfigSource string
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)

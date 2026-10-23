@@ -172,8 +172,10 @@ func TestNarrowSources_RefuseSymlink(t *testing.T) {
 		{"worktrees", "worktrees", worktrees},
 		{"worktrees/agent-1", filepath.Join("worktrees", "agent-1"), worktrees},
 		{"worktrees/agent-1/gitdir", filepath.Join("worktrees", "agent-1", "gitdir"), worktrees},
+		{"worktrees/agent-1/commondir", filepath.Join("worktrees", "agent-1", "commondir"), worktrees},
 		{"worktrees/agent-1/config.worktree", filepath.Join("worktrees", "agent-1", "config.worktree"), worktrees},
 		{"modules/sub/hooks", filepath.Join("modules", "sub", "hooks"), modules},
+		{"modules/sub/info", filepath.Join("modules", "sub", "info"), modules},
 		{"modules/sub/config", filepath.Join("modules", "sub", "config"), modules},
 	}
 	for _, tc := range cases {
@@ -298,8 +300,8 @@ func TestCheckedBindSource_CreateWindowComponentSwapRefused(t *testing.T) {
 // It drives registerReadOnlyBaseGitMounts directly with the broker-trusted name
 // "agent-1": routing through buildCommonRunArgs would mask the gitdir case, because a
 // symlinked worktrees/agent-1/gitdir makes trustedWorktreeAdminName fail to resolve
-// the admin name, so the layout is never reached. The committed worktrees/agent-1
-// cases in TestNarrowSources_* go through narrowWorktreesDir, whose own-worktree
+// the admin name, so the layout is never reached. The worktrees/agent-1 cases in
+// TestNarrowSources_* go through narrowWorktreesDir, whose own-worktree
 // branch this layout does not use.
 func TestReadOnlyBaseWorktreeFiles_RefuseSymlink(t *testing.T) {
 	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {

@@ -25,8 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The host-side provisioning path (`sciontool provision`, i.e. ProvisionShared
-// -> runGitClone) clones the repository for a shared checkout. This guards that
+// The provisioning path ProvisionShared -> runGitClone (called host-side by the
+// broker, and by `sciontool provision` in the k8s init container) clones the
+// repository for a shared checkout. This guards that
 // that provisioning clone goes through the hardened path, so a
 // future change that bypasses it (dropping HostGitEnv, or the LFS skip-smudge) is
 // caught:
