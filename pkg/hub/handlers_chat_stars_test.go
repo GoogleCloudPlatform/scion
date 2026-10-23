@@ -712,14 +712,19 @@ func TestChatStars_StateUnresolvedConversation(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), ErrCodeConversationNotResolved)
 }
 
-// projectGoneAfterFirstLookup answers GetProject normally once, then as
-// deleted: a project removed after the read check of a request.
+// projectGoneAfterFirstLookup, once its switch is armed, answers GetProject
+// normally once, then as deleted: a project removed after the read check of
+// a request. Until then it delegates and counts nothing.
 type projectGoneAfterFirstLookup struct {
 	store.Store
+	fault *storeFaultSwitch
 	calls int
 }
 
 func (s *projectGoneAfterFirstLookup) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if !s.fault.Active() {
+		return s.Store.GetProject(ctx, id)
+	}
 	s.calls++
 	if s.calls > 1 {
 		return nil, store.ErrNotFound
@@ -732,14 +737,17 @@ func (s *projectGoneAfterFirstLookup) GetProject(ctx context.Context, id string)
 // deleted after that check does not turn into a 500.
 func TestChatStars_HydrationReusesTheAuthorizedProject(t *testing.T) {
 	f := newStarFixture(t, true)
+	// Installed before the first request; the fixture's setup writes through
+	// the raw store only, so nothing has read the server's store yet.
+	spy, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *projectGoneAfterFirstLookup {
+		return &projectGoneAfterFirstLookup{Store: inner, fault: sw}
+	})
 	msg := f.threadMsg(t, f.topicA, f.projA, "hydrate", time.Now())
 	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
-	orig := f.srv.store
-	t.Cleanup(func() { f.srv.store = orig })
+	fault.Arm()
 
 	for _, path := range []string{starListPath(f.topicA), starPath(msg)} {
-		spy := &projectGoneAfterFirstLookup{Store: orig}
-		f.srv.store = spy
+		spy.calls = 0
 		rec := f.session(t, f.admin, http.MethodGet, path, nil)
 		assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "Inbox A", path)
