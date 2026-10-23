@@ -220,7 +220,7 @@ func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
 	}
 	if env.token == "" {
-		return nil, tunnelclient.Errorf(tunnelclient.ExitCredential, "no usable credential for hub %s; run scion hub auth login", normalized)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitCredential, "no usable credential for hub %s; run scion hub auth login --hub %s", normalized, normalized)
 	}
 	conn, err := newSSHHubConn(normalized, env.token)
 	if err != nil {

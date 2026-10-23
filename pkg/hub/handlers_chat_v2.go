@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1279,6 +1280,12 @@ func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID 
 	staging := s.resolveAttachmentStaging(ctx, projectID)
 	for _, ref := range attachmentRefs {
 		if ref.artifact {
+			// While the experiment is on, an attachment stored as an artifact
+			// reaches the agent by delivery into its home, not through the
+			// project's scratchpad (ptone/scion#4596).
+			if s.experimentEnabled(experiments.AttachmentArtifacts) {
+				continue
+			}
 			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
 			if err != nil {
 				s.messageLog.Error("Failed to stage attachment for agent",
@@ -1886,7 +1893,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
+	// The bound ones are delivered into the agent's home (ptone/scion#4596).
+	msg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, attachmentRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -1998,6 +2007,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Additive model: the primary always gets IsMention=false (type:"message").
 	// When multiple agents are engaged, CoAddressees lists all of them so
 	// the primary's envelope includes a "to" field naming the full group.
+	// The attachments delivered with this message are planned for the
+	// primary once, before any render (ptone/scion#4596).
+	s.applyAttachmentPlan(ctx, primaryAgent, msg)
 	if s.writeDenyEnabled() {
 		renderInput := messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -2005,6 +2017,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
 			ReplyToID:  replyToID,
+			Plan:       msg.AttachmentPlan,
 		}
 		if len(agents) > 1 {
 			renderInput.CoAddressees = groupCoAddressees(agents)
@@ -2169,6 +2182,17 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				}
 				mentionConvResult = convResult
 			}
+			// The primary's attachments stored as artifacts go with this copy
+			// into the mentioned agent's home (ptone/scion#4596), which is
+			// recorded as an addressee of the primary for them: after the
+			// per-mention authorization and the conversation resolution,
+			// before the copy is stored and dispatched. A deferred copy is
+			// never dispatched, so it records nothing.
+			mentionAddressee := ""
+			if deliveries := attachmentDeliveries(storeMsg.ID, attachmentRefs); len(deliveries) > 0 && !mentionDeferred {
+				mentionAddressee = s.recordAttachmentAddressee(ctx, storeMsg.ID, mentionAgent.ID, "body-mention")
+				mentionMsg.AttachmentDeliveries = deliveries
+			}
 			mentionPersisted := true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
@@ -2190,6 +2214,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
 			// and the same CoAddressees as the primary, so every agent sees the
 			// identical "to" list naming the full group.
+			s.applyAttachmentPlan(ctx, mentionAgent, mentionMsg)
 			if s.writeDenyEnabled() && mentionPersisted {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
@@ -2199,6 +2224,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					IsMention:    true,
 					CoAddressees: groupCoAddressees(agents),
 					ReplyToID:    replyToID,
+					Plan:         mentionMsg.AttachmentPlan,
 				})
 			}
 
@@ -2227,6 +2253,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// A held secondary (ptone/scion#3433) keeps its row but is
 			// never dispatched to; a lookup fault is treated the same.
 			if held, holdErr := s.agentHeld(ctx, mentionAgent.ID); holdErr != nil || held {
+				s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, errors.New("agent unreachable"))
 				if mentionPersisted {
 					_ = s.markFailed(ctx, mentionStoreMsg.ID, "Agent unreachable (suspended)")
 				}
@@ -2251,6 +2278,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
 				if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
+					s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, err)
 					mentionDispatchOK = false
 					// Like the primary: a synchronous dispatch failure must
 					// not leave the row "dispatched" or the client told
@@ -2271,6 +2299,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			}
 			if mentionDispatchOK {
 				dispatchedAgents = append(dispatchedAgents, mentionAgent)
+				s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, nil)
 			}
 		}
 	}
@@ -2291,7 +2320,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		Type:                storeMsg.Type,
 		CreatedAt:           now,
 		Mentions:            mentionResults,
-		Attachments:         attachmentRefs,
+		Attachments:         s.filterReadableAttachments(ctx, storeMsg.ID, attachmentRefs),
 		DispatchState:       storeMsg.DispatchState,
 		DispatchFailureCode: dispatchFailureCode,
 		ArtifactWarning:     artifactWarning,
@@ -2498,7 +2527,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
-	attachmentRefs = s.bindChatAttachments(ctx, user, storeMsg.ID, attachmentRefs)
+	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
 
 	// W7: Link attachments to the persisted message.
 	if wcs != nil && len(attachmentRefs) > 0 {
@@ -2561,7 +2590,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		SenderID:    storeMsg.SenderID,
 		Type:        storeMsg.Type,
 		CreatedAt:   now,
-		Attachments: attachmentRefs,
+		Attachments: s.filterReadableAttachments(ctx, storeMsg.ID, attachmentRefs),
 	}
 	if storeMsg.DispatchState == store.MessageDispatchNoRecipient {
 		resp.DispatchState = storeMsg.DispatchState
@@ -5883,13 +5912,15 @@ type chatMemberEntry struct {
 // ---------------------------------------------------------------------------
 
 // handleChatAttachments dispatches /api/v1/chat/attachments.
-// POST = upload, GET with /{id} = download.
+// POST = upload, GET = the upload capability probe (ptone/scion#4596).
 func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		s.handleAttachmentUpload(w, r)
+	case http.MethodGet:
+		s.handleAttachmentProbe(w, r)
 	default:
-		MethodNotAllowed(w, http.MethodPost)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -5913,6 +5944,12 @@ func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request
 
 // handleAttachmentUpload handles POST /api/v1/chat/attachments (multipart form).
 func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	// An agent first, before the nil-user refusal and every check of a user
+	// upload (ptone/scion#4596).
+	if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
+		s.handleAgentAttachmentUpload(w, r)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
@@ -5939,7 +5976,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Decided once per request: while hub.attachment_artifacts is on (and
-	// the artifact service is ready and the caller is a session), each file
+	// the artifact service is ready and the caller is a session or a user
+	// access token, attachmentWriterKind), each file
 	// is stored as an upload in the artifact service, with the artifact file
 	// size limit.
 	toArtifacts := s.attachmentUploadsToArtifacts(ctx)
@@ -5951,7 +5989,11 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// form fields) applies to the whole multipart body. Parts above
 	// uploadFormMemory are spooled to temporary files, not held in memory.
 	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
-	if err := r.ParseMultipartForm(uploadFormMemory); err != nil {
+	// The form is removed on every return: ParseMultipartForm can spool
+	// parts and still answer an error (from the query string).
+	cleanup, err := parseMultipartUpload(r, uploadFormMemory)
+	defer cleanup()
+	if err != nil {
 		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}

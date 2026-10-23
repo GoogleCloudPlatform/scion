@@ -952,6 +952,13 @@ type listenGapPublisher struct {
 // of its value.
 func portProxyCounter(t *testing.T, s *Server) func() int64 {
 	t.Helper()
+	return portProxyCounterNamed(t, s, "scion.hub.port_proxy.upstream_timeout")
+}
+
+// portProxyCounterNamed is portProxyCounter for the port proxy counter
+// called name.
+func portProxyCounterNamed(t *testing.T, s *Server, name string) func() int64 {
+	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
@@ -964,12 +971,13 @@ func portProxyCounter(t *testing.T, s *Server) func() int64 {
 		var total int64
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				if m.Name != "scion.hub.port_proxy.upstream_timeout" {
+				if m.Name != name {
 					continue
 				}
 				sum, ok := m.Data.(metricdata.Sum[int64])
 				require.True(t, ok, "counter data %T", m.Data)
 				for _, dp := range sum.DataPoints {
+					require.Zero(t, dp.Attributes.Len(), "%s carries no attributes", name)
 					total += dp.Value
 				}
 			}

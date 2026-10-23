@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -155,18 +154,22 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 	before, err := s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 
-	// An agent whose row is not stored: its write ceiling cannot be
-	// computed, so it cannot be recorded as an authority source.
-	unrecordable := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: tid("sched-typechange-unstored-agent")},
-		ProjectID: projectID,
-		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate},
-	}}
+	// A local development user other than the recognized one, holding the
+	// project owner role: it may create agents, but its ceiling cannot be
+	// recorded as an authority source. Agent callers do not edit schedule
+	// definitions, so the PATCH caller is a user.
+	devID := tid("sched-typechange-dev")
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{
+		ID: devID, Email: "devtypechange@example.com", DisplayName: "Dev", Role: "member", Status: "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(context.Background(), projectID, devID))
+	unrecordable := &DevUser{id: devID, email: "devtypechange@example.com", displayName: "Dev"}
 
 	rec = doAuthoredScheduleRequest(t, srv, unrecordable, projectID, created.ID, http.MethodPatch,
 		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"ghost-worker"}`})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+	assert.Contains(t, rec.Body.String(), "cannot authorize scheduled work")
 	after, err := s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "message", after.EventType)
@@ -178,6 +181,7 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 		UpdateScheduleRequest{Payload: `{"agentName":"ghost-target-2","message":"hi"}`})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+	assert.Contains(t, rec.Body.String(), "cannot authorize scheduled work")
 	after, err = s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, before.Payload, after.Payload)

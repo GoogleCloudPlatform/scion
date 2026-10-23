@@ -24,7 +24,7 @@ import (
 )
 
 // TestPodExec_TargetsAgentContainer is a regression test for the bug where
-// syncToPod and syncFromPod omitted the Container field from
+// syncToPod (and a since-removed copy from the pod) omitted the Container field from
 // PodExecOptions. When a Kubernetes admission controller injected an
 // additional container (e.g., Istio sidecar, Dynatrace OneAgent), the API
 // server rejected the exec request because it could no longer default to
@@ -47,15 +47,6 @@ func TestPodExec_TargetsAgentContainer(t *testing.T) {
 				Container: agentContainerName,
 				Command:   []string{"sh", "-c", "tar -xz"},
 				Stdin:     true,
-				Stdout:    true,
-				Stderr:    true,
-			},
-		},
-		{
-			name: "syncFromPod",
-			opts: &corev1.PodExecOptions{
-				Container: agentContainerName,
-				Command:   []string{"sh", "-c", "tar -cz"},
 				Stdout:    true,
 				Stderr:    true,
 			},

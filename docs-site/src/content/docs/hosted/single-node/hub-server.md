@@ -214,6 +214,8 @@ Administrators can trigger critical infrastructure operations directly from the 
 
 The panel also lists one-time data migrations, with **Run** for a pending migration and **Retry** for a failed one. The timezone-related ones, `utc-timestamp-normalize` and `applied-config-tz-cleanup`, are described in [Times and timezones: Operator steps](/scion/reference/times-and-timezones/#operator-steps). On SQLite, the automatic start-up repair of unreadable timestamp rows, and the Hub's run of `utc-timestamp-normalize` at start (in the background, while the Hub serves requests), first write a one-time snapshot next to the database file (`<db>.pre-utc-timestamp-normalize-<time>.bak`); both use the same file, and a later run reuses it. Requests wait while the snapshot is copied. It needs about the database's size in free disk space and contains secrets, so store it like the database. Start-up removes these snapshots, and the `<db>.pre-fk-reconcile-<id>-<time>.bak` snapshot taken before the foreign-key repair, 7 days after their last use; a snapshot that a repair still needs is kept. To keep one longer, copy it elsewhere. A dry run of `utc-timestamp-normalize` (`{"params":{"dryRun":true}}`) reports without writing.
 
+`group-participant-mode-cleanup` removes legacy agent participant rows from group conversations; see [Agents in Group Conversations](/scion/reference/messaging-authorization/#agents-in-group-conversations). It only reports unless run through the API with `{"params":{"apply":"true"}}` (the string `"true"`), which the panel's **Run** does not send; a panel run without dry run reports what it would remove and is still marked completed; the migration can still be run with apply through the API.
+
 ### Operation Execution & History
 
 All maintenance tasks executed through the panel are tracked. The maintenance interface provides:
@@ -227,12 +229,6 @@ To guarantee server stability, the Hub enforces a strict **concurrency guard** o
 - **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
 - **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
-
-### WebDAV Synchronization
-
-The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked projects.
-- WebDAV synchronization utilizes checksum comparisons for reliable file transfers.
-- A local storage HTTP proxy facilitates efficient remote file synchronization.
 
 ## Persistence
 

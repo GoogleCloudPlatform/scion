@@ -1272,3 +1272,35 @@ func TestDeduplicateByDestName_AsAlias(t *testing.T) {
 		t.Errorf("expected 0 collisions with alias, got %d", len(collisions))
 	}
 }
+
+// TestDownloadSkillFile_BodyReadErrorIsDownloadFailure checks that a failure
+// while reading the response body is reported as a download failure, not as
+// a local install failure (ptone/scion#5033).
+func TestDownloadSkillFile_BodyReadErrorIsDownloadFailure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Promise more bytes than are sent: the client's body read ends
+		// with an unexpected EOF when the handler returns.
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte("partial"))
+	}))
+	defer srv.Close()
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
+	dest := filepath.Join(t.TempDir(), "SKILL.md")
+	err := downloadSkillFile(context.Background(), srv.URL+"/signed/file?sig=x", dest, defaultMaxFileSize, gitHubCredential{})
+	if err == nil {
+		t.Fatal("expected an error for a truncated response body")
+	}
+	if got, want := publicInstallReason(err), "download failed while reading the response"; got != want {
+		t.Errorf("public reason = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "failed to write") {
+		t.Errorf("body read error reported as a write failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "sig=x") || strings.Contains(err.Error(), "/signed/") {
+		t.Errorf("error quotes the download URL: %v", err)
+	}
+}
