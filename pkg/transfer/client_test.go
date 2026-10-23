@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -340,5 +341,14 @@ func TestClient_UploadFileWithMethod_DefaultMethod(t *testing.T) {
 
 	if receivedMethod != "PUT" {
 		t.Errorf("expected default PUT method, got %s", receivedMethod)
+	}
+}
+
+func TestClient_UploadFiles_NilRoot(t *testing.T) {
+	files := []FileInfo{{Path: "a.txt", Size: 1, Hash: HashBytes([]byte("a"))}}
+	urls := []UploadURLInfo{{Path: "a.txt", URL: "file://" + filepath.Join(t.TempDir(), "a.txt"), Method: "PUT"}}
+	err := NewClient(nil).UploadFiles(context.Background(), nil, files, urls, nil)
+	if err == nil || !strings.Contains(err.Error(), "no root") {
+		t.Fatalf("err = %v, want a no-root error", err)
 	}
 }

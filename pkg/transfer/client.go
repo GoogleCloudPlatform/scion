@@ -17,6 +17,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -181,6 +182,9 @@ func (c *Client) DownloadToFile(ctx context.Context, signedURL, destPath string)
 // stops the whole upload.
 // If progress is not nil, it is called after each file is uploaded.
 func (c *Client) UploadFiles(ctx context.Context, root *os.Root, files []FileInfo, urls []UploadURLInfo, progress ProgressCallback) error {
+	if root == nil {
+		return errors.New("upload files: no root opened at the collected directory")
+	}
 	// Build URL map for quick lookup
 	urlMap := make(map[string]UploadURLInfo)
 	for _, u := range urls {

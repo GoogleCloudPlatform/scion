@@ -53,7 +53,7 @@ func TestSyncToViaHub_ChangedFileIsNotUploaded(t *testing.T) {
 		},
 		"leaf link outside the root": {
 			swap: func(t *testing.T, ws, outside string) {
-				replaceWithSymlink(t, ws, "main.go", filepath.Join(outside, "secret"))
+				replaceWithSymlink(t, ws, "main.go", filepath.Join(outside, "main.go"))
 			},
 			wantErr: "no longer a regular file",
 		},
@@ -68,8 +68,8 @@ func TestSyncToViaHub_ChangedFileIsNotUploaded(t *testing.T) {
 			writeUploadTestFile(t, ws, "main.go", "main\n")
 			writeUploadTestFile(t, ws, "docs/readme.md", "readme\n")
 			// Same size as the files above, so only the content differs.
-			writeUploadTestFile(t, outside, "secret", "SECR\n")
-			writeUploadTestFile(t, outside, "readme.md", "SECRET\n")
+			writeUploadTestFile(t, outside, "main.go", "OUTS\n")
+			writeUploadTestFile(t, outside, "readme.md", "OUTSIDE\n")
 
 			var mu sync.Mutex
 			put := map[string]string{}
@@ -138,7 +138,7 @@ func TestSyncToViaHub_ChangedFileIsNotUploaded(t *testing.T) {
 				t.Error("the sync was finalized after a refused file")
 			}
 			for p, data := range put {
-				if strings.Contains(data, "SECR") || data == "MAIN\n" {
+				if strings.Contains(data, "OUTS") || data == "MAIN\n" {
 					t.Errorf("uploaded changed content for %s: %q", p, data)
 				}
 			}
