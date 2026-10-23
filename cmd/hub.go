@@ -709,7 +709,9 @@ func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint strin
 		devSent := false
 		if isLocalhostEndpoint(endpoint) {
 			opts = append(opts, hubclient.WithAutoDevAuth())
-			devSent = apiclient.ResolveDevToken() != ""
+			// getAuthInfo above reached the same development credential
+			// lookup, so its result says whether one is sent.
+			devSent = info.IsDevAuth
 		}
 		switch {
 		case devSent:
