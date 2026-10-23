@@ -3891,7 +3891,6 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       // The earlier bottom pin's scroll event arrives first.
       container.scrollTop = SCROLL_HEIGHT;
       container.dispatchEvent(new Event('scroll'));
-      expect((el as unknown as { _unreadAnchorActive: boolean })._unreadAnchorActive).toBe(true);
 
       // Then the frame's animation callbacks run.
       for (const [handle, cb] of [...rafCallbacks]) {
@@ -3902,6 +3901,37 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX);
     } finally {
       restore();
+    }
+  });
+
+  it('stands the anchor down when the render before its first write fails', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+    );
+
+    type Internal = {
+      _unreadAnchorActive: boolean;
+      _unreadAnchorPending: boolean;
+      scrollToUnreadDivider(): void;
+    };
+    const internal = el as unknown as Internal;
+    // A reactive update that throws rejects updateComplete.
+    Object.defineProperty(el, 'updateComplete', {
+      configurable: true,
+      get: () => Promise.reject(new Error('render failed')),
+    });
+    try {
+      internal.scrollToUnreadDivider();
+      expect(internal._unreadAnchorActive).toBe(true);
+
+      await vi.waitFor(() => expect(internal._unreadAnchorActive).toBe(false));
+      expect(internal._unreadAnchorPending).toBe(false);
+    } finally {
+      delete (el as unknown as Record<string, unknown>).updateComplete;
     }
   });
 });

@@ -4555,19 +4555,25 @@ export class ScionChatThread extends LitElement {
     // fires, making the two indistinguishable. A local closure variable
     // keeps each open's token fixed to the value it had when scheduled.
     const openToken = this.fetchId;
-    void this.updateComplete.then(() => {
-      // One more frame past updateComplete: images, attachments and markdown
-      // inside already-rendered rows can still change height after Lit has
-      // committed the DOM, and reading geometry too early re-introduces the
-      // jump-to-bottom-then-up flash this anchor exists to avoid.
-      this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
-        this._unreadAnchorInitialRaf = null;
-        if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
-        this._unreadAnchorPending = false;
-        this.applyUnreadAnchor();
-        this.observeUnreadAnchorLayout(openToken);
+    void this.updateComplete
+      .then(() => {
+        // One more frame past updateComplete: images, attachments and markdown
+        // inside already-rendered rows can still change height after Lit has
+        // committed the DOM, and reading geometry too early re-introduces the
+        // jump-to-bottom-then-up flash this anchor exists to avoid.
+        this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
+          this._unreadAnchorInitialRaf = null;
+          if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+          this._unreadAnchorPending = false;
+          this.applyUnreadAnchor();
+          this.observeUnreadAnchorLayout(openToken);
+        });
+      })
+      .catch(() => {
+        // A render that throws rejects updateComplete, so the first write never
+        // comes: stand the anchor down rather than leave the bottom pins off.
+        if (this.fetchId === openToken) this.deactivateUnreadAnchor();
       });
-    });
   }
 
   /**
