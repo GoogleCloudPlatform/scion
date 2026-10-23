@@ -283,6 +283,50 @@ describe('ChatStarsController', () => {
     expect(fetchState).toHaveBeenCalledTimes(1);
   });
 
+  it('never marks live a message whose state request failed', async () => {
+    let fail = true;
+    const fetchState = vi.fn(() =>
+      fail ? Promise.reject(new Error('offline')) : Promise.resolve([M1])
+    );
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    await c.load([M1]);
+    c.markLive([M1]);
+    expect(c.state(M1)).toBe('unknown');
+    fail = false;
+    await c.retryFailed();
+    expect(c.state(M1)).toBe('starred');
+  });
+
+  it('fetches a live message instead of marking it while a refresh is due', async () => {
+    const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
+    const fetchState = vi.fn(() => {
+      const d = deferred<string[]>();
+      gates.push(d);
+      return d.promise;
+    });
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    const load = c.load([M1]);
+    gates[0].resolve([]);
+    await load;
+    // Another tab starred M2 just before its message event arrived.
+    const refresh = c.invalidate();
+    c.markLive([M2]);
+    expect(c.state(M2)).toBe('unknown');
+    gates[1].resolve([]);
+    await vi.waitFor(() => expect(gates.length).toBe(3));
+    expect(fetchState.mock.calls[2][0]).toContain(M2);
+    gates[2].resolve([M2]);
+    await refresh;
+    expect(c.state(M2)).toBe('starred');
+    // Caught up again: a live message is marked without a request.
+    const M3 = mid(3);
+    c.markLive([M3]);
+    expect(c.state(M3)).toBe('unstarred');
+    expect(fetchState).toHaveBeenCalledTimes(3);
+  });
+
   it('refetches the IDs of a load that was in flight during an invalidation', async () => {
     const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
     const fetchState = vi.fn(() => {

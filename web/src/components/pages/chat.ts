@@ -6701,8 +6701,14 @@ export class ScionPageChat extends LitElement {
    */
   private async openStarredMessage(messageId: string, originKey: string): Promise<void> {
     const seq = ++this.starJumpSeq;
+    // A jump inside the open thread (search, reply preview) made while the
+    // detail request runs is newer navigation too.
+    const threadJumps = (): number => this.threadElement()?.jumpSequence ?? 0;
+    const threadJump = threadJumps();
     const superseded = (): boolean =>
-      seq !== this.starJumpSeq || (this.v2Conversation?.conversationKey ?? '') !== originKey;
+      seq !== this.starJumpSeq ||
+      (this.v2Conversation?.conversationKey ?? '') !== originKey ||
+      threadJumps() !== threadJump;
     let item;
     try {
       item = await fetchStarDetail(messageId);
@@ -6727,13 +6733,15 @@ export class ScionPageChat extends LitElement {
     this.v2SearchActive = false;
     if (item.conversationKey === this.v2Conversation?.conversationKey) {
       await this.updateComplete;
-      const thread = this.shadowRoot?.querySelector('scion-chat-thread') as
-        | import('../shared/chat/chat-thread.js').ScionChatThread
-        | null;
-      void thread?.scrollToMessageById(item.messageId);
+      void this.threadElement()?.scrollToMessageById(item.messageId);
       return;
     }
     navigateTo(item.permalink);
+  }
+
+  /** The open conversation's thread element, if rendered. */
+  private threadElement(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
+    return this.shadowRoot?.querySelector('scion-chat-thread') ?? null;
   }
 
   /** Whether the conversation header folds its secondary actions into the More menu. */

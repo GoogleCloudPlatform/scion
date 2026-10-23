@@ -222,6 +222,8 @@ export class ChatStarsController extends EventTarget {
   private refreshAgain = false;
   /** Bumped by every invalidation; a request that saw a bump is stale. */
   private invalidations = 0;
+  /** The invalidation count the known states are current with. */
+  private appliedInvalidations = 0;
   /** IDs whose state answer was stale, refetched by the next refresh. */
   private readonly stale = new Set<string>();
   /** IDs whose state request failed, retried by the next refresh. */
@@ -253,6 +255,7 @@ export class ChatStarsController extends EventTarget {
     this.failed.clear();
     this.mutatedAt.clear();
     this.refreshAgain = false;
+    this.appliedInvalidations = this.invalidations;
     this.emit('change');
   }
 
@@ -279,16 +282,30 @@ export class ChatStarsController extends EventTarget {
 
   /**
    * Record messages that arrived live as unstarred, without a request.
-   * Known, pending and unstarrable IDs are left alone.
+   * Known, pending and unstarrable IDs are left alone, and so are IDs
+   * whose state request failed or is due again (never inferred
+   * unstarred). While a refresh runs, or after an invalidation the known
+   * states have not caught up with (the star may have been made in
+   * another tab just before the message event arrived), the IDs are
+   * fetched instead.
    */
   markLive(messageIds: readonly string[]): void {
     let changed = false;
+    let fetch = false;
+    const behind = this.refreshing || this.invalidations !== this.appliedInvalidations;
     for (const id of messageIds) {
       if (!isStarrableMessageId(id) || this.states.has(id) || this.pending.has(id)) continue;
+      if (this.failed.has(id) || this.stale.has(id)) continue;
+      if (behind) {
+        this.stale.add(id);
+        fetch = true;
+        continue;
+      }
       this.track(id, false);
       changed = true;
     }
     if (changed) this.emit('change');
+    if (fetch && !this.refreshing) void this.refresh();
   }
 
   /** Refetch the IDs whose state request failed (a menu open), if any. */
@@ -314,13 +331,17 @@ export class ChatStarsController extends EventTarget {
     }
     this.refreshing = true;
     try {
+      let epoch: number;
       do {
         this.refreshAgain = false;
+        epoch = this.invalidations;
         const ids = new Set([...this.states.keys(), ...this.stale, ...this.failed]);
         this.stale.clear();
         this.failed.clear();
         await this.fetchStates([...ids]);
       } while (this.refreshAgain || this.stale.size > 0);
+      // Every known state was refetched after the last invalidation.
+      if (epoch === this.invalidations) this.appliedInvalidations = epoch;
     } finally {
       this.refreshing = false;
     }

@@ -4187,6 +4187,15 @@ export class ScionChatThread extends LitElement {
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
+  /**
+   * Bumped by every jump to a message (search, reply, deep link, a star):
+   * a caller that resolves a target first can tell whether a newer jump
+   * happened meanwhile.
+   */
+  get jumpSequence(): number {
+    return this._jumpSeq;
+  }
+
   async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
     // Explicit programmatic navigation (search-jump, reply-jump, deep link)
     // takes precedence over the open-time unread anchor (rule 5). Without
@@ -4820,7 +4829,14 @@ export class ScionChatThread extends LitElement {
       if (key !== this.conversationKey) return;
       void this.stars.invalidate();
       showToast(starred ? 'Could not star message' : 'Could not unstar message', 'danger', {
-        action: { label: 'Retry', run: () => void this.setMessageStarred(messageId, starred) },
+        action: {
+          label: 'Retry',
+          // Only in the conversation the failure happened in.
+          run: (): void => {
+            if (key !== this.conversationKey) return;
+            void this.setMessageStarred(messageId, starred);
+          },
+        },
       });
     }
   }

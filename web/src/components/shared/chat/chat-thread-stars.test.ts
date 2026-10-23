@@ -363,6 +363,77 @@ describe('scion-chat-thread starred messages', () => {
     expect(starAction(el, M3)).toMatchObject({ label: 'Star message', disabled: false });
   });
 
+  it('a failure Retry does nothing after the conversation changed', async () => {
+    setFlag(true);
+    routeHub({
+      starred: [M1],
+      del: () => json({ error: { message: 'boom' } }, 500),
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+    starAction(el, M1)?.run();
+    await vi.waitFor(() => expect(showToastMock).toHaveBeenCalled());
+    const deletes = (): number =>
+      apiFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'DELETE')
+        .length;
+    expect(deletes()).toBe(1);
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    const options = showToastMock.mock.calls[0][2] as { action: { run: () => void } };
+    options.action.run();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(deletes()).toBe(1);
+  });
+
+  it('fetches state for the window of an around jump', async () => {
+    setFlag(true);
+    const M8 = '00000000-0000-4000-8000-000000000008';
+    const M9 = '00000000-0000-4000-8000-000000000009';
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?') && url.includes('around=')) {
+        return Promise.resolve(json({ messages: [message(M8), message(M9)] }));
+      }
+      if (url.includes('/messages?')) {
+        return Promise.resolve(json({ messages: [message(M1), message(M2)] }));
+      }
+      if (url.startsWith('/api/v1/chat/stars/state')) {
+        return Promise.resolve(json({ starredMessageIds: url.includes(M9) ? [M9] : [] }));
+      }
+      return Promise.resolve(json({}));
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(stateCalls()).toHaveLength(1));
+    void el.scrollToMessageById(M9);
+    await vi.waitFor(() => expect(stateCalls()).toHaveLength(2));
+    expect(stateCalls()[1]).toContain(`messageId=${M8}`);
+    expect(stateCalls()[1]).toContain(`messageId=${M9}`);
+    await vi.waitFor(() =>
+      expect(starAction(el, M9)).toMatchObject({ checked: true, disabled: false })
+    );
+  });
+
+  it('fetches state only for the new messages of a catch-up backfill', async () => {
+    setFlag(true);
+    const M3 = '00000000-0000-4000-8000-000000000003';
+    let page = [message(M1), message(M2)];
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?')) return Promise.resolve(json({ messages: page }));
+      if (url.startsWith('/api/v1/chat/stars/state')) {
+        return Promise.resolve(json({ starredMessageIds: [] }));
+      }
+      return Promise.resolve(json({}));
+    });
+    const el = await mount();
+    await vi.waitFor(() => expect(stateCalls()).toHaveLength(1));
+    page = [message(M1), message(M2), message(M3)];
+    // A lightweight event (no payload) makes the thread catch up.
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+    await vi.waitFor(() => expect(stateCalls()).toHaveLength(2));
+    expect(stateCalls()[1]).toContain(`messageId=${M3}`);
+    expect(stateCalls()[1]).not.toContain(`messageId=${M1}`);
+    await vi.waitFor(() => expect(starAction(el, M3)?.disabled).toBeFalsy());
+  });
+
   it('offers no star action in a DM in phase 1', async () => {
     setFlag(true);
     routeHub({});

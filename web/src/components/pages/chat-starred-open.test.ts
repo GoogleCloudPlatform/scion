@@ -53,9 +53,24 @@ vi.mock('../../client/api.js', async (importOriginal) => {
   return { ...actual, apiFetch: (url: string): Promise<Response> => apiFetch(url) };
 });
 
+interface FakeThread {
+  jumpSequence: number;
+  scrollToMessageById: ReturnType<typeof vi.fn>;
+}
+
 interface ChatInternals extends HTMLElement {
   v2Conversation: { conversationKey: string; projectId: string; isDM: boolean } | null;
   handleStarredMessageOpen(e: CustomEvent<{ messageId: string }>): void;
+  threadElement(): FakeThread | null;
+}
+
+/** Give the page a fake open thread (the page is not rendered here). */
+function withThread(page: ChatInternals): FakeThread {
+  const thread: FakeThread = { jumpSequence: 1, scrollToMessageById: vi.fn() };
+  page.threadElement = (): FakeThread => thread;
+  // The page is not connected, so Lit's updateComplete would never settle.
+  Object.defineProperty(page, 'updateComplete', { value: Promise.resolve(true) });
+  return thread;
 }
 
 const M1 = '00000000-0000-4000-8000-000000000001';
@@ -140,6 +155,28 @@ describe('opening a starred message from the header', () => {
     held.get(M1)?.(star(M1, 'topic-b'));
     await settle();
     expect(navigateTo.mock.calls).toEqual([[`/chat/space/p1/thread/topic-d#msg-${M2}`]]);
+  });
+
+  it('jumps within the open thread when nothing changed meanwhile', async () => {
+    const page = document.createElement('scion-page-chat') as ChatInternals;
+    page.v2Conversation = conversation('topic-a');
+    const thread = withThread(page);
+    open(page, M1);
+    held.get(M1)?.(star(M1, 'topic-a'));
+    await settle();
+    expect(thread.scrollToMessageById).toHaveBeenCalledWith(M1);
+    expect(navigateTo).not.toHaveBeenCalled();
+  });
+
+  it('yields to a newer jump inside the same thread during the request', async () => {
+    const page = document.createElement('scion-page-chat') as ChatInternals;
+    page.v2Conversation = conversation('topic-a');
+    const thread = withThread(page);
+    open(page, M1);
+    thread.jumpSequence = 2; // a search or reply jump while the GET ran
+    held.get(M1)?.(star(M1, 'topic-a'));
+    await settle();
+    expect(thread.scrollToMessageById).not.toHaveBeenCalled();
   });
 
   it('offers Retry on failure, which does nothing once the user has moved on', async () => {
