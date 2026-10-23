@@ -264,9 +264,12 @@ So job steps can read this runner's ephemeral registration, the JIT config on
 exchanged. The JIT config lets a job act as its own runner registration until GitHub
 removes it after the job. sec-review-3 rates this **LOW**, but only because cr-ci
 serves trusted same-repo code:
-- the routing expression's fork-PR guard keeps fork PRs, `pull_request_target`,
-  schedule and workflow_dispatch on `ubuntu-latest`;
-- the mediator's fork guard refuses runners to fork-PR and `pull_request_target` runs;
+- the routing expression's fork-PR guard routes only same-repo `push` and `pull_request`
+  events and sends everything else to `ubuntu-latest` (fork PRs, `pull_request_target`,
+  `workflow_run`, `merge_group`, schedule, workflow_dispatch);
+- the mediator's fork guard (`forkReason`) refuses runners to `pull_request_target` and
+  `workflow_run` runs, and to runs whose repository or head repository is not the target
+  repository (fork PRs);
 - one job runs per runner;
 - the hijack guard and the reaper catch a runner registration that ends up running
   another job or is left behind.
