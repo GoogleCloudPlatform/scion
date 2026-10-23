@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -170,15 +171,27 @@ func assertDense(t *testing.T, evs []*tc.LifecycleEvent) {
 // state and sink kind are reported (design section 22 items 4, 13).
 func TestLifecycleEvents_ExperimentToggle(t *testing.T) {
 	srv, ls, projectID, sink, counters := lifecycleTestServer(t, true)
+	wireKinds := []string{telemetryemit.SinkKindCloudLogging, telemetryemit.SinkKindStdout, telemetryemit.SinkKindNone}
+	// Setting the sink publishes its kind: a StdoutSink is stdout=1 and the
+	// other two 0.
+	srv.SetLifecycleEventsSink(telemetryemit.NewStdoutSink(io.Discard), counters)
+	for _, k := range wireKinds {
+		want := int64(0)
+		if k == telemetryemit.SinkKindStdout {
+			want = 1
+		}
+		assert.Equal(t, want, counters.Get(telemetryemit.MetricSinkKind, k), "sink kind %s for a StdoutSink: %s", k, counters)
+	}
+	// Back to the test's MemorySink, which is none of the three wire kinds:
+	// the gauge is published again, with all three written as 0.
+	srv.SetLifecycleEventsSink(sink, counters)
+	for _, k := range wireKinds {
+		assert.Contains(t, counters.String(), telemetryemit.MetricSinkKind+"{"+k+"}=0 ", "a MemorySink publishes sink kind %s as 0", k)
+	}
 	srv.startLifecycleEvents(context.Background())
 	t.Cleanup(func() { srv.stopLifecycleEvents(context.Background()) })
 	assert.False(t, ls.AgentWriteObserverInstalled(), "off by default")
 	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricObserverState, telemetryemit.ObserverStateDisabledExperimentOff))
-	// A MemorySink is none of the three wire kinds (cloud_logging, stdout,
-	// none), and MemoryCounters records only those, so all three read 0.
-	for _, k := range []string{telemetryemit.SinkKindCloudLogging, telemetryemit.SinkKindStdout, telemetryemit.SinkKindNone} {
-		assert.Zero(t, counters.Get(telemetryemit.MetricSinkKind, k), "a MemorySink is not sink kind %s", k)
-	}
 
 	lcSetExperiment(t, srv, true)
 	ApplySnapshot(srv, Layer1Snapshot{})
@@ -378,14 +391,17 @@ func TestLifecycleEvents_CreateRollback(t *testing.T) {
 	lifecycleDrain(t, ls, sink, func() time.Time { return time.Now().Add(time.Hour) })
 	// The running drainer and this drain can both deliver a row (the
 	// shifted clock expires its lease): keep one copy per event_id, in
-	// revision order.
-	seen := map[string]bool{}
+	// revision order. A redelivery must be byte-identical (design 5.4).
+	seen := map[string][]byte{}
 	var evs []*tc.LifecycleEvent
-	for _, e := range lifecycleDecode(t, sink.Delivered()) {
-		if !seen[e.EventID] {
-			seen[e.EventID] = true
-			evs = append(evs, e)
+	for _, p := range sink.Delivered() {
+		e := lifecycleDecode(t, [][]byte{p})[0]
+		if first, ok := seen[e.EventID]; ok {
+			assert.Equal(t, string(first), string(p), "a redelivered event_id %s must be byte-identical", e.EventID)
+			continue
 		}
+		seen[e.EventID] = p
+		evs = append(evs, e)
 	}
 	sort.Slice(evs, func(i, j int) bool { return evs[i].TransitionRevision < evs[j].TransitionRevision })
 	require.NotEmpty(t, evs)
