@@ -163,6 +163,19 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Runner routing (hack/check-runner-routing.sh): a fork can route jobs to
+      # its cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable,
+      # which is unset here, so every job runs on ubuntu-latest. This keeps every
+      # routed runs-on byte-identical to the canonical, fork-PR-guarded
+      # expression, and keeps jobs that cannot or must not run there (services,
+      # container, write permissions, pull_request_target) and jobs without a
+      # timeout of at most 35 min off it. The selftest runs the script's fixtures.
+      - name: Check runner routing
+        if: github.event_name == 'pull_request'
+        run: |
+          ./hack/check-runner-routing.sh --selftest
+          ./hack/check-runner-routing.sh
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
