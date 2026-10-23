@@ -62,6 +62,12 @@ type startContext struct {
 	// default runtime. The create path reports it to the hub.
 	RuntimeType string
 
+	// Resolution is the full runtime resolution behind Manager and
+	// RuntimeType (the same resolveExistingAgentManager call), with How
+	// settled for the operation (forCreate / forExistingAgent). The create
+	// path resolves its Kubernetes placement from it.
+	Resolution runtimeResolution
+
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
 	// the hub sent none — see api.EnvKind's three-state contract. No consumer
@@ -112,6 +118,11 @@ type startContextInputs struct {
 	// broker-side state is read from, the same one Start uses. A Config's
 	// own SharedWorkspace is used as well when present.
 	SharedWorkspace bool
+
+	// HubProfile is the profile a start or restart request carries (wire
+	// key profile; nil when an older Hub sent none). It is used only for
+	// an agent without an image provenance record (hubSentProfile).
+	HubProfile *string
 
 	// Project
 	ProjectPath string
@@ -316,6 +327,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// A hub-managed workspace's .scion entry must be in the state the
+	// broker recorded for it before anything is read through it (see
+	// checkWorkspaceConfigRecord); recordHubProjectFiles records the state
+	// it leaves.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		var checkErr error
+		if err := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(in.ProjectPath, in.ProjectID) }, in.ProjectPath); err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if checkErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
+		}
+	}
+
 	// Shared-workspace dispatch verifies the project identity before loading
 	// project settings, before the marker handling below and before the
 	// recorded profile is computed (ptone/scion#1799): see
@@ -356,8 +382,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// the process-wide workspace lock on the project, so two Runtime
 		// Broker instances never write them concurrently. It is released
 		// before worktree provisioning takes it again.
-		if err := s.withWorkspaceLock(ctx, func() { s.recordHubProjectFiles(ctx, in) }, in.ProjectPath); err != nil {
+		var recordErr error
+		if err := s.withWorkspaceLock(ctx, func() { recordErr = s.recordHubProjectFilesChecked(ctx, in) }, in.ProjectPath); err != nil {
 			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if recordErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(recordErr, in.Name)
 		}
 	}
 
@@ -394,20 +425,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// so resolving the manager here from a different, saved-profile-derived
 	// value would let a create run on one runtime while everything else
 	// about it — including the GCP identity classification above — is
-	// computed for another. Only start/restart fall back to the agent's own
-	// saved profile (agent.GetSavedProfile): their Config is nil (no profile
-	// to read from a request body that doesn't exist), and handlers.go's
-	// startAgent/restartAgent already resolve the saved profile themselves,
-	// re-running this same check after their own, later resolution.
+	// computed for another. Only start/restart use the existing agent's
+	// profile instead (classificationProfile): their Config carries none,
+	// and handlers.go's startAgent/restartAgent resolve the same profile
+	// themselves, re-running this same check after their own, later
+	// resolution.
 	//
 	// Start/restart classify the runtime with the provisioned profile
-	// recorded in broker-side image provenance when the agent has it, rather
-	// than the agent-info.json profile (GetSavedProfile): this classification
-	// picks the default GCP metadata mode
+	// recorded in broker-side image provenance when the agent has it, else
+	// with the Hub-sent profile (in.HubProfile); agent-info.json is never
+	// read for it. This classification picks the default GCP metadata mode
 	// when the hub sends none, the Kubernetes assign mapping, the hub
 	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
-	// file fails closed (409, re-provision); an agent without one keeps
-	// the saved profile.
+	// file fails closed (409, re-provision), and so does an agent without
+	// one when the Hub sent no profile (*profileRecordMissingError).
 	gcpIdentityProfile := ""
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
@@ -444,11 +475,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
+	}, profileMode, in.PinnedRuntime)
 	mgr, dispatchRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+	if in.Operation == opCreate {
+		res = res.forCreate(in.Name)
+	} else {
+		res = res.forExistingAgent(in.Name)
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -1233,6 +1269,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		Resolution:                  res,
 		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,

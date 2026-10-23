@@ -129,10 +129,11 @@ const (
 // inconsistent with its own remote, which SharingMode() and its callers would
 // then evaluate against mismatched state.
 //
-// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
-// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
-// settings endpoint refuses on PUT (projectSettingsNotStoredFields) and never
-// returns on GET. They are not annotation-backed, so their absence here is
+// Finally, do not try to "complete" this list from the settings endpoint's
+// keys. It also knows bucket, runtimes, harnesses and profiles, which it
+// refuses on PUT (projectSettingsNotStoredFields) and never returns on GET
+// (hubclient.ProjectSettings no longer has fields for them,
+// ptone/scion#5360). They are not annotation-backed, so their absence here is
 // correct and loses nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
@@ -248,11 +249,11 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		// not carry keeps its stored value and is not re-validated, so a
 		// stored value that has since gone stale does not block an
 		// unrelated partial update.
-		if present[projectSettingsFieldThinkingLevel] && merged.DefaultThinkingLevel != nil {
-			if tl := *merged.DefaultThinkingLevel; tl < 0 || tl > 100 {
-				BadRequest(w, "thinking_level must be between 0 and 100")
-				return
-			}
+		// The hub server-config rule (ptone/scion#4052): 1-100, and null
+		// (not 0) clears.
+		if present[projectSettingsFieldThinkingLevel] &&
+			rejectInvalidDefaultThinkingLevel(w, projectSettingsFieldThinkingLevel, merged.DefaultThinkingLevel) {
+			return
 		}
 
 		if present[projectSettingsFieldMaxAgentRole] && merged.MaxAgentRole != "" && !ValidAgentRole(AgentRole(merged.MaxAgentRole)) {
@@ -597,19 +598,20 @@ const (
 )
 
 // projectSettingsNullClearsFields are the fields for which JSON null clears
-// the stored value instead of keeping it. Each is tri-state: false or 0 is
-// a real stored value, unset means "inherit the hub default", and there is
-// no empty value that could express the reset.
+// the stored value instead of keeping it. Each is tri-state: false is a real
+// stored value for the switches, unset means "inherit the hub default", and
+// there is no empty value that could express the reset. The thinking level
+// has no empty value either: 0 is refused (1-100, ptone/scion#4052).
 var projectSettingsNullClearsFields = map[string]bool{
 	projectSettingsFieldThinkingLevel:          true,
 	projectSettingsFieldTelemetryEnabled:       true,
 	projectSettingsFieldAutoExposePortsEnabled: true,
 }
 
-// projectSettingsNotStoredFields are the hubclient.ProjectSettings fields
-// the project settings endpoint does not store: bucket, runtimes, harnesses
-// and profiles are read from server and Runtime Broker settings, never
-// from a project's settings. A PUT carrying one of them with a value is
+// projectSettingsNotStoredFields are the request keys the project settings
+// endpoint does not store (hubclient.ProjectSettings has no fields for them,
+// ptone/scion#5360): bucket, runtimes, harnesses and profiles are read from
+// server and Runtime Broker settings, never from a project's settings. A PUT carrying one of them with a value is
 // refused (projectSettingsNotStoredFieldError) instead of being accepted
 // and dropped.
 var projectSettingsNotStoredFields = []string{"bucket", "runtimes", "harnesses", "profiles"}
@@ -772,8 +774,12 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	settings.DefaultHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
 	settings.DefaultHarnessAuth = project.Annotations[projectSettingDefaultHarnessAuth]
 	settings.DefaultModel = project.Annotations[projectSettingDefaultModel]
+	// A stored level outside 1-100 reads as unset (inherit). Before
+	// ptone/scion#4052 the PUT accepted 0, meant as a clear; such a value is
+	// neither reported nor applied to new agents, and the next save of any
+	// field removes it.
 	if val, ok := project.Annotations[projectSettingDefaultThinkingLevel]; ok {
-		if n, err := strconv.Atoi(val); err == nil {
+		if n, err := strconv.Atoi(val); err == nil && validDefaultThinkingLevel(n) {
 			settings.DefaultThinkingLevel = &n
 		}
 	}

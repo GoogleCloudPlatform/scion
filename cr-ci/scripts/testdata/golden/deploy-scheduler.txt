@@ -1,0 +1,6 @@
+# cr-ci deploy-scheduler.sh (dry-run) project=example-project region=us-central1
+# dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
+# C14: reconciler cr-runner-reconciler
+? gcloud scheduler jobs describe cr-runner-reconciler --location=us-central1 --project=example-project '--format=value(name)'
++ gcloud scheduler jobs create http cr-runner-reconciler --location=us-central1 --project=example-project '--schedule=*/5 * * * *' --time-zone=Etc/UTC --uri=https://cr-runner-mediator-abc123-uc.a.run.app/reconcile --http-method=POST --oidc-service-account-email=cr-runner-scheduler-sa@example-project.iam.gserviceaccount.com --oidc-token-audience=https://cr-runner-mediator-abc123-uc.a.run.app --attempt-deadline=300s '--description=cr-ci: backfill and reap (POST /reconcile)'
+# done

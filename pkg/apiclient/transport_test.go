@@ -677,3 +677,53 @@ func TestDoNoRetry_BodiedPOSTHitOnceOn503(t *testing.T) {
 		t.Errorf("expected exactly 1 server hit on the no-retry path, got %d", got)
 	}
 }
+
+// A request sent under WithRequestTimeout uses that client timeout instead
+// of the Transport's: a response slower than the usual timeout succeeds
+// with a longer one, through Do and DoNoRetry, while requests without it,
+// or with a non-positive one, keep the usual timeout, and the Transport's
+// own client is left unchanged.
+func TestWithRequestTimeout_OverridesClientTimeoutPerRequest(t *testing.T) {
+	const slow = 300 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(slow):
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	tr := NewTransport(server.URL, WithTimeout(50*time.Millisecond))
+
+	send := func(ctx context.Context, do func(context.Context, *http.Request) (*http.Response, error)) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/projects/p/agents", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return do(ctx, req)
+	}
+
+	if resp, err := send(context.Background(), tr.Do); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a response slower than the client timeout succeeded without an override")
+	}
+	if resp, err := send(WithRequestTimeout(context.Background(), 0), tr.Do); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a zero override replaced the client timeout")
+	}
+	long := WithRequestTimeout(context.Background(), 10*time.Second)
+	for name, do := range map[string]func(context.Context, *http.Request) (*http.Response, error){"Do": tr.Do, "DoNoRetry": tr.DoNoRetry} {
+		resp, err := send(long, do)
+		if err != nil {
+			t.Fatalf("%s with a longer request timeout: %v", name, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s status = %d, want 201", name, resp.StatusCode)
+		}
+	}
+	if tr.HTTPClient.Timeout != 50*time.Millisecond {
+		t.Fatalf("Transport client timeout changed to %s", tr.HTTPClient.Timeout)
+	}
+}

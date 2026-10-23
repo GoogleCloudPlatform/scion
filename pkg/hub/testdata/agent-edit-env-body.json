@@ -1,0 +1,9 @@
+{
+  "stateVersion": 5,
+  "config": {
+    "env": {
+      "FOO": "bar",
+      "NEW": "1"
+    }
+  }
+}

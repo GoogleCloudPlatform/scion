@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -23,18 +24,19 @@ import (
 )
 
 // runtimeClassificationProfile is the single source of the profile a
-// start/restart classifies and selects the agent's runtime with — used both
-// by buildStartContext's preliminary classification (the default GCP
-// metadata mode when the Hub sends none, the Kubernetes assign mapping, the
-// hub endpoint and extra hosts) and by the handlers' authoritative runtime
-// selection (which also decides whether the bare-image local-exists check
-// runs, and so whether the image_registry prefix is applied):
+// start/restart runs an existing agent with — used by buildStartContext's
+// preliminary classification (the default GCP metadata mode when the Hub
+// sends none, the Kubernetes assign mapping, the hub endpoint and extra
+// hosts), by the handlers' authoritative runtime selection (which also
+// decides whether the bare-image local-exists check runs, and so whether
+// the image_registry prefix is applied), and by the start itself
+// (opts.Profile):
 //
 //   - the provisioned profile recorded in the agent's broker-side image
 //     provenance, read from exactly the agent dir Start/GetAgent will use
 //     (agentName and sharedWorkspace as the start/restart runs with);
-//   - else, for an agent without a provenance file, legacyProfile() — the
-//     agent-info.json profile (agent.GetSavedProfile), as before;
+//   - else, for an agent without a provenance file, legacyProfile() (see
+//     hubSentProfile); the agent's agent-info.json is never consulted;
 //   - else, for an existing but unusable provenance file, an
 //     *agent.ImageProvenanceError (409, re-provision), never a fallback;
 //   - for a shared-workspace agent, the dir is the broker-side external one
@@ -42,37 +44,72 @@ import (
 //     root, or (restart, mustExist) a missing external agent dir, is an
 //     *agent.AgentStateDirError (409), never the in-project root.
 //
-// (ptone/scion#1799.) With no project path there is nothing to read, so the
-// legacy profile applies.
+// (ptone/scion#1799.) An empty project path resolves as Start resolves it
+// (config.GetResolvedProjectDir), so both read the same record.
 //
 // provisioned reports whether the profile came from image provenance; the
-// handlers then resolve it without the agent-info.json recorded-runtime
-// fallback (profileStrictProvisioned).
-func runtimeClassificationProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool, legacyProfile func() string) (profile string, provisioned bool, err error) {
-	if projectPath == "" {
-		return legacyProfile(), false, nil
-	}
+// handlers then resolve it in profileStrictProvisioned mode.
+func runtimeClassificationProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool, legacyProfile func() (string, error)) (profile string, provisioned bool, err error) {
 	profile, ok, err := agent.ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, mustExist)
 	if err != nil {
 		return "", false, err
 	}
 	if !ok {
-		return legacyProfile(), false, nil
+		profile, err := legacyProfile()
+		return profile, false, err
 	}
 	return profile, true, nil
 }
 
-// runtimeSelectionOpts returns the options the start/restart runtime
-// selection (resolveManagerForOpts and the checks that re-resolve it) runs
-// against: opts with Profile replaced by runtimeClassificationProfile.
-// opts.Profile on entry is the agent-info.json profile (the legacy value).
-// agentName is the agent's real name (the dir Start reads), which on
-// restart can differ from the URL id. Only the runtime selection changes:
-// opts itself, and every other use of opts.Profile, is left as it was.
-// The bool reports whether the profile came from image provenance.
-func runtimeSelectionOpts(opts api.StartOptions, agentName string, mustExist bool) (api.StartOptions, bool, error) {
-	saved := opts.Profile
-	profile, provisioned, err := runtimeClassificationProfile(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID, mustExist, func() string { return saved })
+// profileRecordMissingError refuses a start or restart of an agent that has
+// no image provenance record (it was provisioned before the record
+// existed) when the Hub sent no profile either (an older Hub). The broker
+// then has no source for the agent's profile; it never guesses one.
+type profileRecordMissingError struct {
+	Agent string
+}
+
+func (e *profileRecordMissingError) Error() string {
+	return fmt.Sprintf("agent %q has no broker-side record of its settings profile (it was provisioned by an older version) and the hub sent no profile: re-provision the agent (scion reincarnate, or delete and re-create it)", e.Agent)
+}
+
+// hubSentProfile is the legacyProfile source for a start or restart of an
+// agent without an image provenance record: the profile the Hub sent with
+// the request (hubProfile; nil when an older Hub sent none). With no Hub
+// profile, an agent that is already provisioned on this broker is refused
+// with a *profileRecordMissingError; one that is not (the start will
+// provision it) runs with no profile, as a create without one does.
+func hubSentProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, hubProfile *string) func() (string, error) {
+	return func() (string, error) {
+		if hubProfile != nil {
+			return *hubProfile, nil
+		}
+		if agent.IsProvisioned(projectPath, agentName, sharedWorkspace, hubProjectID) {
+			return "", &profileRecordMissingError{Agent: agentName}
+		}
+		return "", nil
+	}
+}
+
+// startProfileSource is the legacyProfile source the start and restart
+// handlers pass to runtimeSelectionOpts. A flat instance has no profiles
+// (they are refused there), so it keeps opts.Profile as it is.
+func (s *Server) startProfileSource(opts api.StartOptions, agentName string, hubProfile *string) func() (string, error) {
+	if s.isFlat() {
+		profile := opts.Profile
+		return func() (string, error) { return profile, nil }
+	}
+	return hubSentProfile(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID, hubProfile)
+}
+
+// runtimeSelectionOpts returns opts with Profile replaced by
+// runtimeClassificationProfile, with legacyProfile as its source for an
+// agent without image provenance (startProfileSource). agentName is the
+// agent's real name (the dir Start reads), which on restart can differ
+// from the URL id. opts itself is not modified. The bool reports whether
+// the profile came from image provenance.
+func runtimeSelectionOpts(opts api.StartOptions, agentName string, mustExist bool, legacyProfile func() (string, error)) (api.StartOptions, bool, error) {
+	profile, provisioned, err := runtimeClassificationProfile(opts.ProjectPath, agentName, opts.SharedWorkspace, opts.HubProjectID, mustExist, legacyProfile)
 	if err != nil {
 		return opts, false, err
 	}
@@ -97,18 +134,24 @@ func (s *Server) writeImageProvenanceError(w http.ResponseWriter, err error, op,
 		writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to "+op+": "+de.Error(), nil)
 		return
 	}
+	var me *profileRecordMissingError
+	if errors.As(err, &me) {
+		s.agentLifecycleLog.Warn("agent profile unknown", "operation", op, "agent_id", agentID, "error", err)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to "+op+": "+me.Error(), nil)
+		return
+	}
 	s.agentLifecycleLog.Error("runtime selection failed", "operation", op, "agent_id", agentID, "error", err)
 	RuntimeError(w, "Failed to "+op+": "+err.Error())
 }
 
 // classificationProfile is runtimeClassificationProfile for
-// buildStartContext's preliminary classification on start/restart; the
-// legacy profile is the saved one, read under in.Name as before.
+// buildStartContext's preliminary classification on start/restart, under
+// in.Name; an agent without image provenance takes the Hub-sent profile
+// (in.HubProfile, see hubSentProfile).
 func classificationProfile(in startContextInputs) (string, bool, error) {
 	sharedWorkspace := in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace)
-	return runtimeClassificationProfile(in.ProjectPath, in.Name, sharedWorkspace, in.ProjectID, in.Operation == opHTTPRestart, func() string {
-		return agent.GetSavedProfile(in.Name, in.ProjectPath)
-	})
+	return runtimeClassificationProfile(in.ProjectPath, in.Name, sharedWorkspace, in.ProjectID, in.Operation == opHTTPRestart,
+		hubSentProfile(in.ProjectPath, in.Name, sharedWorkspace, in.ProjectID, in.HubProfile))
 }
 
 // rejectRuntimeClassificationMismatch is the late start/restart check that

@@ -329,8 +329,8 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 // A sub-agent's AskUserQuestion or ExitPlanMode tool-start asks the user, so
 // it still sets waiting_for_input locally and reports it to the Hub, as the
 // parent's does. The wait is recorded as notification-set. A
-// waiting_for_input the agent set itself is kept, with no marker, and no Hub
-// update replaces its message. blocked, completed, limits_exceeded and
+// waiting_for_input the agent set itself is kept as parentWaitAgent next to
+// the sub-agent's entry, and no Hub update replaces its message. blocked, completed, limits_exceeded and
 // crashed are kept too; status_subagent_held_question_test.go covers them.
 func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
@@ -347,7 +347,9 @@ func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 				info := readAgentInfoMap(t, statusHandler.StatusPath)
 				assert.Equal(t, "waiting_for_input", info["activity"])
 				if held == state.ActivityWaitingForInput {
-					assert.NotContains(t, info, activitySourceKey, "the agent-set wait is kept")
+					assert.Equal(t, activitySourceNotification, info[activitySourceKey])
+					assert.Equal(t, []string{claudeSubagentChildID}, notificationWaitOwners(info))
+					assert.Equal(t, parentWaitAgent, info[parentWaitKey], "the agent-set wait is kept")
 					assert.Empty(t, sent(), "no hub update replaces the agent-set wait")
 					return
 				}

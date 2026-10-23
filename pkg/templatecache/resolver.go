@@ -17,6 +17,7 @@ package templatecache
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -34,8 +35,10 @@ import (
 // resourceFetcher abstracts the Hub-client surface a Resolver needs, so the same
 // resolve algorithm works for any resource kind.
 type resourceFetcher interface {
-	// Get returns the resource's ID and content hash, or id=="" if not found.
-	Get(ctx context.Context, ref string) (id, contentHash string, err error)
+	// Get returns the resource's ID, content hash and recorded file
+	// manifest (whose Mode fields name executable files), or id=="" if not
+	// found.
+	Get(ctx context.Context, ref string) (id, contentHash string, files []hubclient.TemplateFile, err error)
 	// RequestDownloadURLs returns signed GET URLs (with per-file hashes).
 	RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error)
 	// DownloadFile downloads a single file from a signed URL.
@@ -66,7 +69,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	}
 
 	// Step 1: metadata.
-	id, contentHash, err := r.fetcher.Get(ctx, ref)
+	id, contentHash, metaFiles, err := r.fetcher.Get(ctx, ref)
 	if err != nil {
 		if IsHubConnectivityError(err) {
 			return "", &HubConnectivityError{Cause: err}
@@ -77,9 +80,11 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		return "", fmt.Errorf("%s not found: %s", r.label, ref)
 	}
 
-	// Step 2: content-addressed cache hit (fast path).
+	// Step 2: content-addressed cache hit (fast path). The entry key
+	// covers the executable bits the metadata records, because the
+	// content hash does not (ptone/scion#5652).
 	if contentHash != "" {
-		if cachedPath, ok := r.cache.Get(contentHash); ok {
+		if cachedPath, ok := r.cache.Get(EntryKey(contentHash, manifestModes(metaFiles))); ok {
 			return cachedPath, nil
 		}
 	}
@@ -129,7 +134,8 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	if contentHash == "" {
 		contentHash = computeContentHash(files)
 	}
-	cachePath, storeErr := r.cache.Put(contentHash, files)
+	modes := downloadModes(downloadResp.Files, metaFiles)
+	cachePath, storeErr := r.cache.PutWithModes(EntryKey(contentHash, modes), files, modes)
 	if storeErr != nil {
 		return "", fmt.Errorf("failed to cache %s: %w", r.label, storeErr)
 	}
@@ -167,20 +173,66 @@ func computeContentHash(files map[string][]byte) string {
 	return transfer.ComputeContentHash(fileInfos)
 }
 
+// manifestModes returns the normalised mode of every file in a recorded
+// manifest, keyed by path.
+func manifestModes(files []hubclient.TemplateFile) map[string]os.FileMode {
+	modes := make(map[string]os.FileMode, len(files))
+	for _, f := range files {
+		modes[f.Path] = transfer.NormalizeMode(f.Mode)
+	}
+	return modes
+}
+
+// downloadModes returns the normalised mode of every downloaded file,
+// keyed by path. A hub that carries modes (ptone/scion#5652) names one on
+// every download entry, and those win: they describe the version the URLs
+// were signed for. An older hub sends none; the modes the metadata
+// manifest records are used instead, for entries with the same path and
+// content hash (a commit landing between the two reads cannot attach
+// another version's modes to the files). A file with neither is 0644.
+func downloadModes(dl []hubclient.DownloadURLInfo, meta []hubclient.TemplateFile) map[string]os.FileMode {
+	hubSendsModes := false
+	for _, f := range dl {
+		if f.Mode != "" {
+			hubSendsModes = true
+			break
+		}
+	}
+	// Only an older hub's response needs the metadata manifest.
+	var metaByPath map[string]hubclient.TemplateFile
+	if !hubSendsModes {
+		metaByPath = make(map[string]hubclient.TemplateFile, len(meta))
+		for _, f := range meta {
+			metaByPath[f.Path] = f
+		}
+	}
+	modes := make(map[string]os.FileMode, len(dl))
+	for _, f := range dl {
+		mode := f.Mode
+		if !hubSendsModes {
+			if m, ok := metaByPath[f.Path]; ok && (f.Hash == "" || m.Hash == f.Hash) {
+				mode = m.Mode
+			}
+		}
+		modes[f.Path] = transfer.NormalizeMode(mode)
+	}
+	return modes
+}
+
 // --- Per-kind fetchers ----------------------------------------------------
 
 // templateFetcher adapts hubclient.Templates() to resourceFetcher.
 type templateFetcher struct{ client hubclient.Client }
 
-func (f *templateFetcher) Get(ctx context.Context, ref string) (string, string, error) {
+func (f *templateFetcher) Get(ctx context.Context, ref string) (string, string, []hubclient.TemplateFile, error) {
 	t, err := f.client.Templates().Get(ctx, ref)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if t == nil {
-		return "", "", nil
+		return "", "", nil, nil
 	}
-	return t.ID, t.ContentHash, nil
+	return t.ID, t.ContentHash, t.Files, nil
 }
 
 func (f *templateFetcher) RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {
@@ -194,15 +246,15 @@ func (f *templateFetcher) DownloadFile(ctx context.Context, url string) ([]byte,
 // harnessConfigFetcher adapts hubclient.HarnessConfigs() to resourceFetcher.
 type harnessConfigFetcher struct{ client hubclient.Client }
 
-func (f *harnessConfigFetcher) Get(ctx context.Context, ref string) (string, string, error) {
+func (f *harnessConfigFetcher) Get(ctx context.Context, ref string) (string, string, []hubclient.TemplateFile, error) {
 	hc, err := f.client.HarnessConfigs().Get(ctx, ref)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if hc == nil {
-		return "", "", nil
+		return "", "", nil, nil
 	}
-	return hc.ID, hc.ContentHash, nil
+	return hc.ID, hc.ContentHash, hc.Files, nil
 }
 
 func (f *harnessConfigFetcher) RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {

@@ -33,7 +33,7 @@ import (
 // this test and name, so a test can hold a source and a destination.
 func newNamedTestClient(t *testing.T, name string) *ent.Client {
 	t.Helper()
-	client, err := OpenSQLite("file:"+t.Name()+"-"+name+"?mode=memory&cache=shared", PoolConfig{})
+	client, err := OpenSQLite("file:"+t.Name()+"-"+name+"?mode=memory&cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
