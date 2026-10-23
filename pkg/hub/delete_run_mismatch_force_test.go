@@ -578,3 +578,19 @@ func TestFinalizeInDoubtDelete_SeedsRetriedRunOnlyForRetryIntent(t *testing.T) {
 		})
 	}
 }
+
+// The retried delete runs under the stopped intent the engine recorded for
+// the delete before its first dispatch, and records none of its own: when
+// the broker refuses it too, the rollback restores the agent's prior intent.
+func TestForceDelete_RunMismatch_RetryRefusalRestoresRunIntent(t *testing.T) {
+	f := newRunMismatchFixture(t, "rmf-intent", state.PhaseRunning)
+	_, err := f.store.SetRunIntent(context.Background(), f.agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.client.answer = answerHeld(t, "run-b", func(runID string) error {
+		return runMismatchEnvelope(t, runID, "run-c", true)
+	})
+	r := f.del(t, "?force=true")
+	requireKept(t, f.store, f.agent.ID, r, http.StatusConflict, store.DeletionCodeConflict, state.PhaseRunning)
+	assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted())
+	requireRunIntent(t, f.store, f.agent.ID, store.RunIntentRunning)
+}
