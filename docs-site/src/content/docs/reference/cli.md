@@ -140,7 +140,8 @@ warning that names them.
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
-    - `--harness-config <string>`: Named harness configuration to use.
+    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--model <model>`: Model to use: a size alias (`small`, `medium`, `large`, `extra-large`, or `S` / `M` / `L` / `XL`) or an explicit model ID. It beats the model in a `--config` file, the project default, the template and the Hub default.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. A broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
@@ -784,8 +785,8 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch; for legacy agents created before `createInputs` was recorded, any remaining inline env keys other than `SCION_AUTO_EXPOSE_PORTS` and adopted `TZ` are kept as explicit with a warning in the plan) without migrating anything.
-    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
-    - `--force`: With `--broker <name|id>`, check a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Currently available with `--dry-run` only (executing a forced move that recreates the workspace returns `501 Not Implemented`).
+    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). By default both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`); add `--force` when the workspace is a clone-per-agent or empty-per-agent workspace that can be recreated on the target (`transferMode: "recreate"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--force`: With `--broker <name|id>`, allow a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Without `--dry-run`, the CLI runs the same checks as a dry run first and sends the move only if it is eligible; it does not print the verdict or consequences of an accepted move, so preview them first with `--dry-run --force`.
     - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
@@ -840,8 +841,7 @@ check. It runs before the workspace and capability checks (`400`, `412`), so exp
 
 #### Moving to another Runtime Broker
 
-`scion reincarnate <agent> --broker <name|id>` moves the agent to another Runtime Broker that mounts
-the same NFS export, keeping its ID, slug, generation chain, and workspace. The full requirements,
+`scion reincarnate <agent> --broker <name|id>` moves the agent to another Runtime Broker, keeping its ID, slug, and generation chain. By default both Runtime Brokers must mount the same NFS export so the workspace moves in place (`transferMode: "export"`); with `--force`, a clone-per-agent or empty-per-agent workspace that cannot travel through a shared export is recreated on the target instead (`transferMode: "recreate"`). The full requirements,
 permissions, and operator notes are in
 [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
@@ -849,16 +849,15 @@ The CLI first sends the same request as a dry run. The Hub runs eleven checks in
 `runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`,
 `workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability` (on both Runtime
 Brokers, with the source online), and `capacity`. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
-`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
+`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force` and `--force`. A refused move
 stops there, before anything changes. With `--dry-run` (or `--dry-run --force`) the CLI only prints the verdict and plan.
 
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
-stops the agent on the source, moves its quota to the target, provisions it on the target (which first
-confirms through its own mount that the workspace is there), starts the new generation with the
+stops the agent on the source, moves its quota to the target, provisions it on the target (in `export` mode the target confirms through its own mount that the workspace is there; in `recreate` mode it refuses with `409 move_target_not_fresh` if an agent or workspace directory already exists on the target, then creates a fresh clone of the project's git remote (the agent's branch if it was pushed) or an empty workspace), starts the new generation with the
 preamble and handoff, and then removes the agent's local state from the source. A failure in these
 steps does not come back to the CLI, which already has its `202`: the agent goes to the `error`
 phase, and its status message gives the reason. A failure after the agent is assigned to the target
-and before the new generation is running rolls the move back: the agent is left stopped on the
+and before the new generation is running rolls the move back: the Hub removes the agent's state on the target (in `recreate` mode, only directories marked with that move's reincarnation ID) and leaves the agent stopped on the
 source, in the `error` phase, with its previous configuration and workspace, and you can start it
 again or retry. If the target's start fails in a way that may have left a container, the agent stays
 on the target in the `error` phase instead.
@@ -1243,6 +1242,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--yes`, `--non-interactive`, `--force`
 - `scion hub shadow` and `scion hub unshadow` have been removed. `scion hub shadow` fails with `'scion hub shadow' was removed; run 'scion use <project>' to work with a hub project from any directory`. Directories it created keep working and print a cleanup notice; see [Moving from `scion hub shadow`](/scion/hosted/user/multiple-hubs/#moving-from-scion-hub-shadow).
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
+    - `info [broker-name-or-id]`: Show details for a Runtime Broker, given by name or ID (default: this host's registered Runtime Broker), including its status, capacity, profiles (for a legacy broker), or `Runtime target` and reported defaults (`runtimeTargetPresentation` in `--json`) for a flat Runtime Broker.
     - `join-token create <broker-name>`: Create the broker if it does not exist, and a single-use join token for it, to redeem on the broker host with `scion runtime-broker join` (see [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token)). The token is printed on stdout; the instructions go to stderr. For an existing broker, only its owner or a super-admin can create a token, and the new token replaces any unused earlier one. The broker's settings are not changed. Requires the `broker.create` permission, with a sign-in or a hub-boundary user access token carrying `broker:create`; a token issues a token only for a broker its user created.
         - `--ttl <duration>`: How long the token is valid, from `5m` to `24h`. Default: the Hub's default, `1h`.
         - `--json`: Print `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as JSON.
