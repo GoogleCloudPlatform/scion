@@ -381,10 +381,10 @@ type KubernetesConfig struct {
 // K8sToleration mirrors corev1.Toleration for use in agent configuration
 // without requiring Kubernetes API imports in config consumers.
 type K8sToleration struct {
-	Key      string `json:"key,omitempty" yaml:"key,omitempty"`
-	Operator string `json:"operator,omitempty" yaml:"operator,omitempty"` // Exists or Equal
-	Value    string `json:"value,omitempty" yaml:"value,omitempty"`
-	Effect   string `json:"effect,omitempty" yaml:"effect,omitempty"` // NoSchedule, PreferNoSchedule, NoExecute
+	Key      string `json:"key,omitempty" yaml:"key,omitempty" koanf:"key"`
+	Operator string `json:"operator,omitempty" yaml:"operator,omitempty" koanf:"operator"` // Exists or Equal
+	Value    string `json:"value,omitempty" yaml:"value,omitempty" koanf:"value"`
+	Effect   string `json:"effect,omitempty" yaml:"effect,omitempty" koanf:"effect"` // NoSchedule, PreferNoSchedule, NoExecute
 }
 
 type K8sResources struct {

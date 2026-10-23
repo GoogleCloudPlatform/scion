@@ -1,0 +1,23 @@
+--- a/unused/unused.go
++++ b/unused/unused.go
+@@ -281,6 +281,11 @@
+ 	// package-level named types
+ 	namedTypes     []*types.TypeName
+ 	interfaceTypes []*types.Interface
++
++	// pathEncoder caches per-package state (such as the sorted scope names)
++	// across calls; objectpath.For builds a fresh Encoder on every call.
++	// See https://github.com/dominikh/go-tools/issues/1839.
++	pathEncoder objectpath.Encoder
+ }
+ 
+ type nodeState uint8
+@@ -336,7 +341,7 @@
+ 
+ 	var path ObjectPath
+ 	if relevant {
+-		objPath, _ := objectpath.For(obj)
++		objPath, _ := g.pathEncoder.For(obj)
+ 		if objPath != "" {
+ 			path = ObjectPath{
+ 				PkgPath: obj.Pkg().Path(),

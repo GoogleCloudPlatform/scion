@@ -303,6 +303,11 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(_ *Server, o *OperationalSettings) any { return o.Artifacts() }},
 		"profiling": {section: "profiling", doc: `{"readiness_marks":true}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ReadinessMarks() }},
+		"agent_delegation_policy": {section: "agent_delegation_policy", doc: `{"remove":{"hub":["agent.read"]}}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				p, err := o.AgentDelegationPolicy()
+				return []any{p.Removes("hub", "agent.read"), err == nil}
+			}},
 	}
 	for path, doc := range telemetryProbeDocs {
 		p[path] = layer1LiveProbe{section: "telemetry", doc: doc, observe: observeTelemetry}

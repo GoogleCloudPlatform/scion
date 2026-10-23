@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package maintenance
 
 import (
 	"archive/tar"
@@ -827,7 +827,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
-	imageName := deriveImageBaseName(hc)
+	imageName := DeriveImageBaseName(hc)
 	outputImage := imageName + ":" + tag
 	_, _ = fmt.Fprintf(logger, "Building %s from harness-config %q...\n", outputImage, hc.Name)
 	log.Debug("Starting container build",
@@ -866,7 +866,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 
 	// Record the newly-built image on the harness config (BuiltImage), so
 	// the image status display and checks show it.
-	if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
+	if err := SyncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 	}
@@ -1040,7 +1040,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 		}
 	}()
 
-	imageName := deriveImageBaseName(hc)
+	imageName := DeriveImageBaseName(hc)
 	baseImage := registry + "/scion-base:" + tag
 	outputImage := registry + "/" + imageName + ":" + tag
 
@@ -1141,7 +1141,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 			_, _ = fmt.Fprintf(logger, "\nCloud Build completed successfully: %s\n", outputImage)
 			log.Info("Cloud Build complete", "build_id", buildID, "image", outputImage)
 
-			if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
+			if err := SyncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 				log.Error("Failed to sync built image back to store", "error", err)
 				_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 			}
@@ -1169,10 +1169,10 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 }
 
-// deriveImageBaseName returns the base image name (without tag) for a
+// DeriveImageBaseName returns the base image name (without tag) for a
 // harness config, preferring the config.yaml image field and falling
 // back to the slug or name.
-func deriveImageBaseName(hc *store.HarnessConfig) string {
+func DeriveImageBaseName(hc *store.HarnessConfig) string {
 	if hc.Config != nil && hc.Config.Image != "" {
 		name := hc.Config.Image
 		// Only strip a tag — the colon must appear after the last slash
@@ -1191,7 +1191,7 @@ func deriveImageBaseName(hc *store.HarnessConfig) string {
 	return hc.Name
 }
 
-// syncBuiltImage records the newly-built image on the harness config's DB
+// SyncBuiltImage records the newly-built image on the harness config's DB
 // record without modifying config.yaml in storage. It writes only the
 // BuiltImage column (store.UpdateHarnessConfigBuiltImage): the built image
 // is operational state, not derived from config.yaml, so it never writes
@@ -1201,7 +1201,7 @@ func deriveImageBaseName(hc *store.HarnessConfig) string {
 // config.yaml stays a stable reference; two-phase resolution at agent start
 // prefers local images. This matches the CLI build path's behavior (see
 // cmd/build.go syncBuildToHub).
-func syncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
+func SyncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
 	if err := storeDB.UpdateHarnessConfigBuiltImage(ctx, hc.ID, outputImage); err != nil {
 		return fmt.Errorf("failed to update harness-config record: %w", err)
 	}
@@ -1542,13 +1542,13 @@ func resolveReleaseAssets(ctx context.Context, repo, version string) (downloadUR
 	return downloadURL, checksumsURL, nil
 }
 
-// deriveChecksumsURL derives a release's SHA256SUMS asset URL from one of
+// DeriveChecksumsURL derives a release's SHA256SUMS asset URL from one of
 // its own asset download URLs, by replacing the last path element. Used
 // when a caller supplies download_url directly (bypassing
 // CheckForReleaseUpdates, which already resolves both URLs together via
 // resolveReleaseAssets), so the checksum verification in
 // BinaryUpdateExecutor.Run still has somewhere to look.
-func deriveChecksumsURL(downloadURL string) string {
+func DeriveChecksumsURL(downloadURL string) string {
 	idx := strings.LastIndex(downloadURL, "/")
 	if idx < 0 {
 		return ""
@@ -1556,7 +1556,7 @@ func deriveChecksumsURL(downloadURL string) string {
 	return downloadURL[:idx+1] + "SHA256SUMS"
 }
 
-// fetchExpectedChecksum downloads the release's SHA256SUMS asset and
+// FetchExpectedChecksum downloads the release's SHA256SUMS asset and
 // returns the expected hash for assetName -- the tarball's filename *on
 // the release*, not any local path. Deliberately callable before the
 // (potentially large) release tarball itself is downloaded: this backs an
@@ -1565,9 +1565,9 @@ func deriveChecksumsURL(downloadURL string) string {
 // immediately rather than after downloading the whole tarball every cycle.
 // An empty checksumsURL, a download failure, and a missing entry are all
 // treated as equally fatal -- there is no "proceed anyway" path here (see
-// verifyFileChecksum's doc comment for why this differs from deploy.sh's
+// VerifyFileChecksum's doc comment for why this differs from deploy.sh's
 // own, operator-driven install-time tooling).
-func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
+func FetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
 	if checksumsURL == "" {
 		return "", fmt.Errorf("no checksums URL available for %s", assetName)
 	}
@@ -1579,7 +1579,7 @@ func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, 
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	sumsPath := filepath.Join(tmpDir, "SHA256SUMS")
-	if err := downloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
+	if err := DownloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
 		return "", fmt.Errorf("download checksums: %w", err)
 	}
 
@@ -1608,13 +1608,13 @@ func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, 
 	return "", fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
 }
 
-// verifyFileChecksum hashes the file at path and compares it against
-// expectedHash (as returned by fetchExpectedChecksum), failing closed on a
+// VerifyFileChecksum hashes the file at path and compares it against
+// expectedHash (as returned by FetchExpectedChecksum), failing closed on a
 // mismatch. This is an unattended background updater, not an interactive
 // install, so unlike deploy.sh's own preflight/verification there is no
 // override here: a mismatch always fails the update, with nothing swapped
 // in.
-func verifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
+func VerifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open tarball for checksum: %w", err)
@@ -1734,7 +1734,7 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 		// checksums_url (e.g. a manually-triggered run) — derive it from
 		// the same release's own asset URL rather than treating "no
 		// checksums_url param" as "skip verification".
-		checksumsURL = deriveChecksumsURL(downloadURL)
+		checksumsURL = DeriveChecksumsURL(downloadURL)
 	}
 
 	_, _ = fmt.Fprintf(logger, "Target version: %s\n", targetVersion)
@@ -1750,13 +1750,13 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	// schedule, and a release with no checksums asset, or no entry for
 	// this asset, should fail immediately rather than after a full
 	// download every cycle. Fails closed the same way the combined check
-	// used to — see fetchExpectedChecksum's doc comment for what's fatal
+	// used to — see FetchExpectedChecksum's doc comment for what's fatal
 	// and why there is no override here.
 
 	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
 
 	assetName := path.Base(downloadURL)
-	expectedHash, err := fetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
+	expectedHash, err := FetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
 	if err != nil {
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
@@ -1776,7 +1776,7 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	tarballPath := filepath.Join(tmpDir, "release.tar.gz")
 	_, _ = fmt.Fprintf(logger, "\n==> Downloading release asset...\n")
 
-	if err := downloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
+	if err := DownloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
 
@@ -1784,7 +1784,7 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 
 	_, _ = fmt.Fprintf(logger, "\n==> Verifying checksum...\n")
 
-	if err := verifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
+	if err := VerifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 
@@ -1792,12 +1792,12 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 
 	_, _ = fmt.Fprintf(logger, "\n==> Extracting and verifying binary...\n")
 
-	extractedBinary, err := extractScionBinary(tarballPath, tmpDir, logger)
+	extractedBinary, err := ExtractScionBinary(tarballPath, tmpDir, logger)
 	if err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
-	if err := verifyScionBinary(ctx, extractedBinary, targetVersion, logger); err != nil {
+	if err := VerifyScionBinary(ctx, extractedBinary, targetVersion, logger); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -1809,7 +1809,7 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	// binary's directory (typically /usr/local/bin). Use sudo to read the
 	// binary into the backup location.
 	backupPath := filepath.Join(tmpDir, "scion.bak")
-	if err := backupBinary(ctx, binaryPath, backupPath, logger); err != nil {
+	if err := BackupBinary(ctx, binaryPath, backupPath, logger); err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
@@ -1819,7 +1819,7 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	installCmd.Stderr = io.MultiWriter(logger, &installStderr)
 	if err := installCmd.Run(); err != nil {
 		_, _ = fmt.Fprintf(logger, "Install failed, restoring backup...\n")
-		if restoreErr := restoreBackup(backupPath, binaryPath, logger); restoreErr != nil {
+		if restoreErr := RestoreBackup(backupPath, binaryPath, logger); restoreErr != nil {
 			log.Error("Failed to restore backup after install failure",
 				"install_error", err, "restore_error", restoreErr)
 			return fmt.Errorf("install failed (%w) AND backup restore failed (%v)", err, restoreErr)
@@ -1876,8 +1876,8 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	return nil
 }
 
-// downloadFile fetches a URL and streams it to a local file, logging progress.
-func downloadFile(ctx context.Context, url, destPath string, logger io.Writer) error {
+// DownloadFile fetches a URL and streams it to a local file, logging progress.
+func DownloadFile(ctx context.Context, url, destPath string, logger io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("create download request: %w", err)
@@ -1908,10 +1908,10 @@ func downloadFile(ctx context.Context, url, destPath string, logger io.Writer) e
 	return nil
 }
 
-// extractScionBinary extracts a .tar.gz archive and returns the path to the
+// ExtractScionBinary extracts a .tar.gz archive and returns the path to the
 // scion binary found within it. It looks for a file named "scion" at any
 // depth in the archive.
-func extractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
+func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1994,10 +1994,10 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer) (string, 
 	return scionBinaryPath, nil
 }
 
-// verifyScionBinary runs the extracted binary to confirm it reports the
+// VerifyScionBinary runs the extracted binary to confirm it reports the
 // expected version. This doubles as an integrity check — a corrupt or
 // truncated download will fail to execute.
-func verifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, logger io.Writer) error {
+func VerifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, logger io.Writer) error {
 	cmd := exec.CommandContext(ctx, binaryPath, "version", "--format", "json")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -2023,10 +2023,10 @@ func verifyScionBinary(ctx context.Context, binaryPath, expectedVersion string, 
 	return nil
 }
 
-// backupBinary copies the current binary to a backup path using sudo cp.
+// BackupBinary copies the current binary to a backup path using sudo cp.
 // The source binary is typically owned by root (e.g., /usr/local/bin/scion),
 // so sudo is required to read it reliably.
-func backupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
+func BackupBinary(ctx context.Context, srcPath, backupPath string, logger io.Writer) error {
 	cmd := exec.CommandContext(ctx, "sudo", "cp", srcPath, backupPath)
 	cmd.Stdout = logger
 	cmd.Stderr = logger
@@ -2038,17 +2038,17 @@ func backupBinary(ctx context.Context, srcPath, backupPath string, logger io.Wri
 	return nil
 }
 
-// restoreBackup copies the backup binary back to the original path using
+// RestoreBackup copies the backup binary back to the original path using
 // sudo install. This is the rollback mechanism when install fails.
-func restoreBackup(backupPath, destPath string, logger io.Writer) error {
+func RestoreBackup(backupPath, destPath string, logger io.Writer) error {
 	cmd := exec.Command("sudo", "install", "-m", "755", backupPath, destPath)
 	cmd.Stdout = logger
 	cmd.Stderr = logger
 	return cmd.Run()
 }
 
-// parseMigrationParams extracts and validates migration-specific parameters from the request body.
-func parseMigrationParams(body map[string]interface{}) map[string]string {
+// ParseMigrationParams extracts and validates migration-specific parameters from the request body.
+func ParseMigrationParams(body map[string]interface{}) map[string]string {
 	params := make(map[string]string)
 	if raw, ok := body["params"]; ok {
 		if m, ok := raw.(map[string]interface{}); ok {

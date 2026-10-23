@@ -56,8 +56,8 @@ func TestVerify(t *testing.T) {
 			}
 		})
 	}
-	if g.Fetches > 2 {
-		t.Errorf("JWKS fetched %d times; unknown kids must not refetch more than once a minute", g.Fetches)
+	if n := g.Fetches(); n > 2 {
+		t.Errorf("JWKS fetched %d times; unknown kids must not refetch more than once a minute", n)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestJWKSOutageBackoff(t *testing.T) {
 			t.Fatal("verified without keys")
 		}
 	}
-	if g.Fetches != 1 {
-		t.Errorf("JWKS fetched %d times during an outage, want 1", g.Fetches)
+	if n := g.Fetches(); n != 1 {
+		t.Errorf("JWKS fetched %d times during an outage, want 1", n)
 	}
 	g.SetFail(false)
 	now = now.Add(61 * time.Second)

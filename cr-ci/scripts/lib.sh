@@ -422,9 +422,8 @@ crci_validate_config() {
     fi
   fi
 
-  _crci_required GITHUB_APP_INSTALLATION_SCOPE
   v=${CFG[GITHUB_APP_INSTALLATION_SCOPE]}
-  if [[ -n $v && $v != repo && $v != org ]]; then
+  if [[ $v != repo && $v != org ]]; then
     _crci_fail GITHUB_APP_INSTALLATION_SCOPE "\"$v\" must be \"repo\" or \"org\""
   fi
   if [[ $v == org && ${#owners[@]} -gt 0 ]]; then
@@ -486,9 +485,17 @@ crci_validate_config() {
 
   n=$(_crci_posint RUNNER_DISK_GI) || true
   [[ -n $n ]] || _crci_fail RUNNER_DISK_GI "\"${CFG[RUNNER_DISK_GI]}\" is not a positive integer"
-  [[ -n $n ]] && ((n > 10)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 10 GiB ephemeral-disk maximum"
+  [[ -n $n ]] && ((n > 100)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 100 GiB ephemeral-disk maximum"
   n=$(_crci_posint MAX_CONCURRENT_RUNNERS) || true
   [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"${CFG[MAX_CONCURRENT_RUNNERS]}\" is not a positive integer"
+  case ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} in
+    true | false) ;;
+    *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"${CFG[RUNNER_BUILD_CACHE_IN_RAM]}\" must be true or false" ;;
+  esac
+  # The in-RAM cache (~9.5 GB) plus the ~21 GB compile need the 32 GiB shape (P6 run 4).
+  if [[ ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} == true && -n $mi ]] && ((mi >= 512 && mi < 32 * 1024)); then
+    _crci_fail RUNNER_BUILD_CACHE_IN_RAM "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got ${CFG[RUNNER_MEMORY]}"
+  fi
 
   _crci_duration_check TASK_TIMEOUT $((60 * 1000)) $((168 * 3600 * 1000)) "1m" "168h"
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"
