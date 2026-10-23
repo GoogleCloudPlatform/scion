@@ -9,11 +9,16 @@
 #   - a runs-on that mentions vars.SCION_LARGE_RUNNER is not exactly the
 #     canonical expression below (the fork-PR guard keeps forks,
 #     pull_request_target, schedule and workflow_dispatch on ubuntu-latest);
-#   - a routed job cannot or must not run there: it has services: or
-#     container: (no Docker on Cloud Run), its permissions grant write, or
-#     its workflow is triggered by pull_request_target;
-#   - a routed job has no timeout-minutes, or one above 35 (the runner's task
-#     timeout is 45 min, minus its 10 min idle timeout).
+#   - a routed job cannot or must not run there: it has services:, container:
+#     or a uses: docker:// step (no Docker on Cloud Run), its permissions (its
+#     own, or the workflow's when it has none) grant write, or its workflow is
+#     triggered by pull_request_target;
+#   - a routed job has no timeout-minutes, or one outside 1-35 (the runner's
+#     task timeout is 45 min, minus its 10 min idle timeout). A job whose
+#     hosted runs need longer may use ${{ vars.SCION_LARGE_RUNNER && N || M }}:
+#     N (the cr-ci value) must be 1-35;
+#   - any job's runs-on names a self-hosted runner literally (self-hosted or a
+#     scion-cr-* label) instead of through the canonical expression.
 #
 # Usage: hack/check-runner-routing.sh [WORKFLOW_DIR]   (default .github/workflows)
 #        hack/check-runner-routing.sh --selftest       (runs the fixtures in
@@ -35,25 +40,35 @@ check_file() {
     function flush() {
       if (job == "" || !routed) return
       if (svc != "") printf "%s: job %s is routed to the cr-ci runner but has %s (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, job, svc
+      if (dock) printf "%s: job %s is routed to the cr-ci runner but has a uses: docker:// step (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, job
       if (wperm) printf "%s: job %s is routed to the cr-ci runner but its permissions grant write; keep it on a GitHub-hosted runner\n", file, job
+      else if (!hasperm && topw) printf "%s: job %s is routed to the cr-ci runner but inherits the workflow permissions, which grant write; keep it on a GitHub-hosted runner\n", file, job
       if (prt) printf "%s: job %s is routed to the cr-ci runner but its workflow runs on pull_request_target; keep it on a GitHub-hosted runner\n", file, job
-      if (tmo == "") printf "%s: job %s is routed to the cr-ci runner but has no timeout-minutes; set one of at most %d\n", file, job, maxt
-      else if (tmo !~ /^[0-9]+$/ || tmo + 0 > maxt) printf "%s: job %s is routed to the cr-ci runner with timeout-minutes %s; it must be a number of at most %d\n", file, job, tmo, maxt
+      if (tmo == "") printf "%s: job %s is routed to the cr-ci runner but has no timeout-minutes; set one from 1 to %d\n", file, job, maxt
+      else if (tmo !~ /^[0-9]+$/ || tmo + 0 < 1 || tmo + 0 > maxt) printf "%s: job %s is routed to the cr-ci runner with timeout-minutes %s; it must be a number from 1 to %d\n", file, job, tmo, maxt
     }
-    /^jobs:[[:space:]]*$/ { injobs = 1; next }
+    /^jobs:[[:space:]]*$/ { injobs = 1; intopperm = 0; next }
     injobs && /^[^[:space:]#]/ { flush(); injobs = 0; job = "" }
     !injobs {
-      if ($0 ~ /vars\.SCION_LARGE_RUNNER/ && $0 !~ /^[[:space:]]*#/)
+      if ($0 ~ /^[[:space:]]*#/) next
+      if ($0 ~ /vars\.SCION_LARGE_RUNNER/)
         printf "%s:%d: vars.SCION_LARGE_RUNNER outside a job runs-on; only a job-level %s may use it\n", file, NR, canon
+      if ($0 ~ /^[^[:space:]]/) intopperm = 0
+      if ($0 ~ /^permissions:/) { if ($0 ~ /write/) topw = 1; intopperm = 1; next }
+      if (intopperm && $0 ~ /^  [A-Za-z_-]+:[[:space:]]*write/) topw = 1
       next
     }
     /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
       flush()
       job = $0; sub(/^  /, "", job); sub(/:.*/, "", job)
-      routed = 0; svc = ""; wperm = 0; tmo = ""; inperm = 0
+      routed = 0; svc = ""; dock = 0; wperm = 0; hasperm = 0; tmo = ""; inperm = 0
       next
     }
     /^[[:space:]]*#/ { next }
+    /^    runs-on:/ && !/vars\.SCION_LARGE_RUNNER/ && /self-hosted|scion-cr-/ {
+      printf "%s:%d: job %s names a self-hosted runner literally; route it only through the canonical expression:\n    %s\n", file, NR, job, canon
+    }
+    /uses:[[:space:]]*["\047]?docker:\/\// { dock = 1 }
     /vars\.SCION_LARGE_RUNNER/ {
       line = $0; sub(/[[:space:]]+$/, "", line)
       if (line == "    " canon) routed = 1
@@ -61,8 +76,17 @@ check_file() {
     }
     /^    [A-Za-z_-]+:/ { inperm = 0 }
     /^    (services|container):/ { k = $0; sub(/^    /, "", k); sub(/:.*/, "", k); svc = (svc == "" ? k ":" : svc " and " k ":") }
-    /^    timeout-minutes:/ { t = $0; sub(/^    timeout-minutes:[[:space:]]*/, "", t); sub(/[[:space:]]+(#.*)?$/, "", t); tmo = t }
+    /^    timeout-minutes:/ {
+      t = $0; sub(/^    timeout-minutes:[[:space:]]*/, "", t); sub(/[[:space:]]+(#.*)?$/, "", t)
+      # A job routed only where the variable is set may keep a longer hosted
+      # timeout: ${{ vars.SCION_LARGE_RUNNER && N || M }}; N is what counts.
+      if (t ~ /^\$\{\{ vars\.SCION_LARGE_RUNNER && [0-9]+ \|\| [0-9]+ \}\}$/) {
+        sub(/^\$\{\{ vars\.SCION_LARGE_RUNNER && /, "", t); sub(/ \|\|.*$/, "", t)
+      }
+      tmo = t
+    }
     /^    permissions:/ {
+      hasperm = 1
       if ($0 ~ /write/) wperm = 1
       inperm = 1; next
     }
@@ -122,7 +146,11 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 dir=${1:-.github/workflows}
 if check_dir "$dir"; then
-  echo "check-runner-routing: ok ($(grep -lF 'vars.SCION_LARGE_RUNNER' "$dir"/*.yml 2>/dev/null | wc -l) workflow file(s) route jobs)"
+  routed_files=0
+  for f in "$dir"/*.yml "$dir"/*.yaml; do
+    [ -e "$f" ] && grep -qF 'vars.SCION_LARGE_RUNNER' "$f" && routed_files=$((routed_files + 1))
+  done
+  echo "check-runner-routing: ok ($routed_files workflow file(s) route jobs)"
 else
   rc=$?
   echo "check-runner-routing: FAILED; the canonical routing is:" >&2
