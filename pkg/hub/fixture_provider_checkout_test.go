@@ -15,8 +15,12 @@
 package hub
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
 )
 
 // fixtureProviderCheckout returns the local checkout path for a remote test
@@ -28,4 +32,16 @@ import (
 func fixtureProviderCheckout(t testing.TB) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "checkout")
+}
+
+// giveProviderCheckout sets fixtureProviderCheckout on the existing provider
+// row of brokerID for projectID, for a test whose shared fixture registers a
+// remote broker without one but whose agent create must be accepted.
+func giveProviderCheckout(t testing.TB, s store.Store, projectID, brokerID string) {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := s.GetProjectProvider(ctx, projectID, brokerID)
+	require.NoError(t, err)
+	provider.LocalPath = fixtureProviderCheckout(t)
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 }
