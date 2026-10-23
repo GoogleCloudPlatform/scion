@@ -396,13 +396,6 @@ func SuggestedProjectStorageYAML(ps *V1ProjectStorageConfig) string {
 	return string(data)
 }
 
-func homesOrLocal(h string) string {
-	if h == "" {
-		return HomeStorageBackendLocal
-	}
-	return h
-}
-
 func isZeroWorkspaceStorage(ws *V1WorkspaceStorageConfig) bool {
 	return ws.Backend == "" && ws.NFS == nil && ws.CloudRunVolume == nil && ws.GKESharedVolume == nil
 }
