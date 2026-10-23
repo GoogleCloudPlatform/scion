@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
@@ -135,11 +136,12 @@ func pinnedOutbox(t *testing.T, hub string) *AnalyticsOutbox {
 }
 
 // relocateFromOtherProcess has another process's drainer (its own outbox
-// handle on the same directory) observe hub and record a relocation.
+// handle on the same directory) observe hub, confirm it after the debounce
+// window and record a relocation.
 func relocateFromOtherProcess(t *testing.T, o *AnalyticsOutbox, hub string) {
 	t.Helper()
 	d := NewAnalyticsDrainer(reopen(t, o), func(context.Context, []byte) error { return nil }, trustedHub(hub))
-	d.RunOnce(context.Background())
+	runConfirmed(d)
 	if d.ObservedHubID() != hub || d.VerifiedHubID() != "" {
 		t.Fatalf("other process: observed %q verified %q", d.ObservedHubID(), d.VerifiedHubID())
 	}
@@ -187,7 +189,7 @@ func TestHealthOriginRelocated(t *testing.T) {
 	origin := pinnedOutbox(t, "hub-a")
 	cp := copyOutbox(t, origin)
 	h := newOriginHarness(t, cp, trustedHub("hub-z"))
-	h.drainer.RunOnce(context.Background())
+	runConfirmed(h.drainer)
 	h.periodic()
 	ev := h.last(t)
 	if ev.HubID != "hub-z" || ev.OutboxPinnedHubID != "hub-a" || relocatedValue(ev) != "true" {
@@ -307,7 +309,7 @@ func TestHealthOriginConcurrentRelocationNeverFalseWithNewHub(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h.drainer.RunOnce(context.Background())
+			runConfirmed(h.drainer)
 		}()
 		for i := 0; i < 4; i++ {
 			h.periodic()
@@ -408,5 +410,66 @@ func TestOutboxSubjectRules(t *testing.T) {
 		if rel != tc.wantRelocated || got.PinnedHubID != "hub-a" || got.HubMismatchTotal != 2 || got.RelocatedRefusedTotal != 3 {
 			t.Fatalf("%s: %+v relocated %s, want %s", tc.name, got, rel, tc.wantRelocated)
 		}
+	}
+}
+
+// Debounce: a hub that differs from the pin is an unconfirmed CANDIDATE.
+// Health holds its events (nothing frozen or sent); a later resolution equal
+// to the pin verifies the process and the held events freeze with the pin
+// and relocated=false.
+func TestHealthOriginUnconfirmedCandidateHoldsThenVerifies(t *testing.T) {
+	res := &switchableHub{hub: "hub-z"}
+	h := newOriginHarness(t, pinnedOutbox(t, "hub-a"), res.resolve)
+	clock := time.Date(2026, 10, 23, 5, 0, 0, 0, time.UTC)
+	h.drainer.now = func() time.Time { return clock }
+	h.drainer.RunOnce(context.Background()) // first sighting: candidate only
+	h.periodic()
+	if h.drainer.ObservedHubID() != "" || len(h.sentEvents(t)) != 0 {
+		t.Fatalf("unconfirmed candidate: observed %q, %d sent; want held", h.drainer.ObservedHubID(), len(h.sentEvents(t)))
+	}
+	for i, item := range h.p.health.queue {
+		if item.line != nil {
+			t.Fatalf("queued event %d frozen during an unconfirmed candidate", i)
+		}
+	}
+	res.set("hub-a", nil)
+	clock = clock.Add(analyticsRelocationConfirm)
+	h.drainer.RunOnce(context.Background()) // equal to the pin: verified
+	h.periodic()
+	evs := h.sentEvents(t)
+	if len(evs) == 0 {
+		t.Fatal("held events must be sent once verified")
+	}
+	for _, ev := range evs {
+		if ev.HubID != "hub-a" {
+			t.Fatalf("held event frozen with %q, want the verified hub-a", ev.HubID)
+		}
+	}
+	if ev := h.last(t); relocatedValue(ev) != "false" || ev.OutboxPinnedHubID != "hub-a" || *ev.OutboxHubMismatchTotal != 0 {
+		t.Fatalf("after verification: relocated %s pinned %q mismatch %d", relocatedValue(ev), ev.OutboxPinnedHubID, *ev.OutboxHubMismatchTotal)
+	}
+}
+
+// Debounce: a different candidate restarts the confirmation window; health
+// stays held until the second candidate is confirmed, then carries it.
+func TestHealthOriginDifferentCandidateRestartsWindow(t *testing.T) {
+	res := &switchableHub{hub: "hub-z"}
+	h := newOriginHarness(t, pinnedOutbox(t, "hub-a"), res.resolve)
+	clock := time.Date(2026, 10, 23, 5, 0, 0, 0, time.UTC)
+	h.drainer.now = func() time.Time { return clock }
+	h.drainer.RunOnce(context.Background()) // candidate hub-z
+	res.set("hub-y", nil)
+	clock = clock.Add(analyticsRelocationConfirm)
+	h.drainer.RunOnce(context.Background()) // a different hub: the window restarts
+	h.periodic()
+	if h.drainer.ObservedHubID() != "" || len(h.sentEvents(t)) != 0 {
+		t.Fatalf("restarted candidate: observed %q, %d sent; want held", h.drainer.ObservedHubID(), len(h.sentEvents(t)))
+	}
+	clock = clock.Add(analyticsRelocationConfirm)
+	h.drainer.RunOnce(context.Background()) // hub-y confirmed
+	h.periodic()
+	ev := h.last(t)
+	if ev.HubID != "hub-y" || ev.OutboxPinnedHubID != "hub-a" || relocatedValue(ev) != "true" || *ev.OutboxHubMismatchTotal != 1 {
+		t.Fatalf("after confirmation: hub %q pinned %q relocated %s mismatch %d", ev.HubID, ev.OutboxPinnedHubID, relocatedValue(ev), *ev.OutboxHubMismatchTotal)
 	}
 }
