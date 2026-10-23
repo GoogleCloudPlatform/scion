@@ -944,8 +944,14 @@ func TestPipelineStopEmitsFinalHealth(t *testing.T) {
 	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
 		t.Fatal(err)
 	}
+	// The health loop is already running (it reads QueueDepth under
+	// budget.mu): seed the residual under the same locks production uses.
+	p.metricStateMu.Lock()
 	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
+	p.metricStateMu.Unlock()
+	p.budget.mu.Lock()
 	p.budget.records, p.budget.entries = 1, 1
+	p.budget.mu.Unlock()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_ = p.Stop(stopCtx) // reports the residual as an error
@@ -1065,8 +1071,14 @@ func TestPipelineStopFinalReportsDegraded(t *testing.T) {
 	if err := p.metricStreams.add([]*metricpb.ResourceMetrics{stopTestMetric(5, 2)}); err != nil {
 		t.Fatal(err)
 	}
+	// The health loop is already running (it reads QueueDepth under
+	// budget.mu): seed the residual under the same locks production uses.
+	p.metricStateMu.Lock()
 	p.metricDirtyRecords, p.metricDirtyEntries = 1, 1
+	p.metricStateMu.Unlock()
+	p.budget.mu.Lock()
 	p.budget.records, p.budget.entries = 1, 1
+	p.budget.mu.Unlock()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_ = p.Stop(stopCtx)
