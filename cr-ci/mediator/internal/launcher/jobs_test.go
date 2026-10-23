@@ -41,7 +41,7 @@ func TestLaunchEnvOverrides(t *testing.T) {
 	}
 	want := map[string]string{
 		EnvClaimToken: "0123456789abcdef0123456789abcdef", EnvMediatorURL: "https://mediator.example.com",
-		EnvJobID: "77", EnvRunnerName: "cr-job-77",
+		EnvJobID: "77", EnvRunnerName: "cr-job-77", EnvRepo: "o/r",
 	}
 	if len(ex[0].Env) != len(want) {
 		t.Errorf("env = %v, want exactly %v", ex[0].Env, want)
@@ -60,6 +60,10 @@ func TestLaunchRejectsIncompleteSpec(t *testing.T) {
 	l, cr := newLauncher(t)
 	if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1"}); err == nil {
 		t.Error("launch without a claim token succeeded")
+	}
+	// The runner's job guard binds to GH_REPO, so a launch must carry it.
+	if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1", ClaimToken: "0123456789abcdef0123456789abcdef"}); err == nil {
+		t.Error("launch without a repository succeeded")
 	}
 	if len(cr.RunBodies) != 0 {
 		t.Error("incomplete spec reached Cloud Run")

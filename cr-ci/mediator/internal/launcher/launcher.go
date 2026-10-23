@@ -20,13 +20,16 @@ const (
 	EnvMediatorURL = "MEDIATOR_URL"
 	EnvJobID       = "GH_JOB_ID"
 	EnvRunnerName  = "RUNNER_NAME"
+	// EnvRepo is the repository (owner/name) the runner is launched to serve;
+	// the runner's job guard refuses a job of any other repository.
+	EnvRepo = "GH_REPO"
 )
 
 // LaunchSpec describes one runner execution for one GitHub job.
 type LaunchSpec struct {
 	JobID int64 // the job the runner is launched to serve (GH_JOB_ID)
 	RunID int64
-	Repo  string // owner/name, for logs
+	Repo  string // owner/name; passed to the runner as GH_REPO (its job guard binds to it)
 	// RunnerName is the runner's registration name, normally
 	// cr-job-<JobID>. After a runner swap or a hijack it can carry another
 	// job's ID (the name of the runner that job displaced).

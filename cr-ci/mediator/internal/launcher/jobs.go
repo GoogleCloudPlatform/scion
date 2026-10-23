@@ -64,9 +64,9 @@ type envVar struct {
 }
 
 // Launch calls jobs.run with env overrides RUNNER_CLAIM_TOKEN, MEDIATOR_URL,
-// GH_JOB_ID and RUNNER_NAME, and returns the execution resource name.
+// GH_JOB_ID, RUNNER_NAME and GH_REPO, and returns the execution resource name.
 func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, error) {
-	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || l.MediatorURL == "" {
+	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || spec.Repo == "" || l.MediatorURL == "" {
 		return "", errors.New("launch: incomplete launch spec")
 	}
 	body := map[string]any{
@@ -78,6 +78,7 @@ func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, err
 					{EnvMediatorURL, l.MediatorURL},
 					{EnvJobID, strconv.FormatInt(spec.JobID, 10)},
 					{EnvRunnerName, spec.RunnerName},
+					{EnvRepo, spec.Repo},
 				},
 			}},
 		},
