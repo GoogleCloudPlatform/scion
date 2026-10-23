@@ -446,3 +446,57 @@ func TestGuardNilDrainerAccessors(t *testing.T) {
 		t.Error("nil drainer accessors must return empty")
 	}
 }
+
+// Supported Scion path, unsupported for analytics continuity (temporary
+// limitation): unlink, then `scion hub link` to another hub re-registers
+// the same home as a NEW agent (new agent ID, so a new namespace). Old
+// final bytes drain unchanged; new observations are refused (fail-closed,
+// no pin or epoch reset); the sticky marker survives restarts, including a
+// later process that resolves the original hub again.
+func TestGuardRelinkToAnotherHubAsNewAgent(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("agent-old", "rid1:final", outboxTestTS), AppendWritten)
+	if _, err := o.Finalize("hub-A"); err != nil {
+		t.Fatal(err)
+	}
+	mustAppend(t, o, draftFor("agent-old", "rid1:staged", outboxTestTS), AppendWritten)
+	readyBytes, err := os.ReadFile(filepath.Join(o.Dir(), readyName(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := ledger(t, o).Epoch
+
+	// Process 1 after re-link: hub B, new agent ID.
+	c := &capture{}
+	d := NewAnalyticsDrainer(o, c.send, trustedHub("hub-B"))
+	d.RunOnce(context.Background())
+	if len(c.lines) != 1 || c.lines[0]+"\n" != string(readyBytes) {
+		t.Fatalf("old final bytes must drain unchanged: %q", c.lines)
+	}
+	if got, err := o.AppendUsage(draftFor("agent-new", "rid1:new", outboxTestTS)); err != nil || got != AppendRefusedRelocated {
+		t.Fatalf("new agent's observation = %d, %v; want refused", got, err)
+	}
+
+	// Restarts: the marker is sticky; no pin or epoch reset, even when a
+	// later process resolves hub A again.
+	for _, hub := range []string{"hub-B", "hub-A"} {
+		r := reopen(t, o)
+		c := &capture{}
+		dr := NewAnalyticsDrainer(r, c.send, trustedHub(hub))
+		dr.RunOnce(context.Background())
+		l := ledger(t, r)
+		if l.RelocatedHubID != "hub-B" || l.PinnedHubID != "hub-A" || l.Epoch != epoch {
+			t.Fatalf("after restart (resolving %s): ledger %+v", hub, l)
+		}
+		if got, err := r.AppendUsage(draftFor("agent-new", "rid1:again-"+hub, outboxTestTS)); err != nil || got != AppendRefusedRelocated {
+			t.Fatalf("after restart (resolving %s): append = %d, %v", hub, got, err)
+		}
+		if len(c.lines) != 0 || len(stagingLines(t, r)) != 1 {
+			t.Fatalf("after restart (resolving %s): sent %d, staged %d; want held", hub, len(c.lines), len(stagingLines(t, r)))
+		}
+	}
+	if l := ledger(t, o); l.RelocatedRefusedTotal != 3 {
+		t.Errorf("relocated_refused = %d, want 3", l.RelocatedRefusedTotal)
+	}
+}
