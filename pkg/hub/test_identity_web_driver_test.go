@@ -443,7 +443,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	}
 	// Helpers whose callers carry the check, with every caller listed.
 	helperCallers := map[string][]string{
-		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser"},
+		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser", "inviteBatchUserStep"},
 		"provisionNewUser":    {"Resolve"},
 		"grantProjectVisitor": {"handleAddProjectVisitor"},
 	}
@@ -454,7 +454,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]bool{
-		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
+		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
 		"grantProjectVisitor": true, "linkPendingVisitor": true,
@@ -524,8 +524,15 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The project storage layout authority (pkg/projectfs), not a
+		// user or transport resolver.
+		"projectRecordSharedDirPath localLayout",
+		// The workspace Mount through the same layout authority
+		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
+		// transport resolver.
+		"projectWorkspaceResolved layout",
 		"resolveAsNeededForKeys d.secretBackend",
-		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
+		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")

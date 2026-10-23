@@ -17,8 +17,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -26,14 +25,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// unreachableHubURL returns a loopback URL nothing listens on, so a hub
-// status run against it fails fast with "connection refused".
-func unreachableHubURL(t *testing.T) string {
+// unreachableHubURLs returns n distinct loopback URLs nothing listens on, so
+// a hub status run against any of them fails fast with "connection refused".
+// All n listeners are open at the same time while their ports are read, so
+// the kernel cannot hand out one port twice; closing a listener before the
+// next one opens would free its port for reuse and let two URLs collide.
+func unreachableHubURLs(t *testing.T, n int) []string {
 	t.Helper()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	url := srv.URL
-	srv.Close()
-	return url
+	listeners := make([]net.Listener, n)
+	urls := make([]string, n)
+	for i := range listeners {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		listeners[i] = l
+		urls[i] = "http://" + l.Addr().String()
+	}
+	for _, l := range listeners {
+		require.NoError(t, l.Close())
+	}
+	return urls
 }
 
 // TestResolveCLIHub_ValueAndSourceAgree: in every combination of the hub
@@ -59,11 +69,10 @@ func TestResolveCLIHub_ValueAndSourceAgree(t *testing.T) {
 						origFormat := outputFormat
 						t.Cleanup(func() { outputFormat = origFormat })
 
-						settingsURL := unreachableHubURL(t)
-						flagURL := unreachableHubURL(t)
-						envURL := unreachableHubURL(t)
-						linkURL := unreachableHubURL(t)
-						currentURL := unreachableHubURL(t)
+						// Distinct URLs, so a value that matches one of them
+						// names its source unambiguously.
+						urls := unreachableHubURLs(t, 6)
+						settingsURL, flagURL, envURL, linkURL, currentURL, losingEnvURL := urls[0], urls[1], urls[2], urls[3], urls[4], urls[5]
 
 						t.Setenv("SCION_HUB_ENDPOINT", "")
 						t.Setenv("SCION_HUB_URL", "")
@@ -71,7 +80,7 @@ func TestResolveCLIHub_ValueAndSourceAgree(t *testing.T) {
 							t.Setenv(env.varName, envURL)
 						}
 						if env.name == "both" {
-							t.Setenv("SCION_HUB_URL", unreachableHubURL(t))
+							t.Setenv("SCION_HUB_URL", losingEnvURL)
 						}
 						if current {
 							saveTestContext(t, currentURL, "")

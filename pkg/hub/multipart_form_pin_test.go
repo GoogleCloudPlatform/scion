@@ -29,8 +29,8 @@ import (
 // through parseMultipartUpload. The pin requires each of them to call it, so
 // the scan cannot pass by finding nothing.
 var multipartUploadHandlers = []string{
+	"decodeInviteBatchMultipart",
 	"handleAdminAllowListImport",
-	"handleAdminUserInviteBulk",
 	"handleAgentAttachmentUpload",
 	"handleAttachmentUpload",
 	"handleHarnessConfigFileUpload",

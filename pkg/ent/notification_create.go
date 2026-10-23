@@ -122,6 +122,34 @@ func (_c *NotificationCreate) SetNillableDispatchOutcome(v *string) *Notificatio
 	return _c
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (_c *NotificationCreate) SetDispatchReason(v string) *NotificationCreate {
+	_c.mutation.SetDispatchReason(v)
+	return _c
+}
+
+// SetNillableDispatchReason sets the "dispatch_reason" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableDispatchReason(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetDispatchReason(*v)
+	}
+	return _c
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (_c *NotificationCreate) SetNextAttemptAt(v time.Time) *NotificationCreate {
+	_c.mutation.SetNextAttemptAt(v)
+	return _c
+}
+
+// SetNillableNextAttemptAt sets the "next_attempt_at" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableNextAttemptAt(v *time.Time) *NotificationCreate {
+	if v != nil {
+		_c.SetNextAttemptAt(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *NotificationCreate) SetCreated(v time.Time) *NotificationCreate {
 	_c.mutation.SetCreated(v)
@@ -201,6 +229,10 @@ func (_c *NotificationCreate) defaults() {
 		v := notification.DefaultDispatchOutcome
 		_c.mutation.SetDispatchOutcome(v)
 	}
+	if _, ok := _c.mutation.DispatchReason(); !ok {
+		v := notification.DefaultDispatchReason
+		_c.mutation.SetDispatchReason(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := notification.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -270,6 +302,9 @@ func (_c *NotificationCreate) check() error {
 	}
 	if _, ok := _c.mutation.DispatchOutcome(); !ok {
 		return &ValidationError{Name: "dispatch_outcome", err: errors.New(`ent: missing required field "Notification.dispatch_outcome"`)}
+	}
+	if _, ok := _c.mutation.DispatchReason(); !ok {
+		return &ValidationError{Name: "dispatch_reason", err: errors.New(`ent: missing required field "Notification.dispatch_reason"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Notification.created"`)}
@@ -353,6 +388,14 @@ func (_c *NotificationCreate) createSpec() (*Notification, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.DispatchOutcome(); ok {
 		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
 		_node.DispatchOutcome = value
+	}
+	if value, ok := _c.mutation.DispatchReason(); ok {
+		_spec.SetField(notification.FieldDispatchReason, field.TypeString, value)
+		_node.DispatchReason = value
+	}
+	if value, ok := _c.mutation.NextAttemptAt(); ok {
+		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
+		_node.NextAttemptAt = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(notification.FieldCreated, field.TypeTime, value)
@@ -545,6 +588,36 @@ func (u *NotificationUpsert) SetDispatchOutcome(v string) *NotificationUpsert {
 // UpdateDispatchOutcome sets the "dispatch_outcome" field to the value that was provided on create.
 func (u *NotificationUpsert) UpdateDispatchOutcome() *NotificationUpsert {
 	u.SetExcluded(notification.FieldDispatchOutcome)
+	return u
+}
+
+// SetDispatchReason sets the "dispatch_reason" field.
+func (u *NotificationUpsert) SetDispatchReason(v string) *NotificationUpsert {
+	u.Set(notification.FieldDispatchReason, v)
+	return u
+}
+
+// UpdateDispatchReason sets the "dispatch_reason" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateDispatchReason() *NotificationUpsert {
+	u.SetExcluded(notification.FieldDispatchReason)
+	return u
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (u *NotificationUpsert) SetNextAttemptAt(v time.Time) *NotificationUpsert {
+	u.Set(notification.FieldNextAttemptAt, v)
+	return u
+}
+
+// UpdateNextAttemptAt sets the "next_attempt_at" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateNextAttemptAt() *NotificationUpsert {
+	u.SetExcluded(notification.FieldNextAttemptAt)
+	return u
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (u *NotificationUpsert) ClearNextAttemptAt() *NotificationUpsert {
+	u.SetNull(notification.FieldNextAttemptAt)
 	return u
 }
 
@@ -757,6 +830,41 @@ func (u *NotificationUpsertOne) SetDispatchOutcome(v string) *NotificationUpsert
 func (u *NotificationUpsertOne) UpdateDispatchOutcome() *NotificationUpsertOne {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateDispatchOutcome()
+	})
+}
+
+// SetDispatchReason sets the "dispatch_reason" field.
+func (u *NotificationUpsertOne) SetDispatchReason(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchReason(v)
+	})
+}
+
+// UpdateDispatchReason sets the "dispatch_reason" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateDispatchReason() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchReason()
+	})
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (u *NotificationUpsertOne) SetNextAttemptAt(v time.Time) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetNextAttemptAt(v)
+	})
+}
+
+// UpdateNextAttemptAt sets the "next_attempt_at" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateNextAttemptAt() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateNextAttemptAt()
+	})
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (u *NotificationUpsertOne) ClearNextAttemptAt() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.ClearNextAttemptAt()
 	})
 }
 
@@ -1136,6 +1244,41 @@ func (u *NotificationUpsertBulk) SetDispatchOutcome(v string) *NotificationUpser
 func (u *NotificationUpsertBulk) UpdateDispatchOutcome() *NotificationUpsertBulk {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateDispatchOutcome()
+	})
+}
+
+// SetDispatchReason sets the "dispatch_reason" field.
+func (u *NotificationUpsertBulk) SetDispatchReason(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchReason(v)
+	})
+}
+
+// UpdateDispatchReason sets the "dispatch_reason" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateDispatchReason() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchReason()
+	})
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (u *NotificationUpsertBulk) SetNextAttemptAt(v time.Time) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetNextAttemptAt(v)
+	})
+}
+
+// UpdateNextAttemptAt sets the "next_attempt_at" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateNextAttemptAt() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateNextAttemptAt()
+	})
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (u *NotificationUpsertBulk) ClearNextAttemptAt() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.ClearNextAttemptAt()
 	})
 }
 

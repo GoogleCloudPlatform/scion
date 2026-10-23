@@ -80,6 +80,8 @@ func agentRouteCases() []agentRouteCase {
 		byID(http.MethodPut, "/secrets/MY_KEY", AgentRouteSecrets, "", AgentSubRouteSuffix{Opaque: "/MY_KEY"}),
 		byID(get, "/metrics/summary", AgentRouteMetricsSummary, opAgentMetricsRead, none),
 		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
+		byID(http.MethodDelete, "/pending-config", AgentRoutePendingConfig, opAgentPendingDiscard, none),
+		byID(get, "/pending-config", AgentRoutePendingConfig, "", none),
 		byID(post, "/delegations", AgentRouteDelegations, opAgentDelegationCreate, none),
 		byID(get, "/delegations", AgentRouteDelegations, opAgentDelegationList, none),
 		byID(http.MethodPut, "/delegations", AgentRouteDelegations, "", none),
@@ -390,7 +392,7 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentTokenRefresh, opAgentOutboundMessage, opAgentMetricsReport,
 		opAgentStatusUpdate, opAgentLogsRead, opAgentMessagesRead, opAgentMetricsRead,
 		opAgentKeys, opAgentActionMessage, opAgentPortList, opAgentPortRegister,
-		opAgentPortTunnel, opAgentStopAllProject,
+		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

@@ -81,6 +81,9 @@ func (f *fakeDoctorHub) serve(t *testing.T) *httptest.Server {
 
 func newDoctorTestClient(t *testing.T, url string) hubclient.Client {
 	t.Helper()
+	// hubclient.New probes for transport auth; keep it off the metadata
+	// server.
+	stubNotOnGCE(t)
 	c, err := hubclient.New(url, hubclient.WithBearerToken("test-user-token"))
 	require.NoError(t, err)
 	return c
@@ -341,12 +344,12 @@ func TestDoctorJSON_HubConnectivityFailureExitsZero(t *testing.T) {
 	require.NoError(t, r.finish(), "check results do not set the exit status")
 
 	var doc struct {
-		Status    string                     `json:"status"`
-		HubChecks []scionruntime.CheckResult `json:"hubChecks"`
+		Status    string            `json:"status"`
+		HubHealth doctorJSONSection `json:"hubHealth"`
 	}
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &doc), "stdout: %s", buf.String())
 	assert.Equal(t, "fail", doc.Status)
-	assert.Equal(t, "fail", findCheck(t, doc.HubChecks, "hub-connectivity").Status)
+	assert.Equal(t, "fail", findCheck(t, doc.HubHealth.Checks, "hub-connectivity").Status)
 }
 
 // failingWriter fails every write.
@@ -485,15 +488,15 @@ func TestDoctorJSON_CleanForNonDiagnosableRuntime(t *testing.T) {
 
 	// The failed docker check makes the status fail, with exit zero.
 	assert.JSONEq(t, `"fail"`, string(doc["status"]))
-	assert.JSONEq(t, `"docker"`, string(doc["runtime"]))
 	assert.JSONEq(t, f.summaryBody, string(doc["healthSummary"]))
-	for _, key := range []string{"general", "hubChecks", "platformHealth", "checks"} {
+	for _, key := range []string{"general", "hubHealth", "platformHealth", "runtime"} {
 		assert.Contains(t, doc, key)
 	}
-	var checks []scionruntime.CheckResult
-	require.NoError(t, json.Unmarshal(doc["checks"], &checks))
-	assert.Equal(t, []string{"runtime", "docker"}, checkNames(checks))
-	assert.Equal(t, "fail", checks[1].Status)
+	var rt doctorJSONRuntime
+	require.NoError(t, json.Unmarshal(doc["runtime"], &rt))
+	assert.Equal(t, "docker", rt.Name)
+	assert.Equal(t, []string{"runtime", "docker"}, checkNames(rt.Checks))
+	assert.Equal(t, "fail", rt.Checks[1].Status)
 }
 
 func TestDoctorJSON_UnhealthyIsReportedInJSONAndExitsZero(t *testing.T) {
@@ -658,14 +661,14 @@ func TestDoctorJSON_VerboseAddsNoTables(t *testing.T) {
 	require.NoError(t, r.finish())
 
 	var doc struct {
-		PlatformHealth []scionruntime.CheckResult `json:"platformHealth"`
+		PlatformHealth doctorJSONPlatformHealth `json:"platformHealth"`
 	}
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &doc))
-	require.NotEmpty(t, doc.PlatformHealth)
-	for _, c := range doc.PlatformHealth {
+	require.NotEmpty(t, doc.PlatformHealth.Checks)
+	for _, c := range doc.PlatformHealth.Checks {
 		assert.NotContains(t, c.Message, "\n", c.Name)
 	}
-	assert.NotContains(t, checkNames(doc.PlatformHealth), "hub-instances")
+	assert.NotContains(t, checkNames(doc.PlatformHealth.Checks), "hub-instances")
 }
 
 // fakeDiagnosable is a runtime with its own diagnostics.
@@ -704,16 +707,15 @@ func TestDoctorRuntime_DiagnosableFailureJSONExitsZero(t *testing.T) {
 
 	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
 	var doc struct {
-		Status  string                     `json:"status"`
-		Runtime string                     `json:"runtime"`
-		Checks  []scionruntime.CheckResult `json:"checks"`
+		Status  string            `json:"status"`
+		Runtime doctorJSONRuntime `json:"runtime"`
 	}
 	require.NoError(t, dec.Decode(&doc), "stdout: %s", buf.String())
 	var extra json.RawMessage
 	assert.ErrorIs(t, dec.Decode(&extra), io.EOF, "nothing may follow the JSON object")
 	assert.Equal(t, "fail", doc.Status)
-	assert.Equal(t, "kubernetes", doc.Runtime)
-	assert.Equal(t, []string{"runtime", "cluster", "rbac"}, checkNames(doc.Checks))
+	assert.Equal(t, "kubernetes", doc.Runtime.Name)
+	assert.Equal(t, []string{"runtime", "cluster", "rbac"}, checkNames(doc.Runtime.Checks))
 }
 
 func TestDoctorJSON_NoProject(t *testing.T) {
@@ -727,10 +729,12 @@ func TestDoctorJSON_NoProject(t *testing.T) {
 	require.NoError(t, dec.Decode(&doc), "stdout: %s", buf.String())
 	var extra json.RawMessage
 	assert.ErrorIs(t, dec.Decode(&extra), io.EOF)
-	assert.NotContains(t, doc, "runtime", "no runtime without a project")
 	assert.JSONEq(t, `"warn"`, string(doc["status"]))
+	var rt map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(doc["runtime"], &rt))
+	assert.NotContains(t, rt, "name", "no runtime name without a project")
 	var checks []scionruntime.CheckResult
-	require.NoError(t, json.Unmarshal(doc["checks"], &checks))
+	require.NoError(t, json.Unmarshal(rt["checks"], &checks))
 	require.Len(t, checks, 1)
 	assert.Equal(t, "project", checks[0].Name)
 	assert.Equal(t, "warn", checks[0].Status)

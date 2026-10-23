@@ -127,7 +127,7 @@ func TestWriteAgentInfoFileSyncsParentDirAfterRename(t *testing.T) {
 	if syncedDir != dir {
 		t.Errorf("synced dir %q, want %q", syncedDir, dir)
 	}
-	if string(finalAtSync) != `{"repoRoot":"/repo"}` {
+	if string(finalAtSync) != `{"repoRoot":"/repo","source":"broker"}` {
 		t.Errorf("final path at dir sync = %q, want the new contents (dir sync must follow the rename)", finalAtSync)
 	}
 }
