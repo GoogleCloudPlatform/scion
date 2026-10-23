@@ -163,15 +163,27 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Runner routing (hack/check-runner-routing.sh): a fork can route jobs to
-      # its cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable,
-      # which is unset here, so every job runs on ubuntu-latest. This keeps every
-      # routed runs-on byte-identical to the canonical, fork-PR-guarded
-      # expression, and keeps jobs that cannot or must not run there (services,
-      # container, write permissions, pull_request_target) and jobs without a
-      # timeout of at most 35 min off it. The selftest runs the script's fixtures.
-      - name: Check runner routing
-        if: github.event_name == 'pull_request'
+
+  # Runner routing (hack/check-runner-routing.sh). A fork can route jobs to its
+  # cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable, which is
+  # unset here, so every job runs on ubuntu-latest. This keeps every routed
+  # runs-on byte-identical to the canonical, fork-PR-guarded expression, keeps
+  # jobs that cannot or must not run there (services, container, docker://
+  # steps, write permissions, pull_request_target, literal self-hosted labels)
+  # off it, and requires a timeout of at most 35 min. Its own job, so a failure
+  # here does not touch the path detection in changes (which fails open).
+  runner-routing-check:
+    name: Runner routing check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check runner routing (selftest, then the workflows)
         run: |
           ./hack/check-runner-routing.sh --selftest
           ./hack/check-runner-routing.sh
