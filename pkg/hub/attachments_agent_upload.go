@@ -116,8 +116,8 @@ func (s *Server) handleAgentAttachmentUpload(w http.ResponseWriter, r *http.Requ
 	r.Body = http.MaxBytesReader(w, r.Body, maxFile*MaxAttachmentsPerMessage+1024*1024)
 	// The form is removed on every return: ParseMultipartForm can spool
 	// parts and still answer an error (from the query string).
-	err := r.ParseMultipartForm(uploadFormMemory)
-	defer removeUploadForm(r)
+	cleanup, err := parseMultipartUpload(r, uploadFormMemory)
+	defer cleanup()
 	if err != nil {
 		BadRequest(w, "invalid multipart form or request too large")
 		return

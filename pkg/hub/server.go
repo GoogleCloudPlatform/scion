@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -794,6 +795,13 @@ type StartExtras struct {
 	// state survived the stop is started from that state as before.
 	TemplateID   string
 	TemplateHash string
+	// Profile is the agent's settings profile as the hub records it
+	// (AppliedConfig.Profile), sent on every start and restart (wire key
+	// profile), even when empty, so the broker can tell "no profile" from
+	// an older hub that sends none. The broker uses its own provisioning
+	// record of the profile when it has one, and this value otherwise.
+	// Nil sends nothing.
+	Profile *string
 	// The fields below are set on a restart only (see the type comment).
 	ProjectPath       string
 	ProjectSlug       string
@@ -872,6 +880,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateHash != "" {
 		payload["templateHash"] = extras.TemplateHash
+	}
+	if extras.Profile != nil {
+		payload["profile"] = *extras.Profile
 	}
 	if extras.ProjectPath != "" {
 		payload["projectPath"] = extras.ProjectPath
@@ -2180,6 +2191,10 @@ type Server struct {
 	// called; the reaper tick handler nil-checks before recording, matching
 	// dbMetrics/dispatchMetrics.
 	reaperMetrics reapermetrics.Recorder
+
+	// eventStreamMetrics counts scion.hub.events.published on the event
+	// publisher (event_streams.go); nil until SetEventStreamMetrics.
+	eventStreamMetrics ssemetrics.Recorder
 
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
@@ -4720,7 +4735,11 @@ func (s *Server) SetGCPProjectID(projectID string) {
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
 	s.events = ep
+	rec := s.eventStreamMetrics
 	s.mu.Unlock()
+	if p, ok := ep.(publishMetricsSetter); ok && rec != nil {
+		p.SetPublishMetrics(rec)
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()

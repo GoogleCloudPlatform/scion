@@ -4067,6 +4067,13 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// An agent delegated credential is served only on the route routeGuard
+	// admitted for agent.read, for the agent in its path
+	// (.design/agent-delegation.md §11.1).
+	if !admitDelegatedHandler(w, r, opAgentRead, agentResource(agent)) {
+		return
+	}
+
 	// If the caller is an agent, enforce project isolation.
 	//
 	// This check MUST run before s.authorize: cross-project access is answered

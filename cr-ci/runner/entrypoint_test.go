@@ -20,16 +20,23 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // stubRunSh records how it was started, then exits 0. It writes its args
-// one per line, its PID, its working directory and selected env vars.
+// one per line, its PID and parent PID, its SIGINT disposition, its working
+// directory and selected env vars. Tests append to it (stubRunShWith) to
+// change how it ends.
 const stubRunSh = `#!/usr/bin/env bash
 set -euo pipefail
 out=${STUB_OUT:?}
 printf '%s\n' "$@" > "$out/args"
 echo "$$" > "$out/pid"
+echo "$PPID" > "$out/ppid"
+trap -p INT > "$out/int_trap"
+ls -l /proc/$$/fd > "$out/fds_long" 2>/dev/null || true
 pwd > "$out/cwd"
 {
   echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE:-}"
@@ -44,6 +51,17 @@ pwd > "$out/cwd"
 } > "$out/env"
 echo "stub run.sh started"
 `
+
+// stubRunShWith returns the stub run.sh with tail appended after its recording.
+func stubRunShWith(tail string) string { return stubRunSh + tail }
+
+// setRunSh replaces the harness's run.sh.
+func (h *harness) setRunSh(script string) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(script), 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+}
 
 func requireTools(t *testing.T) {
 	t.Helper()
@@ -252,6 +270,8 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"CR_CLAIM_BACKOFF_SECONDS": "0",
 		"CR_METADATA_URL":          h.meta.URL,
 		"STUB_OUT":                 h.stubOut,
+		// The runner-output FIFOs go under the test's own temp dir, not /tmp.
+		"CR_FIFO_TMPDIR": root,
 	}
 	return h
 }
@@ -354,8 +374,19 @@ func TestEntrypointSuccess(t *testing.T) {
 	if got, want := h.stubFile("args"), "--jitconfig\n"+h.jit; got != want {
 		t.Errorf("run.sh args = %q, want --jitconfig and the claimed config", got)
 	}
-	if got := h.stubFile("pid"); got != strconv.Itoa(res.pid) {
-		t.Errorf("run.sh pid = %s, entrypoint pid = %d: run.sh was not exec'd in place", got, res.pid)
+	// run.sh is the entrypoint's child (not exec'd), so the entrypoint can report the
+	// runner's real exit code and forward signals.
+	if got := h.stubFile("ppid"); got != strconv.Itoa(res.pid) {
+		t.Errorf("run.sh parent pid = %s, entrypoint pid = %d: run.sh is not the entrypoint's child", got, res.pid)
+	}
+	// The watcher's done FIFO is closed for the child: no fd of run.sh points at it.
+	// (Other inherited fds, such as a build wrapper's lock, are not the entrypoint's.)
+	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") {
+		t.Errorf("run.sh inherited the watcher's done FIFO:\n%s", fds)
+	}
+	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
+	if got := h.stubFile("int_trap"); got != "" {
+		t.Errorf("run.sh starts with SIGINT disposition %q, want the default (not ignored)", got)
 	}
 	if got := h.stubFile("cwd"); got != h.runnerDir {
 		t.Errorf("run.sh cwd = %s, want %s", got, h.runnerDir)
@@ -381,7 +412,11 @@ func TestEntrypointSuccess(t *testing.T) {
 		}
 	}
 	h.checkHomeLinks()
-	for _, d := range []string{"_work", "_temp", "_diag", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
+	// The runner's _diag must stay off /scratch (F-D).
+	if _, err := os.Lstat(filepath.Join(h.scratch, "_diag")); !os.IsNotExist(err) {
+		t.Errorf("%s/_diag exists (err %v); the runner's logs must not go to /scratch", h.scratch, err)
+	}
+	for _, d := range []string{"_work", "_temp", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
 		if fi, err := os.Stat(filepath.Join(h.scratch, d)); err != nil || !fi.IsDir() {
 			t.Errorf("%s/%s was not created: %v", h.scratch, d, err)
 		}
@@ -927,14 +962,35 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 	}
 }
 
+// tarCommand runs tar with a minimal environment: an inherited TAR_OPTIONS (for
+// example --exclude) would otherwise change what the round-trip tests see.
+func tarCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("tar", args...)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
+	return cmd
+}
+
 // TestEntrypointCacheTarRoundTrip reproduces actions/cache's archive scheme
 // (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
 // an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
 // directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
-func TestEntrypointCacheTarRoundTrip(t *testing.T) {
+func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
+
+// With RUNNER_BUILD_CACHE_IN_RAM=true, /scratch/.cache is a link to a RAM dir; the
+// same archives must restore where Go reads, with the ~/.cache bytes in RAM.
+func TestEntrypointCacheTarRoundTripRAM(t *testing.T) { cacheTarRoundTrip(t, true) }
+
+func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
+	ramDir := filepath.Join(t.TempDir(), "ram-build-cache")
+	cacheRoot := filepath.Join(h.scratch, ".cache") // where ~/.cache bytes physically land
+	if inRAM {
+		h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+		h.env["CR_RAM_CACHE_DIR"] = ramDir
+		cacheRoot = ramDir
+	}
 	if res := h.run(); res.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
@@ -946,7 +1002,7 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 
 	tarRun := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command("tar", args...).CombinedOutput()
+		out, err := tarCommand(args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("tar %v: %v\n%s", args, err, out)
 		}
@@ -986,18 +1042,23 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 	tarRun(append([]string{"-cPf", ubuntuTar, "-C", ubuntuWorkspace}, entries...)...)
 	tarRun("-xPf", ubuntuTar, "-C", crWorkspace)
 	for logical, physical := range map[string]string{
-		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(h.scratch, ".cache/go-build/ab/obj"),
+		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(cacheRoot, "go-build/ab/obj"),
 		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.scratch, "go/pkg/mod/cache/download/m/@v/v1.zip"),
-		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(h.scratch, ".cache/golangci-lint/x"),
+		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(cacheRoot, "golangci-lint/x"),
 	} {
 		if b, err := os.ReadFile(logical); err != nil || string(b) != "from-ubuntu" {
 			t.Errorf("ubuntu archive did not restore to %s (what Go reads): %v", logical, err)
 		}
-		if _, err := os.Lstat(physical); err != nil {
-			t.Errorf("restored bytes are not on the scratch disk at %s: %v", physical, err)
+		if b, err := os.ReadFile(physical); err != nil || string(b) != "from-ubuntu" {
+			t.Errorf("restored bytes are not physically at %s: %v", physical, err)
 		}
 	}
 	h.checkHomeLinks() // tar must not have replaced a link
+	if inRAM {
+		if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
+			t.Errorf("%s/.cache = %q (%v), want a link to %s after the restore", h.scratch, got, err, ramDir)
+		}
+	}
 
 	// cr-ci -> ubuntu-latest: an archive saved through the links restores under the
 	// plain HOME, not under /home/home/... or next to it.
@@ -1050,11 +1111,11 @@ func TestEntrypointCacheTarWholeDirectory(t *testing.T) {
 		{"-cPf", archive, "-C", ubuntuWorkspace, "../../../.cache"},
 		{"-xPf", archive, "-C", crWorkspace},
 	} {
-		if out, err := exec.Command("tar", args...).CombinedOutput(); err != nil {
+		if out, err := tarCommand(args...).CombinedOutput(); err != nil {
 			t.Fatalf("tar %v: %v\n%s", args, err, out)
 		}
 	}
-	if out, err := exec.Command("tar", "-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
+	if out, err := tarCommand("-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
 		t.Fatalf("archive lacks the ../../../.cache/ directory entry (err %v):\n%s", err, out)
 	}
 	h.checkHomeLinks() // the directory entry must not have replaced the link
@@ -1083,5 +1144,358 @@ func TestEntrypointHomeLinkCreateFails(t *testing.T) {
 	expectFailure(t, h, res, 2, "cannot create symlink "+h.home+"/work -> "+h.scratch+"/_work")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+}
+
+// --- Exit code and signals (section 5) ------------------------------------------
+
+func newSuccessHarness(t *testing.T) *harness {
+	t.Helper()
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	return h
+}
+
+func TestEntrypointPropagatesRunShExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith("exit 134\n"))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want run.sh's 134; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "run.sh exited 134") {
+		t.Errorf("stderr does not report run.sh's exit code:\n%s", res.stderr)
+	}
+}
+
+// run-helper.sh (actions/runner) turns an unknown Runner.Listener exit code into
+// "Exiting with unknown error code: N" and exit 0; run.sh then exits 0 too.
+func TestEntrypointMapsRunHelperUnknownExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith(`echo "Runner listener exited"
+echo "Exiting with unknown error code: 134"
+echo "Exiting runner..."
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want 134 from run-helper's line; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	for _, line := range []string{"Exiting with unknown error code: 134", "Exiting runner..."} {
+		if !strings.Contains(res.stdout, line+"\n") {
+			t.Errorf("runner output line %q was not passed through to stdout:\n%s", line, res.stdout)
+		}
+	}
+	if !strings.Contains(res.stderr, "unknown exit code 134") {
+		t.Errorf("stderr does not explain the mapped exit code:\n%s", res.stderr)
+	}
+}
+
+// Only run-helper.sh's exact line counts: anchored, digits only.
+func TestEntrypointIgnoresOtherUnknownCodeLines(t *testing.T) {
+	for _, line := range []string{
+		"job step said: Exiting with unknown error code: 7",
+		"Exiting with unknown error code: 7 (and more)",
+		"Exiting with unknown error code: abc",
+		"Exiting with unknown error code: 08", // leading zero: would be octal in (( ))
+		"Exiting with unknown error code: ",
+	} {
+		t.Run(line, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith("printf '%s\\n' '" + line + "'\nexit 0\n"))
+			if res := h.run(); res.exitCode != 0 {
+				t.Errorf("exit code = %d, want 0: %q must not be taken as run-helper's line; stderr:\n%s", res.exitCode, line, res.stderr)
+			}
+		})
+	}
+}
+
+// killEntrypoint ends a started entrypoint on a test's failure path, together with
+// the stub run.sh: run.sh runs in its own process group (job control), so killing
+// the entrypoint alone could leave it running past the test.
+func killEntrypoint(h *harness, cmd *exec.Cmd) {
+	if b, err := os.ReadFile(filepath.Join(h.stubOut, "pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL) // run.sh's process group
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+// signalStub waits until it is signalled, records the signal and exits with a
+// signal-specific code (42 for TERM, 43 for INT).
+const signalStub = `trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+touch "$out/ready"
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`
+
+func TestEntrypointForwardsSignals(t *testing.T) {
+	for _, tc := range []struct {
+		sig  syscall.Signal
+		name string
+		code int
+	}{{syscall.SIGTERM, "TERM", 42}, {syscall.SIGINT, "INT", 43}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith(signalStub))
+			cmd := exec.Command("bash", "entrypoint.sh")
+			for k, v := range h.env {
+				cmd.Env = append(cmd.Env, k+"="+v)
+			}
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			ready := filepath.Join(h.stubOut, "ready")
+			deadline := time.Now().Add(20 * time.Second)
+			for {
+				if _, err := os.Stat(ready); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					killEntrypoint(h, cmd)
+					t.Fatalf("stub run.sh never became ready; stderr:\n%s", stderr.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if err := cmd.Process.Signal(tc.sig); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got := h.stubFile("signal"); got != tc.name {
+				t.Errorf("run.sh received %q, want %s forwarded from the entrypoint", got, tc.name)
+			}
+			if code != tc.code {
+				t.Errorf("exit code = %d, want run.sh's %d; stderr:\n%s", code, tc.code, stderr.String())
+			}
+			// Normally logged on receipt; in the narrow window before runner_pid is set,
+			// logged when the recorded signal is forwarded right after the start.
+			if !strings.Contains(stderr.String(), "received SIG"+tc.name+"; forwarding it to run.sh") &&
+				!strings.Contains(stderr.String(), "forwarding SIG"+tc.name+", which arrived while run.sh was starting") {
+				t.Errorf("stderr does not log the forwarded signal:\n%s", stderr.String())
+			}
+			for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit, "ID token": h.idToken} {
+				if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+					t.Errorf("%s leaked into entrypoint output", name)
+				}
+			}
+		})
+	}
+}
+
+// --- Warm-up mode (deploy-job.sh --warm-up) ---------------------------------------
+
+func warmupHarness(t *testing.T) (*harness, *claimServer) {
+	t.Helper()
+	cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+	h := newHarness(t, cs.URL)
+	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME"} {
+		delete(h.env, k)
+	}
+	h.env["RUNNER_WARMUP"] = "1"
+	return h, cs
+}
+
+func TestEntrypointWarmUp(t *testing.T) {
+	h, cs := warmupHarness(t)
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started in warm-up mode")
+	}
+	if n := len(cs.recorded()) + len(h.meta.recorded()); n != 0 {
+		t.Errorf("warm-up made %d mediator/metadata requests, want none", n)
+	}
+	if !strings.Contains(res.stderr, "warm-up OK") {
+		t.Errorf("stderr lacks the warm-up result:\n%s", res.stderr)
+	}
+	h.checkHomeLinks() // the checks still ran
+}
+
+func TestEntrypointWarmUpStillChecks(t *testing.T) {
+	h, _ := warmupHarness(t)
+	if err := os.RemoveAll(h.scratch); err != nil {
+		t.Fatal(err)
+	}
+	expectFailure(t, h, h.run(), 2, "does not exist")
+
+	h2, _ := warmupHarness(t)
+	h2.env["RUNNER_WARMUP"] = "yes"
+	expectFailure(t, h2, h2.run(), 2, "RUNNER_WARMUP must be 1 or unset")
+}
+
+func TestEntrypointBuildCacheInRAMValue(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "yes"
+	expectFailure(t, h, h.run(), 2, "RUNNER_BUILD_CACHE_IN_RAM must be true or false")
+}
+
+func TestEntrypointBuildCacheInRAMLinks(t *testing.T) {
+	h := newSuccessHarness(t)
+	ramDir := filepath.Join(t.TempDir(), "ram")
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+	h.env["CR_RAM_CACHE_DIR"] = ramDir
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got, err := os.Readlink(filepath.Join(h.scratch, ".cache")); err != nil || got != ramDir {
+		t.Errorf("%s/.cache = %q (%v), want a link to %s", h.scratch, got, err, ramDir)
+	}
+	h.checkHomeLinks() // ~/.cache still -> /scratch/.cache (parity)
+	for _, d := range []string{"go-build", "golangci-lint"} {
+		if fi, err := os.Stat(filepath.Join(ramDir, d)); err != nil || !fi.IsDir() {
+			t.Errorf("%s/%s was not created in RAM: %v", ramDir, d, err)
+		}
+	}
+	if !strings.Contains(res.stderr, "build cache in RAM") {
+		t.Errorf("stderr does not log RAM mode:\n%s", res.stderr)
+	}
+}
+
+// A SIGTERM during the claim phase (here: between claim retries) stops the
+// entrypoint at the next checkpoint with 128+15, without starting run.sh.
+func TestEntrypointSignalDuringClaim(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
+	h := newHarness(t, cs.URL)
+	h.env["CR_CLAIM_BACKOFF_SECONDS"] = "2"
+	cmd := exec.Command("bash", "entrypoint.sh")
+	for k, v := range h.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for len(cs.recorded()) == 0 {
+		if time.Now().After(deadline) {
+			killEntrypoint(h, cmd)
+			t.Fatalf("no claim attempt; stderr:\n%s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if code != 143 {
+		t.Errorf("exit code = %d, want 143 (128+SIGTERM); stderr:\n%s", code, stderr.String())
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started after a SIGTERM during the claim")
+	}
+	if !strings.Contains(stderr.String(), "received SIGTERM before run.sh started") {
+		t.Errorf("stderr does not log the early signal:\n%s", stderr.String())
+	}
+	if n := len(cs.recorded()); n > 2 {
+		t.Errorf("%d claim attempts after the signal, want the retries to stop", n)
+	}
+	// The FIFO directory created before the claim is removed on that exit too.
+	if left, _ := filepath.Glob(filepath.Join(h.home, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the signalled exit: %v", left)
+	}
+}
+
+// run.sh exiting immediately on the forwarded signal: the entrypoint's wait is
+// interrupted by the trap and run.sh may already be gone by the liveness check. The
+// exit code must still be run.sh's (42), not the interrupted wait's 128+15. (The race
+// is narrow; this guards the code path rather than forcing the interleaving.)
+func TestEntrypointSignalFastExitKeepsRunShCode(t *testing.T) {
+	for i := 0; i < 3; i++ { // a few rounds: the interleaving varies
+		h := newSuccessHarness(t)
+		h.setRunSh(stubRunShWith(`sleep 30 &
+nap=$!
+trap 'kill "$nap" 2>/dev/null; exit 42' TERM
+touch "$out/ready"
+wait "$nap"
+exit 9
+`))
+		cmd := exec.Command("bash", "entrypoint.sh")
+		for k, v := range h.env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ready := filepath.Join(h.stubOut, "ready")
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				killEntrypoint(h, cmd)
+				t.Fatalf("stub never became ready; stderr:\n%s", stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		var exitErr *exec.ExitError
+		code := 0
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if code != 42 {
+			t.Fatalf("round %d: exit code = %d, want run.sh's 42; stderr:\n%s", i, code, stderr.String())
+		}
+	}
+}
+
+// The runner-output FIFOs are set up before the claim: a failure there exits 2 with
+// the single-use claim token unspent (no claim request at all).
+func TestEntrypointFIFOSetupFailsBeforeClaim(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	h.env["CR_FIFO_TMPDIR"] = filepath.Join(h.home, "no-such-dir")
+	expectFailure(t, h, h.run(), 2, "cannot create a private temp directory")
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("%d claim requests, want none: the token must stay unspent", n)
+	}
+}
+
+// A failed claim (exit 3) removes the FIFO directory it created.
+func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusGone))
+	h := newHarness(t, cs.URL)
+	fifoRoot := filepath.Join(h.home, "fifos")
+	if err := os.Mkdir(fifoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.env["CR_FIFO_TMPDIR"] = fifoRoot
+	expectFailure(t, h, h.run(), 3, "410")
+	if left, _ := filepath.Glob(filepath.Join(fifoRoot, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the failed claim: %v", left)
 	}
 }

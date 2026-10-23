@@ -151,7 +151,7 @@ test_deploy_requires_cert_email_before_provisioning() {
 
 test_deploy_skip_tls_does_not_require_cert_email() {
     fresh_state
-    EXTRA_ENV=(SKIP_TLS=true)
+    EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
     run_script gce-demo-deploy.sh
     # The sub-steps (preflight first) run for real against the stubs and may
     # stop the run; this test only checks that the CERT_EMAIL guard lets
@@ -246,7 +246,7 @@ test_full_unit_renders_values_verbatim() {
     assert_not_contains "$unit" "##" "template notes dropped"
 }
 
-test_full_no_tls_skips_caddy() {
+test_full_no_tls_needs_https_base_url() {
     local mode
     for mode in flag env; do
         fresh_state
@@ -257,11 +257,138 @@ test_full_no_tls_skips_caddy() {
             EXTRA_ENV=(SKIP_TLS=true)
             run_script gce-start-hub.sh --full
         fi
+        assert_eq 1 "$RC" "${mode}: --no-tls without an https HUB_BASE_URL stops"
+        assert_contains "$OUT" "needs HUB_BASE_URL set to the https:// URL" "${mode}: names the fix"
+        assert_contains "$OUT" "refuses to start with an http base URL on a non-loopback listener" "${mode}: says why"
+        if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then fail "${mode}: nothing uploaded"; else pass; fi
+        assert_eq "" "$(cat "${STUB_SSH_LOG}" 2>/dev/null)" "${mode}: no remote session"
+    done
+
+    fresh_state
+    EXTRA_ENV=(HUB_BASE_URL=http://hub.internal.example.test:8080)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "an http HUB_BASE_URL stops"
+    assert_contains "$OUT" "(got http://hub.internal.example.test:8080 from HUB_BASE_URL)" "names the rejected URL and its source"
+}
+
+# gce-demo-deploy.sh with SKIP_TLS=true applies the same https check in its
+# fail-early block, before anything is provisioned (ptone/scion#5364).
+test_deploy_skip_tls_needs_https_base_url_before_provisioning() {
+    fresh_state
+    EXTRA_ENV=(SKIP_TLS=true)
+    run_script gce-demo-deploy.sh
+    assert_eq 1 "$RC" "SKIP_TLS=true without an https base URL stops"
+    assert_contains "$OUT" "needs HUB_BASE_URL set to the https:// URL" "names the fix"
+    assert_not_contains "$OUT" "Step 0" "stops before the first step (nothing provisioned)"
+    assert_not_contains "$CALLS" "compute" "no compute (provisioning) call"
+}
+
+# The base URL that takes effect is checked: a SCION_SERVER_BASE_URL in
+# hub.env overrides the unit's value (ptone/scion#5364).
+test_full_no_tls_checks_the_effective_hub_env_base_url() {
+    local envfile
+
+    # Scenario A: hub.env sets an http URL; an https HUB_BASE_URL does not
+    # help, the two differ.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=http://10.0.0.5:8080\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "A: an http hub.env value with an https HUB_BASE_URL stops"
+    assert_contains "$OUT" "differ" "A: names the mismatch"
+    assert_contains "$OUT" "$envfile" "A: names hub.env"
+    if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then fail "A: nothing uploaded"; else pass; fi
+
+    # Scenario A': hub.env sets an http URL and HUB_BASE_URL is unset.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL="http://10.0.0.5:8080"\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "A': an http hub.env value stops"
+    assert_contains "$OUT" "(got http://10.0.0.5:8080 from SCION_SERVER_BASE_URL in ${envfile})" "A': names the value and hub.env"
+
+    # Scenario B: hub.env sets an https URL and HUB_BASE_URL is unset: accepted.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf '# comment\nSCION_SERVER_BASE_URL=https://hub.internal.example.test\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "B: an https hub.env value with HUB_BASE_URL unset is accepted"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
+        'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "B: the unit carries the effective URL"
+
+    # Both https and equal: accepted.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://hub.internal.example.test\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "equal https values are accepted"
+
+    # Both https but different: refused.
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://a.example.test\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://b.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "different https values are refused"
+}
+
+# hub.env is parsed as systemd does: CRLF line endings and spaces around
+# "=" are accepted (ptone/scion#5364).
+test_full_no_tls_hub_env_crlf_and_spaced_assignment() {
+    local envfile
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL=https://hub.internal.example.test\r\n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a CRLF hub.env is accepted"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
+        'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "CRLF: no CR in the unit"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf '  SCION_SERVER_BASE_URL = "https://hub.internal.example.test"  \n' > "$envfile"
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_ENV_FILE="$envfile" HUB_BASE_URL=https://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "a spaced, quoted assignment equal to HUB_BASE_URL is accepted"
+
+    fresh_state
+    envfile="${STATE_DIR}/hub-test.env"
+    printf 'SCION_SERVER_BASE_URL = http://10.0.0.5:8080\r\n' > "$envfile"
+    EXTRA_ENV=(HUB_ENV_FILE="$envfile")
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 1 "$RC" "a spaced http assignment is refused"
+    assert_contains "$OUT" "(got http://10.0.0.5:8080 from SCION_SERVER_BASE_URL in ${envfile})" "the parsed value is named"
+}
+
+# The scheme match is case-insensitive without bash-4 expansions.
+test_full_no_tls_accepts_upper_case_https() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}" HUB_BASE_URL=HTTPS://hub.internal.example.test)
+    run_script gce-start-hub.sh --full --no-tls
+    assert_eq 0 "$RC" "HTTPS:// is accepted"
+}
+
+test_full_no_tls_skips_caddy() {
+    local mode
+    for mode in flag env; do
+        fresh_state
+        if [[ "$mode" == flag ]]; then
+            EXTRA_ENV=(HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full --no-tls
+        else
+            EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full
+        fi
         assert_eq 0 "$RC" "${mode}: --full without TLS completes"
         if [[ -f "${STUB_SCP_DIR}/Caddyfile" ]]; then fail "${mode}: no Caddyfile uploaded"; else pass; fi
         if [[ -f "${STUB_SCP_DIR}/scion-hub.service" ]]; then pass; else fail "${mode}: unit file still uploaded"; fi
         assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" \
-            'SCION_SERVER_BASE_URL=http://hub.demo.scion-ai.dev:8080"' "${mode}: plain HTTP base URL"
+            'SCION_SERVER_BASE_URL=https://hub.internal.example.test"' "${mode}: the terminator's https base URL"
         assert_contains "$(cat "${STUB_SSH_LOG}")" "SKIP_TLS=true" "${mode}: remote session skips Caddy"
         assert_eq "" "$CURL_CALLS" "${mode}: no HTTPS health check"
         assert_contains "$OUT" "Skipping the HTTPS health check" "${mode}: says the check is skipped"

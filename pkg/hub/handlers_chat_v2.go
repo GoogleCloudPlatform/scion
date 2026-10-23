@@ -5973,8 +5973,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
 	// The form is removed on every return: ParseMultipartForm can spool
 	// parts and still answer an error (from the query string).
-	err := r.ParseMultipartForm(uploadFormMemory)
-	defer removeUploadForm(r)
+	cleanup, err := parseMultipartUpload(r, uploadFormMemory)
+	defer cleanup()
 	if err != nil {
 		BadRequest(w, "invalid multipart form or request too large")
 		return
@@ -6070,16 +6070,6 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 // uploadFormMemory is how much of an upload's multipart body is held in
 // memory; larger parts are spooled to temporary files by ParseMultipartForm.
 const uploadFormMemory = 32 << 20
-
-// removeUploadForm removes the temporary files ParseMultipartForm spooled
-// for r. The server's own clean-up after the handler only sees the request
-// it passed in, and the middleware hands handlers a copy (WithContext), so
-// an upload handler removes them itself once it is done with the form.
-func removeUploadForm(r *http.Request) {
-	if r.MultipartForm != nil {
-		_ = r.MultipartForm.RemoveAll()
-	}
-}
 
 // attachmentRejection is a refusal the uploader caused and could fix — a
 // blocked extension, an unreadable type, an oversized file. Anything else is
