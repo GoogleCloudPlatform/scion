@@ -261,6 +261,8 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		// makes ReverseProxy panic with http.ErrAbortHandler: the client
 		// sees a truncated response, never an error body appended to it.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if r.Context().Err() == nil && isResponseHeaderTimeout(err) {
 				// The transport closed the stream; the agent end closes
 				// with it.
@@ -305,6 +307,13 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			"duration", time.Since(start),
 		}, route...)...)
 	}()
+	// ReverseProxy adds the upstream response headers to the ones already
+	// on w. Drop the web pages' policy and nosniff header set further up
+	// the handler chain, so the sandbox headers set in ModifyResponse are
+	// the only ones and pages served from an agent's port keep working as
+	// on the tunnel path.
+	w.Header().Del("Content-Security-Policy")
+	w.Header().Del("X-Content-Type-Options")
 	rp.ServeHTTP(w, r)
 }
 

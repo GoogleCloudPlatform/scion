@@ -287,6 +287,7 @@ var routeAuthzManifest = map[string]string{
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name
 	"GET /api/v1/test-infra/status": "public",        // Test-identity gate status for the web banner — no auth (ptone/scion#4240)
+	"POST /api/v1/csp-reports":      "public",        // Browser policy reports for the web pages — no auth, rate limited, log only (ptone/scion#5912)
 	"/api/v1/experiments":           "authenticated", // Resolved experiment map — any signed-in identity (#2217)
 	"/api/v1/profiling":             "authenticated", // Profiling switches the web client acts on — any signed-in identity
 

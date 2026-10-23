@@ -539,8 +539,10 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
         }
     </style>
 
-    <!-- Theme detection script (runs before paint) -->
-    <script>
+    <!-- Theme detection script (runs before paint). It is the shell's only
+         inline executable script, and it carries this response's script
+         nonce. -->
+    <script nonce="{{.ScriptNonce}}">
         (function() {
             var saved = localStorage.getItem('scion-theme');
             if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -620,6 +622,9 @@ type spaShellData struct {
 	// ModulePreloads are the request paths hinted with <link
 	// rel="modulepreload"> in the head (WebServer.shellModulePreloads).
 	ModulePreloads []string
+	// ScriptNonce is the nonce of this response's page policy, carried by
+	// the shell's one inline script (scriptNonceForShell).
+	ScriptNonce string
 }
 
 // logger returns the web subsystem logger, falling back to slog.Default()
@@ -1817,6 +1822,8 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			return
 		}
 
+		nonce := scriptNonceForShell(w, r)
+		setShellReportHeaders(w.Header())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", perUserPageCacheControl)
 		w.WriteHeader(http.StatusOK)
@@ -1830,6 +1837,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			IsLoginPage:    r.URL.Path == "/login",
 			IsInvitePage:   r.URL.Path == "/invite",
 			ModulePreloads: ws.shellModulePreloads,
+			ScriptNonce:    nonce,
 		}
 		// Send the head first and flush it, so the browser starts fetching
 		// the entry and its preloaded chunks while the page data is
@@ -4108,29 +4116,14 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
-// webContentSecurityPolicy is the CSP sent with every web response. The
-// client bundles its scripts, styles and Shoelace assets, so the only named
-// external hosts are Google Fonts (stylesheet and font files) and Cloud
-// Storage (signed upload and download URLs); img-src also allows any HTTPS
-// image through its https: source.
-//
-// img-src allows blob: because the chat file preview fetches image bytes
-// with credentials and renders them through URL.createObjectURL (gs://
-// links, attachments, workspace files). A blob: URL matches neither 'self'
-// nor https:, so without it the browser blocks the load and the preview
-// shows a broken image. blob: is allowed for images only, never for
-// scripts or frames.
-const webContentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com; " +
-	"img-src 'self' data: blob: https:; " +
-	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
-
-// securityHeadersMiddleware adds security headers to all responses.
+// securityHeadersMiddleware adds security headers to all responses. Each
+// response gets its own script nonce (see web_csp.go); the SPA shell reads
+// it from the request context and puts it on its inline script.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
+		nonce := newScriptNonce()
+		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy(nonce))
+		r = r.WithContext(withScriptNonce(r.Context(), nonce))
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")

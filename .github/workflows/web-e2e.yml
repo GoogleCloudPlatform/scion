@@ -13,21 +13,24 @@
 # limitations under the License.
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
-# check. PRs and main pushes run only when web/ (or this file) changes;
-# the nightly run covers everything else, such as browser drift.
+# check. PRs and main pushes run only when web/, the hub files the
+# page-policy suite checks, or this file change; the nightly run covers
+# everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in full Chromium. Every suite except test-identity-session (below)
-# serves the web sources itself (Vite dev server or an esbuild bundle) with
-# a mocked hub. Only terminal-workspace also
-# needs a production build: some of its tests check the Shoelace icon files
-# in web/dist, so that job runs npm run build first.
+# all in full Chromium. Every suite except test-identity-session and
+# page-policy (below) serves the web sources itself (Vite dev server or an
+# esbuild bundle) with a mocked hub. Only terminal-workspace also needs a
+# production build: some of its tests check the Shoelace icon files in
+# web/dist, so that job runs npm run build first.
 #
-# test-identity-session is the exception: it runs against the real Go hub
-# binary (a throwaway member-level test hub started by its global setup,
-# ptone/scion#4240). Only that job sets up Go (go.mod version, with
-# setup-go's built-in cache; ci.yml uses per-job caches instead, see
-# .github/actions/setup-go-cache) and builds the binary (make build) and
+# test-identity-session and page-policy are the exceptions: they run
+# against the real Go hub binary (a throwaway hub started by their global
+# setup; test-identity-session's is a member-level test hub,
+# ptone/scion#4240; page-policy checks the page script policy the hub
+# sends, ptone/scion#5912). Only those jobs set up Go (go.mod version,
+# with setup-go's built-in cache; ci.yml uses per-job caches instead, see
+# .github/actions/setup-go-cache) and build the binary (make build) and
 # the web assets (npm run build) before the suite runs.
 #
 # iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
@@ -50,12 +53,13 @@
 # Runtime and cost: about 23 minutes of test time per full run (most of it
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across the 13 mocked-hub jobs; retries of failing
+# 50-60 runner-minutes across the 14 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The 14th job, test-identity-session, adds setup-go, a Go build
-# (make build; a few minutes on a cold Go cache, less with the setup-go
-# cache) and a Vite production build before its short suite.
+# total). The two real-hub jobs, test-identity-session and page-policy,
+# each add setup-go, a Go build (make build; a few minutes on a cold Go
+# cache, less with the setup-go cache) and a Vite production build before
+# their short suites; iap-driver is the 17th job.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -64,11 +68,19 @@ on:
   pull_request:
     paths:
       - 'web/**'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/web_csp.go'
+      - 'pkg/hub/csp_reports.go'
+      - 'pkg/cspreport/**'
       - '.github/workflows/web-e2e.yml'
   push:
     branches: [ main ]
     paths:
       - 'web/**'
+      - 'pkg/hub/web.go'
+      - 'pkg/hub/web_csp.go'
+      - 'pkg/hub/csp_reports.go'
+      - 'pkg/cspreport/**'
       - '.github/workflows/web-e2e.yml'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
@@ -108,6 +120,7 @@ jobs:
           - test-hub-banner
           - broker-area
           - test-identity-session
+          - page-policy
           - iap-driver
     steps:
       - name: Checkout code
@@ -126,16 +139,16 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session only: the suite starts the real hub binary.
-      - name: Setup Go (test-identity-session)
-        if: matrix.suite == 'test-identity-session'
+      # test-identity-session and page-policy only: the suites start the real hub binary.
+      - name: Setup Go (test-identity-session, page-policy)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Build hub binary and web assets (test-identity-session)
-        if: matrix.suite == 'test-identity-session'
+      - name: Build hub binary and web assets (test-identity-session, page-policy)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy'
         run: |
           make build
           npm --prefix web run build
@@ -194,7 +207,7 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session: the binary and web assets
+          # Read only by test-identity-session and page-policy: the binary and web assets
           # were built in the step above.
           E2E_PREBUILT: '1'
         run: |

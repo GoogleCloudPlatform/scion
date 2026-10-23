@@ -508,6 +508,16 @@ On the Runtime Broker path, authentication and permission failures at the start 
 - `GET /readyz`: Readiness check verifying database connectivity and, when a non-`local` workspace storage backend is configured, that its mount is available. Kubernetes and Cloud Run readiness probes must target this endpoint rather than `/healthz`, which always returns `200`. `/readyz` is intentionally unaffected by the co-located broker check above.
 - `GET /health`: Legacy/alternative liveness check endpoint.
 
+## Browser Policy Reports (Hub)
+- `POST /api/v1/csp-reports`: Receives the policy reports browsers send for the web pages. Web pages run only the app's own scripts, and they also carry a report-only policy, `Content-Security-Policy-Report-Only: require-trusted-types-for 'script'; report-to csp`, with `Reporting-Endpoints: csp="/api/v1/csp-reports"`. It blocks nothing; the browser reports each place a page passes a plain string to an API that parses it as markup or script. The endpoint needs no sign-in (browsers send reports on their own). It accepts the Reporting API form (`Content-Type: application/reports+json`) and the older single-report form (`application/csp-report`), and answers `204`. Each report is written to the hub log as one `csp_violation` record at Info level with `subsystem` `hub.csp-reports`, with `directive`, `blocked_uri` and `source_file` (both without query or fragment), `line`, and `sample` (cut to 120 characters). At most 10 reports per request are logged; when a request holds more, one `csp_violation_dropped` record gives the number not logged. Nothing is stored. A body over 16 KiB gets `413`, another content type `415`, and a body with no policy report `400`. Two limits apply: each client (an IPv4 address, or an IPv6 /64) may send a burst of 20 requests, then one every two seconds; and the hub as a whole writes at most 10 records per second (burst 100), counting every record, the dropped-count record included. A client over its limit, or a request when the hub-wide budget is used up, gets `429` with `Retry-After`. Reports refused by either limit are not written as records and not counted; the `csp_violation_dropped` record appears only for reports past the 10-per-request bound, and only while the hub-wide budget allows it.
+
+  Operating the report endpoint:
+  - Browsers send reports only for pages served from HTTPS or a loopback address; a hub reached over plain HTTP on another host receives none.
+  - The per-client limit keys on the connecting address. Behind a load balancer or reverse proxy that is the proxy's address, so all browsers behind it share one limit, and many reports are dropped, until the hub has a trusted-proxy setting.
+  - A refused request still appears in the hub's request log as a `429` on `/api/v1/csp-reports`, so a throttled feed can be told from a quiet one there.
+  - A request body over 16 KiB is refused whole with `413`, so a large batch of reports is lost entirely.
+  - The records are at Info level, so the hub's log level, and any level set for `hub.csp-reports`, must include Info (see `SCION_LOG_LEVEL` in [Server Configuration](/scion/reference/server-config/#logging-environment-variables)). To read them from GCP-formatted logs: `jq 'select(.subsystem == "hub.csp-reports")'`.
+
 ## Communication Patterns
 
 ### State Reporting
