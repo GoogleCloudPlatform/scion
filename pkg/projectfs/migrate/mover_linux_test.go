@@ -762,3 +762,50 @@ func TestMove_CancelledContextStopsCopy(t *testing.T) {
 		t.Fatal("source not left in place")
 	}
 }
+
+// removeCopyTemps removes only regular files named like copy temps; a
+// directory or symlink with such a name, and other files, are left alone.
+func TestRemoveCopyTemps(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		CopyTempPrefix + "file":       "partial",
+		CopyTempPrefix + "dir/":       "",
+		CopyTempPrefix + "link":       "->/etc/passwd",
+		"keep.txt":                    "keep",
+		"not-" + CopyTempPrefix + "x": "keep",
+	})
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	removeCopyTemps(fd)
+	assertAbsent(t, filepath.Join(dir, CopyTempPrefix+"file"))
+	for _, keep := range []string{CopyTempPrefix + "dir", CopyTempPrefix + "link", "keep.txt", "not-" + CopyTempPrefix + "x"} {
+		if _, err := os.Lstat(filepath.Join(dir, keep)); err != nil {
+			t.Fatalf("%s removed: %v", keep, err)
+		}
+	}
+}
+
+// A kill right after a single-file copy is placed cannot leave it with the
+// migrator's owner: the owner is applied to the temp file first.
+func TestMove_OwnerAppliedBeforePlacement(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeTree(t, src, map[string]string{"p/a.txt": "A"})
+	chowned := recordChowns(t, nil)
+	s := Spec{Step: StepLocalProjects, Source: Tree{Base: src, Rel: "p"}, Target: Tree{Base: dst, Rel: "w"}, NoRename: true, Normalize: NormalizeWorkspace}
+	o := opts(false)
+	o.Owner = self()
+	if res := Move(s, o); res.Failed() {
+		t.Fatalf("err=%v", res.Err)
+	}
+	sawTemp := false
+	for _, p := range chowned() {
+		sawTemp = sawTemp || strings.Contains(filepath.Base(p), CopyTempPrefix)
+	}
+	if !sawTemp {
+		t.Fatalf("the temp file was not chowned before placement: %v", chowned())
+	}
+}

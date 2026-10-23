@@ -115,7 +115,14 @@ func TestNormalize_SharedDirCopyAppliesLeafContract(t *testing.T) {
 	}
 	leaf := filepath.Join(dst, "projects/u1/shared-dirs/s")
 	want := []string{filepath.Join(leaf, "a.txt"), filepath.Join(leaf, "d"), filepath.Join(leaf, "d/b.txt")}
-	if got := chowned(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+	var got []string
+	for _, p := range chowned() {
+		// Temp files are chowned before placement (and then placed).
+		if !strings.HasPrefix(filepath.Base(p), CopyTempPrefix) {
+			got = append(got, p)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("chowned:\n%v\nwant\n%v", got, want)
 	}
 	if m := mode(t, filepath.Join(leaf, "d")); m.Perm() != 0o775 || m&os.ModeSetgid == 0 {

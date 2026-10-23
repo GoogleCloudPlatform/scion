@@ -193,8 +193,8 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	assert.Contains(t, log, "moves=0")
 }
 
-// M3 through the hub's object storage: the project's legacy copy goes once
-// M2 succeeded; per-agent objects stay.
+// the object-storage cleanup through the hub's object storage: the project's legacy copy goes once
+// the migration succeeded; per-agent objects stay.
 func TestProjectStorageMigrate_M3DeletesOnlyLegacyCopy(t *testing.T) {
 	f := newStorageMigrateFixture(t)
 	share := f.useNFS(t)
@@ -291,7 +291,7 @@ func TestWorkspaceMigrationNotice_RecomputedAfterRun(t *testing.T) {
 	}, 300*time.Millisecond, 20*time.Millisecond)
 }
 
-// Q7: a hub-local project tree with broker state is only copied from.
+// A hub-local project tree with broker state is only copied from.
 func TestProjectStorageMigrate_LocalBrokerTreeUntouched(t *testing.T) {
 	f := newStorageMigrateFixture(t)
 	share := f.useNFS(t)
@@ -318,7 +318,7 @@ func TestProjectStorageMigrate_LocalBrokerTreeUntouched(t *testing.T) {
 	assert.Contains(t, log, "moves=0")
 }
 
-// Q8: a legacy tree without an identity marker is not migrated by default;
+// A legacy tree without an identity marker is not migrated by default;
 // the notice names the reason and the parameter; adopting the project's
 // slug migrates it.
 func TestProjectStorageMigrate_UnverifiedTreeAndAdoption(t *testing.T) {

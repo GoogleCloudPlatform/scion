@@ -26,7 +26,7 @@ import (
 )
 
 // Normalize says how migrated entries are made usable by agents, by the
-// Mount they land in (fs-cleanup-arch ruling Q6 on ptone/scion#5819).
+// Mount they land in (ptone/scion#5819).
 type Normalize int
 
 const (

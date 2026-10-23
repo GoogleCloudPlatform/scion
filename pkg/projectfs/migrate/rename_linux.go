@@ -32,3 +32,9 @@ func renameNoReplace(oldDir int, oldName string, newDir int, newName string) err
 	}
 	return err
 }
+
+// syncFS flushes the filesystem holding fd (syncfs(2)), so the files a copy
+// placed are durable before its source is put aside.
+func syncFS(fd int) error {
+	return unix.Syncfs(fd)
+}

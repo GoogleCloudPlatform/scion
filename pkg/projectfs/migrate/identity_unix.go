@@ -29,7 +29,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Identity binding of slug-keyed legacy trees (fs-cleanup-arch Q8 on
+// Identity binding of slug-keyed legacy trees (on
 // ptone/scion#5819): a tree found by slug may belong to a deleted project
 // whose slug a different project reuses, so it is migrated only when the
 // identity markers it carries name the project's ID.

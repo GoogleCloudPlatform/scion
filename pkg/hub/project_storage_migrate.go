@@ -32,7 +32,7 @@ import (
 )
 
 // ProjectStorageMigrateExecutor is the one-shot project storage migration
-// (design-v4 §Migration M2 and M3, ptone/scion#5819): on a hub whose
+// (ptone/scion#5819): on a hub whose
 // workspace backend is shared it moves each project's legacy trees into the
 // project storage layout and then deletes the project's legacy GCS
 // workspace copy. The engine is pkg/projectfs/migrate; this executor only
@@ -72,7 +72,7 @@ func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, pa
 // adoptUnverified parses the adoptUnverified parameter: "true" adopts the
 // unverified legacy trees of every project, a comma-separated list of
 // project slugs adopts those projects' only, and anything else none
-// (fs-cleanup-arch Q8). Trees whose identity marker names another project
+// (ptone/scion#5819). Trees whose identity marker names another project
 // are never adopted.
 func adoptUnverified(param string) func(slug string) bool {
 	param = strings.TrimSpace(param)
@@ -93,7 +93,7 @@ func adoptUnverified(param string) func(slug string) bool {
 
 // projectStorageMigrateInput gathers one hub-wide migrate.HubInput: the
 // workspace and shared-dir Layouts the hub serves files from, its global
-// dir, every project, and (withObjects) its object storage for M3.
+// dir, every project, and (withObjects) its object storage for the object-storage cleanup.
 func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects bool) (migrate.HubInput, error) {
 	wsLayout, err := s.workspaceLayout()
 	if err != nil {
@@ -163,7 +163,7 @@ func storageMigrateProjectRef(p *store.Project) migrate.ProjectRef {
 
 // localTreeServedByEmbeddedBroker reports whether this process's embedded
 // broker serves project from ~/.scion/projects/<slug>, the hub-local tree
-// M2 steps 2 and 4 read (fs-cleanup-arch Q7). Such a tree is only copied
+// migration steps 2 and 4 read. Such a tree is only copied
 // from. A provider lookup that fails counts as served: a needless copy-only
 // leaves a tree behind, a wrong rename breaks a broker.
 func (s *Server) localTreeServedByEmbeddedBroker(ctx context.Context, project *store.Project) bool {

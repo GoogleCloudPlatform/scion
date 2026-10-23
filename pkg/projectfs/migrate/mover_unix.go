@@ -218,8 +218,7 @@ func (r Result) Failed() bool {
 	return false
 }
 
-// Move moves spec.Source into spec.Target by the M2 rule (design-v4
-// §Migration M2): rename when the target is absent (an existing empty
+// Move moves spec.Source into spec.Target by the migration rule: rename when the target is absent (an existing empty
 // target is copied into instead, because it may be mounted); otherwise
 // copy the files the target does not have, never overwriting one, report
 // conflicts, and rename the source to <name>.migrated-<ts>. Symlinks in the
@@ -393,6 +392,11 @@ func Move(spec Spec, opts Options) Result {
 		res.Outcome = OutcomeWouldMerge
 		return res
 	}
+	// The copies are durable before the source is put aside: the source's
+	// .migrated copy must not outlive placements a power loss could drop.
+	if err := syncFS(dstFd); err != nil {
+		return fail(fmt.Errorf("sync target: %w", err))
+	}
 	backup, err := renameToBackup(srcParent, srcName, opts)
 	if err != nil {
 		return fail(err)
@@ -528,7 +532,8 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 		}
 	}
 	if !exists {
-		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt)
+		removeCopyTemps(dstParent) // a killed earlier run's leftovers
+		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt, n.entryAt)
 		if err != nil {
 			return fail(err)
 		}
@@ -542,6 +547,9 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 	if spec.CopyOnly {
 		res.Outcome = OutcomeCopied
 		return res
+	}
+	if err := syncFS(dstParent); err != nil {
+		return fail(fmt.Errorf("sync target: %w", err))
 	}
 	backup, err := renameToBackup(srcParent, srcName, opts)
 	if err != nil {
@@ -583,7 +591,7 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 var copyEntryHook = func(rel string) {}
 
 // GitMigratingName is the temporary name a source .git directory is copied
-// under inside the target (fs-cleanup-arch ruling on review finding 3): it
+// under inside the target: it
 // is renamed to .git only once complete, so a provisioner sees either no
 // .git (and refuses a non-empty workspace) or a complete one, never a
 // partial one. An interrupted run resumes into it.
@@ -737,8 +745,8 @@ func (m *merger) mergeGit(src, dst int) {
 		return // incomplete: a re-run resumes into the temp dir
 	}
 	if n := len(m.res.Conflicts) - beforeConflicts; n > 0 {
-		// The temp copy differs from the source (review round 4, finding
-		// 1): never rename an inconsistent .git into place.
+		// The temp copy differs from the source: never rename an
+		// inconsistent .git into place.
 		m.errs = append(m.errs, fmt.Errorf(".git copy incomplete: %d entries in %s differ from the source; not renamed into place (inspect or remove %s, then run again)", n, GitMigratingName, GitMigratingName))
 		return
 	}
@@ -832,7 +840,7 @@ func (m *merger) mergeFile(src, dst int, name, p string, st *unix.Stat_t) {
 			m.res.Copied++
 			return
 		}
-		conflict, err := copyFile(src, name, dst, name, st)
+		conflict, err := copyFile(src, name, dst, name, st, m.norm.entryAt)
 		switch {
 		case err != nil:
 			m.errs = append(m.errs, fmt.Errorf("copy %q: %w", p, err))
@@ -859,8 +867,7 @@ func (m *merger) mergeFile(src, dst int, name, p string, st *unix.Stat_t) {
 	}
 }
 
-// CopyTempPrefix starts the name of a file being copied (review round 4,
-// finding 1): copyFile writes, fsyncs and only then places the file under
+// CopyTempPrefix starts the name of a file being copied: copyFile writes, fsyncs and only then places the file under
 // its final name, so a killed run never leaves a partial file under a
 // final name. Leftover temp files are removed by the next run's copy walk
 // and are never workspace content.
@@ -880,7 +887,7 @@ var errSimulatedKill = errors.New("simulated kill")
 // concurrently, is never touched and is reported as a conflict, and the
 // final name never holds a partial file. Permission bits (no
 // setuid/setgid/sticky) and the modification time are kept.
-func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.Stat_t) (conflict bool, err error) {
+func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.Stat_t, pre func(dir int, name string)) (conflict bool, err error) {
 	sfd, err := unix.Openat(srcDir, srcName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return false, fmt.Errorf("open source file: %w", err)
@@ -926,6 +933,12 @@ func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.S
 		ts := []unix.Timespec{fst.Atim, fst.Mtim}
 		cerr = unix.UtimesNanoAt(dstDir, tmpName, ts, unix.AT_SYMLINK_NOFOLLOW)
 	}
+	if cerr == nil && pre != nil {
+		// Owner and mode are applied to the temp file before it is placed,
+		// so a kill right after placement cannot leave a final-named file
+		// with the migrator's owner that later runs see as identical.
+		pre(dstDir, tmpName)
+	}
 	if cerr == nil {
 		if herr := copyCrashHook(dstName); errors.Is(herr, errSimulatedKill) {
 			return false, herr // as if killed: the temp file stays
@@ -946,8 +959,9 @@ func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.S
 }
 
 // removeCopyTemps removes leftover copy temp files (CopyTempPrefix,
-// regular files only) from a target directory: a killed earlier run's
-// partial copies. Nothing else is ever removed.
+// regular files owned by this process's effective uid) from a target
+// directory: a killed earlier run's partial copies. Nothing else is ever
+// removed.
 func removeCopyTemps(dir int) {
 	names, err := readDirNames(dir)
 	if err != nil {
@@ -958,7 +972,9 @@ func removeCopyTemps(dir int) {
 			continue
 		}
 		var st unix.Stat_t
-		if err := unix.Fstatat(dir, n, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+		// Only regular files this process's identity created (temp files
+		// are chowned only as they are placed).
+		if err := unix.Fstatat(dir, n, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG && int(st.Uid) == unix.Geteuid() {
 			_ = unix.Unlinkat(dir, n, 0)
 		}
 	}

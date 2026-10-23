@@ -26,7 +26,7 @@ import (
 )
 
 // LegacyObjectPrefix is the directory prefix of a hub-managed project's
-// retired object-storage workspace copy, the only objects M3 deletes:
+// retired object-storage workspace copy, the only objects the object-storage cleanup deletes:
 // [hubs/<hubID>/]workspaces/<projectID>/<legacy dir>/. The per-agent
 // prefixes beside it (workspaces/<projectID>/<agentID>/, used by the CLI
 // bootstrap and scion sync) are live and never match it. It returns ""
@@ -47,7 +47,7 @@ func safeObjectElement(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")
 }
 
-// ObjectStore is the slice of the hub's object storage M3 needs.
+// ObjectStore is the slice of the hub's object storage the object-storage cleanup needs.
 type ObjectStore interface {
 	// HasObjects reports whether any object exists under prefix.
 	HasObjects(ctx context.Context, prefix string) (bool, error)
@@ -55,28 +55,28 @@ type ObjectStore interface {
 	DeletePrefix(ctx context.Context, prefix string) error
 }
 
-// ObjectOutcome is what M3 did with one project's legacy workspace objects.
+// ObjectOutcome is what the object-storage cleanup did with one project's legacy workspace objects.
 type ObjectOutcome string
 
 const (
 	ObjectsNone        ObjectOutcome = "none"
 	ObjectsDeleted     ObjectOutcome = "deleted"
 	ObjectsWouldDelete ObjectOutcome = "would-delete"
-	// ObjectsKept: M2 did not succeed for the project, so its objects are
-	// kept (they may be the only copy of what M2 failed to move).
+	// ObjectsKept: the migration did not succeed for the project, so its objects are
+	// kept (they may be the only copy of what the migration failed to move).
 	ObjectsKept   ObjectOutcome = "kept"
 	ObjectsFailed ObjectOutcome = "failed"
 )
 
-// ObjectResult is the M3 report of one project.
+// ObjectResult is the the object-storage cleanup report of one project.
 type ObjectResult struct {
 	Prefix  string
 	Outcome ObjectOutcome
 	Err     error
 }
 
-// CleanObjects is M3 (design §Migration M3) for one project: the GCS copy
-// of the hub-managed workspace under prefix is deleted only when M2
+// CleanObjects is the object-storage cleanup  for one project: the GCS copy
+// of the hub-managed workspace under prefix is deleted only when the migration
 // succeeded for that project AND its workspace steps actually ran (m2 has
 // no failed step and is not WorkspaceIncomplete; conflicts kept in a
 // .migrated copy are not failures). A dry run deletes nothing. prefix must
@@ -104,7 +104,7 @@ func CleanObjects(ctx context.Context, store ObjectStore, prefix string, m2 Proj
 	}
 	if m2.Failed() {
 		res.Outcome = ObjectsKept
-		res.Err = errors.New("M2 did not succeed for this project; objects kept")
+		res.Err = errors.New("the migration did not succeed for this project; objects kept")
 		return res
 	}
 	if m2.WorkspaceIncomplete {

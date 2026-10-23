@@ -235,14 +235,14 @@ func TestRun_SharedBackendMigratesEveryStep(t *testing.T) {
 	if !strings.Contains(log.String(), "CONFLICT README.md") {
 		t.Fatalf("conflict not reported:\n%s", log.String())
 	}
-	// The invalid shared-dir name fails its step, so M2 did not succeed
+	// The invalid shared-dir name fails its step, so the migration did not succeed
 	// for this project and its objects are kept.
 	if !rep.Failed() || rep.Objects[0].Outcome != ObjectsKept || len(f.objects.deletes) != 0 {
 		t.Fatalf("failed=%t objects=%s deletes=%v\n%s", rep.Failed(), rep.Objects[0].Outcome, f.objects.deletes, log.String())
 	}
 
-	// After the operator removes the bad entry, a re-run completes M2 for
-	// the project and M3 deletes only its project-level copy.
+	// After the operator removes the bad entry, a re-run completes the migration for
+	// the project and the object-storage cleanup deletes only its project-level copy.
 	if err := os.RemoveAll(filepath.Join(f.global, "project-configs/p1__0f8fad5b/shared-dirs/Bad Name")); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestRun_SharedBackendMigratesEveryStep(t *testing.T) {
 		t.Fatalf("deletes = %v (%s), want %v", f.objects.deletes, again.Objects[0].Outcome, want)
 	}
 	if !f.objects.objects["hubs/h1/workspaces/"+pid1+"/agent-1/file"] {
-		t.Fatal("M3 deleted a per-agent sync object")
+		t.Fatal("the object cleanup deleted a per-agent sync object")
 	}
 	// A third run is a no-op end to end.
 	third, _ := Run(context.Background(), in, opts(false))
@@ -271,7 +271,7 @@ func TestRun_SharedBackendMigratesEveryStep(t *testing.T) {
 	}
 }
 
-// M3 never deletes for a project whose M2 failed (a symlinked legacy tree
+// the object-storage cleanup never deletes for a project whose the migration failed (a symlinked legacy tree
 // is refused).
 func TestRun_ObjectsKeptWhenM2Fails(t *testing.T) {
 	f := newHubFixture(t)
@@ -306,7 +306,7 @@ func TestRun_EmptyPerAgentLeavesContentMovesSeed(t *testing.T) {
 	if len(rep.Projects[0].Notes) != 1 {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
 	}
-	// Legacy content was left in place: M3 keeps the legacy copy.
+	// Legacy content was left in place: the object-storage cleanup keeps the legacy copy.
 	if !f.objects.objects[objectPrefix(pid1)+"x"] || rep.Objects[0].Outcome != ObjectsKept {
 		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
 	}
@@ -377,7 +377,7 @@ func TestRun_GitSeedMovesOnlyUntrackedIdentity(t *testing.T) {
 
 // When step 4 cannot tell the hub seed apart (.git is a file) or fails
 // (git errors), steps 1 and 2 do not move that source: the seed never lands
-// in agent-visible workspace/. The project stays failed, so M3 keeps its
+// in agent-visible workspace/. The project stays failed, so the object-storage cleanup keeps its
 // objects and the notice stays.
 func TestRun_SeedUndecidedOrFailedBlocksWorkspaceMove(t *testing.T) {
 	for _, tc := range []struct {
@@ -509,7 +509,7 @@ func TestLegacyObjectPrefix(t *testing.T) {
 	}
 }
 
-// M3 deletes only the project-level legacy copy: the live per-agent
+// the object-storage cleanup deletes only the project-level legacy copy: the live per-agent
 // prefixes beside it (CLI bootstrap, scion sync), a sibling project whose
 // ID shares a prefix, and other hubs' objects survive.
 func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
@@ -531,7 +531,7 @@ func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
 	}
 	for _, k := range keep {
 		if !f.objects.objects[k] {
-			t.Fatalf("M3 deleted %s", k)
+			t.Fatalf("the object cleanup deleted %s", k)
 		}
 	}
 	if f.objects.objects[objectPrefix(pid1)+"file"] {
@@ -539,7 +539,7 @@ func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
 	}
 }
 
-// Q7: a hub-local tree carrying broker state is copied from, never changed;
+// A hub-local tree carrying broker state is copied from, never changed;
 // .scion/agents and shared-dirs are not copied; a re-run moves nothing.
 func TestRun_LocalBrokerTreeIsCopyOnly(t *testing.T) {
 	for _, tc := range []struct {
@@ -622,13 +622,13 @@ func TestRun_LocalWorkspaceSharedDirsOnly(t *testing.T) {
 	if len(rep.Projects[0].Notes) == 0 || !strings.Contains(rep.Projects[0].Notes[0], "not shared") {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
 	}
-	// Nothing of the workspace was migrated: M3 keeps the legacy copy.
+	// Nothing of the workspace was migrated: the object-storage cleanup keeps the legacy copy.
 	if !f.objects.objects[objectPrefix(pid1)+"a.txt"] || len(f.objects.deletes) != 0 || rep.Objects[0].Outcome != ObjectsKept {
 		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
 	}
 }
 
-// Q8: a slug-keyed legacy tree is migrated only when its identity markers
+// A slug-keyed legacy tree is migrated only when its identity markers
 // name the project. A tree of another project (a deleted project whose
 // slug was reused) is never migrated, not even with adoptUnverified.
 func TestRun_IdentityMismatchNeverMigrates(t *testing.T) {
@@ -1047,7 +1047,7 @@ func TestRun_WorkspaceMovesHoldProvisioningLock(t *testing.T) {
 }
 
 // A lost lock stops the migration before any write: the project is
-// pending with the reason, the legacy tree is intact, M3 keeps objects.
+// pending with the reason, the legacy tree is intact, the object-storage cleanup keeps objects.
 func TestRun_LostProvisioningLockStops(t *testing.T) {
 	f := newHubFixture(t)
 	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p1/a": "a"})
@@ -1073,7 +1073,7 @@ func TestRun_LostProvisioningLockStops(t *testing.T) {
 	}
 }
 
-// M3 keeps the object copy when there was no legacy content and the
+// the object-storage cleanup keeps the object copy when there was no legacy content and the
 // target workspace is empty: it may be the only copy.
 func TestRun_M3KeepsObjectsWithoutAnyWorkspaceContent(t *testing.T) {
 	f := newHubFixture(t)
@@ -1085,7 +1085,7 @@ func TestRun_M3KeepsObjectsWithoutAnyWorkspaceContent(t *testing.T) {
 	if rep.Objects[0].Outcome != ObjectsKept || len(f.objects.deletes) != 0 {
 		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
 	}
-	// A populated target (provisioned earlier) lets M3 delete.
+	// A populated target (provisioned earlier) lets the object-storage cleanup delete.
 	writeTree(t, f.share, map[string]string{"projects/" + pid1 + "/workspace/x": "x"})
 	rep, _ = Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
 	if rep.Objects[0].Outcome != ObjectsDeleted {
@@ -1122,7 +1122,7 @@ func countNotes(notes []string, sub string) int {
 
 // The migration only reads the hub/broker workspace records (identity
 // markers): a run leaves existing records byte-identical and creates none
-// (sec-review-3 I2).
+// (the hub no longer writes them; the migration only reads them).
 func TestRun_WritesNoWorkspaceRecords(t *testing.T) {
 	f := newHubFixture(t)
 	writeTree(t, f.global, map[string]string{
@@ -1163,7 +1163,7 @@ func gitRepoFiles() map[string]string {
 	return files
 }
 
-// Finding 3 ruling: .git is copied last under GitMigratingName and renamed
+// .git is copied last under GitMigratingName and renamed
 // in only when complete. Interrupted inside .git: workspace/ has no .git
 // (a first start refuses: not empty, no marker, no .git), only the temp
 // dir; the re-run resumes, renames it to .git, and the result is the full
@@ -1265,7 +1265,7 @@ func TestRun_RunStoppedIsNotReportedAsLostLock(t *testing.T) {
 }
 
 // A copy into a hard-linked source's target is chowned: the new file is
-// never hard-linked (review round 3, finding 2).
+// never hard-linked.
 func TestRun_CopyOfHardLinkedSourceIsChowned(t *testing.T) {
 	forceRename(t, nil, syscall.EINVAL)
 	f := newHubFixture(t)
@@ -1294,7 +1294,7 @@ func TestRun_CopyOfHardLinkedSourceIsChowned(t *testing.T) {
 }
 
 // Provisioning lock litter and the temp .git dir do not make a workspace
-// "populated" for M3.
+// "populated" for the object-storage cleanup.
 func TestRun_M3IgnoresLockLitter(t *testing.T) {
 	f := newHubFixture(t)
 	writeTree(t, f.share, map[string]string{
@@ -1310,9 +1310,9 @@ func TestRun_M3IgnoresLockLitter(t *testing.T) {
 	}
 }
 
-// Review round 4, finding 1: a truncated file in the temp .git (from a
+// A truncated file in the temp .git (from a
 // killed earlier run) differs from the source: the temp dir is NOT renamed
-// into .git, the project stays pending, M3 keeps its objects.
+// into .git, the project stays pending, the object-storage cleanup keeps its objects.
 func TestRun_TruncatedFileInTempGitBlocksRename(t *testing.T) {
 	forceRename(t, nil, syscall.EINVAL)
 	f := newHubFixture(t)
@@ -1350,6 +1350,7 @@ func TestRun_KilledCopyLeavesNoPartialFinalFile(t *testing.T) {
 	})
 	ws := filepath.Join(f.share, "projects", pid1, "workspace")
 	old := copyCrashHook
+	t.Cleanup(func() { copyCrashHook = old })
 	copyCrashHook = func(name string) error {
 		if name == "big.bin" {
 			return errSimulatedKill
@@ -1393,9 +1394,12 @@ func TestRun_KilledCopyLeavesNoPartialFinalFile(t *testing.T) {
 			t.Fatalf("temp litter left: %s", e.Name())
 		}
 	}
+	if third, err := Run(context.Background(), in, opts(false)); err != nil || third.Moves() != 0 || third.Failed() {
+		t.Fatalf("third run: err=%v moves=%d failed=%t", err, third.Moves(), third.Failed())
+	}
 }
 
-// Review round 4, finding 2: a legacy tree holding only .scion is kept
+// A legacy tree holding only .scion is kept
 // aside once its configuration is copied; re-runs neither take the lock
 // again nor report conflicts after the target settings are edited.
 func TestRun_ScionOnlyTreeKeptAside(t *testing.T) {
@@ -1427,4 +1431,44 @@ func TestRun_ScionOnlyTreeKeptAside(t *testing.T) {
 	if len(lk.dirs) != 1 {
 		t.Fatalf("lock taken %d times; re-runs must not lock", len(lk.dirs))
 	}
+}
+
+// keepAside negatives: a broker's copy-only .scion-only tree is never kept
+// aside; a tree with content takes the normal move; a dry run is
+// read-only.
+func TestRun_KeepAsideNegatives(t *testing.T) {
+	t.Run("copy-only", func(t *testing.T) {
+		f := newHubFixture(t)
+		writeTree(t, f.global, map[string]string{"projects/p1/.scion/settings.yaml": idSettings(pid1), "projects/p1/.scion/agents/a/x": "x"})
+		before := snapshot(t, filepath.Join(f.global, "projects/p1"))
+		if rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false)); err != nil || rep.Failed() {
+			t.Fatalf("err=%v failed=%t", err, rep.Failed())
+		}
+		if got := snapshot(t, filepath.Join(f.global, "projects/p1")); !reflect.DeepEqual(got, before) {
+			t.Fatal("a broker's tree was changed")
+		}
+	})
+	t.Run("content-tree", func(t *testing.T) {
+		f := newHubFixture(t)
+		writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1), legacyHubProjectsDir + "/p1/a.txt": "A"})
+		rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+		if err != nil || rep.Failed() {
+			t.Fatalf("err=%v failed=%t", err, rep.Failed())
+		}
+		if readFile(t, filepath.Join(f.share, "projects", pid1, "workspace/a.txt")) != "A" {
+			t.Fatal("content not moved by the workspace step")
+		}
+	})
+	t.Run("dry-run", func(t *testing.T) {
+		f := newHubFixture(t)
+		writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1)})
+		before := snapshot(t, f.share)
+		rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(true))
+		if err != nil || rep.Moves() == 0 {
+			t.Fatalf("err=%v moves=%d", err, rep.Moves())
+		}
+		if got := snapshot(t, f.share); !reflect.DeepEqual(got, before) {
+			t.Fatal("a dry run changed the share")
+		}
+	})
 }

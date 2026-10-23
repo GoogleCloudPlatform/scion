@@ -33,13 +33,12 @@ import (
 )
 
 // legacyHubProjectsDir is the retired hub-managed project tree on a shared
-// workspace backend (design-v4 G7: the invariant that this tree no longer
-// exists). This constant is the only place the name survives (ptone/scion#5819,
-// A2 exception agreed with fs-cleanup-arch); the migration that reads it is
+// workspace backend (the tree no longer exists in the project layout). This constant is the only place the name survives (ptone/scion#5819,
+// acceptance criterion A2 exception); the migration that reads it is
 // deleted in phase 6 (ptone/scion#5839).
 const legacyHubProjectsDir = "hub-projects"
 
-// Step names one M2 step (design-v4 §Migration M2). Steps run in the order
+// Step names one migration step. Steps run in the order
 // of ProjectSteps, which puts the seed (4) before the workspace (1).
 type Step string
 
@@ -54,7 +53,7 @@ const (
 	StepCloudRunHomes Step = "5-cloudrun-homes"
 )
 
-// ProjectSteps is the execution order of the M2 steps.
+// ProjectSteps is the execution order of the migration steps.
 var ProjectSteps = []Step{StepSeed, StepHubProjects, StepLocalProjects, StepSharedDirs, StepCloudRunHomes}
 
 // LegacyHubProjectsRoot returns the directory under which a hub on the
@@ -93,7 +92,7 @@ type SharedDirTarget struct {
 	Prepare func() error
 }
 
-// ProjectInput is everything M2 needs for one project. Targets come from
+// ProjectInput is everything the migration needs for one project. Targets come from
 // the layout authority (pkg/projectfs); legacy sources are derived here.
 type ProjectInput struct {
 	ID   string
@@ -124,7 +123,7 @@ type ProjectInput struct {
 	// LocalCopyOnly: a co-located broker serves the project from the
 	// hub-local ~/.scion/projects/<slug> (the per-project provider check).
 	// Steps 2 and 4 then copy from it and change nothing in it, leaving
-	// .scion/agents and shared-dirs out (fs-cleanup-arch Q7). The same
+	// .scion/agents and shared-dirs out. The same
 	// applies, without a provider, when the tree itself carries broker
 	// state (localTreeUsedByBroker).
 	LocalCopyOnly bool
@@ -147,7 +146,7 @@ type ProjectInput struct {
 	CloudRunHomes func(opts Options) []Result
 }
 
-// ProjectReport is the M2 report of one project.
+// ProjectReport is the the migration report of one project.
 type ProjectReport struct {
 	ID      string
 	Slug    string
@@ -159,12 +158,12 @@ type ProjectReport struct {
 	OwnershipRequested bool
 	// WorkspaceIncomplete: the project's workspace content was not (fully)
 	// migrated on this run: the workspace steps were skipped, legacy
-	// content was left in place, or a seed step stopped a source. M3 then
+	// content was left in place, or a seed step stopped a source. the object-storage cleanup then
 	// keeps the project's legacy object-storage copy.
 	WorkspaceIncomplete bool
 	// WorkspacePopulated: after the run the project's workspace target
-	// holds content (migrated now or earlier, or provisioned). M3 deletes
-	// the legacy object copy only then (fs-cleanup-arch NB3): with neither
+	// holds content (migrated now or earlier, or provisioned). the object-storage cleanup deletes
+	// the legacy object copy only then: with neither
 	// legacy content nor a populated target, the object copy may be the
 	// only copy (an ephemeral hub switched to shared storage).
 	WorkspacePopulated bool
@@ -205,14 +204,14 @@ func (p ProjectReport) Failed() bool {
 }
 
 // seedEntries are the project-configuration entries step 4 moves from a
-// legacy .scion to <ProjectRoot>/.scion (fs-cleanup-arch 01:22Z): the
+// legacy .scion to <ProjectRoot>/.scion: the
 // hub-written identity and settings, and the project-level template and
 // harness-config tiers (P3b reads the tier from ProjectRoot/.scion). Broker
 // records (agents/, markers) and anything else are never moved there.
 var seedEntries = []string{"settings.yaml", projectkeys.ProjectIDFile, projectkeys.ProjectSlugFile, "templates", "harness-configs"}
 
 // localTreeUsedByBroker reports whether the hub-local project tree carries
-// state a broker created (fs-cleanup-arch Q7: conservative; a needless
+// state a broker created (conservative: a needless
 // copy-only leaves a tree behind, a wrong rename breaks a broker). The hub
 // itself only ever wrote .scion/settings.yaml there, so a .scion that is a
 // marker file, or holds anything else (agents/, project-id, templates,
@@ -252,7 +251,7 @@ func isInfraEntry(name string) bool {
 	return infraEntries[name] || strings.HasPrefix(name, ".scion"+MigratedSuffix)
 }
 
-// MigrateProject runs (or, with opts.DryRun, plans) every M2 step for one
+// MigrateProject runs (or, with opts.DryRun, plans) every migration step for one
 // project, in ProjectSteps order.
 func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectReport {
 	rep := ProjectReport{ID: in.ID, Slug: in.Slug, OwnershipRequested: in.WorkspaceOwner != nil || in.SharedDirOwner != nil}
@@ -288,7 +287,7 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		}
 		// A source whose seed step failed or could not decide is not moved
 		// into workspace/: the hub seed must never become agent-visible
-		// workspace content (design P1a).
+		// workspace content (project configuration is not visible to agents).
 		seeded := map[string][]string{} // source -> entries step 4 copied
 		seedOK := func(src Tree, copyOnly bool) bool {
 			if in.ProjectRoot.Base == "" {
@@ -320,8 +319,8 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		}
 		// Steps 4, 1 and 2 hold the project's provisioning lock for their
 		// whole duration (the copy included), so a first agent start
-		// cannot provision a half-migrated workspace (review round 2,
-		// finding 1). Only when there is legacy content to move, and never
+		// cannot provision a half-migrated workspace. Only when there is
+		// legacy content to move, and never
 		// in a dry run.
 		legacy := hasLegacyContent(append(append([]Tree{}, sources...), local))
 		switch {
@@ -500,7 +499,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		}
 		switch {
 		case t:
-			// Repository tier (design P1a): stays in the workspace.
+			// Repository tier (project configuration is not visible to agents): stays in the workspace.
 		case isSeed(name):
 			spec.Entries = append(spec.Entries, name)
 		default:
@@ -514,7 +513,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 }
 
 // noteGitlessWorkspace reports a git project whose workspace content was
-// migrated without a .git (fs-cleanup-arch residual 1): the provisioner
+// migrated without a .git: the provisioner
 // refuses a non-empty workspace with no provisioning marker and no .git, so
 // the first agent start will fail until the operator acts.
 func (rep *ProjectReport) noteGitlessWorkspace(in ProjectInput, opts Options) {
@@ -564,7 +563,7 @@ func hasLegacyContent(trees []Tree) bool {
 const StepIdentity Step = "identity"
 
 // bound reports whether the slug-keyed legacy tree src may be migrated into
-// this project (fs-cleanup-arch Q8): an absent tree trivially; otherwise
+// this project: an absent tree trivially; otherwise
 // only when its identity markers name the project's ID, or, with
 // opts.AdoptUnverified, when it carries none. A mismatched or unverified
 // tree is reported as a failed step and left for an operator.
@@ -635,8 +634,7 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 			// Only configuration/infra entries (step 4 copied what
 			// belongs to the project configuration): keep the tree aside
 			// like any migrated source, so its .scion is not left live
-			// and re-runs neither relock nor re-report it (review round 4,
-			// finding 2).
+			// and re-runs neither relock nor re-report it.
 			rep.keepAside(step, src, opts)
 		}
 		return
@@ -685,10 +683,13 @@ func (rep *ProjectReport) keepAside(step Step, src Tree, opts Options) {
 		return
 	}
 	parent, name, ok, err := openParent(src, false)
-	if err != nil || !ok {
-		res.Outcome, res.Err = OutcomeFailed, fmt.Errorf("keep source aside: %v", err)
+	if err != nil {
+		res.Outcome, res.Err = OutcomeFailed, fmt.Errorf("keep source aside: %w", err)
 		rep.Results = append(rep.Results, res)
 		return
+	}
+	if !ok {
+		return // the source is gone: nothing to keep aside
 	}
 	defer closeFd(parent)
 	backup, err := renameToBackup(parent, name, opts)
@@ -701,8 +702,8 @@ func (rep *ProjectReport) keepAside(step Step, src Tree, opts Options) {
 }
 
 // workspaceExcludes lists the entries of a legacy workspace source that
-// must not land in the agent-visible workspace/ (design P1a, review round 2
-// finding 2): shared-dirs/ (step 3 owns shared dirs), step-4 backups
+// must not land in the agent-visible workspace/ (project configuration
+// is never visible to agents): shared-dirs/ (step 3 owns shared dirs), step-4 backups
 // (.scion.migrated-<ts>, .scion/<entry>.migrated-<ts>), for a non-git
 // source the whole .scion (project configuration step 4 copied, broker
 // records, unknown entries), and for a git source the configuration

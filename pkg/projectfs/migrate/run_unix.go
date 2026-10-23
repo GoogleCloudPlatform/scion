@@ -27,7 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
-// ProjectRef is a hub project as M2 sees it.
+// ProjectRef is a hub project as the migration sees it.
 type ProjectRef struct {
 	ID   string
 	Slug string
@@ -43,7 +43,7 @@ type ProjectRef struct {
 	NoWorkspace bool
 }
 
-// HubInput is one hub's M2/M3 run.
+// HubInput is one hub's the migration/the object-storage cleanup run.
 type HubInput struct {
 	// Workspace is the hub's workspace Layout (targets of steps 1, 2, 4,
 	// and the legacy hub-managed root).
@@ -54,10 +54,10 @@ type HubInput struct {
 	// GlobalDir is the hub's own global Scion dir (~/.scion).
 	GlobalDir string
 	Projects  []ProjectRef
-	// Objects is the hub's object storage (nil: M3 is skipped).
+	// Objects is the hub's object storage (nil: the object-storage cleanup is skipped).
 	Objects ObjectStore
 	// ObjectPrefix is the directory prefix of a project's legacy GCS
-	// workspace copy (M3).
+	// workspace copy (the object-storage cleanup).
 	ObjectPrefix func(projectID string) string
 	// ProvisionLock, when set, runs section holding every provisioning lock
 	// a provisioner of the project workspace at workspace may take (the hub
@@ -70,7 +70,7 @@ type HubInput struct {
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
 }
 
-// HubReport is one hub's M2/M3 report.
+// HubReport is one hub's the migration/the object-storage cleanup report.
 type HubReport struct {
 	DryRun bool
 	// Skipped is set when the run did nothing at all (the workspace
@@ -133,7 +133,7 @@ func (h HubReport) IdentityBlockedProjects() []string {
 	return ids
 }
 
-// Run runs (or plans) M2 for every project of a hub, then M3 per project.
+// Run runs (or plans) the migration for every project of a hub, then the object-storage cleanup per project.
 // On a hub whose workspace backend is not shared it touches nothing and
 // reports Skipped. A shared backend without a usable mount root fails
 // closed with an error.
@@ -191,7 +191,7 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 	pi.WorkspaceOwner = layoutOwner(in.Workspace)
 	pi.SharedDirOwner = layoutOwner(in.SharedDirs)
 	if !in.Workspace.Backend.Shared() {
-		// Precondition (fs-cleanup-arch Q7): the workspace steps act only
+		// Precondition: the workspace steps act only
 		// when the workspace Layout is shared.
 		pi.SkipWorkspace = true
 	} else {

@@ -16,8 +16,16 @@
 
 package migrate
 
+import "golang.org/x/sys/unix"
+
 // renameNoReplace has no atomic no-replace rename to use where renameat2
 // does not exist.
 func renameNoReplace(oldDir int, oldName string, newDir int, newName string) error {
 	return errNoAtomicRename
+}
+
+// syncFS flushes what it can where syncfs(2) does not exist: the
+// directory itself.
+func syncFS(fd int) error {
+	return unix.Fsync(fd)
 }

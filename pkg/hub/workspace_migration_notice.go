@@ -27,7 +27,7 @@ import (
 
 // WorkspaceMigrationNotice is shown as a banner on the project Files tab
 // while the hub's legacy workspace trees have not yet been migrated into
-// the project storage layout (design-v4 M2, ptone/scion#5819).
+// the project storage layout (ptone/scion#5819).
 type WorkspaceMigrationNotice struct {
 	Message      string `json:"message"`
 	OperationKey string `json:"operationKey"`
