@@ -129,11 +129,14 @@ func HashBytes(data []byte) string {
 // It remains the skill bundle hash: published skill versions are immutable
 // and pinned by this value (registry pins, content-addressed version lookup,
 // broker install verification), so it cannot change without a pin
-// migration. For templates and harness-configs it is not used by the hub:
-// the commit compare-and-swap compares the stored value strictly (accepting
-// a v1 value that matches the v1 hash of the stored files would accept a
-// stale commit over a rename-only or chmod-only change). The CLI uses it
-// only to compare with a hub response that has no manifest.
+// migration. For templates and harness-configs the hub records it while
+// the hub.content_hash_v2 experiment is off, and ComputeContentHashV2 while
+// it is on. The hub never uses it to accept a client's expected hash
+// against a v2 row: the commit compare-and-swap compares the stored value
+// strictly (accepting a v1 value that matches the v1 hash of the stored
+// files would accept a stale commit over a rename-only or chmod-only
+// change). The CLI uses it only to compare with a hub response that has no
+// manifest.
 // Returns "" for an empty file list.
 func ComputeContentHashV1(files []FileInfo) string {
 	if len(files) == 0 {

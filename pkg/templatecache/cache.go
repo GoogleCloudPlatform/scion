@@ -254,8 +254,9 @@ func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes 
 //
 // The broker computes the key itself, from the metadata manifest for a
 // lookup and from the downloaded files for a store, so it does not depend
-// on which content hash version the hub records (a hub before
-// ptone/scion#5658, or a row not committed since, records v1). For the
+// on which content hash version the hub records (v1 while the
+// hub.content_hash_v2 experiment is off, on a hub before ptone/scion#5658,
+// or for a row not committed since; v2 otherwise). For the
 // same reason it replaces the interim key of ptone/scion#5652, which
 // derived a key from the hub's content hash and the executable paths.
 // Entries stored under the earlier keys (a bare v1 content hash, or that

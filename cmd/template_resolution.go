@@ -581,10 +581,10 @@ func detectHarnessType(tpl *config.Template) (string, error) {
 	return "", nil
 }
 
-// computeLocalContentHash computes the content hash a Hub with
-// ptone/scion#5658 records for local files (paths, modes and contents). It
-// is for display: whether local files match the Hub's is decided by
-// localMatchesHub.
+// computeLocalContentHash computes the v2 content hash of local files
+// (paths, modes and contents), the hash a Hub with the hub.content_hash_v2
+// experiment on records (ptone/scion#5658). It is for display: whether
+// local files match the Hub's is decided by localMatchesHub.
 func computeLocalContentHash(files []hubclient.FileInfo) string {
 	templateFiles := make([]hubclient.TemplateFile, len(files))
 	for i, f := range files {

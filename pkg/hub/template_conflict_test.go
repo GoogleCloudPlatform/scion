@@ -205,8 +205,8 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 	if !reflect.DeepEqual(got.Files, want) {
 		t.Errorf("row files = %+v, want the winner's manifest %+v", got.Files, want)
 	}
-	if got.ContentHash != computeContentHash(want) {
-		t.Errorf("ContentHash = %q, want the winner's %q", got.ContentHash, computeContentHash(want))
+	if got.ContentHash != defaultContentHash(want) {
+		t.Errorf("ContentHash = %q, want the winner's %q", got.ContentHash, defaultContentHash(want))
 	}
 	for _, f := range got.Files {
 		if !objectExists(t, stor, templateObjectPath(got, f)) {
@@ -335,7 +335,7 @@ func TestTemplateBootstrap_RetriesConflictOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ContentHash != computeContentHash(got.Files) || len(got.Files) != 2 {
+	if got.ContentHash != defaultContentHash(got.Files) || len(got.Files) != 2 {
 		t.Errorf("after retry: files %+v hash %q, want the directory's two files", got.Files, got.ContentHash)
 	}
 	assertBothIndex(t, got)

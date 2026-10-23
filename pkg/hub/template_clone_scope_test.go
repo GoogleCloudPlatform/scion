@@ -161,7 +161,7 @@ func TestTemplateClone_LegacyScopeName_RejectedBeforeCollisionCheck(t *testing.T
 		Status: store.TemplateStatusActive, StoragePath: existingPath, StorageBucket: "test-bucket",
 		Files: []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(existingContent))}},
 	}
-	existing.ContentHash = computeContentHash(existing.Files)
+	existing.ContentHash = defaultContentHash(existing.Files)
 	require.NoError(t, s.CreateTemplate(ctx, existing))
 
 	sourcePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "legacy-collide-source")
@@ -173,7 +173,7 @@ func TestTemplateClone_LegacyScopeName_RejectedBeforeCollisionCheck(t *testing.T
 		StoragePath: sourcePath, StorageBucket: "test-bucket",
 		Files: []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(sourceContent))}},
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	member := createNamedTestUser(t, s, "legacy-collide-member", store.UserRoleMember)

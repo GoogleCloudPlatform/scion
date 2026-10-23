@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -467,8 +468,13 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Compute content hash from file hashes
-	contentHash := transfer.ComputeContentHashV2(req.Manifest.Files)
+	// Compute content hash from file hashes, in the version template and
+	// harness-config commits record (the hub.content_hash_v2 experiment).
+	// It is reported to the client only.
+	contentHash := transfer.ComputeContentHashV1(req.Manifest.Files)
+	if s.experimentEnabled(experiments.ContentHashV2) {
+		contentHash = transfer.ComputeContentHashV2(req.Manifest.Files)
+	}
 
 	// Calculate total bytes transferred
 	var totalBytes int64

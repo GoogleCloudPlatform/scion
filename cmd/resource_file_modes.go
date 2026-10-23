@@ -77,15 +77,16 @@ func modeOnlyChangesInManifest(local []hubclient.FileInfo, remote []hubclient.Te
 // modeOnlyChangesInManifest).
 //
 // It compares manifests rather than content hashes, because the Hub's
-// ContentHash is ComputeContentHashV2 (paths and modes included) on a Hub
-// with ptone/scion#5658 and a row committed since, and the
-// ComputeContentHashV1 of an older Hub or an older row, which does not see
-// a rename. A Hub response without a manifest falls back to comparing the
-// content hash against both versions. That fallback cannot take the Hub's
-// executable bits on a platform whose modes carry none (Windows), so there
-// a template with an executable file on a v2 Hub reports out of date; the
-// Hub's Get and List responses carry the manifest, so the fallback is for
-// responses that omit it.
+// ContentHash is ComputeContentHashV2 (paths and modes included) for a row
+// committed with the hub.content_hash_v2 experiment on, and the
+// ComputeContentHashV1 of a row committed while it was off or by an older
+// Hub, which does not see a rename (ptone/scion#5658). A Hub response
+// without a manifest falls back to comparing the content hash against both
+// versions. That fallback cannot take the Hub's executable bits on a
+// platform whose modes carry none (Windows), so there a template with an
+// executable file in a v2 row reports out of date; the Hub's Get and List
+// responses carry the manifest, so the fallback is for responses that omit
+// it.
 func localMatchesHub(local []hubclient.FileInfo, remote []hubclient.TemplateFile, hubContentHash string) bool {
 	if len(remote) == 0 {
 		if hubContentHash == "" {

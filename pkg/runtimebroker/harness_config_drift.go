@@ -31,10 +31,11 @@ import (
 // (ptone/scion#611). Nothing is logged when no local copy exists or the
 // contents match.
 //
-// Both copies are hashed with hubCompatibleContentHash: the hub's content
-// hash algorithm (transfer.ComputeContentHashV2) over line-ending-normalized
-// files, excluding transient files. The values are therefore comparable with
-// each other, but are not necessarily the hub record's stored content_hash
+// Both copies are hashed with hubCompatibleContentHash: the v2 content hash
+// algorithm (transfer.ComputeContentHashV2, which the hub records with the
+// hub.content_hash_v2 experiment on) over line-ending-normalized files,
+// excluding transient files. The values are therefore comparable with each
+// other, but are not necessarily the hub record's stored content_hash
 // (a record uploaded with CRLF content or transient files hashes
 // differently); dispatchHash, the record hash the dispatch carried, is
 // logged alongside when present.

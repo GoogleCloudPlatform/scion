@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -1295,21 +1296,37 @@ func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Reque
 	return s.authorizeRead(w, r, templateResource(template), "Template")
 }
 
-// computeContentHash computes the aggregate content hash of a template's or
-// harness-config's files: transfer.ComputeContentHashV2, which covers paths,
-// normalised modes and file hashes (ptone/scion#5658). It is a thin adapter
-// over the canonical transfer implementation, also used by the transfer
-// collector and the hubclient manifest builder, so the hub and its clients
-// never compute divergent hashes for identical content.
+// computeContentHash computes the content hash a template or harness-config
+// commit records for files. With the hub.content_hash_v2 experiment on it is
+// transfer.ComputeContentHashV2, which covers paths, normalised modes and
+// file hashes (ptone/scion#5658); while it is off (the default) it is
+// transfer.ComputeContentHashV1, which covers file hashes only, so a
+// rename-only or chmod-only re-upload is not visible to the expected-hash
+// check, as before. The experiment is read at every call, so toggling it
+// needs no restart. A nil server (no experiments) records v1.
 //
-// Rows written before v2 keep their v1 value until their next commit, which
-// rewrites it (no backfill). The commit compare-and-swap stays a strict
-// equality on the stored value, v1 or v2: accepting a v1 value that matches
-// the v1 hash of the stored files would accept a stale commit over a
-// rename-only or chmod-only change, the change v2 exists to detect. Skill
-// versions do not use this hash: see computeSkillContentHash.
-func computeContentHash(files []store.TemplateFile) string {
-	return transfer.ComputeContentHashV2(templateFileInfos(files))
+// Rows keep the version they were last committed with until their next
+// commit rewrites it (no backfill). The commit compare-and-swap stays a
+// strict equality on the stored value, v1 or v2, so mixed rows are safe in
+// both directions; accepting a v1 value that matches the v1 hash of the
+// stored files would accept a stale commit over a rename-only or chmod-only
+// change, the change v2 exists to detect. Skill versions do not use this
+// hash: see computeSkillContentHash.
+func (s *Server) computeContentHash(files []store.TemplateFile) string {
+	return computeContentHashVersion(files, s != nil && s.experimentEnabled(experiments.ContentHashV2))
+}
+
+// computeContentHashVersion is the content hash of files: v2
+// (transfer.ComputeContentHashV2) when v2 is set, otherwise v1
+// (transfer.ComputeContentHashV1). It is a thin adapter over the canonical
+// transfer implementations, also used by the transfer collector and the
+// hubclient manifest builder, so the hub and its clients never compute
+// divergent hashes for identical content.
+func computeContentHashVersion(files []store.TemplateFile, v2 bool) string {
+	if v2 {
+		return transfer.ComputeContentHashV2(templateFileInfos(files))
+	}
+	return transfer.ComputeContentHashV1(templateFileInfos(files))
 }
 
 // computeSkillContentHash is the content hash of a skill version's files.

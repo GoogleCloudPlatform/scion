@@ -24,13 +24,16 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
-// Tests for the v2 content hash in the template commit compare-and-swap
-// (ptone/scion#5658): a rename-only or chmod-only commit changes the
-// content hash, so a finalize that diffed against the version before it is
-// refused with 409 instead of overwriting it.
+// Tests for the content hash in the template commit compare-and-swap
+// (ptone/scion#5658). With hub.content_hash_v2 on, a rename-only or
+// chmod-only commit changes the content hash, so a finalize that diffed
+// against the version before it is refused with 409 instead of overwriting
+// it. While it is off, commits record the earlier (v1) hash and such a
+// commit is not visible to the check, as before. The compare-and-swap is a
+// strict equality on the stored value, so rows of either version are safe
+// across a toggle in both directions.
 
 const casScript = "#!/bin/sh\necho hi\n"
 
@@ -48,7 +51,16 @@ func finalizeTemplateCode(t *testing.T, srv *Server, tmpl *store.Template, files
 	return rec.Code
 }
 
-func TestTemplateFinalize_RenameAndChmodOnlyCommitsConflict(t *testing.T) {
+func getTemplateRow(t *testing.T, s store.Store, id string) *store.Template {
+	t.Helper()
+	got, err := s.GetTemplate(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestTemplateFinalize_RenameAndChmodOnlyCommits(t *testing.T) {
 	base := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript}
 
 	tests := []struct {
@@ -56,6 +68,8 @@ func TestTemplateFinalize_RenameAndChmodOnlyCommitsConflict(t *testing.T) {
 		staged map[string]string // uploads the commit introduces
 		next   func() []store.TemplateFile
 	}{
+		// v1 concatenates file hashes in path order; this rename keeps the
+		// order, so v1 cannot see it.
 		{"rename only", map[string]string{"bin/run.sh": casScript}, func() []store.TemplateFile {
 			return commitManifest(map[string]string{"scion-agent.yaml": commitCfgOld, "bin/run.sh": casScript})
 		}},
@@ -70,132 +84,167 @@ func TestTemplateFinalize_RenameAndChmodOnlyCommitsConflict(t *testing.T) {
 		}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stor := newCommitTestStorage(t)
-			srv, s := newCommitTestServer(t, stor)
-			ctx := context.Background()
+		for _, v2 := range []bool{true, false} {
+			name := tt.name + " experiment off"
+			if v2 {
+				name = tt.name + " experiment on"
+			}
+			t.Run(name, func(t *testing.T) {
+				stor := newCommitTestStorage(t)
+				srv, s := newCommitTestServer(t, stor)
+				setContentHashV2Experiment(t, srv, v2)
 
-			tmpl := seedCommittedTemplate(t, srv, "cas-v2", "global", "", base)
-			h0 := tmpl.ContentHash
-			if h0 != computeContentHash(commitManifest(base)) {
-				t.Fatalf("seeded hash %q is not the v2 hash of its files", h0)
-			}
+				tmpl := seedCommittedTemplate(t, srv, "cas", "global", "", base)
+				h0 := tmpl.ContentHash
+				if h0 != computeContentHashVersion(commitManifest(base), v2) {
+					t.Fatalf("seeded hash %q is not the v2=%v hash of its files", h0, v2)
+				}
 
-			// Writer A commits the rename-only or chmod-only change.
-			next := tt.next()
-			stageObjects(t, srv, tmpl, tt.staged)
-			if code := finalizeTemplateCode(t, srv, tmpl, next, h0); code != http.StatusOK {
-				t.Fatalf("writer A: status %d, want 200", code)
-			}
-			afterA, err := s.GetTemplate(ctx, tmpl.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if afterA.ContentHash == h0 {
-				t.Fatalf("%s commit kept content hash %q", tt.name, h0)
-			}
-			if afterA.ContentHash != computeContentHash(next) {
-				t.Errorf("ContentHash = %q, want the v2 hash of the new manifest %q", afterA.ContentHash, computeContentHash(next))
-			}
+				// Writer A commits the rename-only or chmod-only change.
+				next := tt.next()
+				stageObjects(t, srv, tmpl, tt.staged)
+				if code := finalizeTemplateCode(t, srv, tmpl, next, h0); code != http.StatusOK {
+					t.Fatalf("writer A: status %d, want 200", code)
+				}
+				afterA := getTemplateRow(t, s, tmpl.ID)
+				if want := computeContentHashVersion(next, v2); afterA.ContentHash != want {
+					t.Errorf("ContentHash = %q, want the v2=%v hash of the new manifest %q", afterA.ContentHash, v2, want)
+				}
+				if !reflect.DeepEqual(afterA.Files, next) {
+					t.Fatalf("writer A's manifest not recorded: %+v, want %+v", afterA.Files, next)
+				}
 
-			// Writer B diffed against h0: refused, and the row keeps A's commit.
-			stale := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "b.md": "from writer B"}
-			stageObjects(t, srv, tmpl, stale)
-			if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(stale), h0); code != http.StatusConflict {
-				t.Fatalf("writer B with the pre-%s hash: status %d, want 409", tt.name, code)
-			}
-			got, err := s.GetTemplate(ctx, tmpl.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.ContentHash != afterA.ContentHash || !reflect.DeepEqual(got.Files, afterA.Files) {
-				t.Errorf("refused finalize changed the row: hash %q files %+v, want %q %+v",
-					got.ContentHash, got.Files, afterA.ContentHash, afterA.Files)
-			}
-		})
+				// Writer B diffed against h0.
+				stale := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "b.md": "from writer B"}
+				stageObjects(t, srv, tmpl, stale)
+				code := finalizeTemplateCode(t, srv, tmpl, commitManifest(stale), h0)
+				if !v2 {
+					// Off: the change is not visible to the check (the
+					// behaviour before ptone/scion#5658), so B commits.
+					if afterA.ContentHash != h0 || code != http.StatusOK {
+						t.Fatalf("experiment off: hash changed (%q -> %q) or writer B refused (%d); want the earlier behaviour", h0, afterA.ContentHash, code)
+					}
+					return
+				}
+				if afterA.ContentHash == h0 {
+					t.Fatalf("%s commit kept content hash %q", tt.name, h0)
+				}
+				if code != http.StatusConflict {
+					t.Fatalf("writer B with the pre-%s hash: status %d, want 409", tt.name, code)
+				}
+				got := getTemplateRow(t, s, tmpl.ID)
+				if got.ContentHash != afterA.ContentHash || !reflect.DeepEqual(got.Files, afterA.Files) {
+					t.Errorf("refused finalize changed the row: hash %q files %+v, want %q %+v",
+						got.ContentHash, got.Files, afterA.ContentHash, afterA.Files)
+				}
+			})
+		}
 	}
 }
 
-// A row written before ptone/scion#5658 keeps its v1 content hash until its
-// next commit. A client that read that v1 value commits while the row is
-// unchanged; once any commit (even a byte-identical one) has rewritten the
-// row with v2, the same v1 value is refused with 409. The compare-and-swap
-// is a strict equality: accepting a v1 value that matches the v1 hash of
-// the stored files would also accept it over a rename-only or chmod-only
-// commit, which v1 cannot see.
-func TestTemplateFinalize_V1RowStrictCompare(t *testing.T) {
+// TestTemplateFinalize_ExperimentToggle covers rows of both versions across
+// a toggle of hub.content_hash_v2. Every commit records the version active
+// when it runs, and the compare-and-swap is a strict equality on the stored
+// value: accepting a v1 value that matches the v1 hash of the stored files
+// would also accept it over a rename-only or chmod-only commit, which v1
+// cannot see.
+func TestTemplateFinalize_ExperimentToggle(t *testing.T) {
 	files := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript}
+	renamed := commitManifest(map[string]string{"scion-agent.yaml": commitCfgOld, "bin/run.sh": casScript})
+	next := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "new.md": "new"}
 
-	plantV1 := func(t *testing.T, s store.Store, tmpl *store.Template) string {
+	// seedV1 seeds a template with the experiment off, then turns it on.
+	seedV1 := func(t *testing.T, name string) (*Server, store.Store, *store.Template) {
 		t.Helper()
-		ctx := context.Background()
-		row, err := s.GetTemplate(ctx, tmpl.ID)
-		if err != nil {
-			t.Fatal(err)
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		setContentHashV2Experiment(t, srv, false)
+		tmpl := seedCommittedTemplate(t, srv, name, "global", "", files)
+		if tmpl.ContentHash != computeContentHashVersion(commitManifest(files), false) {
+			t.Fatalf("seeded hash %q is not v1", tmpl.ContentHash)
 		}
-		row.ContentHash = transfer.ComputeContentHashV1(templateFileInfos(row.Files))
-		if err := setTemplateContentForTest(ctx, s, row); err != nil {
-			t.Fatal(err)
-		}
-		return row.ContentHash
+		setContentHashV2Experiment(t, srv, true)
+		return srv, s, tmpl
 	}
 
-	t.Run("v1 row unchanged: v1 expected hash commits and rewrites v2", func(t *testing.T) {
-		stor := newCommitTestStorage(t)
-		srv, s := newCommitTestServer(t, stor)
-		tmpl := seedCommittedTemplate(t, srv, "cas-v1", "global", "", files)
-		h1 := plantV1(t, s, tmpl)
-
-		next := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "new.md": "new"}
+	t.Run("off to on: an unchanged v1 row accepts its v1 hash and is rewritten v2", func(t *testing.T) {
+		srv, s, tmpl := seedV1(t, "toggle-v1-ok")
 		stageObjects(t, srv, tmpl, next)
-		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), h1); code != http.StatusOK {
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), tmpl.ContentHash); code != http.StatusOK {
 			t.Fatalf("status %d, want 200", code)
 		}
-		got, err := s.GetTemplate(context.Background(), tmpl.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.ContentHash != computeContentHash(commitManifest(next)) {
-			t.Errorf("ContentHash = %q, want the v2 hash %q", got.ContentHash, computeContentHash(commitManifest(next)))
+		if got, want := getTemplateRow(t, s, tmpl.ID).ContentHash, computeContentHashVersion(commitManifest(next), true); got != want {
+			t.Errorf("ContentHash = %q, want the v2 hash %q", got, want)
 		}
 	})
 
-	t.Run("v1 row renamed since the read: v1 expected hash is refused", func(t *testing.T) {
-		stor := newCommitTestStorage(t)
-		srv, s := newCommitTestServer(t, stor)
-		tmpl := seedCommittedTemplate(t, srv, "cas-v1-rename", "global", "", files)
-		h1 := plantV1(t, s, tmpl)
-
-		// Another writer renames run.sh; the v1 hash of the new files is
-		// still h1, the v2 hash the row now records is not.
-		renamed := commitManifest(map[string]string{"scion-agent.yaml": commitCfgOld, "bin/run.sh": casScript})
-		if transfer.ComputeContentHashV1(templateFileInfos(renamed)) != h1 {
+	t.Run("off to on: a v1 hash is refused after a v1-invisible rename", func(t *testing.T) {
+		srv, s, tmpl := seedV1(t, "toggle-v1-rename")
+		h1 := tmpl.ContentHash
+		if computeContentHashVersion(renamed, false) != h1 {
 			t.Fatal("test premise: v1 must not see the rename")
 		}
 		stageObjects(t, srv, tmpl, map[string]string{"bin/run.sh": casScript})
 		if code := finalizeTemplateCode(t, srv, tmpl, renamed, h1); code != http.StatusOK {
 			t.Fatalf("rename: status %d, want 200", code)
 		}
-
 		stale := map[string]string{"scion-agent.yaml": commitCfgOld, "run.sh": casScript, "b.md": "stale"}
 		stageObjects(t, srv, tmpl, stale)
 		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(stale), h1); code != http.StatusConflict {
 			t.Fatalf("stale v1 finalize over a rename: status %d, want 409", code)
 		}
-		got, err := s.GetTemplate(context.Background(), tmpl.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got.Files, renamed) {
+		if got := getTemplateRow(t, s, tmpl.ID); !reflect.DeepEqual(got.Files, renamed) {
 			t.Errorf("rename lost: files = %+v, want %+v", got.Files, renamed)
+		}
+	})
+
+	t.Run("off to on: one spurious 409 after a byte-identical recommit, then a re-read commits", func(t *testing.T) {
+		srv, s, tmpl := seedV1(t, "toggle-spurious")
+		h1 := tmpl.ContentHash // a client reads the row while it is v1
+		// Another writer recommits the same files: the row becomes v2.
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(files), h1); code != http.StatusOK {
+			t.Fatalf("recommit: status %d, want 200", code)
+		}
+		reread := getTemplateRow(t, s, tmpl.ID)
+		if reread.ContentHash == h1 || !reflect.DeepEqual(reread.Files, commitManifest(files)) {
+			t.Fatalf("recommit: hash %q files %+v; want the same files under a v2 hash", reread.ContentHash, reread.Files)
+		}
+		stageObjects(t, srv, tmpl, next)
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), h1); code != http.StatusConflict {
+			t.Fatalf("finalize with the v1 hash read before the recommit: status %d, want the one spurious 409", code)
+		}
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), reread.ContentHash); code != http.StatusOK {
+			t.Fatalf("retry after re-reading: status %d, want 200", code)
+		}
+	})
+
+	t.Run("on to off: a v2 row accepts its v2 hash and is rewritten v1", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		setContentHashV2Experiment(t, srv, true)
+		tmpl := seedCommittedTemplate(t, srv, "toggle-v2-off", "global", "", files)
+		h2 := tmpl.ContentHash
+		if h2 != computeContentHashVersion(commitManifest(files), true) {
+			t.Fatalf("seeded hash %q is not v2", h2)
+		}
+		setContentHashV2Experiment(t, srv, false)
+
+		stageObjects(t, srv, tmpl, next)
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(next), h2); code != http.StatusOK {
+			t.Fatalf("status %d, want 200", code)
+		}
+		if got, want := getTemplateRow(t, s, tmpl.ID).ContentHash, computeContentHashVersion(commitManifest(next), false); got != want {
+			t.Errorf("ContentHash = %q, want the v1 hash %q", got, want)
+		}
+		if code := finalizeTemplateCode(t, srv, tmpl, commitManifest(files), h2); code != http.StatusConflict {
+			t.Fatalf("finalize with the superseded v2 hash: status %d, want 409", code)
 		}
 	})
 }
 
 // A harness-config commit is a compare-and-swap against the row as read. A
-// rename-only or chmod-only commit changes the v2 content hash, so a writer
-// that read the row before it (here recommitting the files it read) is
-// refused instead of reverting the change (ptone/scion#5658).
+// rename-only or chmod-only commit changes the v2 content hash (with
+// hub.content_hash_v2 on), so a writer that read the row before it (here
+// recommitting the files it read) is refused instead of reverting the
+// change (ptone/scion#5658).
 func TestHarnessConfigCommit_StaleReadOverRenameOrChmodConflicts(t *testing.T) {
 	base := map[string]string{"config.yaml": deriveBareYAML, "run.sh": casScript}
 	cases := []struct {
@@ -210,6 +259,7 @@ func TestHarnessConfigCommit_StaleReadOverRenameOrChmodConflicts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, _ := newHCCommitTestServer(t)
 			ctx := context.Background()
+			setContentHashV2Experiment(t, srv, true)
 			hc := ensureDeriveHC(t, srv, s)
 
 			rec := finalizeHCManifest(t, srv, hc, base)
