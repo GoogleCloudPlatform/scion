@@ -6678,28 +6678,48 @@ export class ScionPageChat extends LitElement {
     return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
   }
 
+  /** Bumped by every header star jump; a newer jump supersedes older ones. */
+  private starJumpSeq = 0;
+
   /**
    * A header star entry was chosen: resolve the star's current target
    * first, then jump with the existing around-message navigation. A star
    * that is no longer available leaves the current conversation as it is.
    */
-  private handleStarredMessageOpen = async (
-    e: CustomEvent<StarredMessageOpenDetail>
-  ): Promise<void> => {
+  private handleStarredMessageOpen = (e: CustomEvent<StarredMessageOpenDetail>): void => {
     const messageId = e.detail?.messageId;
     if (!messageId) return;
+    void this.openStarredMessage(messageId, this.v2Conversation?.conversationKey ?? '');
+  };
+
+  /**
+   * Open a starred message chosen while `originKey` was open. Newer
+   * navigation wins: if the user opened another conversation, or chose
+   * another entry, while the detail request ran, nothing happens. A Retry
+   * from the error toast keeps the original conversation, so it does
+   * nothing either once the user has moved on.
+   */
+  private async openStarredMessage(messageId: string, originKey: string): Promise<void> {
+    const seq = ++this.starJumpSeq;
+    const superseded = (): boolean =>
+      seq !== this.starJumpSeq || (this.v2Conversation?.conversationKey ?? '') !== originKey;
     let item;
     try {
       item = await fetchStarDetail(messageId);
     } catch {
+      if (superseded()) return;
       showToast('Could not open the starred message', 'danger', {
         action: {
           label: 'Retry',
-          run: (): void => void this.handleStarredMessageOpen(e),
+          run: (): void => {
+            if ((this.v2Conversation?.conversationKey ?? '') !== originKey) return;
+            void this.openStarredMessage(messageId, originKey);
+          },
         },
       });
       return;
     }
+    if (superseded()) return;
     if (!item) {
       showToast('This starred message is no longer available', 'warning');
       return;
@@ -6714,7 +6734,7 @@ export class ScionPageChat extends LitElement {
       return;
     }
     navigateTo(item.permalink);
-  };
+  }
 
   /** Whether the conversation header folds its secondary actions into the More menu. */
   private isHeaderCompact(conv: V2ConversationState): boolean {
