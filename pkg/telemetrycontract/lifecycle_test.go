@@ -28,7 +28,9 @@ var (
 	lcObservedTS = time.Date(2026, 10, 22, 0, 0, 0, 2000, time.UTC)
 )
 
-func boolp(b bool) *bool { return &b }
+// lifecycleBoolPtr is a *bool helper for the lifecycle tests (named apart from
+// the usage-event tests' boolp in the same package).
+func lifecycleBoolPtr(b bool) *bool { return &b }
 
 // lcBase returns an envelope-complete event with the given transition and
 // revisions 1/1; it carries no other payload.
@@ -183,10 +185,10 @@ func TestLifecycleValidateRules(t *testing.T) {
 		{"delete_mode elsewhere", func(e *LifecycleEvent) { e.DeleteMode = DeleteModeSoft }, TransitionCreated, "delete_mode is only allowed"},
 		{"resynced without cause", func(e *LifecycleEvent) { e.Cause = "" }, TransitionResynced, "not a resynced cause"},
 		{"resynced unobserved without gap", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange }, TransitionResynced, "gap must be true"},
-		{"resynced unobserved gap false", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange; e.Gap = boolp(false) }, TransitionResynced, "gap must be true"},
-		{"resynced unobserved gap true", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange; e.Gap = boolp(true) }, TransitionResynced, ""},
-		{"gap on no_cursor", func(e *LifecycleEvent) { e.Gap = boolp(true) }, TransitionResynced, "gap is only allowed"},
-		{"gap on deleted", func(e *LifecycleEvent) { e.Gap = boolp(true) }, TransitionDeleted, "gap is only allowed"},
+		{"resynced unobserved gap false", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange; e.Gap = lifecycleBoolPtr(false) }, TransitionResynced, "gap must be true"},
+		{"resynced unobserved gap true", func(e *LifecycleEvent) { e.Cause = CauseUnobservedChange; e.Gap = lifecycleBoolPtr(true) }, TransitionResynced, ""},
+		{"gap on no_cursor", func(e *LifecycleEvent) { e.Gap = lifecycleBoolPtr(true) }, TransitionResynced, "gap is only allowed"},
+		{"gap on deleted", func(e *LifecycleEvent) { e.Gap = lifecycleBoolPtr(true) }, TransitionDeleted, "gap is only allowed"},
 		{"cause on created", func(e *LifecycleEvent) { e.Cause = "x" }, TransitionCreated, "cause is not allowed"},
 		{"bad stopped cause", func(e *LifecycleEvent) { e.Cause = CauseNoCursor }, TransitionStopped, "not a stopped cause"},
 		{"started run_uncorrelated", func(e *LifecycleEvent) { e.Cause = CauseRunUncorrelated }, TransitionStarted, ""},

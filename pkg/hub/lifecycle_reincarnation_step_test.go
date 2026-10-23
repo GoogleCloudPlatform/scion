@@ -61,7 +61,12 @@ type reincStepFixture struct {
 // write and everything the observer wrote must roll back.
 type failAfterObserver struct {
 	inner store.AgentWriteObserver
-	ran   int
+	// sawRev is the agent's cursor transition revision read in the write's
+	// transaction right after the inner observer returned: higher than the
+	// committed revision only if the observer really wrote (an inner
+	// observer that skipped the write, e.g. on a build failure, also
+	// returns nil).
+	sawRev int64
 }
 
 var errInjectedReincStep = errors.New("injected reincarnation step failure")
@@ -70,7 +75,13 @@ func (o *failAfterObserver) ObserveAgentWrite(ctx context.Context, tx store.Life
 	if err := o.inner.ObserveAgentWrite(ctx, tx, w); err != nil {
 		return err
 	}
-	o.ran++
+	c, err := tx.GetLifecycleCursor(ctx, w.AgentID())
+	if err != nil {
+		return err
+	}
+	if c != nil && c.TransitionRevision > o.sawRev {
+		o.sawRev = c.TransitionRevision
+	}
 	return errInjectedReincStep
 }
 
@@ -253,9 +264,14 @@ func TestReincarnationStepLifecycle_PlainObserverFailureRollsBack(t *testing.T) 
 	require.NoError(t, err)
 	obs := &failAfterObserver{inner: inner}
 	f.ls.SetAgentWriteObserver(obs)
-	err = f.step(2, nil)
-	f.ls.SetAgentWriteObserver(inner) // for the reads in assertNothingCommitted
+	// Restore a plain observer when the test ends; nothing below writes
+	// through it.
+	t.Cleanup(func() { f.ls.SetAgentWriteObserver(inner) })
+	// One attempt: the injected error is not a version conflict, so the
+	// step never retries.
+	err = f.step(1, nil)
 	require.ErrorIs(t, err, errInjectedReincStep)
-	require.Positive(t, obs.ran, "the real observer ran inside the write before the failure")
+	require.Greater(t, obs.sawRev, before.transitionRev,
+		"the real observer bumped the cursor inside the write's transaction before the failure")
 	f.assertNothingCommitted(t, before)
 }
