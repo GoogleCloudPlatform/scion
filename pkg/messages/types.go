@@ -183,6 +183,15 @@ type StructuredMessage struct {
 	// serialized.
 	AttachmentPlan []AttachmentPlanEntry `json:"-"`
 
+	// AttachmentMounts names, for an entry of Attachments that is a
+	// container path inside a shared dir (a legacy attachment staged into
+	// the scratchpad, ptone/scion#5827), the shared dir it is in,
+	// keyed by that path. The rendered envelope tags such an entry with its
+	// mount, so a recipient can tell a path in a shared dir from one in its
+	// home. Set by the hub's send path only; never read from a request,
+	// never serialized.
+	AttachmentMounts map[string]string `json:"-"`
+
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no
 	// formatting. Phase 13 deletes this field along with the rest of
@@ -386,6 +395,12 @@ type AttachmentDelivery struct {
 	MimeType   string
 	Size       int64
 	SHA256     string
+	// ProjectedPath, when set, is the container path of the attachment's
+	// projection into shared dir ProjectedMount (the scratchpad,
+	// ptone/scion#5830), where sibling agents of the project find it. It is
+	// listed after the inbox path, never instead of it.
+	ProjectedPath  string
+	ProjectedMount string
 }
 
 // Attachment plan states (ptone/scion#4596): what the hub decided, for one
@@ -413,6 +428,12 @@ type AttachmentPlanEntry struct {
 	// Name is the hub-reduced file name.
 	Name  string
 	State string
+	// ProjectedPath and ProjectedMount are the delivery's projection into a
+	// shared dir (AttachmentDelivery.ProjectedPath), set for every state
+	// but withheld. The envelope lists the projection as a second,
+	// self-describing entry after the inbox path.
+	ProjectedPath  string
+	ProjectedMount string
 }
 
 // WireAttachment is one attachment of a message request the hub sends to
