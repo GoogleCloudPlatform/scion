@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gopkg.in/yaml.v3"
@@ -61,6 +62,12 @@ type startContext struct {
 	// found-on runtime on restart), which can differ from the broker's
 	// default runtime. The create path reports it to the hub.
 	RuntimeType string
+
+	// Resolution is the full runtime resolution behind Manager and
+	// RuntimeType (the same resolveExistingAgentManager call), with How
+	// settled for the operation (forCreate / forExistingAgent). The create
+	// path resolves its Kubernetes placement from it.
+	Resolution runtimeResolution
 
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
@@ -112,6 +119,11 @@ type startContextInputs struct {
 	// broker-side state is read from, the same one Start uses. A Config's
 	// own SharedWorkspace is used as well when present.
 	SharedWorkspace bool
+
+	// HubProfile is the profile a start or restart request carries (wire
+	// key profile; nil when an older Hub sent none). It is used only for
+	// an agent without an image provenance record (hubSentProfile).
+	HubProfile *string
 
 	// Project
 	ProjectPath string
@@ -316,6 +328,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// A hub-managed workspace's .scion entry must be in the state the
+	// broker recorded for it before anything is read through it (see
+	// checkWorkspaceConfigRecord); recordHubProjectFiles records the state
+	// it leaves.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		var checkErr error
+		if err := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(in.ProjectPath, in.ProjectID) }, in.ProjectPath); err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if checkErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
+		}
+	}
+
 	// Shared-workspace dispatch verifies the project identity before loading
 	// project settings, before the marker handling below and before the
 	// recorded profile is computed (ptone/scion#1799): see
@@ -356,8 +383,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// the process-wide workspace lock on the project, so two Runtime
 		// Broker instances never write them concurrently. It is released
 		// before worktree provisioning takes it again.
-		if err := s.withWorkspaceLock(ctx, func() { s.recordHubProjectFiles(ctx, in) }, in.ProjectPath); err != nil {
+		var recordErr error
+		if err := s.withWorkspaceLock(ctx, func() { recordErr = s.recordHubProjectFilesChecked(ctx, in) }, in.ProjectPath); err != nil {
 			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if recordErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(recordErr, in.Name)
 		}
 	}
 
@@ -394,20 +426,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// so resolving the manager here from a different, saved-profile-derived
 	// value would let a create run on one runtime while everything else
 	// about it — including the GCP identity classification above — is
-	// computed for another. Only start/restart fall back to the agent's own
-	// saved profile (agent.GetSavedProfile): their Config is nil (no profile
-	// to read from a request body that doesn't exist), and handlers.go's
-	// startAgent/restartAgent already resolve the saved profile themselves,
-	// re-running this same check after their own, later resolution.
+	// computed for another. Only start/restart use the existing agent's
+	// profile instead (classificationProfile): their Config carries none,
+	// and handlers.go's startAgent/restartAgent resolve the same profile
+	// themselves, re-running this same check after their own, later
+	// resolution.
 	//
 	// Start/restart classify the runtime with the provisioned profile
-	// recorded in broker-side image provenance when the agent has it, rather
-	// than the agent-info.json profile (GetSavedProfile): this classification
-	// picks the default GCP metadata mode
+	// recorded in broker-side image provenance when the agent has it, else
+	// with the Hub-sent profile (in.HubProfile); agent-info.json is never
+	// read for it. This classification picks the default GCP metadata mode
 	// when the hub sends none, the Kubernetes assign mapping, the hub
 	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
-	// file fails closed (409, re-provision); an agent without one keeps
-	// the saved profile.
+	// file fails closed (409, re-provision), and so does an agent without
+	// one when the Hub sent no profile (*profileRecordMissingError).
 	gcpIdentityProfile := ""
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
@@ -444,11 +476,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
+	}, profileMode, in.PinnedRuntime)
 	mgr, dispatchRuntimeType := res.Manager, res.RuntimeType
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+	if in.Operation == opCreate {
+		res = res.forCreate(in.Name)
+	} else {
+		res = res.forExistingAgent(in.Name)
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -549,7 +586,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
 	//      above — on the start/resume path the hub mints the agent JWT into
 	//      resolvedEnv, so it is already present here and must be kept.
-	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only.
+	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only, and only
+	//      for the co-located hub: decided after the hub endpoint below (see
+	//      colocatedHubDevToken) and passed to the agent manager outside env.
 	// The dev-token fallback must NOT clobber a token resolved from the hub:
 	// resume mints a valid JWT into resolvedEnv, and overwriting it with the
 	// broker's dev token caused 401s ("compact JWS format must have three parts").
@@ -566,14 +605,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
 		}
-	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
-		env["SCION_AUTH_TOKEN"] = devToken
-		// Bootstrap: NOT in argv (same diversion as AgentToken path above).
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from broker env", "agent_id", in.AgentID, "length", len(devToken))
-		}
 	}
+	hubIssuedToken := env["SCION_AUTH_TOKEN"] != ""
 
 	// 4. Hub endpoint
 	// The hub endpoint (its container-bridge rewrite and the cloudrun-family
@@ -635,6 +668,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	var trustedHubEndpoint string
 	if hubEndpointTrusted {
 		trustedHubEndpoint = hubEndpoint
+	}
+
+	// The broker's own dev token (step 3's last resort) is offered only to an
+	// agent with no hub-issued token whose dispatch is bound to the
+	// co-located hub and whose endpoint is operator-derived. It does not go
+	// into env: the agent manager applies it only if the agent's final
+	// endpoint is still trustedHubEndpoint (pkg/agent/run.go).
+	var colocatedDevToken string
+	if !hubIssuedToken {
+		colocatedDevToken = s.colocatedHubDevToken(ctx, in.HTTPRequest, hubConn, trustedHubEndpoint)
+		if colocatedDevToken != "" && s.config.Debug {
+			s.agentLifecycleLog.Debug("co-located hub dev token offered", "agent_id", in.AgentID)
+		}
+		if colocatedDevToken == "" && trustedHubEndpoint != "" && os.Getenv("SCION_AUTH_TOKEN") != "" {
+			// Names no value. Tells an operator why an agent that would once
+			// have received this process's token starts without a hub credential.
+			s.agentLifecycleLog.Info("broker token not passed to agent: dispatch is not from the co-located hub", "agent_id", in.AgentID)
+		}
 	}
 
 	// Colocated bridge override: when the hub and broker are on the same
@@ -814,6 +865,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		// Applied by the agent manager only for an unchanged endpoint.
+		ColocatedHubDevToken: colocatedDevToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
@@ -1233,6 +1286,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		Resolution:                  res,
 		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,
@@ -1435,20 +1489,22 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 // redactCloneURL returns gc's clone URL with any userinfo removed, for
 // logging. This covers both a user:pass URL and a username-only token URL
 // (https://TOKEN@host) — net/url's Redacted() masks only a password, leaving
-// a username-only token visible. On a parse failure, the raw URL is never
-// logged: "<unparseable>" is returned instead.
+// a username-only token visible. A query string or fragment can carry a
+// bare access token (e.g. "?access_token=...") the same way, so both are
+// removed too. A URL that does not parse, or holds an '@' the shared user
+// info rule cannot place (urlredact.HostAndPath), is never logged:
+// "<unparseable>" is returned instead.
 func redactCloneURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "<unparseable>"
+	u, ok := urlredact.HostAndPath(rawURL)
+	if !ok {
+		return unparseableCloneURL
 	}
-	u.User = nil
-	// A query string or fragment can carry a bare access token (e.g.
-	// "?access_token=..."), the same way userinfo can — clear both.
-	u.RawQuery = ""
-	u.Fragment = ""
 	return u.String()
 }
+
+// unparseableCloneURL is what redactCloneURL shows for a URL it cannot
+// show any part of.
+const unparseableCloneURL = "<unparseable>"
 
 // sanitizeCloneErrorText strips a clone URL's credentials, query string, and
 // fragment from errText. provision.ProvisionShared's own clone errors embed
@@ -1457,33 +1513,14 @@ func redactCloneURL(rawURL string) string {
 // omits userinfo on its own — this covers both by replacing the exact raw
 // URL wholesale, then removing the userinfo, query, and fragment
 // substrings individually so a reformatted echo of the same URL is caught
-// too. Used to keep a raw clone URL (and any credential or token it
-// carries) out of server-side logs, alongside the already-redacted
-// `clone_url` attribute logged next to it.
+// too (urlredact.RedactURLIn). Used to keep a raw clone URL (and any
+// credential or token it carries) out of server-side logs, alongside the
+// already-redacted `clone_url` attribute logged next to it.
 func sanitizeCloneErrorText(errText, rawURL string) string {
 	if rawURL == "" || errText == "" {
 		return errText
 	}
-	u, parseErr := url.Parse(rawURL)
-	if parseErr != nil {
-		// Even when rawURL itself cannot be parsed, this package always
-		// embeds it verbatim into its own error text, so the exact
-		// occurrence is still stripped rather than left in place.
-		return strings.ReplaceAll(errText, rawURL, "<unparseable>")
-	}
-	out := strings.ReplaceAll(errText, rawURL, redactCloneURL(rawURL))
-	if u.User != nil {
-		if pw, _ := u.User.Password(); u.User.Username() != "" || pw != "" {
-			out = strings.ReplaceAll(out, u.User.String()+"@", "")
-		}
-	}
-	if u.RawQuery != "" {
-		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
-	}
-	if u.Fragment != "" {
-		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
-	}
-	return out
+	return urlredact.RedactURLIn(errText, rawURL, redactCloneURL(rawURL), urlredact.Mask)
 }
 
 // isStrictWorktreeChild reports whether path is a real descendant of
@@ -2519,6 +2556,19 @@ func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, 
 		return false
 	}
 	return config.UseHostCredentials(globalDir)
+}
+
+// colocatedHubDevToken returns the dev token this broker process holds
+// (SCION_AUTH_TOKEN, which the workstation server sets to its dev token) when
+// the dispatch is bound to the co-located hub (dispatchFromColocatedHub) and
+// trustedHubEndpoint, the operator-derived endpoint the agent is given, is
+// set. Otherwise it returns "": a dispatch from any other hub, an unbound
+// request, or a creator-supplied endpoint never gets the host's dev token.
+func (s *Server) colocatedHubDevToken(ctx context.Context, r *http.Request, hubConn *HubConnection, trustedHubEndpoint string) string {
+	if trustedHubEndpoint == "" || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
+		return ""
+	}
+	return os.Getenv("SCION_AUTH_TOKEN")
 }
 
 // dispatchFromColocatedHub reports whether this dispatch is bound to the hub

@@ -25,6 +25,27 @@ import tseslint from 'typescript-eslint';
 
 const tsconfigRootDir = import.meta.dirname;
 
+// Full-page navigations go through loadPage() or navigateTo() in
+// src/client/navigation.ts (ptone/scion#5535): writing a path to
+// window.location (href, assign, replace) directly drops the base path the
+// UI needs when served under a proxy prefix. Any write is flagged, not only
+// a literal absolute path, since the target is often built elsewhere.
+// Used in two config blocks below: a later block's no-restricted-syntax
+// replaces an earlier one's, so the components block repeats these.
+const locationWriteRestrictions = [
+  {
+    selector: [
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="href"][left.object.name="location"]',
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="href"][left.object.property.name="location"]',
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="location"]',
+      'CallExpression[callee.type="MemberExpression"][callee.property.name=/^(assign|replace)$/][callee.object.name="location"]',
+      'CallExpression[callee.type="MemberExpression"][callee.property.name=/^(assign|replace)$/][callee.object.property.name="location"]',
+    ].join(', '),
+    message:
+      'Use loadPage() (full page load) or navigateTo() (client-side) from client/navigation.js; a raw window.location write drops the base path.',
+  },
+];
+
 // Rules shared by every linted file.
 const sharedRules = {
   '@typescript-eslint/explicit-function-return-type': 'warn',
@@ -81,6 +102,8 @@ const componentTests = [
   'src/components/pages/agent-placement.test.ts',
   'src/components/pages/agent-detail-placement.test.ts',
   'src/components/pages/admin-maintenance-reissue-scopes.test.ts',
+  'src/components/shared/resource-list-refresh.test.ts',
+  'src/components/pages/harness-config-detail-source.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
@@ -177,6 +200,16 @@ export default defineConfig([
     },
   },
 
+  // No raw window.location writes outside navigation.ts (see
+  // locationWriteRestrictions). Tests are exempt: they stub location.
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/client/navigation.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...locationWriteRestrictions],
+    },
+  },
+
   // Components navigate through src/client/navigation.ts (#2857, #3118):
   // no importing the client entry module (its load boots the app) and
   // no raw history.pushState/replaceState (skips the base path). The
@@ -212,6 +245,7 @@ export default defineConfig([
       // no-restricted-imports does not see.
       'no-restricted-syntax': [
         'error',
+        ...locationWriteRestrictions,
         {
           selector:
             'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
@@ -224,6 +258,36 @@ export default defineConfig([
           message:
             'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
         },
+      ],
+    },
+  },
+
+  // Client requests go through apiFetch() in src/client/api.ts
+  // (ptone/scion#353): credentials, the hub clock sample and the global
+  // 401/403 handling (or `authErrors: 'caller'` to opt out) live in one
+  // place. A direct fetch() needs an explicit, commented exception
+  // (eslint-disable-next-line ... -- reason). Tests and fixtures stub
+  // fetch and are exempt. src/components and src/utils are not covered
+  // yet (follow-up of ptone/scion#5613).
+  {
+    files: ['src/client/**/*.ts'],
+    ignores: ['src/client/**/*.test.ts', 'src/client/__fixtures__/**'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'fetch',
+          message:
+            "Use apiFetch() from client/api.js (with authErrors: 'caller' to handle 401/403 yourself); a direct fetch() needs a commented eslint-disable exception.",
+        },
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['window', 'globalThis', 'self'].map((object) => ({
+          object,
+          property: 'fetch',
+          message: 'Use apiFetch() from client/api.js instead of a direct fetch().',
+        })),
       ],
     },
   },

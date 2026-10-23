@@ -432,25 +432,25 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
-// TestChatThreadGroups_RegisteredDefaultOff pins hub.chat_thread_groups
-// (ptone/scion#4424): it gates the web rail and the hub routes, so it needs
-// both layers, and it ships off.
-func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
-	entry, ok := Default().Lookup(ChatThreadGroups)
+// TestAgentBadges_RegisteredDefaultOff pins web.agent_badges
+// (ptone/scion#5503): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentBadges_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentBadges)
 	if !ok {
-		t.Fatalf("compiled registry entry %q absent", ChatThreadGroups)
+		t.Fatalf("compiled registry entry %q absent", AgentBadges)
 	}
-	if entry.Name != "hub.chat_thread_groups" {
-		t.Errorf("Name = %q, want hub.chat_thread_groups", entry.Name)
+	if entry.Name != "web.agent_badges" {
+		t.Errorf("Name = %q, want web.agent_badges", entry.Name)
 	}
 	if entry.Default {
 		t.Error("Default = true, want false")
 	}
-	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
-		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
 	}
-	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4424" || entry.Owner != "native-chat" || entry.ReviewBy != "2027-01-11" {
-		t.Errorf("chat thread groups experiment metadata mismatch: %+v", entry)
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#5503" || entry.Owner != "web" || entry.ReviewBy != "2027-01-19" {
+		t.Errorf("agent badges experiment metadata mismatch: %+v", entry)
 	}
 }
 
@@ -517,5 +517,28 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	}
 	if e.Issue != "ptone/scion#4669" || e.Stage != StageAlpha || e.Owner != "async-start" {
 		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestAgentEditHeld_RegisteredDefaultOff pins hub.agent_edit_held
+// (ptone/scion#3976): it changes what the hub does with config edits of a
+// running agent, so it has LayerServer, and the web UI mirrors it, so it has
+// LayerWeb; it ships off, separately from the Edit page experiment.
+func TestAgentEditHeld_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentEditHeld)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentEditHeld)
+	}
+	if entry.Name != "hub.agent_edit_held" {
+		t.Errorf("Name = %q, want hub.agent_edit_held", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#3952" {
+		t.Errorf("held edits experiment metadata mismatch: %+v", entry)
 	}
 }

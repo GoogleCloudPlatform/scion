@@ -216,7 +216,8 @@ func TestStartAgentAfterCreate_WorktreePerAgent_NeverRemovesSharedWorktreesDir(t
 }
 
 // TestStartAgentAfterCreate_WorktreePerAgent_RealManagerPreservesWorkspace
-// drives create-then-start through New(cfg, agent.NewManager(&runtime.MockRuntime{}), rt)
+// drives create-then-start through New(cfg, agent.NewManager(&runtime.MockRuntime{}), rt,
+// config.RuntimeBuildRecord{})
 // — the real agent.Manager, not a hand-rolled capture shim — so the start
 // dispatch traverses the full production chain: HTTP handler ->
 // buildStartContext -> ctx -> Manager.Start -> GetAgent. It proves an

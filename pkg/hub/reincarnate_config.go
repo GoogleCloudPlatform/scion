@@ -63,7 +63,7 @@ import (
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
-// which wraps errWorkspaceContentTimeout).
+// which wraps errWorkspaceStorageUnavailable).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
 }
@@ -353,14 +353,21 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 // reincarnate plan's image steps, or returns nil (logged) if they cannot be
 // loaded, in which case those steps contribute nothing.
 //
-// The settings view comes from the hub's own config.LoadEffectiveSettings(""),
-// which — in postgres mode — already reflects DB-backed harness_configs and
+// The settings view comes from the hub's own config.LoadEffectiveSettings
+// of its global settings directory (never a project found from the process
+// working directory, ptone/scion#5363), which — in postgres mode — already
+// reflects DB-backed harness_configs and
 // profiles through the process-global settings overlay that
 // OperationalSettings.Refresh populates (pkg/config/settings_overlay.go), the
 // same overlay a co-located broker's own LoadEffectiveSettings call sees. In
 // file/SQLite mode it reads the hub's settings.yaml directly.
 func (s *Server) reincarnateImageSettings() *config.VersionedSettings {
-	vs, _, err := config.LoadEffectiveSettings("")
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		s.agentLifecycleLog.Warn("reincarnate: failed to resolve the global settings directory for the image plan", "error", err)
+		return nil
+	}
+	vs, _, err := config.LoadEffectiveSettings(globalDir)
 	if err != nil {
 		s.agentLifecycleLog.Warn("reincarnate: failed to load settings for the image plan", "error", err)
 		return nil
@@ -489,6 +496,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		// provisions afresh, so the new generation starts with no clears
 		// (ptone/scion#3906).
 		inline.ClearedFields = nil
+		// So does changed_fields: the reprovision renders every
+		// provision-rendered key afresh (ptone/scion#3982).
+		inline.ChangedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))

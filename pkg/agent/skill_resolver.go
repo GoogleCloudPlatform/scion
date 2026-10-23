@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -248,6 +249,12 @@ type ResolvedFile struct {
 	URL  string
 	Hash string
 	Size int64
+	// Mode is the file's recorded mode as the Hub serves it: "0755"
+	// (executable) or "0644" (ptone/scion#5657). Resolvers that know no
+	// mode, and Hubs from before modes were carried, leave it empty; the
+	// install step writes such a file 0644 (transfer.NormalizeMode). Only
+	// the executable bit is ever applied, never setuid, setgid or sticky.
+	Mode string `json:",omitempty"`
 	// Content holds the pre-fetched file bytes when available (e.g. from the
 	// GitHub resolver, which downloads each file during resolution for hashing).
 	// If non-nil, installOneSkill writes this directly and skips the network
@@ -708,13 +715,31 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	}()
 	skillStagingDir := filepath.Join(stagingDir, dest)
 
+	// S3: validate every path from the resolve response before anything
+	// uses it. The cache-hit branch below reads and chmods these paths, so
+	// the check must come before it, not only before the downloads
+	// (ptone/scion#5657).
+	for _, f := range skill.Files {
+		if err := validateFilePath(f.Path); err != nil {
+			// The path comes from the skill bundle, so the text is safe.
+			msg := fmt.Sprintf("unsafe file path in skill %q: %v", skill.URI, err)
+			return nil, newSkillInstallError(msg, errors.New(msg))
+		}
+	}
+
 	// Check cache before downloading
 	cache := SkillCacheFromContext(ctx)
 	if cache != nil && skill.Hash != "" {
-		if cachedPath, hit := cache.Get(skill.Hash); hit {
+		if cachedPath, hit := cache.Get(skillCacheKey(skill)); hit {
 			copyErr := cache.CopyToDir(cachedPath, skillStagingDir)
 			if copyErr == nil {
 				copyErr = verifyInstalledSkillHash(skillStagingDir, skill)
+			}
+			if copyErr == nil {
+				// The entry key already covers the executable bits, but
+				// set each file's mode again so the install does not depend
+				// on how the cached copy was written.
+				copyErr = applySkillFileModes(skillStagingDir, skill)
 			}
 			if copyErr == nil {
 				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
@@ -752,13 +777,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	var fileEntries []FileEntry
 
 	for _, f := range skill.Files {
-		// S3: Validate path safety
-		if err := validateFilePath(f.Path); err != nil {
-			// The path comes from the skill bundle, so the text is safe.
-			msg := fmt.Sprintf("unsafe file path in skill %q: %v", skill.URI, err)
-			return nil, newSkillInstallError(msg, errors.New(msg))
-		}
-
+		// f.Path was validated (S3) at the top of the function.
 		destPath := filepath.Join(skillStagingDir, f.Path)
 
 		// Create parent directories for nested files
@@ -783,6 +802,13 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			}
 		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghCred); err != nil {
 			return nil, wrapSkillFileError("failed to download", f.Path, err)
+		}
+
+		// Both writers create the file 0644 (under the umask); give it
+		// the recorded mode, so an executable skill script stays
+		// executable (ptone/scion#5657).
+		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil {
+			return nil, wrapSkillFileError("failed to set mode of", f.Path, err)
 		}
 
 		// S2: Verify per-file hash, in whichever format the resolver supplied.
@@ -893,9 +919,50 @@ func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolu
 	}, nil
 }
 
-// populateSkillCache stores downloaded skill files in the cache.
+// skillFileModes returns the normalised mode of each file of skill, keyed
+// by its path in the skill.
+func skillFileModes(skill ResolvedSkill) map[string]os.FileMode {
+	modes := make(map[string]os.FileMode, len(skill.Files))
+	for _, f := range skill.Files {
+		modes[f.Path] = transfer.NormalizeMode(f.Mode)
+	}
+	return modes
+}
+
+// skillCacheKey is the skill cache entry name for skill. The bundle hash
+// does not cover file modes, so a skill with an executable file is keyed
+// by templatecache.EntryKey over the hash and its executable paths: an
+// entry cached before modes were carried (every file 0644) is then never
+// served for it (ptone/scion#5657). A skill with no executable file keeps
+// the bare bundle hash, so its existing entries stay valid. Both forms are
+// canonical "sha256:<hex64>" names.
+func skillCacheKey(skill ResolvedSkill) string {
+	return templatecache.EntryKey(skill.Hash, skillFileModes(skill))
+}
+
+// applySkillFileModes sets each file of skill under dir to its normalised
+// mode. The chmods go through an os.Root opened on dir, so a path that
+// escapes dir (through "..", an absolute path or a symlink) is refused
+// rather than changing a file outside it; callers validate the paths
+// first as well.
+func applySkillFileModes(dir string, skill ResolvedSkill) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("failed to open skill directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	for _, f := range skill.Files {
+		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
+			return fmt.Errorf("failed to set mode of %s: %w", f.Path, err)
+		}
+	}
+	return nil
+}
+
+// populateSkillCache stores downloaded skill files in the cache, with
+// their modes, under skillCacheKey.
 func populateSkillCache(cache interface {
-	Put(string, map[string][]byte) (string, error)
+	PutWithModes(string, map[string][]byte, map[string]os.FileMode) (string, error)
 }, skill ResolvedSkill, installedDir string) {
 	files := make(map[string][]byte, len(skill.Files))
 	for _, f := range skill.Files {
@@ -906,10 +973,11 @@ func populateSkillCache(cache interface {
 		}
 		files[f.Path] = content
 	}
-	if _, err := cache.Put(skill.Hash, files); err != nil {
+	key := skillCacheKey(skill)
+	if _, err := cache.PutWithModes(key, files, skillFileModes(skill)); err != nil {
 		util.Debugf("provision: failed to cache skill %s@%s: %v", LoggedSkillName(skill.URI, skill.Name), skill.Version, err)
 	} else {
-		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, skill.Hash)
+		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, key)
 	}
 }
 
@@ -1104,8 +1172,11 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		return newSkillInstallError(msg, errors.New(msg))
 	}
 
-	// S5: Enforce size limit
-	limitedReader := io.LimitReader(resp.Body, maxSize+1)
+	// S5: Enforce size limit. bodyReader records a read error so a failure
+	// while receiving the body is reported as a download failure, not as a
+	// local write failure (ptone/scion#5033).
+	body := &bodyReader{r: resp.Body}
+	limitedReader := io.LimitReader(body, maxSize+1)
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -1114,6 +1185,17 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, limitedReader)
+	if body.err != nil {
+		// The read error names no URL (a *url.Error is reduced to its
+		// cause), but is kept out of the user text all the same.
+		cause := body.err.Error()
+		var ue *url.Error
+		if errors.As(body.err, &ue) {
+			cause = transportFailureCause(ue)
+		}
+		return newSkillInstallError("download failed while reading the response",
+			fmt.Errorf("download from %s failed while reading the response: %s", parsed.Host, cause))
+	}
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
@@ -1128,6 +1210,22 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
 	return nil
+}
+
+// bodyReader wraps a download response body and records the first read
+// error other than io.EOF, so a failed read can be told apart from a failed
+// write in an io.Copy.
+type bodyReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
 }
 
 // transportFailureCause returns the cause of a client.Do failure as text that
@@ -1292,4 +1390,25 @@ func collectRequiredSkillURIs(skills []api.SkillReference) []string {
 		}
 	}
 	return uris
+}
+
+// platformSkillScheme is the scheme of the display-only entries the Hub
+// seeds for its platform (binary-embedded) skills. NOTE: this must be kept
+// in sync with platformSkillURIPrefix in pkg/hub/platform_skills_seed.go.
+const platformSkillScheme = "scion-platform"
+
+// resolvableSkillRefs returns skills without the optional display-only
+// platform entries (scheme scion-platform). Those entries only list the
+// platform skills; provisioning installs them separately, and no resolver
+// serves the scheme. A required entry is kept, so it still fails closed.
+// skills itself is not modified.
+func resolvableSkillRefs(skills []api.SkillReference) []api.SkillReference {
+	out := make([]api.SkillReference, 0, len(skills))
+	for _, s := range skills {
+		if s.Optional && detectScheme(s.URI) == platformSkillScheme {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }

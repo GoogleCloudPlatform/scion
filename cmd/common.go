@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -301,7 +302,10 @@ func getHubAccessToken(endpoint string) string {
 		return token
 	}
 
-	// Priority 3: Dev auth token
+	// Priority 3: Dev auth token, for a loopback hub only (see scopeDevAuth)
+	if !isLocalhostEndpoint(endpoint) {
+		return ""
+	}
 	return apiclient.ResolveDevToken()
 }
 
@@ -420,7 +424,7 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	ownProjectSlug := os.Getenv("SCION_PROJECT")
-	ownProjectID := os.Getenv("SCION_PROJECT_ID")
+	ownProjectID := projectkeys.ProjectIDFromEnv(os.Getenv)
 	isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 		(ownProjectID != "" && projectPath == ownProjectID)
 	if isSameProject {
@@ -805,24 +809,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
-	if modelFlag != "" {
-		normalizedModel := config.NormalizeModelAlias(modelFlag)
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.Model = normalizedModel
-	}
-	// An explicitly set --thinking-level is always parsed, so an empty
-	// value fails instead of being treated as unset.
-	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
-		val, err := parseThinkingLevel(thinkingLevelFlag)
-		if err != nil {
-			return err
-		}
-		if inlineCfg == nil {
-			inlineCfg = &api.ScionConfig{}
-		}
-		inlineCfg.ThinkingLevel = &val
+	inlineCfg, err = applyModelFlags(cmd, inlineCfg)
+	if err != nil {
+		return err
 	}
 
 	hubCtx, err := requireHub(projectPath)
@@ -831,6 +820,33 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
+}
+
+// applyModelFlags writes --model and --thinking-level into the request's
+// inline config, creating it when either flag is set, and returns it. They
+// are explicit request values, the top of the hub's request > project >
+// template > hub order. --model is sent alias-normalized; the hub resolves
+// the alias. An explicitly set --thinking-level is always parsed, so an
+// empty value fails (a usage error) instead of being treated as unset.
+// Shared by scion start and scion create.
+func applyModelFlags(cmd *cobra.Command, inlineCfg *api.ScionConfig) (*api.ScionConfig, error) {
+	if modelFlag != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = config.NormalizeModelAlias(modelFlag)
+	}
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return nil, err
+		}
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.ThinkingLevel = &val
+	}
+	return inlineCfg, nil
 }
 
 // applyServiceAccountFlag wires the --service-account CLI flag into a
@@ -1698,7 +1714,17 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	})
 }
 
+// hubCreateRequestTimeout is the client timeout of the agent create request
+// that scion start and scion create send, and of the env submit that
+// carries the launch when the hub gathers env first. With async launch off,
+// the hub answers only once the runtime has created the agent, which can
+// take well over hubClientTimeout (a Cloud Run instance create, for
+// example), so these requests get a longer timeout. Other hub requests keep
+// theirs.
+var hubCreateRequestTimeout = 3 * time.Minute
+
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+	createCtx := apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout)
 	for {
 		if debugMode {
 			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (project=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
@@ -1709,7 +1735,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			}
 		}
 
-		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(ctx, req)
+		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(createCtx, req)
 		if err == nil {
 			if debugMode {
 				if resp.EnvGather != nil {
@@ -2070,7 +2096,9 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	if !cleanup.markSubmitted() {
 		return nil, errEnvGatherInterrupted
 	}
-	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
+	// The submit carries the launch, which the hub can run synchronously,
+	// so it gets the create request's longer timeout.
+	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout), agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {

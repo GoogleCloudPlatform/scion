@@ -331,6 +331,56 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 			t.Errorf("expected %q (original path), got %q", projectDir, result)
 		}
 	})
+
+	// A workspace root's own settings file is workspace content: with a
+	// .scion directory present, the .scion directory is the settings dir
+	// whether or not it holds a settings file, and the root's file is not
+	// read.
+	t.Run("hub-managed project - settings file at the workspace root is not used", func(t *testing.T) {
+		projectDir := t.TempDir()
+		scionDir := filepath.Join(projectDir, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://root.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveProjectSettingsDir(projectDir); got != scionDir {
+			t.Errorf("resolveProjectSettingsDir = %q, want %q", got, scionDir)
+		}
+		if ep := hubEndpointFromProjectSettings(projectDir); ep != "" {
+			t.Errorf("hub endpoint = %q from the workspace root's settings file, want none", ep)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("hub:\n  endpoint: https://scion.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if ep := hubEndpointFromProjectSettings(projectDir); ep != "https://scion.example.com" {
+			t.Errorf("hub endpoint = %q, want the .scion settings value", ep)
+		}
+	})
+
+	t.Run("project marker file - resolves to the external dir", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		projectDir := filepath.Join(t.TempDir(), "proj")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := &config.ProjectMarker{ProjectID: "11111111-2222-3333-4444-555555555555", ProjectName: "proj", ProjectSlug: "proj"}
+		if err := config.WriteProjectMarker(filepath.Join(projectDir, ".scion"), marker); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://root.example.com\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		want, err := config.ResolveProjectMarker(filepath.Join(projectDir, ".scion"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveProjectSettingsDir(projectDir); got != want {
+			t.Errorf("resolveProjectSettingsDir = %q, want the external dir %q", got, want)
+		}
+	})
 }
 
 // TestCreateAgentContainerHubEndpointOverride tests that ContainerHubEndpoint

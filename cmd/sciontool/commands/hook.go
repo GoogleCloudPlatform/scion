@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
@@ -60,6 +62,7 @@ Examples:
   sciontool hook task_completed "Implemented feature X"`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		if len(args) > 0 {
 			// Handle subcommands: ask_user, task_completed
 			switch args[0] {
@@ -111,6 +114,7 @@ var askUserCmd = &cobra.Command{
 	Short: "Signal that the agent is waiting for user input",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Input requested"
 		if len(args) > 0 {
 			message = args[0]
@@ -125,12 +129,30 @@ var taskCompletedCmd = &cobra.Command{
 	Short: "Signal that the agent has completed its task",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Task completed"
 		if len(args) > 0 {
 			message = args[0]
 		}
 		runTaskCompleted(message)
 	},
+}
+
+// hookExit exits the process. Tests replace it.
+var hookExit = os.Exit
+
+// recoverHookPanic, deferred at the top of a hook command's Run, turns a
+// panic into a logged error and exit code 1. An unrecovered panic exits
+// with code 2, which some harnesses read as a hook result with its own
+// meaning (Copilot, for example, then adds the hook's stdout to the model
+// context). A runtime fatal error cannot be recovered and still exits 2.
+func recoverHookPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Error("Hook panicked: %v\n%s", r, debug.Stack())
+	hookExit(1)
 }
 
 // runHookFromStdin processes hook events from stdin.
@@ -422,6 +444,7 @@ func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *
 	}
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+	telemetryHandler.Analytics = hookUsageAnalytics(cfg)
 	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {
 		log.Debug("Hook telemetry handler: %v", err)
@@ -523,4 +546,18 @@ func hookHomeDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return home
+}
+
+// hookUsageAnalytics returns the hook-path agent.usage producer, or nil when
+// analytics is disabled: hook usage not selected (SCION_USAGE_SOURCE is not
+// "hooks") or no GCP exporter configured. It does no I/O.
+func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
+	if os.Getenv("SCION_USAGE_SOURCE") != telemetrycontract.UsageSourceHooks || !telemetry.AnalyticsEnabledForHooks(cfg) {
+		return nil
+	}
+	// Opened lazily: only a model-end event pays for the open and flock.
+	// The directory is the agent home's (the hook runs as the agent user,
+	// HOME=<agent home>), the same one init resolves for the pipeline.
+	dir := telemetry.AnalyticsOutboxDirFor(hookHomeDir())
+	return telemetry.NewLazyUsageAnalytics(dir, nil, telemetrycontract.UsageSourceHooks)
 }

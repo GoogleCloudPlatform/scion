@@ -332,6 +332,14 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if filter.LastRunStatus != "" {
 		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
 	}
+	if filter.InitiatorAgentID != "" {
+		query.Where(
+			schedule.InitiatorPrincipalKindEQ(store.DelegationPrincipalAgent),
+			schedule.InitiatorPrincipalIDEQ(filter.InitiatorAgentID),
+			schedule.AttributionVersionGTE(1),
+			schedule.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
+		)
+	}
 	if filter.SystemPausedOnly {
 		query.Where(schedule.StatusEQ(store.ScheduleStatusPaused))
 		query.Where(schedule.StatusReasonNotNil(), schedule.StatusReasonNEQ(store.ScheduleStatusReasonNone))
@@ -970,17 +978,29 @@ func (s *ScheduleStore) ClaimScheduledEvent(ctx context.Context, id string, clai
 // CancelScheduledEvent marks a pending event as cancelled. Returns ErrNotFound
 // if the event doesn't exist or is not pending.
 func (s *ScheduleStore) CancelScheduledEvent(ctx context.Context, id string) error {
+	return s.CancelScheduledEventWithReason(ctx, id, "")
+}
+
+// CancelScheduledEventWithReason marks a pending event as cancelled and, when
+// reason is not empty, records it as the event's error. The UPDATE is
+// conditional on status = 'pending', so it cannot overwrite an event that
+// was fired or claimed first. Returns ErrNotFound if the event doesn't exist
+// or is not pending.
+func (s *ScheduleStore) CancelScheduledEventWithReason(ctx context.Context, id string, reason string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	n, err := s.client.ScheduledEvent.Update().
+	update := s.client.ScheduledEvent.Update().
 		Where(
 			scheduledevent.IDEQ(uid),
 			scheduledevent.StatusEQ(store.ScheduledEventPending),
 		).
-		SetStatus(store.ScheduledEventCancelled).
-		Save(ctx)
+		SetStatus(store.ScheduledEventCancelled)
+	if reason != "" {
+		update.SetError(reason)
+	}
+	n, err := update.Save(ctx)
 	if err != nil {
 		return err
 	}
@@ -1010,6 +1030,14 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	if filter.ScheduleID != "" {
 		query.Where(scheduledevent.ScheduleIDEQ(filter.ScheduleID))
 	}
+	if filter.InitiatorAgentID != "" {
+		query.Where(
+			scheduledevent.InitiatorPrincipalKindEQ(store.DelegationPrincipalAgent),
+			scheduledevent.InitiatorPrincipalIDEQ(filter.InitiatorAgentID),
+			scheduledevent.AttributionVersionGTE(1),
+			scheduledevent.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
+		)
+	}
 
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
@@ -1017,7 +1045,7 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	}
 
 	if opts.Cursor != "" {
-		cursorUID, err := parseUUID(opts.Cursor)
+		cursorUID, err := parseCursorUUID(opts.Cursor)
 		if err != nil {
 			return nil, err
 		}

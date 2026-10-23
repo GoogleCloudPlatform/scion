@@ -64,7 +64,7 @@ A `RoleBinding` contains the following fields:
 * **Principal ID**: The identifier of the specific principal.
 * **Scope Type**: The scope bounds, either `system` (global permissions) or `project` (project-restricted permissions).
 * **Scope ID**: Empty for `system` scope, or the specific project ID for `project` scope.
-* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed.
+* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed. For a user principal, a binding (direct or via group membership) also grants authority only while the user's account is `active`; bindings held by an `invited` user take effect when the user signs in and the account becomes `active`, and bindings held by an `invited`, `suspended`, or removed user grant nothing.
 
 ### Agent Synthetic RoleBindings
 At runtime, agents do not require static RoleBindings to be manually created. Instead, the authorization engine dynamically extracts the agent's JWT claims and scopes and constructs **synthetic project-scoped role bindings** so that agent actions can be evaluated through the unified authorization pipeline.
@@ -94,7 +94,7 @@ The AccessConstraint system relies on several backend subsystems to ensure secur
 * **Canonical Evaluator**: Built into the core AK1 Kernel, the evaluator computes the intersection of active role permissions and monotonic ceilings at wire-speed on every request.
 * **Typed Constraint Model**: A strictly typed and schema-validated structural model. It validates all inputs before persistence, ensuring permission lists only refer to valid, registered permission IDs.
 * **Preview Engine & Provenance/Explain API**: An interactive dry-run service (`POST /api/v1/admin/access-constraint-previews`) that evaluates the effective permissions of a targeted principal. It provides high-fidelity **provenance/explain data** showcasing exactly which positive permissions are restricted by active boundaries, which rules caused the ceiling to apply, and what the final resolved permissions set is.
-* **Transactional Governance & Atomic Audit**: To prevent partial policy writes or split-brain configurations, all updates are fully transaction-bound. The system records atomic, tamper-evident audit logs of all access boundary creations, updates, or deactivations in the global Hub secure audit ledger.
+* **Transactional Governance & Audit History**: To prevent partial policy writes or split-brain configurations, all updates are fully transaction-bound. Creating or updating a boundary writes its history entry in the same transaction as the change; the history is readable at `GET /api/v1/admin/access-constraints/{id}/audit` while the boundary exists, and the newest 1,000 entries are kept. Deleting a boundary deletes its history: the delete emits only a best-effort structured log event and has no persisted audit record.
 * **HTTP API and Error Contract**: Standardized REST endpoints govern AccessConstraints. The API features a strict error contract, validating payloads and returning detailed error diagnostics—such as `422 Unprocessable Entity` with a validation error matrix for invalid scopes or permissions, or `403 Forbidden` for delegation and access-denial scenarios.
 
 ---
@@ -113,7 +113,7 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 ```
 
 1. **Authentication**: The caller is authenticated, establishing their principal type, principal ID, group memberships, and credentials (such as token type/scope).
-2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to.
+2. **Retrieve Positive Grants**: The engine retrieves all active, time-valid RoleBindings that apply to the principal directly, or to any groups they belong to (for a user principal, only when the user's account is `active`; a federated user with no account record is decided by its bindings alone).
 3. **Union Allowed Permissions**: The union of all permission IDs granted by these bindings forms the positive "allowed permissions" set.
 4. **Load Applicable AccessConstraints**: The engine queries all active, non-disabled AccessConstraints that match the principal (by principal ID, group closure, or `all_principals`) within the targeted scope.
 5. **Intersect Permissions**: The effective permission set is calculated as the intersection of the positive set and the maximum permitted ceilings.

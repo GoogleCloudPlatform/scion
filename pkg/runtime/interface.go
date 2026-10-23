@@ -45,6 +45,17 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// AgentOwnWorkspace marks Workspace as the agent's own directory
+	// (<agent dir>/workspace: its worktree or private checkout), as the
+	// broker decided from its own paths. That workspace's .scion is the
+	// agent's branch checkout, which stays writable; any other workspace's
+	// .scion is project configuration and is mounted read-only.
+	AgentOwnWorkspace bool
+	// ProjectConfigPath is the broker-side path of the project's .scion
+	// entry (a directory or marker file). In the full-repo-root fallback
+	// layout, a project whose .scion lies below the repo root other than at
+	// <repo>/.scion has that entry masked (or a marker bound read-only) too.
+	ProjectConfigPath string
 	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
 	// trusts. In broker mode, this field arrives already resolved by the
 	// runtime broker from operator-controlled tiers only — the request's
@@ -92,14 +103,15 @@ type RunConfig struct {
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
-	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
-	// be applied uniformly across adapters — currently the narrowed read-only
-	// mount over the shared base repo's .git admin surface (config/hooks/info)
-	// for hub-native worktree-per-agent projects, which the broker-git
-	// worktree change currently applies to Docker only. Left empty by
-	// adapters that have not yet been extended (podman, apple); code gating on
-	// this field must fail closed (i.e. skip the mount narrowing) for any
-	// value it does not explicitly recognize.
+	// runtime-specific choices in buildCommonRunArgs that cannot yet be
+	// applied uniformly across adapters: the narrowed read-only mount over
+	// the shared base repo's .git admin surface (config/hooks/info) for
+	// hub-native worktree-per-agent projects, which the broker-git worktree
+	// change currently applies to Docker ("docker") only, and the form and
+	// condition of the shared workspace .scion/agents mask for Apple
+	// ("container"). Docker and Apple set it; Podman leaves it empty. Code
+	// gating on this field must fail closed (i.e. skip the mount narrowing)
+	// for any value it does not explicitly recognize.
 	RuntimeName string
 
 	// WorkspaceBackendName is the name of the backend chosen by the workspace

@@ -131,12 +131,32 @@ func (s *statefulInstances) write(name, etag string, apply func()) (cloudrun.Ins
 
 func (s *statefulInstances) StartInstance(_ context.Context, req *runpb.StartInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	s.starts++
-	return s.write(req.Name, req.Etag, func() { s.instances[req.Name].Etag = s.nextEtag() })
+	return s.write(req.Name, req.Etag, func() {
+		inst := s.instances[req.Name]
+		inst.Etag = s.nextEtag()
+		// The recorded shape of a started instance (ptone/scion#5295).
+		inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Started instance in 3.47s."}
+		inst.Conditions = []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 1.39s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+			{Type: "Retry", State: runpb.Condition_CONDITION_SUCCEEDED, Reasons: &runpb.Condition_Reason{Reason: runpb.Condition_WAITING_FOR_OPERATION}, Message: "System will retry after 00:05 from lastTransitionTime for polling interval", Severity: runpb.Condition_INFO},
+		}
+	})
 }
 
 func (s *statefulInstances) StopInstance(_ context.Context, req *runpb.StopInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	s.stops++
-	return s.write(req.Name, req.Etag, func() { s.instances[req.Name].Etag = s.nextEtag() })
+	return s.write(req.Name, req.Etag, func() {
+		inst := s.instances[req.Name]
+		inst.Etag = s.nextEtag()
+		// The recorded shape of a stopped instance (ptone/scion#5295): the
+		// Retry condition is gone, the other conditions stay.
+		inst.TerminalCondition = &runpb.Condition{Type: "Running", State: runpb.Condition_CONDITION_FAILED, Message: "Instance stopped."}
+		inst.Conditions = []*runpb.Condition{
+			{Type: "ContainerReady", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Imported container image in 2.66s."},
+			{Type: "ResourcesAvailable", State: runpb.Condition_CONDITION_SUCCEEDED, Message: "Provisioned imported containers."},
+		}
+	})
 }
 
 func (s *statefulInstances) DeleteInstance(_ context.Context, req *runpb.DeleteInstanceRequest, _ ...gax.CallOption) (cloudrun.InstanceOperation, error) {
@@ -429,8 +449,8 @@ func TestCloudRunRun_ReuseIsRunChecked(t *testing.T) {
 // Stop then start of the same agent still works: the stop leaves run A's
 // instance, Start's pre-clean (pkg/agent/run.go) deletes every listed
 // non-running entry with its run, and Run for run B then creates a fresh
-// instance labelled run B. Cloud Run's List sets no Phase, so the listed
-// instance always counts as not running.
+// instance labelled run B. List reports the stopped instance as "stopped"
+// (cloudRunInstancePhase), so the pre-clean removes it.
 func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	s := newStatefulInstances()
 	rt := newStatefulCloudRunRuntime(t, s)
@@ -449,8 +469,8 @@ func TestCloudRunRun_StopThenStartNewRun(t *testing.T) {
 	if err != nil || len(agents) != 1 {
 		t.Fatalf("List = %v, %v; want one entry", agents, err)
 	}
-	if agents[0].Phase == "running" {
-		t.Fatalf("listed phase %q: pre-clean would skip the instance", agents[0].Phase)
+	if agents[0].Phase != "stopped" {
+		t.Fatalf("listed phase %q, want stopped: pre-clean would skip a running instance", agents[0].Phase)
 	}
 	if err := rt.Delete(ctx, RunRef{ID: AgentOperationID(agents[0]), RunID: agents[0].RunID}); err != nil {
 		t.Fatalf("pre-clean Delete: %v", err)

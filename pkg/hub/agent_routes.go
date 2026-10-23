@@ -66,6 +66,7 @@ const (
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
 	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
+	AgentRoutePendingConfig      AgentSubRouteID = "agents.pendingConfig"
 	// Agent delegation (.design/agent-delegation.md §18.4).
 	AgentRouteDelegations          AgentSubRouteID = "agents.delegations"
 	AgentRouteDelegationExchange   AgentSubRouteID = "agents.delegations.exchange"
@@ -189,6 +190,7 @@ const (
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
 	opAgentHoldLift         authzop.OperationID = "agent.hold.lift"
+	opAgentPendingDiscard   authzop.OperationID = "agent.update.pendingconfig.delete"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
@@ -276,6 +278,9 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}, ops: postOp(opAgentKeys)},
 	// Hub-admin lift of an agent's holds (ptone/scion#3433).
 	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
+	// Discard of held config edits (ptone/scion#3976), behind
+	// hub.agent_edit_held.
+	{id: AgentRoutePendingConfig, form: agentFormByID, segs: []string{"pending-config"}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPendingDiscard}},
 	// Agent delegation (.design/agent-delegation.md §18.4): grant issuance
 	// and credential exchange, behind hub.agent_delegation; grant list,
 	// read and revoke, and delegated credential revoke, which answer while

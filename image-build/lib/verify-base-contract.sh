@@ -316,6 +316,21 @@ need_cmd gcsfuse "GCS volume mounts (pkg/runtime/common.go)"
 # sudo — scion-base installs /etc/sudoers.d/scion for passwordless sudo.
 need_cmd sudo "scion-base passwordless sudo for the scion user"
 
+# /usr/bin/env, /usr/bin/stat and /bin/cat — the Apple runtime's post-start
+# checks (pkg/runtime/apple_container.go) exec these exact paths in the
+# started container, with an empty environment, so neither PATH nor a binary
+# elsewhere can stand in for them: the tmpfs mask check runs env and stat,
+# and the read-only bind check runs env and cat on /proc/self/mountinfo.
+# Missing, every Apple start with a mask or a nested read-only bind fails.
+for _contract_bin in /usr/bin/env /usr/bin/stat /bin/cat; do
+  if [ -x "$_contract_bin" ]; then
+    ok "$_contract_bin present"
+  else
+    fail "$_contract_bin missing — the Apple mask and read-only bind checks
+      (pkg/runtime/apple_container.go) run this exact path"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # chromium — the base-image contract is a headless browser on PATH under the
 # name chromium, for templates that run a service called chromium. The hub test

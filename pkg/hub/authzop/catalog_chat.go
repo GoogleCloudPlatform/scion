@@ -271,7 +271,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.history.topic",
 		Domain:      "chat",
-		Description: "Read the messages of a chat thread. Needs project:read on the thread's project",
+		Description: "Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "topic"},
 		},
@@ -312,7 +312,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.send.topic",
 		Domain:      "chat",
-		Description: "Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message",
+		Description: "Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "POST", Variant: "topic"},
 		},
@@ -340,6 +340,7 @@ var chatOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatSendTopic_RequiresChatPost"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -901,6 +902,57 @@ var chatOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
 	},
 	{
+		ID:          "chat.attachment.upload.agent",
+		Domain:      "chat",
+		Description: "Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST", Variant: "agent"},
+		},
+		Principals:       []PrincipalKind{PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialAgentJWT},
+		ResourceResolver: "agent-self",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAgentUpload_RefusedWhenAgentMaySendFalse"},
+			{Package: "pkg/hub", Function: "TestAgentUpload_NotInStandingRefused"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The agent uploads into its own upload scope with its own agent JWT; the gate is the agent's standing (the target-independent part of sending), no user permission applies",
+			Scope:  "agent self access",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
+		ID:          "chat.attachment.probe",
+		Domain:      "chat",
+		Description: "Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAttachmentProbe_AnswersPerCredential"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Describes the caller's own upload capability (the experiment state for its credential class and the delivery budget); carries no user records",
+			Scope:  "caller self description only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestAttachmentProbe_AnyTokenReads"},
+	},
+	{
 		ID:          "chat.attachment.download.project",
 		Domain:      "chat",
 		Description: "Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read",
@@ -923,7 +975,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.promote",
 		Domain:      "chat",
-		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule",
+		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/promote", Method: "POST"},
 		},
