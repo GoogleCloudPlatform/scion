@@ -161,3 +161,86 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 		t.Error("ConfigResolved = true on the already-running return")
 	}
 }
+
+// startEffective starts name with opts on a fresh mock runtime and returns
+// the AgentInfo, failing on a start error.
+func startEffective(t *testing.T, opts api.StartOptions) *api.AgentInfo {
+	t.Helper()
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) { return "mock-id", nil },
+	}
+	opts.BrokerMode, opts.NoAuth = true, true
+	info, err := NewManager(mockRT).Start(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return info
+}
+
+// TestStart_EffectiveHarnessIsTheResolvedHarness (addendum v14 section 5;
+// vm-deploy and token-analyst-2 ACK 07:19-07:20): the effective harness is
+// Name() of the harness Start resolved and launched with, not the stored
+// harness name. A start that switches harness-config reports the new
+// harness although the agent's stored config still names the old one.
+func TestStart_EffectiveHarnessIsTheResolvedHarness(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	other := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "alpha", "harness-configs", "other-hc")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "config.yaml"), []byte("harness: switched-h\nuser: alpha-user\nimage: alpha-image:v1\ncapabilities: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project})
+	if first.Harness != "generic" {
+		t.Fatalf("first start: Harness = %q, want generic", first.Harness)
+	}
+	switched := startEffective(t, api.StartOptions{Name: "eff-switch", Template: "alpha", ProjectPath: project, HarnessConfig: "other-hc"})
+	if switched.HarnessConfig != "other-hc" {
+		t.Fatalf("fixture: the start did not switch harness-config (%q)", switched.HarnessConfig)
+	}
+	if switched.Harness != "switched-h" || !switched.ConfigResolved {
+		t.Errorf("switched start: Harness = %q, ConfigResolved = %v; want the resolved harness switched-h", switched.Harness, switched.ConfigResolved)
+	}
+}
+
+// TestStart_EffectiveHarnessGenericFallback (token-analyst-2 fixture 2): a
+// harness-config with no declarative metadata resolves to the plain
+// Generic harness (harness.Resolve's legacy fallback), whatever harness it
+// names. The effective harness is the one that ran, "generic", not the
+// stored name the config declared.
+func TestStart_EffectiveHarnessGenericFallback(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	hc := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "alpha", "harness-configs", "test-harness", "config.yaml")
+	if err := os.WriteFile(hc, []byte("harness: named-h\nuser: alpha-user\nimage: alpha-image:v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info := startEffective(t, api.StartOptions{Name: "eff-fallback", Template: "alpha", ProjectPath: project})
+	if info.HarnessConfig != "test-harness" {
+		t.Fatalf("fixture: harness-config %q", info.HarnessConfig)
+	}
+	if info.Harness != "generic" || !info.ConfigResolved {
+		t.Errorf("Generic fallback: Harness = %q, ConfigResolved = %v; want generic (the harness that ran), true", info.Harness, info.ConfigResolved)
+	}
+}
+
+// TestStart_FailedResolutionReportsNothing (token-analyst-2 fixture 3): a
+// start whose harness resolution fails (an unusable provisioner) returns
+// no AgentInfo at all, so there is no echo and no evidence to invent.
+func TestStart_FailedResolutionReportsNothing(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-bad", unusableBuiltinHC)
+	runs := 0
+	info, err := policyTestManager(&runs).Start(context.Background(), api.StartOptions{
+		Name: "fresh", ProjectPath: e.scion, HarnessConfig: "hc-bad", NoAuth: true,
+	})
+	if err == nil || info != nil {
+		t.Fatalf("Start = (%+v, %v); want an error and no AgentInfo", info, err)
+	}
+	if runs != 0 {
+		t.Errorf("container ran %d times; want none", runs)
+	}
+}

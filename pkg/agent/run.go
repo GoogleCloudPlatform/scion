@@ -1011,6 +1011,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		h = harness.New(harnessName)
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 	}
+	// launchedHarness is the name of the harness implementation this start
+	// resolved and launches with (harness.Resolve's, the error fallback's,
+	// or harness.New's Generic), captured once here. It is the effective
+	// harness the hub records (WP1 slice 3 addendum v14 section 5), not the
+	// stored harnessName, which a harness-config switch or a legacy config
+	// can leave stale or empty.
+	launchedHarness := ""
+	if h != nil {
+		launchedHarness = h.Name()
+	}
 
 	// Clear the staged provisioning state (wrapper and whole bundle) before
 	// staging, for every harness and with or without a policy
@@ -2696,7 +2706,7 @@ authDone:
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
 				// The effective configuration the hub records (WP1 slice 3).
-				a.Harness = harnessName
+				a.Harness = launchedHarness
 				a.Model = effectiveModel
 				a.ConfigResolved = true
 				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
@@ -2723,7 +2733,7 @@ authDone:
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
-		Harness:               harnessName,
+		Harness:               launchedHarness,
 		Model:                 effectiveModel,
 		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
 		ConfigResolved:        true,
