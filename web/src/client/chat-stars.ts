@@ -173,6 +173,14 @@ export const chatStarsLocalChanges = new EventTarget();
 /** A canonical message UUID (the only IDs the hub can star). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Whether a message can be starred: only persisted messages have a
+ * canonical UUID; an optimistic local row does not have one yet.
+ */
+export function isStarrableMessageId(messageId: string): boolean {
+  return UUID_RE.test(messageId);
+}
+
 /** The most message states one controller keeps. */
 const MAX_TRACKED = 2000;
 
@@ -254,8 +262,9 @@ export class ChatStarsController extends EventTarget {
 
   /** Fetch the state of the IDs not yet known (one loaded history page). */
   async load(messageIds: readonly string[]): Promise<void> {
-    // Only persisted messages have a UUID; an optimistic local row does not.
-    const ids = [...new Set(messageIds)].filter((id) => UUID_RE.test(id) && !this.states.has(id));
+    const ids = [...new Set(messageIds)].filter(
+      (id) => isStarrableMessageId(id) && !this.states.has(id)
+    );
     await this.fetchStates(ids);
   }
 

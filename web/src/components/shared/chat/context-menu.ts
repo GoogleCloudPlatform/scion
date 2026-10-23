@@ -61,6 +61,11 @@ export function runMenuAction(actions: MenuAction[], id: string): void {
  * The rows of a desktop popup menu: `.context-menu-item` divs, each with an
  * optional icon. Disabled rows stay visible but dimmed and inert, as the
  * rail's edge-of-list "Move up" / "Move down" always have been.
+ *
+ * A toggle row (`checked` set) gets no menu role here: the popup has no
+ * `role="menu"` container or keyboard focus yet, so a `menuitemcheckbox`
+ * would be an orphan. Its label names the action ("Unstar message"); the
+ * touch sheet exposes the state as `aria-pressed`.
  */
 export function renderMenuRows(actions: MenuAction[]): TemplateResult {
   return html`${actions.map(
@@ -69,8 +74,6 @@ export function renderMenuRows(actions: MenuAction[]): TemplateResult {
         class="context-menu-item ${a.destructive ? 'danger' : ''} ${a.className ?? ''}"
         style=${a.disabled ? 'opacity: 0.4; pointer-events: none;' : nothing}
         aria-disabled=${a.disabled ? 'true' : nothing}
-        role=${a.checked === undefined ? nothing : 'menuitemcheckbox'}
-        aria-checked=${a.checked === undefined ? nothing : a.checked ? 'true' : 'false'}
         @click=${(): void => a.run()}
       >
         ${a.icon ? html`<sl-icon name=${a.icon}></sl-icon>` : nothing} ${a.label}

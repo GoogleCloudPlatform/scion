@@ -53,6 +53,8 @@ vi.mock('../../../utils/toast.js', () => ({
 }));
 
 await import('./chat-thread.js');
+const { renderMenuRows } = await import('./context-menu.js');
+const { render } = await import('lit');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 type Message = import('../../../shared/types.js').Message;
 
@@ -284,6 +286,47 @@ describe('scion-chat-thread starred messages', () => {
       new CustomEvent('chat-stars-updated', { detail: { data: { action: 'changed' } } })
     );
     await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+  });
+
+  it('re-announces the same text for a second star', async () => {
+    setFlag(true);
+    routeHub({});
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M2)?.disabled).toBeFalsy());
+    const region = el.shadowRoot!.querySelector('.star-live-region')!;
+    const seen: string[] = [];
+    const observer = new MutationObserver(() => seen.push(region.textContent?.trim() ?? ''));
+    observer.observe(region, { childList: true, characterData: true, subtree: true });
+
+    starAction(el, M1)?.run();
+    await vi.waitFor(() => expect(seen.at(-1)).toBe('Message starred'));
+    starAction(el, M2)?.run();
+    await vi.waitFor(() => expect(starAction(el, M2)?.checked).toBe(true));
+    await vi.waitFor(() => expect(seen.filter((t) => t === 'Message starred')).toHaveLength(2));
+    observer.disconnect();
+    // Emptied between the two announcements, so the second is not ignored.
+    const second = seen.lastIndexOf('Message starred');
+    expect(seen.slice(seen.indexOf('Message starred') + 1, second)).toContain('');
+  });
+
+  it('offers no star action for an unsent local row', async () => {
+    setFlag(true);
+    routeHub({});
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.disabled).toBeFalsy());
+    expect(starAction(el, 'local-1700000000000')).toBeUndefined();
+  });
+
+  it('renders the desktop toggle row without an orphan menu role', () => {
+    const host = document.createElement('div');
+    render(
+      renderMenuRows([{ id: 'star', label: 'Unstar message', checked: true, run: () => {} }]),
+      host
+    );
+    const row = host.querySelector('.context-menu-item')!;
+    expect(row.textContent).toContain('Unstar message');
+    expect(row.hasAttribute('role')).toBe(false);
+    expect(row.hasAttribute('aria-checked')).toBe(false);
   });
 
   it('offers no star action in a DM in phase 1', async () => {

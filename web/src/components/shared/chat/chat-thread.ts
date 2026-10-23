@@ -58,6 +58,7 @@ import { showToast } from '../../../utils/toast.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
+  isStarrableMessageId,
   starredMessagesEnabled,
 } from '../../../client/chat-stars.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
@@ -4752,7 +4753,8 @@ export class ScionChatThread extends LitElement {
         run: () => this.handleContextMenuCopyLink(),
       }
     );
-    if (this.starsActive) actions.push(this.starMenuAction(msg));
+    // An unsent local row has no server ID yet, so it cannot be starred.
+    if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
     if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
       actions.push({
         id: 'set-default-agent',
@@ -4807,7 +4809,7 @@ export class ScionChatThread extends LitElement {
     try {
       await this.stars.setStarred(messageId, key, starred);
       if (key !== this.conversationKey) return;
-      this.starAnnouncement = starred ? 'Message starred' : 'Message unstarred';
+      await this.announceStar(starred ? 'Message starred' : 'Message unstarred');
     } catch {
       if (key !== this.conversationKey) return;
       void this.stars.invalidate();
@@ -4815,6 +4817,17 @@ export class ScionChatThread extends LitElement {
         action: { label: 'Retry', run: () => void this.setMessageStarred(messageId, starred) },
       });
     }
+  }
+
+  /**
+   * Announce a star change in the polite live region. The region is
+   * emptied first, so the same text (star one message, then another) is
+   * announced again rather than ignored as unchanged.
+   */
+  private async announceStar(text: string): Promise<void> {
+    this.starAnnouncement = '';
+    await this.updateComplete;
+    this.starAnnouncement = text;
   }
 
   /**
