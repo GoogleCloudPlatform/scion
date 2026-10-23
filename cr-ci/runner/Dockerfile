@@ -122,12 +122,20 @@ RUN apt-get update \
 # derives it from /etc/passwd, but the image config is what Cloud Run is sure to pass on.
 RUN useradd --create-home --home-dir /home/runner --uid 1001 --shell /bin/bash runner
 
-# git from the git stage (pinned source build), then a build-time assert: the
-# repository's tests need git >= 2.48 (worktree --relative-paths).
+# git from the git stage (pinned source build), then build-time asserts: the
+# repository's tests need git >= 2.48 (worktree --relative-paths), and every runtime
+# library of the HTTPS transport is present (git --version alone does not load libcurl,
+# so a missing one would otherwise fail only the first checkout).
 COPY --from=git /out/usr/local/ /usr/local/
 RUN v=$(git --version | awk '{print $3}') \
- && printf '%s\n%s\n' 2.48 "$v" | sort -V -C \
- || { echo "git $v is older than 2.48" >&2; exit 1; }
+ && { printf '%s\n%s\n' 2.48 "$v" | sort -V -C || { echo "git $v is older than 2.48" >&2; exit 1; }; } \
+ && for b in git-remote-https git-http-push; do \
+      f=/usr/local/libexec/git-core/$b; \
+      if [ "$b" = git-remote-https ] && [ ! -x "$f" ]; then echo "$f is missing" >&2; exit 1; fi; \
+      if [ -e "$f" ]; then libs=$(ldd "$f"); \
+        if grep 'not found' <<<"$libs"; then echo "$b is missing a runtime library" >&2; exit 1; fi; \
+      fi; \
+    done
 
 # Go toolchain (verified in the go stage) and the patched golangci-lint.
 COPY --from=go /usr/local/go /usr/local/go
