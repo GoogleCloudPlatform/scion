@@ -220,7 +220,7 @@ var compiled = []Experiment{
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
-		Issue:       "ptone/scion#333",
+		Issue:       "ptone/scion#5900",
 		Owner:       "telemetry",
 		ReviewBy:    "2027-03-31",
 	},

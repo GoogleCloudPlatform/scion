@@ -125,7 +125,9 @@ func Classify(err error) (ErrorClass, string) {
 
 // KindOf names the kind of sink s for the lifecycle_sink_kind gauge
 // (design section 22 item 4, condition b): cloud_logging, stdout, or none
-// for no sink. Any other sink (tests) reports "other".
+// for no sink. Any other sink (tests) reports "other", which appears in
+// the sink log line only: the gauge records the three wire kinds, so an
+// "other" sink publishes all three as 0.
 func KindOf(s Sink) string {
 	switch s.(type) {
 	case nil:
