@@ -15,7 +15,9 @@
 package telemetryemit
 
 import (
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -51,14 +53,15 @@ func TestMemoryCountersSinkKind(t *testing.T) {
 			c := NewMemoryCounters()
 			c.SinkKind(kind)
 			listed := c.String()
+			fields := strings.Fields(listed)
 			for _, k := range wire {
 				want := int64(0)
 				if k == kind {
 					want = 1
 				}
 				key := memKey(MetricSinkKind, k)
-				if !strings.Contains(listed, key+"=") {
-					t.Fatalf("SinkKind(%q) did not write %s: %s", kind, key, listed)
+				if !slices.Contains(fields, fmt.Sprintf("%s=%d", key, want)) {
+					t.Fatalf("SinkKind(%q) did not write %s=%d: %s", kind, key, want, listed)
 				}
 				if got := c.Get(MetricSinkKind, k); got != want {
 					t.Errorf("SinkKind(%q): %s = %d, want %d", kind, key, got, want)

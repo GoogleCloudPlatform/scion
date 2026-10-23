@@ -185,8 +185,9 @@ func TestLifecycleEvents_ExperimentToggle(t *testing.T) {
 	// Back to the test's MemorySink, which is none of the three wire kinds:
 	// the gauge is published again, with all three written as 0.
 	srv.SetLifecycleEventsSink(sink, counters)
+	fields := strings.Fields(counters.String())
 	for _, k := range wireKinds {
-		assert.Contains(t, counters.String(), telemetryemit.MetricSinkKind+"{"+k+"}=0 ", "a MemorySink publishes sink kind %s as 0", k)
+		assert.Contains(t, fields, telemetryemit.MetricSinkKind+"{"+k+"}=0", "a MemorySink publishes sink kind %s as 0", k)
 	}
 	srv.startLifecycleEvents(context.Background())
 	t.Cleanup(func() { srv.stopLifecycleEvents(context.Background()) })
