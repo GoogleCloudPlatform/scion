@@ -131,8 +131,8 @@ func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, fi
 	// An existing file is reused only when it is a regular file holding
 	// exactly the attachment's bytes: agents write this directory, so
 	// anything else there may have been planted.
-	if _, err := root.Lstat(destPath); err == nil {
-		if verr := verifyStagedCopy(root, destPath, open); verr != nil {
+	if info, err := root.Lstat(destPath); err == nil {
+		if verr := verifyStagedCopy(root, destPath, info, open); verr != nil {
 			return "", verr
 		}
 		return agentPath, nil
@@ -155,7 +155,11 @@ func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, fi
 	if err := root.Link(tmpPath, destPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			// Staged concurrently (fan-out); reuse only an identical copy.
-			if verr := verifyStagedCopy(root, destPath, open); verr != nil {
+			info, lerr := root.Lstat(destPath)
+			if lerr != nil {
+				return "", fmt.Errorf("check staged file: %w", lerr)
+			}
+			if verr := verifyStagedCopy(root, destPath, info, open); verr != nil {
 				return "", verr
 			}
 			return agentPath, nil
@@ -213,12 +217,10 @@ func writeStagingTemp(root *os.Root, dir, name string, open func() (io.ReadClose
 var errStagedCopyMismatch = errors.New("a different file is already staged under this attachment's name")
 
 // verifyStagedCopy checks that destPath inside root is a regular file (not a
-// symlink) whose bytes equal what open returns.
-func verifyStagedCopy(root *os.Root, destPath string, open func() (io.ReadCloser, error)) error {
-	info, err := root.Lstat(destPath)
-	if err != nil {
-		return fmt.Errorf("check staged file: %w", err)
-	}
+// symlink) whose bytes equal what open returns. info is the caller's Lstat of
+// destPath; the file opened here must be that same file, so a name swapped
+// after the Lstat is not reused.
+func verifyStagedCopy(root *os.Root, destPath string, info fs.FileInfo, open func() (io.ReadCloser, error)) error {
 	if !info.Mode().IsRegular() {
 		return errStagedCopyMismatch
 	}
