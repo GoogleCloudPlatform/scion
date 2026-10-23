@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -454,13 +454,10 @@ func printTokenExpiry(expiry time.Time) {
 	fmt.Printf("Expires:    %s (%s)\n", when, clitime.Relative(expiry))
 }
 
+// isLocalhostEndpoint is hubsync.IsLocalhostEndpoint: the loopback rule the
+// CLI uses both to report a dev credential and to send one.
 func isLocalhostEndpoint(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return hubsync.IsLocalhostEndpoint(endpoint)
 }
 
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
@@ -594,29 +591,69 @@ func scopeDevAuth(info authInfo, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
-	// With a hub profile selected, the client comes only from the profile:
-	// none of the credentials below is read, and there is no fallback.
-	if hubProfileSelected() {
-		return openHubProfileClient()
-	}
-	endpoint := invocationHubEndpoint()
-	if endpoint == "" {
-		return nil, errHubNotConfigured
-	}
-	return hubClientForEndpoint(settings, endpoint)
+	c, _, err := getHubClientWithAuthSource(settings)
+	return c, err
 }
 
 // hubClientForEndpoint returns a client for the hub at endpoint, with the
 // credential getHubClient would choose for that endpoint.
 func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+	c, _, err := hubClientAndAuthSourceForEndpoint(settings, endpoint)
+	return c, err
+}
+
+// Hub credential sources, as "scion doctor" reports them (hub.auth.source
+// in its JSON output). Each names where the credential came from, never
+// the credential itself.
+const (
+	hubAuthSourceHubProfile     = "hub_profile"
+	hubAuthSourceStoredLogin    = "stored_login"
+	hubAuthSourceAgentTokenFile = "agent_token_file"
+	hubAuthSourceEnvAuthToken   = "env_auth_token"
+	hubAuthSourceEnvHubToken    = "env_hub_token"
+	hubAuthSourceDev            = "dev"
+	// hubAuthSourceTransport: no Hub credential, only the transport
+	// (proxy) credential that hubclient.New adds from the environment.
+	hubAuthSourceTransport = "transport"
+	hubAuthSourceNone      = "none"
+)
+
+// transportAuthActive reports whether hubclient.New will add a transport
+// (proxy) credential from the environment, as noCredentialAuthInfo does.
+func transportAuthActive() bool {
+	src, err := transportauth.FromEnv()
+	return err == nil && src != nil
+}
+
+// getHubClientWithAuthSource is getHubClient that also names the source
+// of the credential the client sends (a hubAuthSource value).
+func getHubClientWithAuthSource(settings *config.Settings) (hubclient.Client, string, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
+	if hubProfileSelected() {
+		c, err := openHubProfileClient()
+		return c, hubAuthSourceHubProfile, err
+	}
+	endpoint := invocationHubEndpoint()
+	if endpoint == "" {
+		return nil, "", errHubNotConfigured
+	}
+	return hubClientAndAuthSourceForEndpoint(settings, endpoint)
+}
+
+// hubClientAndAuthSourceForEndpoint is hubClientForEndpoint that also
+// names the source of the credential it chose (a hubAuthSource value).
+func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, string, error) {
 	var opts []hubclient.Option
+	source := ""
 
 	// Get auth info for logging
 	info := getAuthInfo(settings, endpoint)
 
 	// Add authentication - check in priority order.
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
+	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+	// auto dev auth, which applies to a loopback hub only (isLocalhostEndpoint).
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 	// to avoid stale scion-token files from previous remote hub connections. This exception
 	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching
@@ -627,6 +664,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		source = hubAuthSourceStoredLogin
 	}
 
 	// Check for agent auth token from canonical token file, then bootstrap env var
@@ -636,15 +674,18 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					source = hubAuthSourceDev
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				source = hubAuthSourceAgentTokenFile
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvAuthToken
 		}
 	}
 
@@ -653,13 +694,26 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			source = hubAuthSourceEnvHubToken
 		}
 	}
 
 	// Fallback to auto dev auth if no explicit auth configured
-	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file
-	if !authConfigured {
+	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file. A
+	// dev token is valid only on the local workstation server that wrote
+	// it, so it is sent only to a loopback hub (as scopeDevAuth reports).
+	if !authConfigured && isLocalhostEndpoint(endpoint) {
 		opts = append(opts, hubclient.WithAutoDevAuth())
+		// WithAutoDevAuth sends no Hub credential when it finds no dev
+		// token; transport auth (hubclient.New) may still add one.
+		switch {
+		case apiclient.ResolveDevToken() != "":
+			source = hubAuthSourceDev
+		case transportAuthActive():
+			source = hubAuthSourceTransport
+		default:
+			source = hubAuthSourceNone
+		}
 	}
 
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
@@ -667,7 +721,8 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 
 	opts = append(opts, hubclient.WithTimeout(hubClientTimeout))
 
-	return hubclient.New(endpoint, opts...)
+	c, err := hubclient.New(endpoint, opts...)
+	return c, source, err
 }
 
 // hubClientTimeout is the client timeout of hub requests. A synchronous
@@ -710,10 +765,16 @@ func endpointSourceNote(s hubEndpointScope) string {
 
 // redactEndpointIn returns text (an error message that may quote the hub
 // URL, or a URL built from it) with the user info of endpoint redacted as
-// config.RedactURL does.
+// config.RedactURL does. An endpoint that does not parse, whose user info
+// the shared rule cannot delimit (urlredact.Undelimited), or that holds an
+// '@' the parser does not read as user info (a password that reads as a
+// port and a path, as in https://u:1234/x@h, or a token followed by a
+// path) is replaced whole instead (see redactUnparsedEndpointIn). Hub URLs
+// must not contain '@' (config.ValidateHubURL), so such an endpoint can
+// only come from a source that skipped the validator.
 func redactEndpointIn(text, endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil {
+	if err != nil || urlredact.Undelimited(endpoint) || (u.User == nil && strings.Contains(endpoint, "@")) {
 		return redactUnparsedEndpointIn(text, endpoint)
 	}
 	if u.User == nil {
@@ -721,9 +782,9 @@ func redactEndpointIn(text, endpoint string) string {
 	}
 	r, err := url.Parse(config.RedactURL(endpoint))
 	if err != nil || r.User == nil {
-		// Not reached (the redacted form of a parsed URL parses); mask any
-		// user info all the same.
-		return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
+		// Not reached (the redacted form of a delimited URL parses with
+		// its user info); mask any user info all the same.
+		return urlredact.RedactUserInfoIn(text, urlredact.Mask)
 	}
 	masked := "//" + r.User.String() + "@"
 	// The user info as url.URL writes it, and as written in endpoint.
@@ -741,36 +802,32 @@ func redactEndpointIn(text, endpoint string) string {
 // located (see redactUnparsedEndpointIn).
 const redactedHubURL = "[redacted hub URL]"
 
-// urlUserInfoInTextRe matches the user info of a URL anywhere in a text, up
-// to the last '@' of the authority (a password may contain '@').
-var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s"<>]*@`)
-
-// redactUnparsedEndpointIn is redactEndpointIn for an endpoint that
-// url.Parse rejects, so its user info cannot be located: it fails closed.
-// Every occurrence of the endpoint in text is replaced whole, both as given
-// and as %q writes it (Go quotes URLs that way in its errors, escaping
-// control and other special characters), and the user info of any URL
-// still in text is masked.
+// redactUnparsedEndpointIn is redactEndpointIn for an endpoint whose user
+// info cannot be located: it fails closed. Every occurrence of the
+// endpoint in text is replaced whole, both as given and as %q writes it
+// (Go quotes URLs that way in its errors, escaping control and other
+// special characters), every rendering of the part of it that may be user
+// info is replaced (endpointUserInfo), and the user info of any URL still
+// in text is masked by the shared rule (urlredact.RedactUserInfoIn).
 func redactUnparsedEndpointIn(text, endpoint string) string {
 	if endpoint != "" {
 		text = strings.ReplaceAll(text, endpoint, redactedHubURL)
 		text = strings.ReplaceAll(text, quotedBody(strconv.Quote(endpoint)), redactedHubURL)
 		text = redactSecretForms(text, endpointUserInfo(endpoint))
 	}
-	return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
+	return urlredact.RedactUserInfoIn(text, urlredact.Mask)
 }
 
-// endpointUserInfo returns the user info of an endpoint that url.Parse
-// rejects, read from the string itself: the text after "://" (or from the
-// start, without one) up to the last '@' before the first '/', '?' or '#'.
-// It returns "" when there is none.
+// endpointUserInfo returns the part of an endpoint that may be user info,
+// read from the string itself: the text after "://" (or from the start,
+// without one) up to its last '@'. The whole span is taken, path included,
+// because the endpoint reaches here only when its user info cannot be
+// delimited: replacing more than the user info is safe, less is not. It
+// returns "" when the endpoint holds no '@'.
 func endpointUserInfo(endpoint string) string {
 	rest := endpoint
 	if _, after, ok := strings.Cut(endpoint, "://"); ok {
 		rest = after
-	}
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		rest = rest[:i]
 	}
 	if at := strings.LastIndex(rest, "@"); at > 0 {
 		return rest[:at]
@@ -1899,8 +1956,8 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	//
 	// The clone-url label is always https, whatever scheme the remote uses
 	// (ptone/scion#2862). Agents and shared-workspace init clone from it
-	// with the hub/broker token, and token auth only works over HTTPS:
-	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// with the hub/broker token, and token auth only works over HTTPS: the
+	// host-scoped credential helper supplies the token for https URLs only, and
 	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
 	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
 	// would clone without credentials, or stall on an SSH host-key prompt.

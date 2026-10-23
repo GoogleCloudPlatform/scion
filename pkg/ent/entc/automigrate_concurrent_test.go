@@ -98,7 +98,7 @@ func TestAutoMigrate_ConcurrentCallers(t *testing.T) {
 		clients := make([]*ent.Client, callers)
 		for i := range clients {
 			dsn := fmt.Sprintf("file:%s-%d-%d?mode=memory&cache=shared", t.Name(), r, i)
-			client, err := OpenSQLite(dsn, PoolConfig{})
+			client, err := OpenSQLite(dsn, PoolConfig{MaxOpenConns: 1})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = client.Close() })
 			clients[i] = client
@@ -132,7 +132,7 @@ func TestAutoMigrate_ConcurrentCallers(t *testing.T) {
 // not migrate. The lock is full for the whole call, so whether cancel lands
 // before or during the wait, the only ready case is ctx.Done().
 func TestAutoMigrate_CancelledWhileWaiting(t *testing.T) {
-	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{})
+	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 

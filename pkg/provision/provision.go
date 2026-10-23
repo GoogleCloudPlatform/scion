@@ -29,7 +29,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"golang.org/x/sys/unix"
 )
 
@@ -2912,8 +2912,9 @@ func cloneError(rawURL, output string, runErr error, withToken bool, token strin
 
 // redactCloneURL returns rawURL without userinfo, query string or fragment,
 // any of which can carry a token. For an scp-style URL ("user@host:path")
-// the user is dropped and host and path are kept. An unparseable URL is
-// never echoed.
+// the user is dropped and host and path are kept. A URL that does not
+// parse, or holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is never echoed.
 func redactCloneURL(rawURL string) string {
 	if !strings.Contains(rawURL, "://") {
 		// scp-style "user@host:path", or a local path: keep host and path,
@@ -2925,13 +2926,10 @@ func redactCloneURL(rawURL string) string {
 			return rawURL
 		}
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	u, ok := urlredact.HostAndPath(rawURL)
+	if !ok {
 		return "<unparseable clone URL>"
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
 	return u.String()
 }
 
@@ -2952,26 +2950,14 @@ func scpUserEnd(rawURL string) int {
 }
 
 // sanitizeCloneOutput removes rawURL's credentials, query string and
-// fragment from text (git's own output can echo the URL).
+// fragment from text (git's own output can echo the URL), by the shared
+// rule (urlredact.RedactURLIn): every rendering of rawURL is shown as
+// redactCloneURL shows it.
 func sanitizeCloneOutput(text, rawURL string) string {
 	if rawURL == "" || text == "" {
 		return text
 	}
-	out := strings.ReplaceAll(text, rawURL, redactCloneURL(rawURL))
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return out
-	}
-	if u.User != nil && u.User.String() != "" {
-		out = strings.ReplaceAll(out, u.User.String()+"@", "")
-	}
-	if u.RawQuery != "" {
-		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
-	}
-	if u.Fragment != "" {
-		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
-	}
-	return out
+	return urlredact.RedactURLIn(text, rawURL, redactCloneURL(rawURL), urlredact.Mask)
 }
 
 // moveDirContentsUp moves every entry from src into dest, leaving src with

@@ -146,6 +146,12 @@ func HostGitEnv(env []string) []string {
 		if strings.HasPrefix(k, "GIT_") && !hostGitEnvKept[k] {
 			continue
 		}
+		// Drop any inherited scoped-credential variable so it never reaches a host
+		// git call that did not set it. ScopedCredentialHelperEnv appends it back
+		// after this scrub for the one command that needs it.
+		if k == scopedGitCredentialEnv {
+			continue
+		}
 		out = append(out, kv)
 	}
 	return out
@@ -478,8 +484,14 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 		return base, false
 	}
 	start := existingConfigCount(base)
-	helper := fmt.Sprintf("!f() { echo username=oauth2; echo password=%s; }; f", token)
 	key := fmt.Sprintf("credential.%s://%s.helper", scheme, host)
+	// The helper text is a constant that reads the credential from the environment
+	// at run time (scopedGitCredentialEnv), so the credential value appears in no
+	// config value and in no argv — git runs a "!" helper via `sh -c <text>`, and
+	// the text is the same for every call. The value is carried only in this git
+	// command's environment (below); HostGitEnv scrubs scopedGitCredentialEnv from
+	// every host git call, so an inherited value never reaches an unrelated command.
+	//
 	// First reset the generic credential helper list to empty, so no other
 	// configured helper (for example a global `credential.helper = store`) runs
 	// and persists the token, or offers credentials to any other host. Then add
@@ -488,13 +500,25 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 	// unscoped key; the TestNoUnscopedHostGitCredentials guard exempts this file
 	// for exactly this line.
 	return append(base,
+		scopedGitCredentialEnv+"="+token,
 		"GIT_CONFIG_COUNT="+strconv.Itoa(start+2),
 		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
 		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
 		fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", start+1, key),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", start+1, helper),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", start+1, scopedCredentialHelperText),
 	), true
 }
+
+// scopedGitCredentialEnv is the environment variable the scoped credential helper
+// reads at run time. It is set only in the environment of the single git command
+// that needs it, and scrubbed by HostGitEnv from every host git call. Its value is
+// readable through /proc/<pid>/environ only by the same uid (and root).
+const scopedGitCredentialEnv = "SCION_SCOPED_GIT_CREDENTIAL"
+
+// scopedCredentialHelperText is the constant git credential-helper command. It
+// expands scopedGitCredentialEnv at run time, so no credential value is ever
+// formatted into a config value or passed on an argv.
+const scopedCredentialHelperText = `!f() { echo username=oauth2; echo "password=${` + scopedGitCredentialEnv + `}"; }; f`
 
 // existingConfigCount returns the GIT_CONFIG_COUNT already set in env, or 0.
 func existingConfigCount(env []string) int {

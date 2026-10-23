@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2578,7 +2579,21 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	agentsExcluded := false
 	if !nfsAgentDir && !nfsWorktree {
 		var maskTarget string
-		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "")
+		nfsShared := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, nfsShared)
+		// An NFS-shared workspace is mounted directly, so its project
+		// configuration directory is mounted read-only over it, as on the
+		// local runtimes. The local backend's per-pod copy is private to
+		// the pod and is never synced back to the broker.
+		if nfsShared {
+			m, ok, err := k8sProjectConfigVolumeMount(config)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				agentVolumeMounts = append(agentVolumeMounts, m)
+			}
+		}
 		if maskTarget != "" {
 			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
 			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
@@ -4634,19 +4649,32 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 // which cannot produce a path separator or ".." by construction), and the
 // joined-path-prefix check below is a second, structurally different gate
 // that doesn't depend on the slug regex ever staying correct.
+//
+// The layout is pkg/projectfs': the project ID and subpath root are read
+// back from workspaceSubPath ("<subpath root>/<pid>/workspace") and the
+// shared dir is resolved by Layout.Resolve, which validates the name (the
+// slug check) and confines the leaf to <subpath root>/<pid>/shared-dirs/
+// (shareddirs.ConfineLeaf). The prefix check below stays as the second,
+// structurally different gate.
 func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
 		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
 	}
-	// workspaceSubPath is "projects/<pid>/workspace"
-	// We need "projects/<pid>/shared-dirs/<name>"
-	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
-	wantDir := filepath.Join(parent, "shared-dirs")
-	joined := filepath.Join(wantDir, sharedDirName)
-	if !strings.HasPrefix(joined, wantDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, joined, wantDir)
+	if filepath.Base(workspaceSubPath) != "workspace" || !filepath.IsLocal(workspaceSubPath) {
+		return "", fmt.Errorf("shared dir %q: unexpected NFS workspace subPath %q", sharedDirName, workspaceSubPath)
 	}
-	return joined, nil
+	parent := filepath.Dir(workspaceSubPath) // "<subpath root>/<pid>"
+	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: filepath.Dir(parent)}
+	res, err := layout.Resolve(projectfs.Project{ID: filepath.Base(parent)}, "",
+		projectfs.SharedDirMount(api.SharedDir{Name: sharedDirName}, ""))
+	if err != nil {
+		return "", fmt.Errorf("shared dir %q: %w", sharedDirName, err)
+	}
+	wantDir := filepath.Join(parent, "shared-dirs")
+	if !strings.HasPrefix(res.RelPath, wantDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, res.RelPath, wantDir)
+	}
+	return res.RelPath, nil
 }
 
 // nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
@@ -4936,6 +4964,38 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 		out[k8sWorkspaceAgentsAnnotation] = "true"
 	}
 	return out
+}
+
+// k8sProjectConfigVolumeMount returns the read-only mount of the project
+// configuration directory (or .scion marker file) of an NFS-shared
+// workspace, whose broker-side view is config.Workspace, over the pod's
+// /workspace mount of the same export. ok is false when the workspace has
+// no .scion entry. A workspace the broker cannot see (including a symlink
+// whose target is unreachable), or a .scion entry it cannot check, is an
+// error: the pod is refused rather than built without the read-only mount.
+func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
+	// The NFS-shared pod mounts the project's shared workspace
+	// (config.Workspace, the export subPath) at /workspace, whatever repo
+	// root git metadata reports for it.
+	if config.Workspace == "" || config.AgentOwnWorkspace {
+		return corev1.VolumeMount{}, false, nil
+	}
+	// The broker must see the shared workspace to decide; a workspace it
+	// cannot check refuses the pod rather than omit the read-only mount.
+	if _, err := os.Stat(config.Workspace); err != nil {
+		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
+	}
+	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)
+	if err != nil || !ok {
+		return corev1.VolumeMount{}, false, err
+	}
+	rel := strings.TrimPrefix(target, "/workspace/")
+	return corev1.VolumeMount{
+		Name:      "workspace",
+		MountPath: target,
+		SubPath:   path.Join(config.NFSSubPath, rel),
+		ReadOnly:  true,
+	}, true, nil
 }
 
 // k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to a

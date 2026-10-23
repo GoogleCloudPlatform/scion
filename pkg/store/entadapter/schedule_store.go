@@ -332,6 +332,14 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	if filter.LastRunStatus != "" {
 		query.Where(schedule.LastRunStatusEQ(filter.LastRunStatus))
 	}
+	if filter.InitiatorAgentID != "" {
+		query.Where(
+			schedule.InitiatorPrincipalKindEQ(store.DelegationPrincipalAgent),
+			schedule.InitiatorPrincipalIDEQ(filter.InitiatorAgentID),
+			schedule.AttributionVersionGTE(1),
+			schedule.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
+		)
+	}
 	if filter.SystemPausedOnly {
 		query.Where(schedule.StatusEQ(store.ScheduleStatusPaused))
 		query.Where(schedule.StatusReasonNotNil(), schedule.StatusReasonNEQ(store.ScheduleStatusReasonNone))
@@ -1021,6 +1029,14 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	}
 	if filter.ScheduleID != "" {
 		query.Where(scheduledevent.ScheduleIDEQ(filter.ScheduleID))
+	}
+	if filter.InitiatorAgentID != "" {
+		query.Where(
+			scheduledevent.InitiatorPrincipalKindEQ(store.DelegationPrincipalAgent),
+			scheduledevent.InitiatorPrincipalIDEQ(filter.InitiatorAgentID),
+			scheduledevent.AttributionVersionGTE(1),
+			scheduledevent.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
+		)
 	}
 
 	totalCount, err := query.Clone().Count(ctx)
