@@ -15,10 +15,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -167,5 +169,35 @@ func TestStartCarriesTheRunID(t *testing.T) {
 	}
 	if got := s.list(map[string]string{api.LabelRunID: "run-1"}); len(got) != 1 {
 		t.Errorf("list by run label = %v, want the agent", got)
+	}
+}
+
+func TestWaitConnected(t *testing.T) {
+	newAgent := func() *fakeAgent {
+		return &fakeAgent{done: make(chan struct{}), connected: make(chan struct{})}
+	}
+	wait := func(s *agentSet, name string, d time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		return s.waitConnected(ctx, name)
+	}
+
+	s := newAgentSet(8080)
+	stopped := newAgent()
+	close(stopped.done)
+	s.agents["port-proxy-legacy"] = stopped
+	if err := wait(s, "port-proxy-legacy", 5*time.Second); err == nil || !strings.Contains(err.Error(), "stopped before") {
+		t.Errorf("an agent that stopped before connecting: err = %v, want the stopped error", err)
+	}
+
+	connected := newAgent()
+	connected.markConnected()
+	s.agents["port-proxy-conduit"] = connected
+	if err := wait(s, "port-proxy-conduit", 5*time.Second); err != nil {
+		t.Errorf("a connected agent: err = %v, want nil", err)
+	}
+
+	if err := wait(s, "port-proxy-missing", 300*time.Millisecond); err == nil {
+		t.Error("an agent the hub never started: want an error at the deadline")
 	}
 }

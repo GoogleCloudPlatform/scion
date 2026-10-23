@@ -267,7 +267,10 @@ async function redeemToStorageState(
   }
 }
 
-/** An admin API call with the dev token (setup only). */
+/** Bound of one admin API call in setup. */
+const ADMIN_REQUEST_TIMEOUT_MS = 30_000;
+
+/** An admin API call with the dev token (setup only); it fails after ADMIN_REQUEST_TIMEOUT_MS. */
 async function adminJSON(
   hub: HubState,
   method: string,
@@ -278,6 +281,7 @@ async function adminJSON(
     method,
     headers: { Authorization: `Bearer ${hub.devToken}`, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(ADMIN_REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`${method} ${apiPath} answered ${res.status}`);
   return (await res.json()) as unknown;

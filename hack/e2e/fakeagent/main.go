@@ -294,7 +294,7 @@ func createAgent(ctx context.Context, c hubclient.Client, projectID, brokerID, n
 			RuntimeBrokerID: brokerID,
 			NoAuth:          true,
 		})
-		if err == nil && resp.Agent != nil {
+		if err == nil && resp != nil && resp.Agent != nil {
 			return resp.Agent.ID, nil
 		}
 		if err == nil {
@@ -532,6 +532,8 @@ func (s *agentSet) waitConnected(ctx context.Context, name string) error {
 			select {
 			case <-a.connected:
 				return nil
+			case <-a.done:
+				return errors.New("the agent stopped before its transport connected")
 			case <-ctx.Done():
 				return errors.New("no transport session")
 			}
