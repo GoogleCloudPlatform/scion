@@ -213,6 +213,7 @@ func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 		name        string
 		host        string
 		devAuth     string
+		base        resolvedWebBaseURL // the default when empty
 		wantErr     bool
 		errContains string
 	}{
@@ -244,9 +245,19 @@ func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "no dev auth with 0.0.0.0 allowed",
+			// The default http base URL on a non-loopback listener is
+			// refused by the web base URL check (ptone/scion#5364).
+			name:        "no dev auth with 0.0.0.0 and the default base URL refused",
+			host:        "0.0.0.0",
+			devAuth:     "",
+			wantErr:     true,
+			errContains: "refusing to start the web server",
+		},
+		{
+			name:    "no dev auth with 0.0.0.0 and an https base URL not refused",
 			host:    "0.0.0.0",
 			devAuth: "",
+			base:    resolvedWebBaseURL{URL: "https://hub.example.com", Source: "SCION_SERVER_BASE_URL"},
 			wantErr: false,
 		},
 	}
@@ -256,7 +267,11 @@ func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 			cfg := &config.GlobalConfig{}
 			cfg.Hub.Host = tt.host
 
-			_, err := initWebServer(context.Background(), cfg, nil, tt.devAuth, false, "", nil, nil)
+			base := tt.base
+			if base.URL == "" {
+				base = resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}
+			}
+			_, err := initWebServer(context.Background(), cfg, nil, tt.devAuth, base, false, "", nil, nil)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -267,6 +282,8 @@ func TestInitWebServer_DevAuth_NonLoopback_Rejected(t *testing.T) {
 				if err != nil {
 					assert.NotContains(t, err.Error(), "dev auth cannot be enabled",
 						"should not reject dev auth on loopback host")
+					assert.NotContains(t, err.Error(), "refusing to start the web server",
+						"should not refuse the web base URL")
 				}
 			}
 		})
