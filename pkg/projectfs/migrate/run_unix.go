@@ -41,6 +41,16 @@ type ProjectRef struct {
 	// project (empty-per-agent, or a linked project in a per-agent git
 	// mode). Steps 1 and 2 then leave legacy content in place, reported.
 	NoWorkspace bool
+	// Agents are the project's agents, for step 5 (Cloud Run homes).
+	Agents []AgentRef
+}
+
+// AgentRef is an agent as step 5 sees it: its hub ID, its slug, and
+// whether it is stopped (only a stopped agent's home is moved).
+type AgentRef struct {
+	ID      string
+	Slug    string
+	Stopped bool
 }
 
 // HubInput is one hub's the migration/the object-storage cleanup run.
@@ -200,6 +210,10 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 			return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
 		}
 		pi.ProjectRoot = Tree{Base: root.HostBase, Rel: root.RelPath}
+		if len(ref.Agents) > 0 {
+			layout, agents := in.Workspace, ref.Agents
+			pi.CloudRunHomes = func(opts Options) []Result { return cloudRunHomes(layout, ref.ID, agents, opts) }
+		}
 		if in.ProvisionLock != nil && !ref.NoWorkspace {
 			ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 			if err != nil {

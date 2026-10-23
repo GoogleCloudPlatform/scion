@@ -60,6 +60,37 @@ the start.
   dispatch check refuses a Kubernetes or Cloud Run dispatch whose share is not
   mounted.
 
+### Workspace bootstrap targets the shared workspace (ptone/scion#5823)
+
+On a shared Layout the broker applies a CLI workspace bootstrap upload to the
+project's workspace on the share (`<ProjectRoot>/workspace`), under the
+project's provisioning locks, only when no provisioner has populated it (no
+provisioning sentinel); it then writes the sentinel
+(`provision.MarkProvisioned`). A workspace that carried the sentinel when the
+create was admitted is not overwritten (the existing warning). No broker-local
+record or workspace marker is written.
+
+### Shared-plain provisioning backstop (ptone/scion#5823)
+
+On a shared Layout, a shared-plain git project dispatched to Docker, Podman or
+Apple container gets `provision.ProvisionShared` on its shared workspace before
+the container starts, with the provisioning init container's layout (sentinel
+and lock in the project state directory, the workspace root as the legacy
+sentinel location, ownership from the Layout, chown failure not fatal). A
+provisioned checkout is reused; a lost sentinel or an older project is cloned
+under the lock, with the agent's git token bound to the clone URL's host. The
+in-container clone is then not requested.
+
+### Node-local shared dirs move to the shared tree on broker start (ptone/scion#5823)
+
+A broker whose Layout places shared dirs on the shared tree moves the shared
+dirs it kept node-local (`~/.scion/project-configs/<slug>__<id8>/shared-dirs`)
+into `<ProjectRoot>/shared-dirs` once per process start, with the
+project-storage migration's mover (copy-only into the authority's leaf, never
+overwriting, symlinks refused, source kept as `.migrated-<ts>`), under the
+project's provisioning locks, matching projects by the hub-written identity on
+the share.
+
 ### Homes on one share (ptone/scion#5825)
 
 `projectfs.Layout.AgentHome` and `AgentSecrets` place an agent's home and
@@ -67,6 +98,10 @@ secrets at `<subpath root>/<project>/agents/<slug>/{home-,secrets-}<agent ID>`.
 The Kubernetes NFS home and the Cloud Run agent runtime both resolve through
 them (acceptance A12); Cloud Run moves from `agents/<agent ID>/{home,secrets}`.
 Homes on nfs take their share and claim from the project storage Layout.
+The project-storage migration's Cloud Run homes step moves existing
+`agents/<agent ID>/{home,secrets}` to the new paths, only for stopped agents
+(a running agent's are reported deferred and move on a later run); it is the
+only code that builds the legacy path.
 
 ## Verification
 

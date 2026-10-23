@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -139,6 +140,11 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 			p := &page.Items[i]
 			ref := storageMigrateProjectRef(p)
 			ref.LocalBrokerTree = s.localTreeServedByEmbeddedBroker(ctx, p)
+			agents, err := s.storageMigrateAgents(ctx, p.ID)
+			if err != nil {
+				return nil, err
+			}
+			ref.Agents = agents
 			refs = append(refs, ref)
 		}
 		if page.NextCursor == "" || page.NextCursor == cursor {
@@ -146,6 +152,39 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 		}
 		cursor = page.NextCursor
 	}
+}
+
+// storageMigrateAgents lists a project's agents for migration step 5 (Cloud
+// Run homes, ptone/scion#5825): each agent's ID and slug, and whether it is
+// stopped (stopped, error or halted: no container holds its home), the only
+// state in which its home is moved.
+func (s *Server) storageMigrateAgents(ctx context.Context, projectID string) ([]migrate.AgentRef, error) {
+	var refs []migrate.AgentRef
+	cursor := ""
+	for {
+		page, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 500, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, fmt.Errorf("list agents of project %s: %w", projectID, err)
+		}
+		for i := range page.Items {
+			a := &page.Items[i]
+			refs = append(refs, migrate.AgentRef{ID: a.ID, Slug: a.Slug, Stopped: storageMigrateAgentStopped(a.Phase)})
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return refs, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// storageMigrateAgentStopped reports whether an agent in phase holds no
+// running container, so its home can be moved.
+func storageMigrateAgentStopped(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
+		return true
+	}
+	return false
 }
 
 // storageMigrateProjectRef maps a project to the migration's view: it has a
