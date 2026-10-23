@@ -80,6 +80,7 @@ func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.Resol
 				URL:  f.URL,
 				Hash: f.Hash,
 				Size: f.Size,
+				Mode: f.Mode,
 			}
 		}
 		result.Resolved = append(result.Resolved, ResolvedSkill{

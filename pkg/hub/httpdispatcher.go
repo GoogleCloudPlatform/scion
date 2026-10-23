@@ -167,7 +167,6 @@ type HTTPAgentDispatcher struct {
 	agentEndpoint     string               // Optional override of hubEndpoint for SCION_HUB_ENDPOINT only
 	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
-	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
 	transportAudience string               // OIDC audience for transport tokens
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
@@ -382,12 +381,6 @@ func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 // SetHubID sets the hub instance ID for hub-scoped queries.
 func (d *HTTPAgentDispatcher) SetHubID(id string) {
 	d.hubID = id
-}
-
-// SetDevAuthToken sets the dev auth token to inject into agent containers.
-// When set, agents receive SCION_DEV_TOKEN as a fallback authentication method.
-func (d *HTTPAgentDispatcher) SetDevAuthToken(token string) {
-	d.devAuthToken = token
 }
 
 // SetAuthzService sets the authorization service for progeny secret verification.
@@ -1287,15 +1280,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			"totalResolvedEnvCount", len(req.ResolvedEnv),
 			"provisionCredentialsCount", len(req.ProvisionCredentials),
 		)
-	}
-
-	// In dev-auth mode, inject the dev token so agents can use it as fallback auth
-	if d.devAuthToken != "" {
-		if req.ResolvedEnv == nil {
-			req.ResolvedEnv = make(map[string]string)
-		}
-		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
-		classifyEnv(&req.EnvClassifications, "SCION_DEV_TOKEN", api.EnvKindSecretInjected)
 	}
 
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)

@@ -379,7 +379,7 @@ func TestCreateWorktree_RunsNoRepositoryCommands(t *testing.T) {
 		t.Fatalf("worktree file = %q, %v", got, err)
 	}
 	// The branch-exists path runs the second worktree add.
-	if _, err := RemoveWorktree(filepath.Dir(wt), wt, repo, false); err != nil {
+	if _, err := RemoveWorktree(filepath.Dir(wt), wt, repo, ""); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
 	if err := CreateWorktree(wt, "agent-a"); err != nil {
@@ -401,9 +401,32 @@ func TestDeleteBranchIn_RunsNoRepositoryHooks(t *testing.T) {
 	assertNoMarkers(t, markers)
 }
 
-// RemoveWorktree acts on the repository the caller names, not on the one
-// the worktree's .git file points at.
-func TestRemoveWorktree_IgnoresWorktreeGitFile(t *testing.T) {
+// A branch name that is empty or looks like an option is refused outright, so a
+// hostile value can never reach `git branch -D` as a flag (it is also passed
+// after "--"). This guards both DeleteBranchIn and, through it, the branch that
+// RemoveWorktree deletes.
+func TestDeleteBranchIn_RefusesOptionLikeBranch(t *testing.T) {
+	repo, markers := newHostGitRepo(t)
+	// A real branch whose deletion must NOT be triggered by a hostile value.
+	hostRunGit(t, repo, "branch", "keep")
+	plantRepoCommands(t, repo, markers)
+	for _, hostile := range []string{"", "-D", "--force", "-", "--all"} {
+		if DeleteBranchIn(repo, hostile) {
+			t.Errorf("DeleteBranchIn accepted the option-like branch %q", hostile)
+		}
+	}
+	if !BranchExistsIn(repo, "keep") {
+		t.Error("a real branch was deleted by an option-like value")
+	}
+	assertNoMarkers(t, markers)
+}
+
+// RemoveWorktree never acts on the repository the worktree's (agent-writable)
+// .git file points at: it validates the worktree against the caller-named
+// repository (worktreeOnBranch) and fails closed on a rewritten .git file, so
+// no branch is deleted anywhere — and in particular nothing in the repository
+// the .git file names is touched.
+func TestRemoveWorktree_RewrittenGitFileFailsClosed(t *testing.T) {
 	repo, markers := newHostGitRepo(t)
 	agentDir := filepath.Join(repo, "agents", "a")
 	wt := filepath.Join(agentDir, "workspace")
@@ -423,15 +446,17 @@ func TestRemoveWorktree_IgnoresWorktreeGitFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleted, err := RemoveWorktree(agentDir, wt, repo, true)
+	deleted, err := RemoveWorktree(agentDir, wt, repo, "agent-a")
 	if err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
 	}
-	if !deleted {
-		t.Error("expected the worktree's branch to be deleted")
+	// The .git file was rewritten to name another repository, so the worktree no
+	// longer validates against the caller's repository: fail closed, delete nothing.
+	if deleted {
+		t.Error("a rewritten .git file must not cause a branch deletion")
 	}
-	if BranchExistsIn(repo, "agent-a") {
-		t.Error("branch agent-a still exists in the caller's repository")
+	if !BranchExistsIn(repo, "agent-a") {
+		t.Error("branch agent-a was deleted despite the worktree .git mismatch")
 	}
 	if !BranchExistsIn(other, "agent-a") || !BranchExistsIn(other, "other-wt") {
 		t.Error("a branch was deleted in the repository the .git file names")
@@ -439,56 +464,30 @@ func TestRemoveWorktree_IgnoresWorktreeGitFile(t *testing.T) {
 	assertNoMarkers(t, markers)
 }
 
-// With no repository given, RemoveWorktree uses the repository the .git
-// file names only when that repository's registry lists the worktree.
-func TestRemoveWorktree_NoRepoRootRequiresRegisteredWorktree(t *testing.T) {
-	t.Run("registered", func(t *testing.T) {
-		repo, _ := newHostGitRepo(t)
-		agentDir := filepath.Join(repo, "agents", "a")
-		wt := filepath.Join(agentDir, "workspace")
-		if err := os.MkdirAll(agentDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := CreateWorktree(wt, "agent-a"); err != nil {
-			t.Fatal(err)
-		}
-		deleted, err := RemoveWorktree(agentDir, wt, "", true)
-		if err != nil || !deleted {
-			t.Fatalf("RemoveWorktree = %v, %v; want the branch deleted", deleted, err)
-		}
-		if BranchExistsIn(repo, "agent-a") {
-			t.Error("branch agent-a still exists")
-		}
-	})
-	t.Run("redirected", func(t *testing.T) {
-		repo, markers := newHostGitRepo(t)
-		agentDir := filepath.Join(repo, "agents", "a")
-		wt := filepath.Join(agentDir, "workspace")
-		if err := os.MkdirAll(agentDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := CreateWorktree(wt, "agent-a"); err != nil {
-			t.Fatal(err)
-		}
-		other, _ := newHostGitRepo(t)
-		hostRunGit(t, other, "worktree", "add", "-q", filepath.Join(t.TempDir(), "o"), "-b", "agent-a")
-		plantRepoCommands(t, other, markers)
-		otherAdmin := filepath.Join(other, ".git", "worktrees", "o")
-		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+otherAdmin+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		deleted, err := RemoveWorktree(agentDir, wt, "", true)
-		if err != nil || deleted {
-			t.Fatalf("RemoveWorktree = %v, %v; want no branch deleted", deleted, err)
-		}
-		if _, err := os.Stat(wt); !os.IsNotExist(err) {
-			t.Error("worktree directory still exists")
-		}
-		if !BranchExistsIn(other, "agent-a") {
-			t.Error("a branch was deleted in the repository the .git file names")
-		}
-		assertNoMarkers(t, markers)
-	})
+// With no repository root, RemoveWorktree removes the worktree directory but
+// deletes no branch: a branch is deleted only through the repository the caller
+// names, never one discovered from the worktree's own (agent-writable) .git file.
+func TestRemoveWorktree_NoRepoRootDeletesNoBranch(t *testing.T) {
+	repo, markers := newHostGitRepo(t)
+	agentDir := filepath.Join(repo, "agents", "a")
+	wt := filepath.Join(agentDir, "workspace")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateWorktree(wt, "agent-a"); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := RemoveWorktree(agentDir, wt, "", "agent-a")
+	if err != nil || deleted {
+		t.Fatalf("RemoveWorktree = %v, %v; want no branch deleted", deleted, err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Error("worktree directory still exists")
+	}
+	if !BranchExistsIn(repo, "agent-a") {
+		t.Error("branch agent-a was deleted even though no repository root was given")
+	}
+	assertNoMarkers(t, markers)
 }
 
 // sharedWorkspaceFixture returns a source repository and a shared
