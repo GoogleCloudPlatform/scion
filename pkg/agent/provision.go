@@ -491,7 +491,8 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 // directory as the name is joined onto the agent directories, so a key
 // other than the name is held to the same rule (checkAgentDirContained).
 // DeleteHubAgentFiles and CheckMoveMarkers both validate through it, so
-// the delete and its guard accept exactly the same keys.
+// the delete and its guard accept exactly the same keys. agentName must
+// already have passed checkAgentDirContained.
 func validateSharerKey(projectPath, agentName, sharerKey string) (string, error) {
 	if sharerKey == "" {
 		return agentName, nil
