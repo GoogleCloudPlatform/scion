@@ -406,8 +406,8 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	const bindingReader = "../store/entadapter/test_infra_binding_read.go"
 	sawBindingReader := false
 	for _, dir := range []string{".", "../store"} {
-		// pkgmove:scan-covers pkg/hub/maintenance
-		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
+		// pkgmove:scan-covers pkg/hub/...
+		// recursive walk of pkg/hub (".", no SkipDir; ../store is walked on its own): covers every directory below it.
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -945,8 +945,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (".", no SkipDir): covers every directory below it.
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1047,8 +1047,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 // definition names it.
 func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (".", no SkipDir): covers every directory below it.
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
