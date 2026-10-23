@@ -505,7 +505,10 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
             # non-standard JSON is never written back.
             pass
 
-    defaults = {"autoUpdate": False, "banner": "never"}
+    # remoteSessions: keep Copilot's remote control (steering the session from
+    # github.com or GitHub Mobile) off. It is off by default; this pins it now
+    # that the --no-remote flag no longer exists. A value already set is kept.
+    defaults = {"autoUpdate": False, "banner": "never", "remoteSessions": False}
     changed = False
     for key, value in defaults.items():
         if key not in settings:

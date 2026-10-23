@@ -560,7 +560,8 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
 
     def _assert_settings_defaults(self) -> None:
         with open(self._settings_path(), encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {"autoUpdate": False, "banner": "never"})
+            self.assertEqual(json.load(f), {"autoUpdate": False, "banner": "never",
+                                            "remoteSessions": False})
 
     def _write_settings_raw(self, raw: bytes) -> None:
         os.makedirs(os.path.dirname(self._settings_path()), exist_ok=True)
@@ -602,7 +603,14 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self._provision_must_succeed()
         with open(self._settings_path(), encoding="utf-8") as f:
             self.assertEqual(json.load(f),
-                             {"autoUpdate": True, "banner": "never", "theme": "dark"})
+                             {"autoUpdate": True, "banner": "never", "theme": "dark",
+                              "remoteSessions": False})
+
+    def test_explicit_remote_sessions_is_kept(self) -> None:
+        self._write_settings_raw(b'{"remoteSessions": true}')
+        self._provision_must_succeed()
+        with open(self._settings_path(), encoding="utf-8") as f:
+            self.assertTrue(json.load(f)["remoteSessions"])
 
     def test_unparseable_config_is_still_replaced(self) -> None:
         self._write_raw(b'{"theme": ')

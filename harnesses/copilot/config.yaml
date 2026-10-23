@@ -49,8 +49,10 @@ model_aliases:
   extra-large: claude-opus-4.8
 
 command:
-  base: ["copilot", "--no-auto-update", "--no-remote", "--no-color",
-         "--allow-all"]
+  # No --no-remote: Copilot CLI 1.0.103 removed it and exits 1 when given it.
+  # Remote control is off by default; the provisioner also writes
+  # "remoteSessions": false to ~/.copilot/settings.json.
+  base: ["copilot", "--no-auto-update", "--no-color", "--allow-all"]
   resume_flag: "--continue"
   task_flag: "-i"
   task_position: after_base_args
