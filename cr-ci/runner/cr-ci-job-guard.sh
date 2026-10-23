@@ -5,8 +5,10 @@
 # build). Runner.Worker runs it after a job is assigned and before any step of that job
 # (actions/runner 2.338.0, src/Runner.Worker/JobExtension.cs L303-312, L585-586). It lets
 # the job run only if it is what cr-ci serves:
-#   - GITHUB_REPOSITORY equals CR_JOB_GUARD_REPO, the repository the runner was launched
-#     to serve (GH_REPO from the mediator, exported read-only by entrypoint.sh), and
+#   - GITHUB_REPOSITORY is one of CR_JOB_GUARD_REPOS (comma-separated owner/name), the
+#     repositories whose jobs the runner may take: its registration scope (GH_REPOS from
+#     the mediator: the one repository in repo scope, every target repository of the
+#     owner in org scope; exported read-only by entrypoint.sh), and
 #   - GITHUB_EVENT_NAME push, or
 #   - GITHUB_EVENT_NAME pull_request whose event payload (GITHUB_EVENT_PATH) has
 #     pull_request.head.repo.full_name equal to GITHUB_REPOSITORY (not a fork).
@@ -44,15 +46,28 @@ set +e -o pipefail
 event=${GITHUB_EVENT_NAME:-}
 repo=${GITHUB_REPOSITORY:-}
 payload=${GITHUB_EVENT_PATH:-}
-served=${CR_JOB_GUARD_REPO:-}
+served=${CR_JOB_GUARD_REPOS:-}
 head=""
 reason=""
 
+# served_has REPO: REPO is in the served list (case-insensitive, whole entries only).
+served_has() {
+  local entry
+  local -a entries
+  IFS=, read -r -a entries <<<"$served"
+  for entry in "${entries[@]}"; do
+    [[ ${entry,,} == "${1,,}" ]] && return 0
+  done
+  return 1
+}
+
 if [[ -z $served ]]; then
-  reason=served_repository_missing
+  reason=served_repositories_missing
+elif [[ ! $served =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(,[A-Za-z0-9-]+/[A-Za-z0-9._-]+)*$ ]]; then
+  reason=served_repositories_malformed
 elif [[ -z $repo ]]; then
   reason=repository_missing
-elif [[ ${repo,,} != "${served,,}" ]]; then
+elif ! served_has "$repo"; then
   reason=repository_not_served
 else
   case $event in

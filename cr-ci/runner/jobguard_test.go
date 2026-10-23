@@ -96,7 +96,7 @@ kill "$(cat "$OUT/sleeper")"
 	}
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "OUT=" + out, "HOOK=" + guardHookPath(t), "HOOK_SHELL=" + bash,
-		"CR_JOB_GUARD_MARKER=" + markerPath, "CR_JOB_GUARD_REPO=" + testRepoFull, "LC_ALL=C"}
+		"CR_JOB_GUARD_MARKER=" + markerPath, "CR_JOB_GUARD_REPOS=" + testRepoFull, "LC_ALL=C"}
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -299,26 +299,47 @@ exit 0
 	}
 }
 
-// TestJobGuardServedRepository (R4): the hook binds GITHUB_REPOSITORY to the repository
-// the runner serves (CR_JOB_GUARD_REPO, from GH_REPO); without it, it refuses.
+// TestJobGuardServedRepository (R4, R5): the hook requires GITHUB_REPOSITORY to be one
+// of the repositories the runner serves (CR_JOB_GUARD_REPOS, from GH_REPOS): one in repo
+// scope, every target repository of the owner in org scope. Fail closed on an empty or
+// malformed list.
 func TestJobGuardServedRepository(t *testing.T) {
 	requireTools(t)
-	t.Run("served repository missing", func(t *testing.T) {
-		survived, _, marker := runGuardInGroup(t, map[string]string{
-			"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": testRepoFull, "CR_JOB_GUARD_REPO": "",
+	const orgList = "example-owner/second-repo,example-owner/example-repo,example-owner/third.repo"
+	for _, tc := range []struct {
+		name, repo, served, reason string // reason "" = allowed
+	}{
+		{"repo scope", testRepoFull, testRepoFull, ""},
+		{"repo scope, other case", testRepoFull, "Example-Owner/Example-Repo", ""},
+		{"repo scope, another repository", "example-owner/second-repo", testRepoFull, "reason=repository_not_served"},
+		{"org scope, a member", testRepoFull, orgList, ""},
+		{"org scope, another member", "example-owner/third.repo", orgList, ""},
+		{"org scope, a non-member of the owner", "example-owner/fourth-repo", orgList, "reason=repository_not_served"},
+		{"org scope, another owner", "other-owner/example-repo", orgList, "reason=repository_not_served"},
+		{"org scope, a prefix is not a member", "example-owner/example", orgList, "reason=repository_not_served"},
+		{"list empty", testRepoFull, "", "reason=served_repositories_missing"},
+		{"list with an empty entry", testRepoFull, testRepoFull + ",", "reason=served_repositories_malformed"},
+		{"list with a leading comma", testRepoFull, "," + testRepoFull, "reason=served_repositories_malformed"},
+		{"list with spaces", testRepoFull, "example-owner/second-repo, " + testRepoFull, "reason=served_repositories_malformed"},
+		{"list entry without owner", testRepoFull, "example-repo", "reason=served_repositories_malformed"},
+		{"list entry with a path", testRepoFull, testRepoFull + "/x", "reason=served_repositories_malformed"},
+		{"list with a wildcard", testRepoFull, "example-owner/*", "reason=served_repositories_malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			survived, rc, marker := runGuardInGroup(t, map[string]string{
+				"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": tc.repo, "CR_JOB_GUARD_REPOS": tc.served,
+			})
+			if tc.reason == "" {
+				if !survived || rc != "0" || marker != "" {
+					t.Errorf("survived=%v rc=%q marker=%q, want allowed", survived, rc, marker)
+				}
+				return
+			}
+			if survived || !strings.Contains(marker, tc.reason) {
+				t.Errorf("survived=%v marker=%q, want refused with %s", survived, marker, tc.reason)
+			}
 		})
-		if survived || !strings.Contains(marker, "reason=served_repository_missing") {
-			t.Errorf("survived=%v marker=%q, want refused with served_repository_missing", survived, marker)
-		}
-	})
-	t.Run("served repository in other case", func(t *testing.T) {
-		survived, rc, marker := runGuardInGroup(t, map[string]string{
-			"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": testRepoFull, "CR_JOB_GUARD_REPO": "Example-Owner/Example-Repo",
-		})
-		if !survived || rc != "0" || marker != "" {
-			t.Errorf("survived=%v rc=%q marker=%q, want allowed", survived, rc, marker)
-		}
-	})
+	}
 }
 
 // TestJobGuardStopsParentFromOwnGroup (R1): the stop must not depend on the hook sharing
@@ -504,24 +525,33 @@ func TestEntrypointTestOverridesNeedTestMode(t *testing.T) {
 	}
 }
 
-// TestEntrypointGHRepo (R4): GH_REPO, the repository the runner serves, is required and
-// must be owner/name.
-func TestEntrypointGHRepo(t *testing.T) {
+// TestEntrypointGHRepos (R4, R5): GH_REPOS, the repositories the runner serves, is
+// required: 1-100 comma-separated owner/name entries. A malformed value is not echoed.
+func TestEntrypointGHRepos(t *testing.T) {
+	const bad = "GH_REPOS must be 1-100 comma-separated owner/name entries"
+	many := strings.TrimSuffix(strings.Repeat("o/r,", 101), ",")
 	for _, tc := range []struct{ name, value, want string }{
-		{"missing", "", "required environment variable GH_REPO is not set"},
-		{"no owner", "example-repo", "GH_REPO must be owner/name"},
-		{"extra path", "owner/repo/x", "GH_REPO must be owner/name"},
-		{"shell characters", "owner/re$(id)", "GH_REPO must be owner/name"},
+		{"missing", "", "required environment variable GH_REPOS is not set"},
+		{"no owner", "example-repo", bad},
+		{"extra path", "owner/repo/x", bad},
+		{"shell characters", "owner/re$(id)", bad},
+		{"empty entry", testRepoFull + ",", bad},
+		{"space after comma", testRepoFull + ", owner/b", bad},
+		{"101 entries", many, bad},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
 			h := newHarness(t, cs.URL)
 			if tc.value == "" {
-				delete(h.env, "GH_REPO")
+				delete(h.env, "GH_REPOS")
 			} else {
-				h.env["GH_REPO"] = tc.value
+				h.env["GH_REPOS"] = tc.value
 			}
-			expectFailure(t, h, h.run(), 2, tc.want)
+			res := h.run()
+			expectFailure(t, h, res, 2, tc.want)
+			if tc.value != "" && strings.Contains(res.stderr, tc.value) {
+				t.Errorf("the malformed value was echoed:\n%s", res.stderr)
+			}
 			if n := len(cs.recorded()); n != 0 {
 				t.Errorf("%d claim requests, want none", n)
 			}
@@ -529,7 +559,7 @@ func TestEntrypointGHRepo(t *testing.T) {
 	}
 }
 
-// TestEntrypointJobGuardRepositoryBinding (R4): a job of a repository other than GH_REPO
+// TestEntrypointJobGuardRepositoryBinding (R4): a job of a repository other than GH_REPOS
 // is refused (hard stop, exit 5), even a same-repo push there.
 func TestEntrypointJobGuardRepositoryBinding(t *testing.T) {
 	h := newSuccessHarness(t)
@@ -543,20 +573,54 @@ func TestEntrypointJobGuardRepositoryBinding(t *testing.T) {
 	}
 }
 
+// TestEntrypointJobGuardOrgScope (R5): with an org-scope list, a job of any listed
+// repository runs on (org runners legitimately take any of them); a job of an unlisted
+// repository of the same owner is refused.
+func TestEntrypointJobGuardOrgScope(t *testing.T) {
+	const list = "example-owner/second-repo,example-owner/example-repo"
+	t.Run("member", func(t *testing.T) {
+		h := newSuccessHarness(t)
+		h.env["GH_REPOS"] = list
+		h.setRunSh(guardRunShRepo("push", "{}", "example-owner/second-repo"))
+		res := h.run()
+		if res.exitCode != 0 || strings.Contains(res.stderr, "job_guard") {
+			t.Errorf("exit code %d, want 0 and no guard line; stderr:\n%s", res.exitCode, res.stderr)
+		}
+		if _, err := os.Stat(filepath.Join(h.stubOut, "always-step-ran")); err != nil {
+			t.Error("the member repository's job did not run")
+		}
+		if env := h.stubFile("env"); !strings.Contains(env+"\n", "CR_JOB_GUARD_REPOS="+list+"\n") {
+			t.Errorf("run.sh env lacks the served list; got:\n%s", env)
+		}
+	})
+	t.Run("non-member", func(t *testing.T) {
+		h := newSuccessHarness(t)
+		h.env["GH_REPOS"] = list
+		h.setRunSh(guardRunShRepo("push", "{}", "example-owner/third-repo"))
+		res := h.run()
+		if res.exitCode != 5 || !strings.Contains(res.stderr, "reason=repository_not_served event=push head= repository=example-owner/third-repo served=example-owner/second-repo_example-owner/example-repo") {
+			t.Errorf("exit code %d, want 5 with repository_not_served; stderr:\n%s", res.exitCode, res.stderr)
+		}
+		if _, err := os.Stat(filepath.Join(h.stubOut, "always-step-ran")); err == nil {
+			t.Error("a step after the refused hook ran")
+		}
+	})
+}
+
 // TestEntrypointJobGuardEnvFixed (R2a): values for the hook's settings in the
 // entrypoint's own environment are replaced: run.sh (and so Runner.Worker) gets the
-// verified hook path and GH_REPO.
+// verified hook path and GH_REPOS.
 func TestEntrypointJobGuardEnvFixed(t *testing.T) {
 	h := newSuccessHarness(t)
 	h.env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = "/bin/true"
-	h.env["CR_JOB_GUARD_REPO"] = "other-owner/other-repo"
+	h.env["CR_JOB_GUARD_REPOS"] = "other-owner/other-repo"
 	h.env["CR_JOB_GUARD_MARKER"] = filepath.Join(t.TempDir(), "elsewhere")
 	res := h.run()
 	if res.exitCode != 0 {
 		t.Fatalf("exit code %d; stderr:\n%s", res.exitCode, res.stderr)
 	}
 	env := h.stubFile("env")
-	for _, want := range []string{"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook, "CR_JOB_GUARD_REPO=" + testRepoFull} {
+	for _, want := range []string{"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook, "CR_JOB_GUARD_REPOS=" + testRepoFull} {
 		if !strings.Contains(env+"\n", want+"\n") {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
 		}

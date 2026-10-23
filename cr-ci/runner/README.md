@@ -98,13 +98,13 @@ The mediator sets these env overrides on each execution (see
 | `MEDIATOR_URL` | https origin of the mediator, no trailing slash |
 | `GH_JOB_ID` | numeric GitHub job ID (used in logs only) |
 | `RUNNER_NAME` | normally `cr-job-<GH_JOB_ID>` (used in logs only). After a runner swap or hijack recovery the mediator may reuse another job's name, so a mismatch is only a warning |
-| `GH_REPO` | `owner/name` of the repository the runner is launched to serve; the job guard refuses any job of another repository |
+| `GH_REPOS` | comma-separated `owner/name` list (1-100) of the repositories whose jobs the runner may be handed: its registration scope. Repo scope: the one repository; org scope: every `TARGET_REPOS` entry of the owner (an org runner may take any of their jobs). The job guard refuses a job of any other repository |
 
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
 1. **Checks the env and the job guard.** All five variables and `HOME` must be set, and `HOME`
-   must be `/home/runner`; `GH_REPO` must be `owner/name`. The job-started hook must be
+   must be `/home/runner`; `GH_REPOS` must be 1-100 comma-separated `owner/name` entries. The job-started hook must be
    the pinned, protected file ("Job guard", below), or it exits 2 here, in warm-up too. The token must be
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
@@ -286,12 +286,12 @@ ptone/scion#5978
 
 **Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports, read-only,
 `ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh`,
-`CR_JOB_GUARD_MARKER` and `CR_JOB_GUARD_REPO` (= `GH_REPO`, the repository the runner
-serves). The hook allows a job only if `GITHUB_REPOSITORY` is `CR_JOB_GUARD_REPO` and
-`GITHUB_EVENT_NAME` is `push`, or `pull_request` with the payload's
-`pull_request.head.repo.full_name` equal to `GITHUB_REPOSITORY`. It refuses anything
-else, and also a missing served repository or a missing or unparsable payload (fail
-closed).
+`CR_JOB_GUARD_MARKER` and `CR_JOB_GUARD_REPOS` (= `GH_REPOS`, the repositories the
+runner serves). The hook allows a job only if `GITHUB_REPOSITORY` is one of
+`CR_JOB_GUARD_REPOS` (whole entries, case-insensitive) and `GITHUB_EVENT_NAME` is
+`push`, or `pull_request` with the payload's `pull_request.head.repo.full_name` equal to
+`GITHUB_REPOSITORY`. It refuses anything else, and also an empty or malformed served
+list or a missing or unparsable payload (fail closed).
 
 **No fail-open: the hook must be the pinned one.** If the worker cannot run the hook
 (missing, not executable), only its pre-job step fails and the job's `always()` steps

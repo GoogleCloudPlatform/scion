@@ -38,8 +38,10 @@
 #   MEDIATOR_URL        https origin of the mediator, no trailing slash
 #   GH_JOB_ID           GitHub workflow job ID (logging only)
 #   RUNNER_NAME         cr-job-<GH_JOB_ID> (logging only)
-#   GH_REPO             owner/name of the repository the runner serves; the job guard
-#                       refuses any job from another repository
+#   GH_REPOS            comma-separated owner/name list of the repositories whose jobs
+#                       the runner may take (repo scope: the one repository; org scope:
+#                       every target repository of the owner); the job guard refuses a
+#                       job of any other repository
 #
 # Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), the job-started hook
@@ -182,17 +184,19 @@ esac
 if ((warmup)); then
   required_vars=(HOME)
 else
-  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME GH_REPO HOME)
+  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME GH_REPOS HOME)
 fi
 for var in "${required_vars[@]}"; do
   if [[ -z ${!var:-} ]]; then
     die "$EXIT_CONFIG" "required environment variable $var is not set"
   fi
 done
-# GH_REPO: the repository (owner/name) this runner is launched to serve. The job guard
-# refuses any job from another repository (section 5, "Job guard").
-if ((!warmup)) && [[ ! $GH_REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
-  die "$EXIT_CONFIG" "GH_REPO must be owner/name, got '$GH_REPO'"
+# GH_REPOS: the repositories (owner/name, comma-separated, 1-100 of them) whose jobs this
+# runner may be handed. The job guard refuses a job of any other repository (section 5,
+# "Job guard"). Never echoed: a malformed value may hold anything.
+if ((!warmup)); then
+  [[ $GH_REPOS =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(,[A-Za-z0-9-]+/[A-Za-z0-9._-]+){0,99}$ ]] ||
+    die "$EXIT_CONFIG" "GH_REPOS must be 1-100 comma-separated owner/name entries"
 fi
 
 # --- Job guard: the job-started hook must be the one pinned in the image ----------
@@ -615,14 +619,14 @@ watcher_pid=$!
 
 # The job-started hook (cr-ci-job-guard.sh): Runner.Worker runs it before any step of an
 # assigned job (it reads ACTIONS_RUNNER_HOOK_JOB_STARTED from its own environment, which
-# it inherits from run.sh; a workflow cannot change it). A job from a repository other
-# than GH_REPO, or one that is not a same-repo push or pull_request, is refused with a
+# it inherits from run.sh; a workflow cannot change it). A job from a repository not in
+# GH_REPOS, or one that is not a same-repo push or pull_request, is refused with a
 # hard stop: the hook writes the marker and SIGKILLs Runner.Worker and run.sh's process
 # group (section 5, "Job guard").
 # Read-only and exported: the verified hook path (section 1), the marker, and the
-# repository this runner serves (GH_REPO), which the hook binds GITHUB_REPOSITORY to.
-readonly ACTIONS_RUNNER_HOOK_JOB_STARTED="$job_guard_hook" CR_JOB_GUARD_MARKER="$guard_marker" CR_JOB_GUARD_REPO="$GH_REPO"
-export ACTIONS_RUNNER_HOOK_JOB_STARTED CR_JOB_GUARD_MARKER CR_JOB_GUARD_REPO
+# repositories this runner serves (GH_REPOS), which GITHUB_REPOSITORY must be one of.
+readonly ACTIONS_RUNNER_HOOK_JOB_STARTED="$job_guard_hook" CR_JOB_GUARD_MARKER="$guard_marker" CR_JOB_GUARD_REPOS="$GH_REPOS"
+export ACTIONS_RUNNER_HOOK_JOB_STARTED CR_JOB_GUARD_MARKER CR_JOB_GUARD_REPOS
 
 log "starting run.sh (ephemeral JIT runner)"
 set -m

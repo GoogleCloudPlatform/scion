@@ -49,7 +49,7 @@ pwd > "$out/cwd"
   echo "XDG_CACHE_HOME_SET=${XDG_CACHE_HOME+yes}"
   echo "TOKEN_SET=${RUNNER_CLAIM_TOKEN+yes}"
   echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${ACTIONS_RUNNER_HOOK_JOB_STARTED:-}"
-  echo "CR_JOB_GUARD_REPO=${CR_JOB_GUARD_REPO:-}"
+  echo "CR_JOB_GUARD_REPOS=${CR_JOB_GUARD_REPOS:-}"
   echo "CR_TEST_MODE_SET=${CR_TEST_MODE+yes}"
 } > "$out/env"
 echo "stub run.sh started"
@@ -268,7 +268,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"CR_JOB_GUARD_HOOK":        h.guardHook,
 		"CR_JOB_GUARD_SHA_FILE":    h.guardSHAFile,
 		"CR_JOB_GUARD_OWNER_UID":   strconv.Itoa(os.Getuid()),
-		"GH_REPO":                  testRepoFull,
+		"GH_REPOS":                 testRepoFull,
 		"PATH":                     os.Getenv("PATH"),
 		"HOME":                     root,
 		"CR_EXPECTED_HOME":         root,
@@ -415,7 +415,7 @@ func TestEntrypointSuccess(t *testing.T) {
 		"XDG_CACHE_HOME_SET=",
 		"TOKEN_SET=",
 		"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook,
-		"CR_JOB_GUARD_REPO=" + testRepoFull,
+		"CR_JOB_GUARD_REPOS=" + testRepoFull,
 		"CR_TEST_MODE_SET=",
 	} {
 		if !strings.Contains(env+"\n", want+"\n") {
@@ -1340,7 +1340,7 @@ func warmupHarness(t *testing.T) (*harness, *claimServer) {
 	t.Helper()
 	cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
 	h := newHarness(t, cs.URL)
-	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME", "GH_REPO"} {
+	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME", "GH_REPOS"} {
 		delete(h.env, k)
 	}
 	h.env["RUNNER_WARMUP"] = "1"
