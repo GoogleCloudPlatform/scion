@@ -97,7 +97,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_access_constraints.go", "Server.handleAdminAccessConstraintPreviews", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_auth.go", "Server.handleTokenByID", "URL.Path", 1, "routing: extracts the token id"},
 	{"handlers_brokers.go", "Server.handleBrokerByIDRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
-	{"handlers_chat_send.go", "Server.authorizeChatSend", "URL(bare)", 1, "not the served request: a synthetic request carrying a chat-send label path"},
+	{"handlers_chat_send.go", "Server.authorizeChatConversation", "URL(bare)", 2, "not the served request: a synthetic request carrying a chat-send label path"},
 	{"handlers_chat_v2.go", "Server.handleChatAttachmentByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatConversationRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatSpaceRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
