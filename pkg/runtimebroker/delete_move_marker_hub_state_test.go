@@ -15,6 +15,9 @@
 package runtimebroker
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,29 +27,196 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// Tests for ptone/scion#5955: a forced move's rollback delete also removes
-// the agent's hub-project state directory (keyed by the agent name and the
-// Hub project ID the delete uses), so the move-marker check covers it,
-// with the same project ID.
+// Tests for ptone/scion#5955: a forced move's rollback delete passes the
+// Hub project ID it resolves the agent's hub-project state directory with
+// (the request's projectId) to the move-marker check, so the check and the
+// delete name the same directories.
+//
+// For canonical project layouts, the check's hub-project state directory
+// branch (agent.CheckMoveMarkers via hubStateDirToRemove) is not reachable
+// through this handler: that directory is a directory of its own only when
+// the project's recorded project ID is absent or differs from the Hub
+// project ID, and the handler uses a project path only when it identifies
+// as the request's projectId (resolveDeleteTarget), which is also the Hub
+// project ID it passes. A project with such a directory therefore has no
+// project path here, and its rollback delete is refused (409 when a runtime
+// entry matched, else 404) before the check runs. A non-canonical layout
+// can still name a directory of its own, and there the check is what
+// refuses: TestDeleteAgent_ForcedMoveRollback_NonCanonicalMarkerHubDirRefused
+// builds one (a non-git project whose marker slug is not in the slugified
+// form). The branch is also covered in pkg/agent (move_marker_test.go).
+// The other tests pin the wiring and a refusal that comes from the check
+// itself.
 
 const hubStateMoveID = "reincarnation-5955"
 
-// newHubStateMoveFixture is a plain project (no project-id file, so no
-// external agents root) whose agent dev runs in a container labelled with
-// scopeProjB, its agent directory marked by hubStateMoveID, and the
-// agent's hub-project state directory for scopeProjB created with a file
-// in it. It returns the server, the runtime entries deleted, the agent
-// directory and the hub-project state directory.
-func newHubStateMoveFixture(t *testing.T) (*Server, *[]string, string, string) {
+const hubStateMoveDeleteQuery = "deleteFiles=true&removeBranch=false&projectId=" + scopeProjB + "&" + api.MoveReincarnationIDQueryParam + "=" + hubStateMoveID
+
+// hubIDMoveManager is a filteringMockManager that records the Hub project
+// ID the handler passes to CheckMoveMarkers and puts in DeleteTarget's
+// context. With a checker, CheckMoveMarkers is the real
+// agent.AgentManager check; without one it reports no paths and no error.
+type hubIDMoveManager struct {
+	filteringMockManager
+	checker          *agent.AgentManager
+	checkCalls       int
+	checkProjectPath string
+	checkHubProject  string
+	deleteHubProject string
+}
+
+func (m *hubIDMoveManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error) {
+	m.checkCalls++
+	m.checkProjectPath = projectPath
+	m.checkHubProject = hubProjectID
+	if m.checker == nil {
+		return nil, nil
+	}
+	return m.checker.CheckMoveMarkers(ctx, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID)
+}
+
+func (m *hubIDMoveManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.deleteHubProject = api.HubProjectIDFromContext(ctx)
+	return m.filteringMockManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
+}
+
+// newHubIDMoveFixture is a hub-native project proj-b (project ID
+// scopeProjB, which the delete resolves) with agent dev running in a
+// container labelled with scopeProjB, behind a broker over mgr whose
+// lifecycle log is returned. It returns the server, the project's .scion
+// dir and the agent's home.
+func newHubIDMoveFixture(t *testing.T, mgr *hubIDMoveManager) (*Server, string, string, *bytes.Buffer) {
 	t.Helper()
-	var entries []api.AgentInfo
-	deleted := &[]string{}
-	srv, home := newProvisionDirsServer(t, &entries, deleted)
-	scionDir := filepath.Join(home, "plainproj", config.DotScion)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	scionDir, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-dev", scopeProjB, scionDir)}
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	logs := &bytes.Buffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	return srv, scionDir, config.GetAgentHomePath(scionDir, "dev"), logs
+}
+
+// The rollback delete passes the request's projectId as the Hub project ID
+// both to the move-marker check and in DeleteTarget's context.
+func TestDeleteAgent_ForcedMoveRollback_HubProjectIDWiring(t *testing.T) {
+	mgr := &hubIDMoveManager{}
+	srv, scionDir, _, _ := newHubIDMoveFixture(t, mgr)
+
+	rec := doDelete(t, srv, "dev", hubStateMoveDeleteQuery)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("got %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.checkCalls != 1 {
+		t.Fatalf("CheckMoveMarkers calls = %d, want 1", mgr.checkCalls)
+	}
+	if mgr.checkHubProject != scopeProjB {
+		t.Errorf("CheckMoveMarkers hub project ID = %q, want the request's %q", mgr.checkHubProject, scopeProjB)
+	}
+	if !sameDirPath(t, mgr.checkProjectPath, scionDir) {
+		t.Errorf("CheckMoveMarkers project path = %q, want %q", mgr.checkProjectPath, scionDir)
+	}
+	if mgr.deleteCalls != 1 {
+		t.Fatalf("DeleteTarget calls = %d, want 1", mgr.deleteCalls)
+	}
+	if mgr.deleteHubProject != scopeProjB {
+		t.Errorf("DeleteTarget context hub project ID = %q, want the request's %q", mgr.deleteHubProject, scopeProjB)
+	}
+}
+
+// An agent directory without the move's marker, in a project the delete
+// resolves: the real check refuses with move_marker_mismatch, the refusal
+// names the paths it checked (not the missing project path), and nothing
+// is removed.
+func TestDeleteAgent_ForcedMoveRollback_HubProjectUnmarkedDirRefused(t *testing.T) {
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	mgr := &hubIDMoveManager{checker: agent.NewManager(rt).(*agent.AgentManager)}
+	srv, scionDir, agentHome, logs := newHubIDMoveFixture(t, mgr)
 	agentDir := filepath.Join(scionDir, "agents", "dev")
-	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0o755); err != nil {
+	unmarked := filepath.Dir(agentHome)
+	if sameDirPath(t, unmarked, agentDir) {
+		t.Fatalf("setup: the agent home's parent %s is the project agent directory", unmarked)
+	}
+	// The project agent directory carries the marker; the home's parent
+	// under the external agents root does not.
+	if err := os.WriteFile(filepath.Join(agentDir, agent.MoveMarkerFile), []byte(hubStateMoveID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDelete(t, srv, "dev", hubStateMoveDeleteQuery)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"`+api.BrokerErrCodeMoveMarkerMismatch+`"`) {
+		t.Fatalf("body = %s, want code %s", rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
+	}
+	if mgr.checkCalls != 1 {
+		t.Fatalf("CheckMoveMarkers calls = %d, want 1", mgr.checkCalls)
+	}
+	if mgr.checkHubProject != scopeProjB {
+		t.Errorf("CheckMoveMarkers hub project ID = %q, want the request's %q", mgr.checkHubProject, scopeProjB)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "refusing a forced move's rollback delete") {
+		t.Fatalf("no rollback refusal logged: %s", out)
+	}
+	if strings.Contains(out, "no project path to check the move markers in") {
+		t.Errorf("refused for the missing project path, not by the move-marker check: %s", out)
+	}
+	if strings.Contains(out, "paths=[]") || !strings.Contains(out, unmarked) {
+		t.Errorf("the refusal does not name the checked paths, including the unmarked %s: %s", unmarked, out)
+	}
+	if !strings.Contains(out, agent.ErrMoveMarkerMismatch.Error()) {
+		t.Errorf("the refusal is not the move-marker mismatch: %s", out)
+	}
+	if mgr.deleteCalls != 0 {
+		t.Errorf("DeleteTarget calls = %d on a refused rollback delete, want 0", mgr.deleteCalls)
+	}
+	for _, dir := range []string{agentDir, agentHome} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("%s removed on a refused rollback delete: %v", dir, err)
+		}
+	}
+}
+
+// A non-git project whose marker slug is not in the slugified form
+// (Proj-B): the agent's project path is the project's external config dir
+// <global>/project-configs/Proj-B__<short id>/.scion, which identifies as
+// the project by its name, while the Hub project ID resolves the agent's
+// state directory under project-configs/proj-b__<short id>, a directory of
+// its own. That directory carries another move's marker: the check refuses
+// on it with move_marker_mismatch, and nothing is removed.
+func TestDeleteAgent_ForcedMoveRollback_NonCanonicalMarkerHubDirRefused(t *testing.T) {
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	mgr := &hubIDMoveManager{checker: agent.NewManager(rt).(*agent.AgentManager)}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	marker := &config.ProjectMarker{ProjectID: scopeProjB, ProjectName: "Proj-B", ProjectSlug: "Proj-B"}
+	if marker.HasCanonicalDirName() {
+		t.Fatalf("setup: the marker slug %q is canonical", marker.ProjectSlug)
+	}
+	workspace := filepath.Join(home, "work", "proj-b")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectMarker(filepath.Join(workspace, config.DotScion), marker); err != nil {
+		t.Fatal(err)
+	}
+	extScion, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(extScion, "agents", "dev")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
@@ -55,15 +225,11 @@ func newHubStateMoveFixture(t *testing.T) (*Server, *[]string, string, string) {
 	if err := os.WriteFile(filepath.Join(agentDir, agent.MoveMarkerFile), []byte(hubStateMoveID+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	projectDir, err := config.GetResolvedProjectDir(scionDir)
-	if err != nil {
-		t.Fatalf("resolve the project: %v", err)
-	}
-	hubDir, err := config.AgentDirForProject(projectDir, "dev", true, scopeProjB)
+	hubDir, err := config.AgentDirForProject(extScion, "dev", true, scopeProjB)
 	if err != nil {
 		t.Fatalf("hub-project state dir: %v", err)
 	}
-	if hubDir == agentDir || strings.HasPrefix(hubDir, scionDir+string(filepath.Separator)) {
+	if strings.HasPrefix(filepath.Clean(hubDir), filepath.Clean(extScion)+string(filepath.Separator)) {
 		t.Fatalf("setup: the hub-project state dir %s is not a directory of its own", hubDir)
 	}
 	if err := os.MkdirAll(hubDir, 0o755); err != nil {
@@ -72,57 +238,60 @@ func newHubStateMoveFixture(t *testing.T) (*Server, *[]string, string, string) {
 	if err := os.WriteFile(filepath.Join(hubDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	entries = []api.AgentInfo{{
-		Name: "dev", ContainerID: "cid-dev", ProjectID: scopeProjB, ProjectPath: scionDir,
-		Labels: map[string]string{"scion.agent": "true", "scion.name": "dev", "scion.project_id": scopeProjB},
-	}}
-	return srv, deleted, agentDir, hubDir
-}
-
-const hubStateMoveDeleteQuery = "deleteFiles=true&removeBranch=false&projectId=" + scopeProjB + "&" + api.MoveReincarnationIDQueryParam + "=" + hubStateMoveID
-
-// The hub-project state directory exists without the move's marker: the
-// rollback delete is refused with move_marker_mismatch and removes nothing.
-func TestDeleteAgent_ForcedMoveRollback_UnmarkedHubStateDirRefused(t *testing.T) {
-	srv, deleted, agentDir, hubDir := newHubStateMoveFixture(t)
+	if err := os.WriteFile(filepath.Join(hubDir, agent.MoveMarkerFile), []byte("reincarnation-other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.agents = []api.AgentInfo{labelled("dev", "cid-dev", scopeProjB, extScion)}
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	logs := &bytes.Buffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
 
 	rec := doDelete(t, srv, "dev", hubStateMoveDeleteQuery)
+	if mgr.checkCalls != 1 {
+		t.Fatalf("CheckMoveMarkers calls = %d, want 1 (status %d: %s)", mgr.checkCalls, rec.Code, rec.Body.String())
+	}
+	if mgr.checkHubProject != scopeProjB {
+		t.Errorf("CheckMoveMarkers hub project ID = %q, want the request's %q", mgr.checkHubProject, scopeProjB)
+	}
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("got %d, want 409 for the unmarked hub-project state dir: %s", rec.Code, rec.Body.String())
+		t.Fatalf("got %d, want 409 for the hub-project state dir with another move's marker: %s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"code":"`+api.BrokerErrCodeMoveMarkerMismatch+`"`) {
 		t.Fatalf("body = %s, want code %s", rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
 	}
-	if len(*deleted) != 0 {
-		t.Errorf("runtime entries deleted on a refused rollback delete: %v", *deleted)
+	out := logs.String()
+	if strings.Contains(out, "no project path to check the move markers in") {
+		t.Errorf("refused for the missing project path, not by the move-marker check: %s", out)
 	}
-	if _, err := os.Stat(filepath.Join(hubDir, "scion-agent.json")); err != nil {
-		t.Errorf("hub-project state dir removed: %v", err)
+	if strings.Contains(out, "paths=[]") || !strings.Contains(out, hubDir) {
+		t.Errorf("the refusal does not name the checked hub-project state dir %s: %s", hubDir, out)
 	}
-	if _, err := os.Stat(filepath.Join(agentDir, agent.MoveMarkerFile)); err != nil {
-		t.Errorf("agent directory removed: %v", err)
+	if !strings.Contains(out, agent.ErrMoveMarkerMismatch.Error()) {
+		t.Errorf("the refusal is not the move-marker mismatch: %s", out)
+	}
+	if mgr.deleteCalls != 0 {
+		t.Errorf("DeleteTarget calls = %d on a refused rollback delete, want 0", mgr.deleteCalls)
+	}
+	for _, f := range []string{filepath.Join(hubDir, "scion-agent.json"), filepath.Join(agentDir, "scion-agent.json")} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("%s removed on a refused rollback delete: %v", f, err)
+		}
 	}
 }
 
-// Positive control: the hub-project state directory carries the move's
-// marker, so the rollback delete removes it with the agent directory.
-func TestDeleteAgent_ForcedMoveRollback_MarkedHubStateDirRemoved(t *testing.T) {
-	srv, deleted, agentDir, hubDir := newHubStateMoveFixture(t)
-	if err := os.WriteFile(filepath.Join(hubDir, agent.MoveMarkerFile), []byte(hubStateMoveID+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+// sameDirPath reports whether a and b name the same existing directory.
+func sameDirPath(t *testing.T, a, b string) bool {
+	t.Helper()
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
 	}
-
-	rec := doDelete(t, srv, "dev", hubStateMoveDeleteQuery)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("got %d, want 204: %s", rec.Code, rec.Body.String())
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
 	}
-	if len(*deleted) != 1 {
-		t.Errorf("runtime entries deleted = %v, want the agent's one", *deleted)
-	}
-	if _, err := os.Stat(hubDir); !os.IsNotExist(err) {
-		t.Errorf("the marked hub-project state dir was not removed (stat err %v)", err)
-	}
-	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
-		t.Errorf("the agent directory was not removed (stat err %v)", err)
-	}
+	return os.SameFile(ai, bi)
 }
