@@ -125,7 +125,7 @@ func writeRelinkFile(t *testing.T, path, content string) {
 }
 
 func (f *relinkFixture) relink(slug string) error {
-	return f.srv.relinkSharedProjectIdentity(context.Background(), f.root, slug, relinkNewID, relinkAgent)
+	return f.srv.relinkSharedProjectIdentity(context.Background(), f.root, slug, relinkNewID, relinkAgent, nil, false)
 }
 
 func (f *relinkFixture) markerID(t *testing.T) string {
@@ -335,7 +335,7 @@ func TestRelink_WorkspacePathAnchor(t *testing.T) {
 		if err := os.Symlink(f.root, link); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.srv.relinkSharedProjectIdentity(context.Background(), link, "", relinkNewID, relinkAgent); err != nil {
+		if err := f.srv.relinkSharedProjectIdentity(context.Background(), link, "", relinkNewID, relinkAgent, nil, false); err != nil {
 			t.Fatal(err)
 		}
 		if got := f.markerID(t); got != relinkOldID {
@@ -547,7 +547,7 @@ func TestRelink_InvalidMarkerIDMovesNothing(t *testing.T) {
 	}
 	t.Run("non-UUID hub ID", func(t *testing.T) {
 		f := newRelinkFixture(t)
-		if err := f.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", "hub.project", relinkAgent); err != nil {
+		if err := f.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", "hub.project", relinkAgent, nil, false); err != nil {
 			t.Fatal(err)
 		}
 		if got := f.markerID(t); got != relinkOldID {

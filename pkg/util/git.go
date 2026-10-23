@@ -1562,7 +1562,9 @@ var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 //
 // NOTE: Project IDs are random UUIDs (see config.GenerateProjectID).  This
 // function is NOT used for project-ID generation — it is retained for other
-// deterministic identifier needs such as cache keys.
+// deterministic identifier needs such as cache keys. LegacyGitProjectID
+// derives the same value for a normalized git remote, but pins its own copy
+// of the namespace, so it does not depend on this function.
 func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
 }
