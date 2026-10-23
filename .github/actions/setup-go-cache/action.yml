@@ -174,8 +174,13 @@ runs:
       run: |
         set -uo pipefail
         fail=0
+        # An empty value (a path that does not exist or cannot be resolved) fails even
+        # when the expected side is empty too.
         check() {
-          if [ "$2" = "$3" ]; then
+          if [ -z "$2" ]; then
+            echo "::error title=cr-ci cache parity::$1 is empty (missing or unresolvable), want '$3'"
+            fail=1
+          elif [ "$2" = "$3" ]; then
             echo "ok   $1: $2"
           else
             echo "::error title=cr-ci cache parity::$1 is '$2', want '$3'"
