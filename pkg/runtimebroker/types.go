@@ -207,10 +207,11 @@ type AgentResponse struct {
 	Labels              map[string]string `json:"labels,omitempty"`
 	CreatedAt           time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt           time.Time         `json:"updatedAt,omitempty"`
-	// Warnings carries only the hub-only env drop warnings (a broker-local
-	// TZ value ignored for a hub-dispatched agent), so the hub can relay
-	// them in its own create and start responses. Other broker-local start
-	// warnings are deliberately not included.
+	// Warnings carries only the start warnings meant for the hub
+	// (api.AgentInfo.HubRelayedWarnings: a broker-local TZ value ignored for
+	// a hub-dispatched agent, or an agent starting with no hub credential),
+	// so the hub can relay them in its own create and start responses.
+	// Other broker-local start warnings are deliberately not included.
 	Warnings []string `json:"warnings,omitempty"`
 	// RunID is the run identity the runtime entry carries (its scion.run_id
 	// label). It usually echoes the runId the hub sent, but a start that
@@ -749,8 +750,8 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Ready:                 phase == string(state.PhaseRunning),
 		WorkspacePlacement:    info.WorkspacePlacement,
 	}
-	if len(info.HubOnlyEnvWarnings) > 0 {
-		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
+	if len(info.HubRelayedWarnings) > 0 {
+		resp.Warnings = append([]string(nil), info.HubRelayedWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

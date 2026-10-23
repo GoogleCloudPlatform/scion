@@ -113,8 +113,7 @@ profiles:
   endpoint: "http://localhost:9810"
 `), 0644)
 
-	// A dev-token file on the host. A start that is not a broker dispatch
-	// bound to the co-located hub must never hand it to the agent.
+	// A dev-token file on the host. No start ever hands it to the agent.
 	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	// Capture the RunConfig
@@ -162,7 +161,7 @@ profiles:
 
 	// The host dev token is not written to the agent's token file.
 	if _, err := os.Stat(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("agent token file: stat err = %v, want not exist (no host dev token outside a co-located broker dispatch)", err)
+		t.Errorf("agent token file: stat err = %v, want not exist (the host dev token never reaches an agent)", err)
 	}
 }
 
