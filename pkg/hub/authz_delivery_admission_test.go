@@ -160,9 +160,9 @@ func hdEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateID,
 	require.NoError(t, s.CreateDelegationEdge(context.Background(), e))
 }
 
-// boundedCeiling returns a mutate func giving the edge a bounded V1
+// withBoundedCeiling returns a mutate func giving the edge a bounded V1
 // ceiling holding exactly ids.
-func boundedCeiling(ids ...string) func(e *store.DelegationEdge) {
+func withBoundedCeiling(ids ...string) func(e *store.DelegationEdge) {
 	return func(e *store.DelegationEdge) {
 		e.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: ids}
 	}
@@ -255,7 +255,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 		f := newGoldenFixture(t)
 		c := tid("hd-adm-bounded-ok")
 		hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
-		hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID, boundedCeiling(secretPerm))
+		hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID, withBoundedCeiling(secretPerm))
 		r := hdDirect(t, f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}, secretPerm)
 		assert.True(t, r.allowed, r.reason)
 	})
@@ -266,7 +266,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 		hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.projectOwnerID})
 		hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID, a})
 		hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, a, f.projectAlpha.ID, nil)
-		hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, boundedCeiling(secretPerm, "agent.read"))
+		hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, withBoundedCeiling(secretPerm, "agent.read"))
 		r := hdDirect(t, f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}, secretPerm)
 		assert.True(t, r.allowed, r.reason)
 		assert.Equal(t, 2, countDecisionSteps(r.explain, "delegation_ceiling_delivery_hop"), "explain: %+v", r.explain)
@@ -306,7 +306,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.projectOwnerID})
 			hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID, a})
 			hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, a, f.projectAlpha.ID, nil)
-			hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, boundedCeiling(secretPerm))
+			hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, withBoundedCeiling(secretPerm))
 			h := hdIdentity(t, f.authz, c)
 			authz := f.authz
 			if after != nil {
@@ -432,7 +432,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 		},
 		{
 			name:       "bounded_without_permission",
-			setup:      single("bounded-no-perm", "", boundedCeiling("agent.read", "secret.use")),
+			setup:      single("bounded-no-perm", "", withBoundedCeiling("agent.read", "secret.use")),
 			wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling", wantCause: DenyCauseCeilingEffectExceeded,
 		},
 		{
@@ -440,7 +440,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			// self-operation exception for delivery.
 			name: "no_self_operation_exception",
 			setup: func(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
-				a, h, _ := single("no-self-op", "", boundedCeiling("agent.read"))(t, f)
+				a, h, _ := single("no-self-op", "", withBoundedCeiling("agent.read"))(t, f)
 				return a, h, Resource{Type: "agent", ID: h.ID(), OwnerID: h.ID()}
 			},
 			wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling", wantCause: DenyCauseCeilingEffectExceeded,
@@ -506,7 +506,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.projectOwnerID})
 				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID, a})
 				hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, a, f.projectAlpha.ID, nil)
-				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, boundedCeiling("agent.read"))
+				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, withBoundedCeiling("agent.read"))
 				return f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}
 			},
 			wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling", wantCause: DenyCauseCeilingEffectExceeded,
@@ -932,7 +932,7 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 	rows := []row{
 		{
 			name:       "bounded_without_permission",
-			setup:      withEdge("bounded-no-perm", boundedCeiling("agent.read")),
+			setup:      withEdge("bounded-no-perm", withBoundedCeiling("agent.read")),
 			wantCause:  DenyCauseCeilingEffectExceeded,
 			wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling",
 		},
