@@ -955,8 +955,20 @@ func RunInit(args []string, opts InitRunOptions) int {
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
 		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
-			log.Error("Failed to start metadata server: %v", err)
-			// Continue — metadata failure shouldn't block harness
+			if metaCfg.StartFailureIsFatal(err) {
+				// Fail closed: the harness must not run in block or assign
+				// mode without the metadata server and, where the runtime
+				// granted it, the interception.
+				log.Error("Failed to start metadata server (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+				if svcManager != nil {
+					svcShutdownCtx, svcShutdownCancel := context.WithTimeout(context.Background(), gracePeriod)
+					_ = runServicesShutdown(svcShutdownCtx, svcManager)
+					svcShutdownCancel()
+				}
+				reportInitFailure(agentHome, fmt.Errorf("GCP metadata server could not start in %s mode: %w", metaCfg.Mode, err))
+				return 1
+			}
+			log.Warn("Metadata server not started (mode=%s, host networking); continuing: %v", metaCfg.Mode, err)
 		} else {
 			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
 		}
