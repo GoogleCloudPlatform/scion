@@ -381,10 +381,10 @@ type KubernetesConfig struct {
 // K8sToleration mirrors corev1.Toleration for use in agent configuration
 // without requiring Kubernetes API imports in config consumers.
 type K8sToleration struct {
-	Key      string `json:"key,omitempty" yaml:"key,omitempty"`
-	Operator string `json:"operator,omitempty" yaml:"operator,omitempty"` // Exists or Equal
-	Value    string `json:"value,omitempty" yaml:"value,omitempty"`
-	Effect   string `json:"effect,omitempty" yaml:"effect,omitempty"` // NoSchedule, PreferNoSchedule, NoExecute
+	Key      string `json:"key,omitempty" yaml:"key,omitempty" koanf:"key"`
+	Operator string `json:"operator,omitempty" yaml:"operator,omitempty" koanf:"operator"` // Exists or Equal
+	Value    string `json:"value,omitempty" yaml:"value,omitempty" koanf:"value"`
+	Effect   string `json:"effect,omitempty" yaml:"effect,omitempty" koanf:"effect"` // NoSchedule, PreferNoSchedule, NoExecute
 }
 
 type K8sResources struct {
@@ -592,6 +592,18 @@ type ScionConfig struct {
 	// carry it). A broker that ignores it starts the agent exactly as before
 	// the field existed.
 	ClearedFields []string `json:"cleared_fields,omitempty" yaml:"-"`
+
+	// ChangedFields lists the provision-rendered config keys (see
+	// RerenderableConfigKeys) the agent's owner changed after the agent was
+	// created. Like ClearedFields, the Hub records it on the agent's live
+	// inline config and sends it with every start; a Runtime Broker that
+	// advertises the changedFields capability re-renders the files
+	// provisioning wrote for each listed key (and for each cleared one,
+	// see RerenderConfigKeys) before the start, and never writes the list
+	// itself to disk. It is wire-only: it is ignored if a template sets it
+	// (yaml:"-", and config.MergeScionConfig does not carry it). A broker
+	// that ignores it starts the agent exactly as before the field existed.
+	ChangedFields []string `json:"changed_fields,omitempty" yaml:"-"`
 
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
@@ -1470,6 +1482,16 @@ type StartOptions struct {
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
 
+	// ResolvedPlacement is the Kubernetes placement (node selector,
+	// tolerations, runtime class) the agent runtime server resolved for this
+	// start from its settings (ptone/scion#5085), and PlacementResolved
+	// records that the server ran that resolution (ResolvedPlacement may
+	// then be nil: nothing configured, or not a Kubernetes runtime).
+	// Manager.Start applies it over the agent's own kubernetes block with
+	// config.ApplyPlacement. Never persisted: recomputed on every start.
+	ResolvedPlacement *ResolvedPlacement `json:"-"`
+	PlacementResolved bool               `json:"-"`
+
 	// HostCredentialFiles is set by a co-located workstation broker whose
 	// host-credential policy allows it (hub on loopback, dev auth,
 	// use_host_credentials on). In broker mode the agent manager then reads
@@ -1478,6 +1500,14 @@ type StartOptions struct {
 	// or target already exists. Like KubernetesBlockIdentity it is never
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
+
+	// RerenderKeys are the provision-rendered config keys
+	// (RerenderableConfigKeys) whose files this start renders again before
+	// the container starts, from the hub inline config's ChangedFields and
+	// ClearedFields (RerenderConfigKeys). A key whose rendered result is
+	// unchanged since its last render is not written again. Set by the
+	// Runtime Broker; never persisted.
+	RerenderKeys []string
 
 	// TemplateEnvSource is a local template path (hydrated by the broker on a
 	// start or restart of an agent with a Hub template) used only to compute

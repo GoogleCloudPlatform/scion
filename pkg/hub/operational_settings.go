@@ -219,6 +219,17 @@ type Layer1Snapshot struct {
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
 	EnvOverrides []string
+
+	// Revision is the operational-settings revision the snapshot's values
+	// come from (store.HubSettingsRevisionSection): a counter the store
+	// bumps in the same transaction as every operational-settings write.
+	// OperationalSettings.Snapshot sets it together with the values, under
+	// one lock. ApplySnapshot skips a DB-backed snapshot whose Revision is
+	// older than the last one applied, so a snapshot built before a newer
+	// one never overwrites it (ptone/scion#4457). 0 means no revision: a
+	// file snapshot, a store that keeps none, or a database with no
+	// operational write yet.
+	Revision int64
 }
 
 // settingsUpdatedSubject is the LISTEN/NOTIFY subject used to propagate
@@ -281,6 +292,14 @@ type OperationalSettings struct {
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
+
+	// revision is the highest operational-settings revision
+	// (store.HubSettingsRevisionSection) seen by Refresh, Update or
+	// DeleteSection; 0 until the store reports one. It only grows. It is a
+	// high-water mark, not a promise that the cache holds every write up
+	// to it (Update and DeleteSection raise it while changing one
+	// section). Guarded by mu.
+	revision int64
 
 	// writeGuard, when set, is asked before every section write or delete
 	// (Update, DeleteSection); a non-nil error refuses the write. The
@@ -369,22 +388,71 @@ func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
 	o.aboveSeedKoanf = k
 }
 
+// SettingsRevision returns the cached operational-settings revision, the
+// value Snapshot carries in Layer1Snapshot.Revision (0 when the store
+// reports none). Settings applies are ordered by it (ApplySnapshot).
+//
+// It is a cache high-water mark: the cache can lack writes at or below it
+// until the next read. So it is only an advisory hint for a client. The
+// store revision it mirrors is the shared mechanism for a revision-checked
+// save precondition, and such a precondition must compare the client's
+// revision with the stored store.HubSettingsRevisionSection revision
+// inside the write transaction (for example after locking that row), never
+// with this value.
+func (o *OperationalSettings) SettingsRevision() int64 {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.revision
+}
+
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
+//
+// The rows and the operational-settings revision come from one read
+// (ListHubSettings returns the store.HubSettingsRevisionSection row with
+// the sections), so the read holds every operational write up to its
+// revision. A read whose revision is below the cached revision is
+// discarded and nothing is reported changed (ptone/scion#4457). The cached
+// revision is a high-water mark, not a promise that the cache holds every
+// write up to it: Update and DeleteSection raise it while caching one
+// section. Discarding is still safe because a later read at or above the
+// cached revision is guaranteed: every write that raised it publishes its
+// own settings event, whose refresh reads the store after that write
+// committed (and the poll backstop reads it again).
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	changed, _, _, err := o.refresh(ctx)
+	return changed, err
+}
+
+// refresh is Refresh, also returning the revision of the read and whether
+// the read was taken into the cache (false when it was discarded as older
+// than the cached revision).
+func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, readRevision int64, accepted bool, err error) {
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("operational settings refresh: %w", err)
+		return nil, 0, false, fmt.Errorf("operational settings refresh: %w", err)
+	}
+
+	for _, row := range rows {
+		if row.Section == store.HubSettingsRevisionSection {
+			readRevision = row.Revision
+		}
 	}
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	var changed []string
+	if readRevision < o.revision {
+		slog.Debug("operational settings refresh: discarding a read below the cached revision",
+			"read_revision", readRevision, "cached_revision", o.revision)
+		return nil, readRevision, false, nil
+	}
+	o.revision = readRevision
+
 	seen := make(map[string]bool, len(rows))
 
 	for _, row := range rows {
-		if row.Section == "_meta" {
+		if row.Section == "_meta" || row.Section == store.HubSettingsRevisionSection {
 			continue
 		}
 		seen[row.Section] = true
@@ -434,7 +502,7 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	return changed, nil
+	return changed, readRevision, true, nil
 }
 
 // experimentsOverridesFor returns the parsed "experiments" section overrides
@@ -475,6 +543,7 @@ func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool
 // are honored as seed input during the deprecation window.
 func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	o.mu.RLock()
+	revision := o.revision
 	dbSections := make(map[string]json.RawMessage, len(o.cache))
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
@@ -527,6 +596,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 
 	snap := buildSnapshotFromKoanf(merged)
 	snap.FromOperationalSettings = true
+	snap.Revision = revision
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -660,16 +730,32 @@ func (o *OperationalSettings) Update(
 	}
 	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
-	o.cache[section] = sectionState{
-		Value:                result.Value,
-		Revision:             result.Revision,
-		UpdatedAt:            result.UpdatedAt,
-		UpdatedBy:            result.UpdatedBy,
-		Origin:               result.Origin,
-		Malformed:            malformed,
-		ExperimentsOverrides: experimentsOverrides,
+	// A cached revision above this write's was raised by a newer local
+	// write or a newer read, after this write committed. The cache may
+	// still lack this write (an Update of another section raises the
+	// revision but caches only its own section), and writing this row
+	// could replace a newer value of the same section. So the cache is
+	// not written here; instead the store is read again below, before the
+	// self-apply (ptone/scion#4457).
+	reread := result.SettingsRevision > 0 && result.SettingsRevision < o.revision
+	if !reread {
+		o.cache[section] = sectionState{
+			Value:                result.Value,
+			Revision:             result.Revision,
+			UpdatedAt:            result.UpdatedAt,
+			UpdatedBy:            result.UpdatedBy,
+			Origin:               result.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
+		}
+		if result.SettingsRevision > o.revision {
+			o.revision = result.SettingsRevision
+		}
 	}
 	o.mu.Unlock()
+	if reread {
+		o.refreshThrough(ctx, result.SettingsRevision, section)
+	}
 
 	// Publish admin.settings.updated event to propagate the change to other
 	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
@@ -702,13 +788,37 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	if err := o.checkWriteGuard(ctx, section); err != nil {
 		return err
 	}
-	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
+	// The delete's own revision comes from the optional
+	// store.HubSettingRevisionDeleter, so DeleteHubSetting keeps its
+	// signature for its many callers. A store without it gives revision 0.
+	var deleteRevision int64
+	if rd, ok := o.store.(store.HubSettingRevisionDeleter); ok {
+		rev, err := rd.DeleteHubSettingRevision(ctx, section)
+		if err != nil {
+			return err
+		}
+		deleteRevision = rev
+	} else if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
 
 	o.mu.Lock()
-	delete(o.cache, section)
+	// As in Update: with the cached revision above the delete's, the cache
+	// is not changed here and the store is read again before the
+	// self-apply. Revision 0 (a store or section without a revision) never
+	// skips the cache delete, and also re-reads, since nothing orders it
+	// against the cache (ptone/scion#4457).
+	reread := deleteRevision == 0 || deleteRevision < o.revision
+	if deleteRevision == 0 || deleteRevision >= o.revision {
+		delete(o.cache, section)
+		if deleteRevision > o.revision {
+			o.revision = deleteRevision
+		}
+	}
 	o.mu.Unlock()
+	if reread {
+		o.refreshThrough(ctx, deleteRevision, section)
+	}
 
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
@@ -724,6 +834,35 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	}
 
 	return nil
+}
+
+// refreshThroughAttempts bounds refreshThrough's reads.
+const refreshThroughAttempts = 3
+
+// refreshThrough re-reads the store until a read at or above writeRevision
+// is taken into the cache, so the cache holds the write that got
+// writeRevision before the writer's self-apply. Update and DeleteSection
+// call it, outside o.mu, when the cached revision is above their write's.
+// Any accepted read qualifies: it is at or above the cached revision,
+// which was above writeRevision, and a read at revision N holds every
+// operational write up to N. A read is discarded only when another write
+// raised the cached revision meanwhile, so the next read is newer; after
+// refreshThroughAttempts reads (or on a read error) it logs and returns,
+// and the writer's own settings event refreshes again.
+func (o *OperationalSettings) refreshThrough(ctx context.Context, writeRevision int64, section string) {
+	for attempt := 1; attempt <= refreshThroughAttempts; attempt++ {
+		_, read, accepted, err := o.refresh(ctx)
+		if err != nil {
+			slog.Warn("operational settings: re-read after a write failed; the settings event will refresh",
+				"section", section, "write_revision", writeRevision, "error", err)
+			return
+		}
+		if accepted && read >= writeRevision {
+			return
+		}
+	}
+	slog.Warn("operational settings: re-read after a write kept losing to newer writes; the settings event will refresh",
+		"section", section, "write_revision", writeRevision, "attempts", refreshThroughAttempts)
 }
 
 // EnvOverriddenKeys returns the list of Layer-1 koanf keys that are overridden
@@ -1193,14 +1332,67 @@ func (s *Server) startupHubNameOrDefault() string {
 	return config.ResolveHubNameOrDefault(s.startupHubName)
 }
 
+// settingsApplyState is the apply lock and the operational-settings
+// revision last applied (Server.settingsApply).
+//
+// Lock order: settings-file lock (a workstation save applies while holding
+// it), then mu, then s.mu and the other locks ApplySnapshot takes inside
+// (the notification registry, OperationalSettings.mu). mu is never taken
+// while holding s.mu, OperationalSettings.mu or a DB transaction: callers
+// build the snapshot first, then apply. Nothing under mu takes the
+// settings-file lock.
+type settingsApplyState struct {
+	mu sync.Mutex
+	// lastRevision is the highest Layer1Snapshot.Revision applied.
+	// Guarded by mu.
+	lastRevision int64
+}
+
+// staleLocked reports whether snap is older than the last snapshot
+// applied and must be skipped. Only DB-backed snapshots are ordered. A
+// DB-backed snapshot with Revision 0 was built before the store had a
+// revision (startup before the first operational write, or a read that
+// predates it); once a revision has been applied it is older, so it is
+// skipped as well. A file snapshot (FromOperationalSettings false) has no
+// revision and is always applied: it occurs only on a hub without
+// OperationalSettings, where no DB-backed snapshot is ever applied and
+// lastRevision stays 0. An equal revision is applied again, so the
+// double apply of a write (self-apply and the propagation event) stays
+// harmless. Caller holds mu.
+func (a *settingsApplyState) staleLocked(snap Layer1Snapshot) bool {
+	return snap.FromOperationalSettings && snap.Revision < a.lastRevision
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
 // under s.mu exactly as today.
 //
+// Applies are ordered by the snapshot revision (ptone/scion#4457): the
+// whole apply runs under the apply lock (Server.settingsApply), and a
+// DB-backed snapshot older than the last one applied is skipped, with
+// nothing applied. Callers that build a snapshot before any lock (the
+// self-apply after a save, the propagation event, the poll) are covered:
+// whichever of two concurrent applies runs second, the newer values stay.
+//
 // It returns the list of applied field names and the list of fields that
 // require a restart (for parity with the old reloadSettings return value).
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
+	s.settingsApply.mu.Lock()
+	defer s.settingsApply.mu.Unlock()
+	if s.settingsApply.staleLocked(snap) {
+		slog.Info("Settings apply skipped: snapshot older than the last applied",
+			"revision", snap.Revision, "last_applied_revision", s.settingsApply.lastRevision)
+		return map[string]interface{}{
+			"applied":          []string{},
+			"requires_restart": []string{},
+			"skipped_stale":    true,
+		}
+	}
+	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
+		s.settingsApply.lastRevision = snap.Revision
+	}
+
 	applied := []string{}
 
 	// GCP service-account permission check: decided before s.mu is taken
@@ -1671,6 +1863,17 @@ func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
 	}
+	// Ordered like ApplySnapshot, under the same apply lock: a snapshot
+	// older than the last one applied leaves the maintenance state alone
+	// (ptone/scion#4457).
+	s.settingsApply.mu.Lock()
+	defer s.settingsApply.mu.Unlock()
+	if s.settingsApply.staleLocked(snap) {
+		return
+	}
+	if snap.FromOperationalSettings && snap.Revision > s.settingsApply.lastRevision {
+		s.settingsApply.lastRevision = snap.Revision
+	}
 
 	if s.maintenanceBreakGlass() {
 		_, msg := s.maintenance.State()
@@ -1841,6 +2044,27 @@ func (o *OperationalSettings) ReadinessMarks() bool {
 		return false
 	}
 	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
+}
+
+// AgentDelegationPolicy returns the narrowing of the hub agent-delegation
+// policy (the "agent_delegation_policy" section). An absent section narrows
+// nothing. A stored document that is unreadable or that the code cannot
+// fully parse returns an error: callers deny rather than treat it as "no
+// narrowing" (.design/agent-delegation.md §11.2 step 9).
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AgentDelegationPolicy() (opsettings.AgentDelegationPolicySettings, error) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.AgentDelegationPolicySectionName]
+	if !ok {
+		return opsettings.AgentDelegationPolicySettings{}, nil
+	}
+	if state.Malformed {
+		return opsettings.AgentDelegationPolicySettings{}, fmt.Errorf("agent_delegation_policy settings: unreadable document")
+	}
+	return opsettings.ParseAgentDelegationPolicyDoc(state.Value)
 }
 
 // Artifacts returns the resolved artifact service settings (the
@@ -2033,4 +2257,56 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 // workstation server-config save.
 func applySnapshotLogLevel(level string) {
 	logging.ApplyLogLevelSetting("server.log_level", level)
+}
+
+// DefaultAttachmentDeliveryMaxBytes is the compiled default of
+// messaging.attachment_delivery_max_bytes (ptone/scion#4596): 32 MiB.
+const DefaultAttachmentDeliveryMaxBytes int64 = 32 << 20
+
+// DefaultAttachmentInboxRetentionDays is the compiled default of
+// messaging.attachment_inbox_retention_days (ptone/scion#4596).
+const DefaultAttachmentInboxRetentionDays = 7
+
+// messagingSection returns the cached messaging section, and false when it
+// is absent or unreadable.
+func (o *OperationalSettings) messagingSection() (opsettings.MessagingSettings, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	var ms opsettings.MessagingSettings
+	state, ok := o.cache["messaging"]
+	if !ok || state.Malformed {
+		return ms, false
+	}
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return opsettings.MessagingSettings{}, false
+	}
+	return ms, true
+}
+
+// AttachmentDeliveryMaxBytes returns the per-message total size limit of
+// attachments for a message with an agent recipient (ptone/scion#4596).
+// 0 means delivery is off. The compiled default applies when the section
+// or field is absent or unreadable, or the value is negative.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AttachmentDeliveryMaxBytes() int64 {
+	ms, ok := o.messagingSection()
+	if !ok || ms.AttachmentDeliveryMaxBytes == nil || *ms.AttachmentDeliveryMaxBytes < 0 {
+		return DefaultAttachmentDeliveryMaxBytes
+	}
+	return *ms.AttachmentDeliveryMaxBytes
+}
+
+// AttachmentInboxRetentionDays returns how many days a broker keeps
+// delivered attachments in an agent's inbox (ptone/scion#4596). The
+// compiled default applies when the section or field is absent or
+// unreadable, or the value is below 1.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AttachmentInboxRetentionDays() int {
+	ms, ok := o.messagingSection()
+	if !ok || ms.AttachmentInboxRetentionDays == nil || *ms.AttachmentInboxRetentionDays < 1 {
+		return DefaultAttachmentInboxRetentionDays
+	}
+	return *ms.AttachmentInboxRetentionDays
 }

@@ -159,6 +159,7 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.cloud.protocol":                 `{"cloud":{"protocol":"http"}}`,
 	"telemetry.cloud.headers":                  `{"cloud":{"headers":{"x-probe":"v"}}}`,
 	"telemetry.cloud.provider":                 `{"cloud":{"provider":"gcp"}}`,
+	"telemetry.cloud.gcp_project_id":           `{"cloud":{"gcp_project_id":"probe-project"}}`,
 	"telemetry.cloud.tls":                      `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.enabled":              `{"cloud":{"tls":{"enabled":true}}}`,
 	"telemetry.cloud.tls.insecure_skip_verify": `{"cloud":{"tls":{"insecure_skip_verify":true}}}`,
@@ -302,6 +303,11 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(_ *Server, o *OperationalSettings) any { return o.Artifacts() }},
 		"profiling": {section: "profiling", doc: `{"readiness_marks":true}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ReadinessMarks() }},
+		"agent_delegation_policy": {section: "agent_delegation_policy", doc: `{"remove":{"hub":["agent.read"]}}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				p, err := o.AgentDelegationPolicy()
+				return []any{p.Removes("hub", "agent.read"), err == nil}
+			}},
 	}
 	for path, doc := range telemetryProbeDocs {
 		p[path] = layer1LiveProbe{section: "telemetry", doc: doc, observe: observeTelemetry}

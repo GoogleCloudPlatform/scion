@@ -250,6 +250,7 @@ func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`{"harness":"gemini","max_turns":3}`), 0644); err != nil {
 		t.Fatalf("failed to write scion-agent.json: %v", err)
 	}
+	writeProvisionedProfile(t, projectDir, agentName, "")
 
 	body := fmt.Sprintf(`{
 		"projectPath": %q,
@@ -294,7 +295,7 @@ func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 // TestStartAgent_RejectsTraversalName is the regression anchor for
 // startAgent's containment check: id must be a single, clean path element
 // that resolves under the project's agents root before any of
-// applyInlineConfigUpdate, GetSavedProfile, GetSavedPhase, or mgr.Start runs,
+// applyInlineConfigUpdate, ProvisionedProfile, GetSavedPhase, or mgr.Start runs,
 // checked independently of whatever the request routing already filtered.
 func TestStartAgent_RejectsTraversalName(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
