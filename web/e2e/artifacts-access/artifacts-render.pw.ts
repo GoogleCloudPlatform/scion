@@ -2932,6 +2932,12 @@ async function setUpChatHtml(): Promise<void> {
     r2b.homeName = homeBody.name || homeBody.slug || '';
     r2b.homeSlug = homeBody.slug || '';
     fx.homeRead = home.status;
+    // The canonical chat route names the project by its slug: without it the
+    // thread identity check could not be made, so the R2b rows are not run.
+    if (!r2b.homeSlug) {
+      r2b.fixtureRefused = `the member's home project read gave no slug (${home.status})`;
+      return;
+    }
     const thread = await j.api('owner', 'POST', `/api/v1/chat/spaces/${projectId}/threads`, {
       name: `R2b chat ${suffix()}`,
     });
@@ -3055,7 +3061,7 @@ function canonicalThreadOf(url: string): { slug: string; topicId: string } | nul
 /** True when url names the R2b thread on its canonical route. */
 function isR2bThread(url: string): boolean {
   const t = canonicalThreadOf(url);
-  return !!t && t.topicId === r2b.topicId && (r2b.homeSlug === '' || t.slug === r2b.homeSlug);
+  return !!t && r2b.homeSlug !== '' && t.topicId === r2b.topicId && t.slug === r2b.homeSlug;
 }
 
 /**
