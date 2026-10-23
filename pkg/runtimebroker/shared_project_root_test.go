@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -340,5 +341,30 @@ func TestSharedProjectsWithLocalAgents(t *testing.T) {
 	got := f.srv.sharedProjectsWithLocalAgents()
 	if len(got) != 1 || got[0] != f.scionDir {
 		t.Fatalf("sharedProjectsWithLocalAgents = %v, want [%s]", got, f.scionDir)
+	}
+}
+
+// On a shared Layout a warn-only (Kubernetes, Cloud Run) dispatch whose share
+// is not mounted on the broker is refused (fs-cleanup-arch ruling Q6); on a
+// local Layout it is still only warned about.
+func TestCheckNFSForDispatch_WarnOnlyRefusedOnSharedLayout(t *testing.T) {
+	for _, shared := range []bool{true, false} {
+		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
+			srv, _ := newGateServer(t, nfsCfg(true), "docker", "kubernetes")
+			if shared {
+				srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/ws1", SubPathRoot: "projects"}
+			}
+			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+			err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
+			if shared {
+				if err == nil || !strings.Contains(err.Error(), "project storage share is not mounted on this broker (/mnt/nfs/ws1;") {
+					t.Fatalf("checkNFSForDispatch = %v, want the not-mounted refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("checkNFSForDispatch on a local Layout = %v, want nil (warn only)", err)
+			}
+		})
 	}
 }
