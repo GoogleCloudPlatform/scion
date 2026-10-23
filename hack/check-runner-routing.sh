@@ -15,10 +15,14 @@
 #     triggered by pull_request_target;
 #   - a routed job has no timeout-minutes, or one outside 1-35 (the runner's
 #     task timeout is 45 min, minus its 10 min idle timeout). A job whose
-#     hosted runs need longer may use ${{ vars.SCION_LARGE_RUNNER && N || M }}:
-#     N (the cr-ci value) must be 1-35;
+#     hosted runs need longer may use the guarded form
+#       ${{ <the runs-on guard> && vars.SCION_LARGE_RUNNER && N || M }}
+#     (the same guard as the runs-on, so fork pull requests and the other
+#     unrouted events keep M on ubuntu-latest): N (the cr-ci value) must be
+#     1-35. No other job line may read vars.SCION_LARGE_RUNNER;
 #   - any job's runs-on names a self-hosted runner literally (self-hosted or a
-#     scion-cr-* label) instead of through the canonical expression.
+#     scion-cr-* label, inline or as a block list) instead of through the
+#     canonical expression.
 #
 # Usage: hack/check-runner-routing.sh [WORKFLOW_DIR]   (default .github/workflows)
 #        hack/check-runner-routing.sh --selftest       (runs the fixtures in
@@ -37,6 +41,28 @@ check_file() {
     prt=1
   fi
   awk -v file="$f" -v canon="$CANONICAL" -v maxt="$MAX_TIMEOUT" -v prt="$prt" '
+    BEGIN {
+      # The guard is the canonical runs-on between "runs-on: ${{ " and
+      # " && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}"; the timeout form
+      # reuses it byte for byte.
+      head = "runs-on: ${{ "
+      tail = " && vars.SCION_LARGE_RUNNER || \047ubuntu-latest\047 }}"
+      guard = substr(canon, length(head) + 1, length(canon) - length(head) - length(tail))
+      tprefix = "${{ " guard " && vars.SCION_LARGE_RUNNER && "
+      tform_doc = "${{ <the runs-on guard> && vars.SCION_LARGE_RUNNER && N || M }}"
+    }
+    # tform VALUE: N if VALUE is the guarded timeout form, "" otherwise.
+    function tform(v,   r) {
+      if (index(v, tprefix) != 1) return ""
+      r = substr(v, length(tprefix) + 1)
+      if (r !~ /^[0-9]+ \|\| [0-9]+ \}\}$/) return ""
+      sub(/ \|\|.*$/, "", r)
+      return r
+    }
+    function tvalue(line,   t) {
+      t = line; sub(/^    timeout-minutes:[[:space:]]*/, "", t); sub(/[[:space:]]+(#.*)?$/, "", t)
+      return t
+    }
     function flush() {
       if (job == "" || !routed) return
       if (svc != "") printf "%s: job %s is routed to the cr-ci runner but has %s (no Docker on Cloud Run); keep it on ubuntu-latest\n", file, job, svc
@@ -61,11 +87,13 @@ check_file() {
     /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
       flush()
       job = $0; sub(/^  /, "", job); sub(/:.*/, "", job)
-      routed = 0; svc = ""; dock = 0; wperm = 0; hasperm = 0; tmo = ""; inperm = 0
+      routed = 0; svc = ""; dock = 0; wperm = 0; hasperm = 0; tmo = ""; inperm = 0; inrunson = 0
       next
     }
     /^[[:space:]]*#/ { next }
-    /^    runs-on:/ && !/vars\.SCION_LARGE_RUNNER/ && /self-hosted|scion-cr-/ {
+    /^    [A-Za-z_-]+:/ { inrunson = 0 }
+    /^    runs-on:[[:space:]]*$/ { inrunson = 1; next }
+    (/^    runs-on:/ && !/vars\.SCION_LARGE_RUNNER/ || inrunson && /^      /) && /self-hosted|scion-cr-/ {
       printf "%s:%d: job %s names a self-hosted runner literally; route it only through the canonical expression:\n    %s\n", file, NR, job, canon
     }
     /uses:[[:space:]]*["\047]?docker:\/\// { dock = 1 }
@@ -74,19 +102,17 @@ check_file() {
       if (line == "    " canon) routed = 1
       else printf "%s:%d: job %s: a runs-on that reads vars.SCION_LARGE_RUNNER must be exactly:\n    %s\n  got:\n%s\n", file, NR, job, canon, line
     }
-    /vars\.SCION_LARGE_RUNNER/ && !/^    runs-on:/ && !/^    timeout-minutes: \$\{\{ vars\.SCION_LARGE_RUNNER && [0-9]+ \|\| [0-9]+ \}\}[[:space:]]*$/ {
-      printf "%s:%d: job %s reads vars.SCION_LARGE_RUNNER outside runs-on and the timeout-minutes form; only the canonical runs-on and ${{ vars.SCION_LARGE_RUNNER && N || M }} may use it\n", file, NR, job
+    /vars\.SCION_LARGE_RUNNER/ && !/^    runs-on:/ && !(/^    timeout-minutes:/ && tform(tvalue($0)) != "") {
+      printf "%s:%d: job %s reads vars.SCION_LARGE_RUNNER outside runs-on and the guarded timeout-minutes form; only the canonical runs-on and %s may use it\n", file, NR, job, tform_doc
     }
     /^    [A-Za-z_-]+:/ { inperm = 0 }
     /^    (services|container):/ { k = $0; sub(/^    /, "", k); sub(/:.*/, "", k); svc = (svc == "" ? k ":" : svc " and " k ":") }
     /^    timeout-minutes:/ {
-      t = $0; sub(/^    timeout-minutes:[[:space:]]*/, "", t); sub(/[[:space:]]+(#.*)?$/, "", t)
-      # A job routed only where the variable is set may keep a longer hosted
-      # timeout: ${{ vars.SCION_LARGE_RUNNER && N || M }}; N is what counts.
-      if (t ~ /^\$\{\{ vars\.SCION_LARGE_RUNNER && [0-9]+ \|\| [0-9]+ \}\}$/) {
-        sub(/^\$\{\{ vars\.SCION_LARGE_RUNNER && /, "", t); sub(/ \|\|.*$/, "", t)
-      }
-      tmo = t
+      # The guarded form keeps a longer hosted timeout (M); N is what the cr-ci
+      # runner gets, and what counts here.
+      t = tvalue($0)
+      n = tform(t)
+      tmo = (n != "" ? n : t)
     }
     /^    permissions:/ {
       hasperm = 1

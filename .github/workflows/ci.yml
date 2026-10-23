@@ -163,7 +163,6 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
-
   # Runner routing (hack/check-runner-routing.sh). A fork can route jobs to its
   # cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable, which is
   # unset here, so every job runs on ubuntu-latest. This keeps every routed
