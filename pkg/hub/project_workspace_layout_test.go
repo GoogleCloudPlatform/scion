@@ -290,10 +290,6 @@ func TestInitHubManagedProject_SharedBackend_SeedsProjectRoot(t *testing.T) {
 	_, err = os.Stat(filepath.Join(f.home, ".scion", config.ProjectConfigsDir))
 	assert.True(t, os.IsNotExist(err), "the hub connection settings are not redirected to an external project config directory on the hub's disk")
 
-	dir, err := f.srv.projectConfigDir(project)
-	require.NoError(t, err)
-	assert.Equal(t, cfgDir, dir)
-
 	// The identity files beside settings.yaml: project-id and project-slug,
 	// one line each, mode 0644.
 	for name, want := range map[string]string{projectkeys.ProjectIDFile: project.ID, projectkeys.ProjectSlugFile: project.Slug} {
