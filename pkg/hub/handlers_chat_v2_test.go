@@ -2972,9 +2972,12 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 
 // TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault: promoting a DM
 // stores the agent slug as the thread's default agent, the form group
-// create stores (setGroupDefaultAgent), and the agent ID as the owner value.
+// create stores (setGroupDefaultAgent). The agent ID as the owner value
+// (conversations.default_agent_id) is checked by
+// TestPromoteDM_Handler_SetsConversationDefaultAgentID; the topic's
+// DefaultAgentID field is write-only and GetTopic does not read it back.
 func TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault(t *testing.T) {
-	_, agentID, wcs, promResp := promoteDMThroughHandler(t)
+	_, _, wcs, promResp := promoteDMThroughHandler(t)
 
 	topic, err := wcs.GetTopic(context.Background(), promResp.ID)
 	if err != nil {
@@ -2985,9 +2988,6 @@ func TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault(t *testing.T) {
 	}
 	if topic.DefaultAgent != "promote-da-bot" {
 		t.Errorf("topic default_agent = %q, want the agent slug %q", topic.DefaultAgent, "promote-da-bot")
-	}
-	if topic.DefaultAgentID != agentID {
-		t.Errorf("topic default_agent_id = %q, want %q", topic.DefaultAgentID, agentID)
 	}
 	if promResp.DefaultAgent != "promote-da-bot" {
 		t.Errorf("response defaultAgent = %q, want %q", promResp.DefaultAgent, "promote-da-bot")
