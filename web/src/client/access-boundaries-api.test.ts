@@ -21,7 +21,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const retainedPage = {
+const retainedPage: AccessBoundaryAuditPage = {
   items: [
     {
       id: 'event-2',

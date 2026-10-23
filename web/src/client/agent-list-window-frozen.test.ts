@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Agent } from '../shared/types.js';
+import type { Agent, AgentPhase } from '../shared/types.js';
 import { AgentListWindow } from './agent-list-window.js';
 import type { AgentListViewState, PagedPageParams, PagedPageResult } from './agent-list-window.js';
 
@@ -65,7 +65,7 @@ class FakeServer {
   private sorted(phase: string): Agent[] {
     return [...this.agents]
       .filter((a) => !phase || a.phase === phase)
-      .sort((a, b) => b.updated.localeCompare(a.updated) || b.id.localeCompare(a.id));
+      .sort((a, b) => b.updated!.localeCompare(a.updated!) || b.id.localeCompare(a.id));
   }
   page(params: PagedPageParams, phase = ''): PagedPageResult {
     this.requests.push(params);
@@ -191,7 +191,10 @@ describe('AgentListWindow — frozen walk order', () => {
   });
 
   it('applies the phase filter to the frozen order', async () => {
-    const agents = ten().map((a, i) => ({ ...a, phase: i % 2 === 0 ? 'running' : 'stopped' }));
+    const agents = ten().map((a, i) => ({
+      ...a,
+      phase: (i % 2 === 0 ? 'running' : 'stopped') as AgentPhase,
+    }));
     const server = new FakeServer(agents);
     const win = setup(server, { phaseFilter: 'running' });
     win.setPaged(
@@ -303,7 +306,7 @@ describe('AgentListWindow — frozen walk order', () => {
       server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running'),
       ''
     );
-    const setPhase = (id: string, phase: string) => {
+    const setPhase = (id: string, phase: AgentPhase) => {
       server.agents = server.agents.map((a) => (a.id === id ? { ...a, phase } : a));
     };
     setPhase('a4', 'stopped');

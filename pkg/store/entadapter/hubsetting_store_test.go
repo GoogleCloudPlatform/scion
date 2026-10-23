@@ -194,12 +194,25 @@ func TestListHubSettings(t *testing.T) {
 
 	list, err = s.ListHubSettings(ctx)
 	require.NoError(t, err)
-	assert.Len(t, list, 3)
+	assert.Len(t, list, 4)
 
-	// Should be ordered by section name.
-	assert.Equal(t, "access", list[0].Section)
-	assert.Equal(t, "maintenance", list[1].Section)
-	assert.Equal(t, "telemetry", list[2].Section)
+	// The operational-settings revision row comes with the sections (three
+	// operational writes so far). It is found by name: its position depends
+	// on the database collation (Postgres ignores the leading underscore,
+	// SQLite sorts bytes).
+	var sections []string
+	revisionRows := 0
+	for _, row := range list {
+		if row.Section == store.HubSettingsRevisionSection {
+			revisionRows++
+			assert.Equal(t, int64(3), row.Revision)
+			continue
+		}
+		sections = append(sections, row.Section)
+	}
+	assert.Equal(t, 1, revisionRows)
+	// The sections are ordered by section name.
+	assert.Equal(t, []string{"access", "maintenance", "telemetry"}, sections)
 }
 
 // =============================================================================

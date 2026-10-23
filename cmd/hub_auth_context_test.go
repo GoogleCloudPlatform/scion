@@ -93,14 +93,14 @@ func TestRecordLoginHub_HubURLAddedNotSaved(t *testing.T) {
 	require.Equal(t, "https://other.example.com", hubURL)
 
 	out, _ := loginRecord(t, hubURL)
-	assert.Contains(t, out, "To make it the current hub, run 'scion use --hub other'.\n")
+	assert.Contains(t, out, "To make hub 'other' the current hub, run 'scion use --hub other'.\n")
 	assert.Equal(t, "Registered hub 'other' (https://other.example.com); rename with 'scion hub rename'.\n"+
-		"To make it the current hub, run 'scion use --hub other'.\n", out)
+		"To make hub 'other' the current hub, run 'scion use --hub other'.\n", out)
 	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
 	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
 	c := readTestContext(t)
 	assert.NotNil(t, c.Hubs["other"])
-	assert.Equal(t, "prod", c.CurrentHub, "a login never makes a hub current")
+	assert.Equal(t, "prod", c.CurrentHub, "a login does not switch the current hub")
 }
 
 // TestRecordLoginHub_FlagHubs: --hub with a nickname of a hub that is not
@@ -115,7 +115,7 @@ func TestRecordLoginHub_FlagHubs(t *testing.T) {
 		hubEndpoint = "staging"
 		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 		out, _ := loginRecord(t, hubEndpoint)
-		assert.Equal(t, "To make it the current hub, run 'scion use --hub staging'.\n", out)
+		assert.Equal(t, "To make hub 'staging' the current hub, run 'scion use --hub staging'.\n", out)
 	})
 	t.Run("the current hub by URL", func(t *testing.T) {
 		setupLoginContextTest(t)

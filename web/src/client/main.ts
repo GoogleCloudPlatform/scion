@@ -29,6 +29,7 @@ import { stateManager } from './state.js';
 import { setDocumentTitle } from './page-title.js';
 import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
+import { legacyAgentRedirect } from './agent-routes.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -50,6 +51,7 @@ import { showToast } from '../utils/toast.js';
 import { FLAT_BROKERS_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
 import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
+import { apiFetch } from './api.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
 import {
@@ -62,7 +64,13 @@ import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/aut
 import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
-import { browserPath, stripBasePath } from './navigation.js';
+import {
+  browserPath,
+  mayLeave,
+  noteShownEntry,
+  stripBasePath,
+  vetoPopState,
+} from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { installViewportFrame } from './viewport.js';
@@ -234,6 +242,7 @@ async function runTerminalMove(): Promise<void> {
     const current = stripBasePath(window.location.pathname);
     if (!window.location.search && (current === '/terminals' || terminalAgentRoute.test(current))) {
       window.history.replaceState(window.history.state, '', browserPath(path));
+      noteShownEntry();
       workspace.setCurrentPath(path);
       terminalRouteAgentId = result.agentId;
     }
@@ -358,6 +367,7 @@ async function ensureTerminalCoordinator(thisNav: number): Promise<TerminalCoord
       // after the user has already navigated elsewhere.
       if (window.location.pathname !== browserPath('/terminals') || window.location.search) return;
       window.history.replaceState(window.history.state, '', browserPath(`/terminals/${agentId}`));
+      noteShownEntry();
       terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
     },
   });
@@ -389,7 +399,7 @@ async function ensureTerminalCoordinator(thisNav: number): Promise<TerminalCoord
  */
 async function fetchCurrentUser(): Promise<User | null> {
   try {
-    const res = await fetch('/auth/me', { credentials: 'include' });
+    const res = await apiFetch('/auth/me', { authErrors: 'caller' });
     if (!res.ok) return null;
     const data = (await res.json()) as AuthMeResponse;
     return {
@@ -438,7 +448,7 @@ async function fetchCurrentUser(): Promise<User | null> {
  */
 async function loadPreferredTimeZone(): Promise<void> {
   try {
-    const res = await fetch('/auth/me', { credentials: 'include' });
+    const res = await apiFetch('/auth/me', { authErrors: 'caller' });
     if (!res.ok) return;
     const data = (await res.json()) as AuthMeResponse;
     setPreferredTimeZone(data.preferences?.timezone);
@@ -775,12 +785,7 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-graph.js'),
   },
   {
-    pattern: /^\/agents\/[^/]+\/configure$/,
-    tag: 'scion-page-agent-configure',
-    load: () => import('../components/pages/agent-configure.js'),
-  },
-  {
-    // Edit agent page (experiment web.agent_edit; the page renders 404 when off).
+    // Edit agent page (the by-tier view inside it is behind web.agent_edit).
     pattern: /^\/agents\/[^/]+\/edit$/,
     tag: 'scion-page-agent-edit',
     load: () => import('../components/pages/agent-edit.js'),
@@ -907,12 +912,13 @@ async function redirectIfOnboardingIncomplete(): Promise<void> {
   const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
   if (skipRedirectPaths.includes(stripBasePath(window.location.pathname))) return;
   try {
-    const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
+    const statusRes = await apiFetch('/api/v1/system/status', { authErrors: 'caller' });
     if (statusRes.ok) {
       const status = (await statusRes.json()) as { complete?: boolean };
       if (!status.complete) {
         sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
         window.history.replaceState({}, '', browserPath('/onboarding'));
+        noteShownEntry();
       }
     }
   } catch {
@@ -956,7 +962,9 @@ async function init(): Promise<void> {
   // Start the feature-flag and onboarding-status fetches now so they overlap
   // the auth and component work below; both are awaited, together with the
   // timezone refresh, before the first render.
-  const featureFlagsReady = applyServerFeatureFlags();
+  // The hub embeds the experiment map in a signed-in shell's payload; with
+  // it, no experiments request is sent (ptone/scion#2489).
+  const featureFlagsReady = applyServerFeatureFlags(initialData?.experiments);
   const onboardingChecked = redirectIfOnboardingIncomplete();
 
   // Fetch current user from session if not provided by SSR
@@ -1049,6 +1057,7 @@ async function init(): Promise<void> {
 
   // Setup client-side router for navigation
   setupRouter();
+  noteShownEntry();
   // Include query string on initial render so terminal layout state
   // from a shared/bookmarked URL can be restored on page load (#1715).
   const initialSearch = window.location.search;
@@ -1171,7 +1180,7 @@ function preloadInitialRoute(pathname: string): void {
   ) {
     return;
   }
-  const route = resolveRoute(pathname);
+  const route = resolveRoute(legacyAgentRedirect(pathname) ?? pathname);
   startRouteLoads(route, getShellType(route.tag)).catch(() => undefined);
 }
 
@@ -1205,6 +1214,14 @@ async function renderRoute(path: string): Promise<void> {
     pathname = `/terminals/${legacyAgent}`;
     path = pathname;
     window.history.replaceState({}, '', browserPath(path));
+    noteShownEntry();
+  }
+  const redirected = legacyAgentRedirect(pathname);
+  if (redirected) {
+    pathname = redirected;
+    path = redirected;
+    window.history.replaceState({}, '', browserPath(path));
+    noteShownEntry();
   }
   if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
     if (!currentUser?.id) {
@@ -1571,10 +1588,33 @@ function setupRouter(): void {
       // left this page for a moment ago), as any navigation does: it must
       // not replace the page this entry belongs to once it finishes.
       ++navigationId;
+      noteShownEntry();
       return;
     }
+    // A page with unsaved changes may veto being removed; nothing is rendered.
+    if (leavesPage(appPath) && vetoPopState()) return;
+    noteShownEntry();
     void renderRoute(appPath);
   });
+}
+
+/**
+ * Whether going to app path `path` removes the page on screen, the only case
+ * in which its leave guards are asked. A terminal route keeps the page
+ * (hidden), and leaving the terminals for the kept page's own path reuses it
+ * (see returningFromTerminal in renderRoute).
+ */
+function leavesPage(path: string): boolean {
+  const pathname = path.split('?')[0].split('#')[0];
+  if (
+    pathname === '/terminals' ||
+    terminalAgentRoute.test(pathname) ||
+    legacyTerminalRoute.test(pathname)
+  ) {
+    return false;
+  }
+  const shell = activeShell?.element as RouteShell | undefined;
+  return !(routeOutlet?.hidden && shell && shell.currentPath.split('#')[0] === path.split('#')[0]);
 }
 
 /**
@@ -1586,9 +1626,12 @@ function navigateTo(path: string): void {
     if (path === '/terminals' || terminalAgentRoute.test(path)) void renderRoute(path);
     return;
   }
+  // A page with unsaved changes may veto being removed.
+  if (leavesPage(path) && !mayLeave()) return;
 
   // Prefix app-relative paths with the base path for the browser URL bar
   window.history.pushState({}, '', browserPath(path));
+  noteShownEntry();
   void renderRoute(path);
 }
 
@@ -1606,6 +1649,7 @@ function replaceRoute(path: string): Promise<void> {
     '',
     browserPath(path) + search + window.location.hash
   );
+  noteShownEntry();
   const shell = activeShell?.element as
     | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
     | undefined;
@@ -1624,12 +1668,14 @@ function replaceRoute(path: string): Promise<void> {
  * re-rendered for it.
  */
 function pushRoute(path: string, state: Record<string, unknown> = {}): Promise<void> {
-  return pushRouteEntry(
+  const done = pushRouteEntry(
     activeShell?.element as RouteShell | undefined,
     path,
     browserPath(path),
     state
   );
+  noteShownEntry();
+  return done;
 }
 
 // Initialize when DOM is ready
