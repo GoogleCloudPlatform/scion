@@ -148,7 +148,9 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 // For schema version "1" it also checks value formats the schema cannot
 // express, such as shared_dir_size being a Kubernetes quantity, and that a
 // shared_dir_storage_backend of "nfs" has a complete
-// server.shared_dir_storage.nfs block.
+// server.shared_dir_storage.nfs block. It also validates the Kubernetes
+// placement fields and requires runtime entries with literally the same
+// context and namespace to agree on placement (ValidatePlacement).
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
 	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
 	if err != nil || schemaVersion != "1" {
@@ -171,6 +173,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
 		errs = append(errs, ValidateHomeStorageOverrides(vs.Runtimes, vs.Profiles)...)
+		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		if err := vs.Server.HomeStorage.Validate(); err != nil {
 			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
 		}
@@ -201,6 +204,8 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
 	warnings = append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
 }
 

@@ -15,7 +15,10 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -52,8 +55,9 @@ func (o *SettingsOverlay) SuppliesRuntimes() bool {
 // directory is never a project layer.
 //
 // It fails closed: a settings file that exists but cannot be read or
-// parsed counts as defining the key, so the caller records no entry name.
-// A missing file defines nothing.
+// parsed, or whose stat fails for a reason other than not-exist, counts as
+// defining the key, so the caller records no entry name. A missing file
+// defines nothing.
 func ProjectSettingsDefinesRuntime(projectDir, name string) bool {
 	if name == "" {
 		return false
@@ -68,7 +72,21 @@ func ProjectSettingsDefinesRuntime(projectDir, name string) bool {
 		dirs = append(dirs, effective)
 	}
 	for _, dir := range dirs {
-		if settingsFileDefinesRuntime(GetSettingsPath(dir), name) {
+		if settingsFileUnstatable(dir) || settingsFileDefinesRuntime(GetSettingsPath(dir), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// settingsFileUnstatable reports whether a settings file name in dir
+// (settings.yaml, settings.yml or settings.json, the names GetSettingsPath
+// probes) gives a stat error other than not-exist. GetSettingsPath treats
+// such a file as missing; here it fails closed, since the file may define
+// the runtime.
+func settingsFileUnstatable(dir string) bool {
+	for _, name := range []string{"settings.yaml", "settings.yml", "settings.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
 	}

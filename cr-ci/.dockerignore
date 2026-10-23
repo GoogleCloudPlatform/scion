@@ -1,0 +1,6 @@
+# Local docker builds of mediator/Dockerfile use cr-ci/ as the context.
+# ALLOWLIST, the same as .gcloudignore: only go.mod and mediator/ (no tests).
+*
+!go.mod
+!mediator
+mediator/**/*_test.go

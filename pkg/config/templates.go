@@ -477,10 +477,11 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
-	projectTemplatesDir := filepath.Join(projectPath, "templates")
-	path := filepath.Join(projectTemplatesDir, name)
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: "project"}, nil
+	if root := projectTemplatesRoot(projectPath); root != "" {
+		path := filepath.Join(root, "templates", name)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return &Template{Name: name, Path: path, Scope: "project"}, nil
+		}
 	}
 
 	// Fall back to global templates
@@ -493,6 +494,107 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 
 	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
+}
+
+// projectTemplatesRoot returns the directory whose templates/ subdirectory
+// is the project template tier for projectPath. A project path that is a
+// workspace root holding a .scion entry (the broker's path for a
+// hub-managed project, ~/.scion/projects/<slug>) resolves to the project's
+// .scion directory, or the external directory a .scion marker file names,
+// as ResolveProjectPath does; the workspace root's own templates/ directory
+// is ordinary workspace content and never a template source; such a root
+// with no .scion entry at all, below the hub projects directory, has no
+// project tier ("" is returned). Any other path, including a .scion
+// directory itself, is used as given.
+func projectTemplatesRoot(projectPath string) string {
+	if filepath.Base(projectPath) == DotScion {
+		return projectPath
+	}
+	if _, err := os.Lstat(filepath.Join(projectPath, DotScion)); err != nil {
+		if isHubWorkspaceRootWithoutScion(projectPath) {
+			// A hub-managed workspace root without a .scion entry has no
+			// project template tier.
+			return ""
+		}
+		return projectPath
+	}
+	resolved, _, err := ResolveProjectPath(projectPath)
+	if err != nil {
+		return projectPath
+	}
+	return resolved
+}
+
+// isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
+// workspace root (below the hub projects directory, not a .scion path)
+// that has no .scion entry: it then has no project configuration tier.
+func isHubWorkspaceRootWithoutScion(p string) bool {
+	if p == "" || filepath.Base(p) == DotScion {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(p, DotScion)); err == nil {
+		return false
+	}
+	return isUnderHubProjectsDir(p)
+}
+
+// isUnderHubProjectsDir reports whether p lies below the global
+// directory's projects/ directory, where hub-managed workspaces live.
+func isUnderHubProjectsDir(p string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	projects := filepath.Join(globalDir, "projects")
+	if resolved, err := filepath.EvalSymlinks(projects); err == nil {
+		projects = resolved
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	rel, err := filepath.Rel(projects, abs)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// LegacyProjectTemplatesWarning returns a start warning when projectPath is
+// a workspace root (see projectTemplatesRoot) with templates under its own
+// templates/ directory, which was the project template tier for
+// hub-managed projects before it moved to <project>/.scion/templates. Only
+// subdirectories that hold a scion-agent config count, so an unrelated
+// templates/ directory in the repository does not warn. It returns "" when
+// there is nothing to report.
+func LegacyProjectTemplatesWarning(projectPath string) string {
+	if projectPath == "" {
+		return ""
+	}
+	root := projectTemplatesRoot(projectPath)
+	if root == projectPath {
+		return ""
+	}
+	newDir := filepath.Join(root, "templates")
+	if root == "" {
+		newDir = filepath.Join(projectPath, DotScion, "templates")
+	}
+	legacyDir := filepath.Join(projectPath, "templates")
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && GetScionAgentConfigPath(filepath.Join(legacyDir, e.Name())) != "" {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: templates in %s (%s) are no longer used; project templates are read from %s. Move them there, or upload them to the hub",
+		legacyDir, strings.Join(names, ", "), newDir)
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the
