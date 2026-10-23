@@ -34,6 +34,7 @@ import (
 func TestSharedDirConfigDelete_NFSBackend_RemovesLeaf(t *testing.T) {
 	hostBase := setNFSSharedDirStorageGlobalSettings(t)
 	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 	project := createTestGitProject(t, srv, "Config Delete NFS", "github.com/test/config-delete-nfs")
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
 	addSharedDirToProject(t, srv, project.ID, "extra")
@@ -66,6 +67,7 @@ func TestSharedDirConfigDelete_NFSBackend_RemovesLeaf(t *testing.T) {
 func TestSharedDirConfigDelete_NFSBackend_SymlinkedSharedDirsRefused(t *testing.T) {
 	hostBase := setNFSSharedDirStorageGlobalSettings(t)
 	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 	outside := newOutsideTree(t)
 	project := createTestGitProject(t, srv, "Config Delete Symlink NFS", "github.com/test/config-delete-symlink-nfs")
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
