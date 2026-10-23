@@ -17,6 +17,7 @@ package runtime
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -238,7 +239,7 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"shared, .scion symlink inside the workspace", symlinkInside, "", "", "", "", false, true},
 			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", "", false, true},
 			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
-			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "", false, false},
+			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "/workspace/.scion/agents", false, false},
 			{"plain, agent home under .scion/agents", plainHomeInside, ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
 			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
@@ -654,5 +655,64 @@ func TestNestedProjectConfigRel(t *testing.T) {
 		if rel != tt.rel || ok != tt.ok {
 			t.Errorf("%s: (%q, %v), want (%q, %v)", tt.path, rel, ok, tt.rel, tt.ok)
 		}
+	}
+}
+
+// In the plain layout on Docker and Podman the agents root is masked even
+// when it does not exist yet: the broker creates it before the run, so an
+// agent dir created there later (after the run args were built) lies under
+// the mask. Apple masks only an existing agents root.
+func TestBuildCommonRunArgs_PlainAgentsMaskCoversLaterAgentDirs(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		t.Run(rt, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			ws := filepath.Join(t.TempDir(), "project")
+			writeFile(t, filepath.Join(ws, ".scion", "settings.yaml"), "x: y\n")
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+			mkdirs(t, cfg.HomeDir)
+			cfg.Workspace = ws
+			args, err := buildCommonRunArgs(cfg)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs: %v", err)
+			}
+			var masks []string
+			for i := 0; i < len(args)-1; i++ {
+				switch {
+				case args[i] == "--tmpfs":
+					masks = append(masks, args[i+1])
+				case args[i] == "--mount" && strings.HasPrefix(args[i+1], "type=tmpfs,destination="):
+					masks = append(masks, strings.TrimPrefix(args[i+1], "type=tmpfs,destination="))
+				}
+			}
+			if rt == appleContainerRuntimeName {
+				if len(masks) != 0 {
+					t.Errorf("Apple: unexpected masks %q (the agents root did not exist)", masks)
+				}
+				return
+			}
+			if fi, err := os.Stat(filepath.Join(ws, ".scion", "agents")); err != nil || !fi.IsDir() {
+				t.Fatalf("the agents root was not created before the run: %v", err)
+			}
+			// An agent dir created after the run args were built.
+			later := filepath.Join(ws, ".scion", "agents", "later-agent", "home")
+			mkdirs(t, later)
+			rel, err := filepath.Rel(ws, later)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inContainer := path.Join("/workspace", filepath.ToSlash(rel))
+			covered := false
+			for _, m := range masks {
+				if inContainer == m || strings.HasPrefix(inContainer, m+"/") {
+					covered = true
+				}
+			}
+			if !covered {
+				t.Errorf("%s is not under any mask %q", inContainer, masks)
+			}
+		})
 	}
 }
