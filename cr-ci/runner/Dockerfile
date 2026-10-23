@@ -22,6 +22,12 @@ ARG ACTIONS_RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25
 # https://go.dev/dl/ (linux-amd64 archive).
 ARG GO_VERSION=1.26.1
 ARG GO_SHA256=031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a
+# https://mirrors.edge.kernel.org/pub/software/scm/git/ (git-<v>.tar.xz). The sha256 is from
+# that directory's sha256sums.asc, and the tarball was checked against Junio C Hamano's
+# detached git-<v>.tar.sign (key 96E07AF25771955980DAD10020D04E5A713660A7) when pinned. The
+# repository's tests need git >= 2.48 (worktree --relative-paths); Ubuntu 24.04 ships 2.43.
+ARG GIT_VERSION=2.56.0
+ARG GIT_SHA256=26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
 # -------------------------------------------------------------------------------
 
 # --- Go toolchain (used by the golangci-lint build and copied into the image) ---
@@ -51,6 +57,28 @@ COPY golangci-lint/ /src/golangci-lint/
 RUN GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache bash /src/golangci-lint/build.sh /out/golangci-lint \
  && rm -rf /tmp/gocache /tmp/gomodcache
 
+# --- git, built from the pinned source ------------------------------------------
+# gcc, make and the -dev libraries exist only in this stage; the runner image gets the
+# installed tree (/usr/local), never a compiler. No Perl, Python, gettext or Tk parts.
+FROM ${UBUNTU_IMAGE} AS git
+ARG GIT_VERSION
+ARG GIT_SHA256
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl xz-utils gcc libc6-dev make \
+      libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL -o /tmp/git.tar.xz "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" \
+ && echo "${GIT_SHA256}  /tmp/git.tar.xz" | sha256sum -c - \
+ && mkdir /tmp/git-src \
+ && tar -C /tmp/git-src --strip-components=1 -xJf /tmp/git.tar.xz \
+ && make -C /tmp/git-src -j"$(nproc)" prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease all \
+ && make -C /tmp/git-src prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease \
+      DESTDIR=/out install \
+ && /out/usr/local/bin/git --version | grep -qx "git version ${GIT_VERSION}"
+
 # --- The runner image ------------------------------------------------------------
 FROM ${UBUNTU_IMAGE}
 
@@ -76,12 +104,15 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # ent-generate-check, sqlite-nonhub-tests), procps (the build-and-test watchdog's ps,
 # pgrep, pkill; the lint sampler's free), python3 + python3-yaml (harness and cloud-init
 # checks, single-node tests), ripgrep, tmux (SCION_TEST_REQUIRE_TMUX) and shellcheck
-# (24.04's 0.9.0, the version upstream CI's shellcheck job gets from apt). No gcc, no
-# Docker, no sudo: no routed job needs them, and they would widen what a job can do.
+# (24.04's 0.9.0, the version upstream CI's shellcheck job gets from apt), and
+# openssh-client (cmd's ssh tests run the ssh client). No gcc, no Docker, no sudo: no
+# routed job needs them, and they would widen what a job can do. git is NOT from apt
+# (24.04's is 2.43): it comes from the git stage below; libexpat1 is its runtime library
+# for http-push (libcurl and zlib come with curl and the base image).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq tar gzip unzip zstd \
-      make procps python3 python3-yaml ripgrep tmux shellcheck \
+      ca-certificates curl jq tar gzip unzip zstd libexpat1 \
+      make procps python3 python3-yaml ripgrep tmux shellcheck openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root runner user. The runner, its work dir and all caches belong to it. uid 1001
@@ -90,6 +121,13 @@ RUN apt-get update \
 # HOME is set explicitly (below, before USER) rather than left to the runtime: Docker
 # derives it from /etc/passwd, but the image config is what Cloud Run is sure to pass on.
 RUN useradd --create-home --home-dir /home/runner --uid 1001 --shell /bin/bash runner
+
+# git from the git stage (pinned source build), then a build-time assert: the
+# repository's tests need git >= 2.48 (worktree --relative-paths).
+COPY --from=git /out/usr/local/ /usr/local/
+RUN v=$(git --version | awk '{print $3}') \
+ && printf '%s\n%s\n' 2.48 "$v" | sort -V -C \
+ || { echo "git $v is older than 2.48" >&2; exit 1; }
 
 # Go toolchain (verified in the go stage) and the patched golangci-lint.
 COPY --from=go /usr/local/go /usr/local/go
