@@ -393,7 +393,7 @@ In addition to managing injected skills via the CLI, the Scion Web Dashboard all
 6. Scion adds all checked skills as individual URI references in a single atomic update.
 
 :::note[Security & Privacy]
-Before performing discovery or logging requests (`POST /api/v1/skills/discover-directory`), Scion's API strips embedded userinfo, fragments, and all query parameters except `?token=<SECRET_NAME>` (where `<SECRET_NAME>` matches `[A-Z][A-Z0-9_]*`), preventing sensitive tokens, query strings, or usernames from appearing in candidate URIs or system logs.
+Before performing discovery or logging requests (`POST /api/v1/skills/discover-directory`), Scion's API strips embedded userinfo, fragments, and all query parameters except `?token=<SECRET_NAME>` (where `<SECRET_NAME>` matches `[A-Z][A-Z0-9_]*`, a `token` value that is not such a name is refused with `400`), preventing sensitive tokens, query strings, or usernames from appearing in candidate URIs or system logs.
 :::
 
 ## Platform skills

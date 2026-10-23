@@ -62,7 +62,7 @@ Feature flags control the availability of Web Dashboard features. Registered exp
 | :--- | :--- | :--- |
 | `web.native_chat` | ON | Enable the [Native Web Chat](/scion/workstation/dashboard/#native-web-chat) workspace. |
 | `web.gcs_links` | OFF | Linkify a `gs://bucket/object` URI an agent posts in chat, and let the viewer fetch and preview that object through the hub. Also gates the hub's `GET /api/v1/gcs/object` endpoint, which additionally requires a configured GCP token generator. |
-| `web.agent_badges` | OFF | Show runtime and harness icon badges in the agent list and agent detail header. Web only; the hub is unaffected. |
+| `web.agent_badges` | OFF | Show a harness vendor mark and the agent's configured model size (S, M, L, XL) on agent cards and rows on the Agents and project pages and on graph cards. Web only; the hub is unaffected. |
 | `web.sse_hidden_tab_close` | OFF | Close a tab's live-update streams (page, agent list and terminal metadata) after it has been hidden for 60 seconds, and reopen them, refreshing the page's data, when it is shown again. Terminal connections stay open. Web only; the hub is unaffected. |
 | `hub.artifacts` | OFF | Artifacts: files and bundles agents and users publish with stable, versioned references. Also gates the hub's `/api/v1/artifacts` routes, which answer 404 while it is off, and the artifact page. See [Artifacts](/scion/reference/artifacts/). |
 

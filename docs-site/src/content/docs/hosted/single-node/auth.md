@@ -144,9 +144,9 @@ When registering Scion as a client in your identity provider, set the **redirect
 <hub-base-url>/auth/callback/oidc
 ```
 
-Replace `<hub-base-url>` with the web server's base URL, including the scheme, for example `https://hub.example.com`. The web base URL is resolved once at startup from operator inputs only (`--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, or `server.hub.public_url` in the global `settings.yaml`, never from the database; see [Web Base URL](/scion/reference/server-config/#web-base-url)), and defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
+Replace `<hub-base-url>` with the web server's base URL, including the scheme, for example `https://hub.example.com`. The web base URL is resolved once at startup from operator inputs only (in order: `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, `server.hub.public_url` in the global `settings.yaml`, or a URL derived from a Cloud Run IAP audience; never from the database; see [Web Base URL](/scion/reference/server-config/#web-base-url)), and defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
 
-The Hub builds the redirect URI from its web base URL, and marks the session cookie `Secure` when the base URL starts with `https://`. On any non-loopback listener, the server requires an `https://` web base URL and refuses to start with `http://`; plain `http://` is accepted only on a loopback listener (`localhost`, `127.0.0.0/8`, or `::1`). The `issuer_url` must also use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
+The Hub builds the redirect URI from its web base URL, and marks the session cookie `Secure` when the base URL starts with `https://`. On any non-loopback listener, the server requires an `https://` web base URL and refuses to start with `http://`; plain `http://` is accepted only on a loopback listener (`localhost`, `127.0.0.0/8`, or `::1`). Whether an `http://` loopback redirect URI is accepted is up to your identity provider. The `issuer_url` must also use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
 
 #### Configuration
 
@@ -166,7 +166,7 @@ server:
 Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the web base URL (resolved from `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, or `server.hub.public_url` in the global `settings.yaml`), plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the web base URL (resolved from `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, `server.hub.public_url` in the global `settings.yaml`, or the Cloud Run IAP audience), plus `/auth/callback/oidc`.
 :::
 
 ### Verified Email Requirement
@@ -415,7 +415,7 @@ export SCION_SERVER_AUTH_DEVMODE=true
 
 ### Using the Developer Token
 When the Hub starts with `devMode: true`, it writes the token to `~/.scion/dev-token`.
-- **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
+- **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and, when no other credential applies, print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
 - **Web**: The Web Dashboard automatically uses this token for the "Development User" login when `SCION_DEV_AUTH_ENABLED=true` is set.
 
 Alternatively, you can set the token in your environment for a loopback Hub:
