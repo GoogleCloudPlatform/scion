@@ -1013,17 +1013,41 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
+	// The broker has the hub-managed workspace at a local path (a
+	// co-located broker): since project storage phase 2
+	// (ptone/scion#5813) a remote broker that cannot reach the hub's
+	// workspace storage is refused with 409 (topology T6). Tests of that
+	// refusal, and of the CLI workspace bootstrap, clear it
+	// (clearCreateAgentProviderPath).
+	localPath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
+		LocalPath:  localPath,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 	return project
+}
+
+// clearCreateAgentProviderPath makes the setupCreateAgentServer broker a
+// remote broker without a local path for project: the topology of the CLI
+// workspace bootstrap and of the phase 2 T6 refusal.
+func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	provider.LocalPath = ""
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
+	got, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	require.Empty(t, got.LocalPath, "fixture check: the provider must have no local path")
 }
 
 // postAgentStatusAsAgent POSTs a status update for agent using an agent

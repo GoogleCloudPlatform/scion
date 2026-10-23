@@ -44,8 +44,8 @@ import (
 // Without create, a missing directory is an fs.ErrNotExist-compatible error
 // and nothing is created.
 func (r Resolved) Open(create bool) (*os.Root, error) {
-	switch r.Backend {
-	case BackendNFS:
+	switch {
+	case r.Backend.Shared():
 		base, err := r.resolvedHostBase()
 		if err != nil {
 			return nil, err
@@ -60,7 +60,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			}
 		}
 		return shareddirs.OpenAnchoredRoot(base, r.RelPath)
-	case BackendLocal:
+	case r.Backend == BackendLocal:
 		return openConfinedDir(r.HostPath, create)
 	default:
 		return nil, fmt.Errorf("projectfs: cannot open a directory on backend %q", r.Backend)
@@ -83,7 +83,7 @@ func (r Resolved) resolvedHostBase() (string, error) {
 // ResolvedHostBase returns the shared backend's HostBase with symlinks
 // resolved, the base pkg/shareddirs' walks take.
 func (r Resolved) ResolvedHostBase() (string, error) {
-	if r.Backend != BackendNFS {
+	if !r.Backend.Shared() {
 		return "", fmt.Errorf("projectfs: backend %q has no host base", r.Backend)
 	}
 	return r.resolvedHostBase()
@@ -112,6 +112,31 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 		return "", fmt.Errorf("%s %q resolves through a symlink to %q, want %q", r.Kind, r.Name, got, want)
 	}
 	return got, nil
+}
+
+// EnsureProjectConfigDir creates (or verifies) a project's configuration
+// directory on a shared backend, <ProjectRoot(projectID)>/.scion (design-v4
+// §P1a: beside workspace/, inside no Mount), through pkg/shareddirs'
+// O_NOFOLLOW component walk, and returns its host path. A newly created
+// directory gets mode 2755 and no default ACL: only Scion components write
+// it. Missing intermediates are created as the brokers create them.
+func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
+	cfg, err := l.ProjectConfig(projectID)
+	if err != nil {
+		return "", err
+	}
+	base, err := cfg.ResolvedHostBase()
+	if err != nil {
+		return "", err
+	}
+	fd, _, err := shareddirs.EnsurePrivateDir(base, cfg.RelPath)
+	if err != nil {
+		return "", fmt.Errorf("create project configuration directory: %w", err)
+	}
+	if err := shareddirs.CloseFd(fd); err != nil {
+		return "", err
+	}
+	return cfg.HostPath, nil
 }
 
 // openConfinedDir opens dir as an *os.Root, refusing a dir whose own final

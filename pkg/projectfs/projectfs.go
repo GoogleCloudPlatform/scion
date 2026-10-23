@@ -49,13 +49,31 @@ const (
 	// BackendNFS is a shared NFS export mounted at HostBase, with the
 	// UUID-keyed tree <SubPathRoot>/<projectID>/...
 	BackendNFS Backend = "nfs"
+	// BackendCloudRunVolume is a platform volume declared on a Cloud Run
+	// service and mounted at HostBase (/mnt/<volume name>), with the same
+	// UUID-keyed tree as nfs.
+	BackendCloudRunVolume Backend = "cloudrun-volume"
+	// BackendGKESharedVolume is a shared RWX volume mounted into GKE pods at
+	// HostBase (/mnt/<volume name>), with the same UUID-keyed tree as nfs.
+	BackendGKESharedVolume Backend = "gke-shared-volume"
 )
+
+// Shared reports whether the backend is storage shared by the hub and every
+// broker of a project, laid out as the UUID-keyed tree
+// <SubPathRoot>/<projectID>/... under HostBase.
+func (b Backend) Shared() bool {
+	switch b {
+	case BackendNFS, BackendCloudRunVolume, BackendGKESharedVolume:
+		return true
+	}
+	return false
+}
 
 // Durable reports whether data written to this backend survives the loss
 // of the process's own instance (a Cloud Run instance recycle). Only shared
 // backends are durable; local disk is not.
 func (b Backend) Durable() bool {
-	return b == BackendNFS
+	return b.Shared()
 }
 
 // Scope says whether a Mount is one directory for all agents of a project or
@@ -331,7 +349,7 @@ func validSharedDirName(name string) error {
 // ProjectRoot resolves the root of a project's tree on a shared backend:
 // <SubPathRoot>/<projectID>.
 func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
-	if l.Backend != BackendNFS {
+	if !l.Backend.Shared() {
 		return Resolved{}, fmt.Errorf("projectfs: ProjectRoot is defined for shared backends, not %q", l.Backend)
 	}
 	if err := validProjectID(projectID); err != nil {
@@ -342,6 +360,22 @@ func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
 		return Resolved{}, err
 	}
 	return l.shared(filepath.Join(root, projectID), Mount{}), nil
+}
+
+// ProjectConfigDirName is the name of a project's configuration directory.
+const ProjectConfigDirName = ".scion"
+
+// ProjectConfig resolves a project's configuration directory on a shared
+// backend: <SubPathRoot>/<projectID>/.scion, beside workspace/ and inside
+// no Mount (design-v4 §P1a rule 1). Hub-seeded: project settings, the hub
+// connection and project identity. A .scion inside the workspace is
+// repository content and never supplies those.
+func (l Layout) ProjectConfig(projectID string) (Resolved, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return l.shared(filepath.Join(pr.RelPath, ProjectConfigDirName), Mount{}), nil
 }
 
 // AgentRoot resolves an agent's directory on a shared backend:
@@ -406,19 +440,19 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 			return Resolved{}, err
 		}
 	}
-	switch l.Backend {
-	case BackendNFS:
-		return l.resolveNFS(p, agent, m)
-	case BackendLocal:
+	switch {
+	case l.Backend.Shared():
+		return l.resolveShared(p, agent, m)
+	case l.Backend == BackendLocal:
 		return l.resolveLocal(p, agent, m)
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported backend %q", l.Backend)
 	}
 }
 
-func (l Layout) resolveNFS(p Project, agent string, m Mount) (Resolved, error) {
+func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error) {
 	if p.ID == "" {
-		return Resolved{}, errors.New("projectfs: project ID is required on the nfs backend")
+		return Resolved{}, fmt.Errorf("projectfs: project ID is required on the %s backend", l.Backend)
 	}
 	pr, err := l.ProjectRoot(p.ID)
 	if err != nil {

@@ -39,7 +39,7 @@ import (
 )
 
 func TestHubManagedProjectPath(t *testing.T) {
-	path, err := hubManagedProjectPath("my-test-project")
+	path, err := localProjectPath("my-test-project")
 	require.NoError(t, err)
 
 	homeDir, err := os.UserHomeDir()
@@ -70,7 +70,7 @@ func TestHubManagedProjectPath_NeverFallsBackToLegacyDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, projectsDir, path, "should always resolve to the projects path, never the legacy directory")
 }
@@ -85,133 +85,15 @@ func TestHubManagedProjectPath_UsesProjectsDirWhenEmpty(t *testing.T) {
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
 
-	path, err := hubManagedProjectPath(slug)
+	path, err := localProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, projectsDir, path, "should resolve to the projects path even when it only contains infrastructure dirs")
 }
 
 func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
-	_, err := hubManagedProjectPath("")
+	_, err := localProjectPath("")
 	require.Error(t, err, "empty slug should return an error")
 	assert.Contains(t, err.Error(), "slug must not be empty")
-}
-
-// TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath is the
-// regression test for agent.AppliedConfig.Workspace being uploaded to GCS
-// without validation: it starts as the caller-supplied req.Workspace
-// (buildAppliedConfig) and is only ever replaced by the resolved
-// hub-managed project path when the caller left it empty, so a non-empty
-// value the caller supplied directly must still be checked against the
-// project's own managed path before anything is read from it.
-func TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath(t *testing.T) {
-	srv, _ := testServer(t)
-
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	slug := "upload-guard-project"
-	expectedPath, err := hubManagedProjectPath(slug)
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(expectedPath, 0755))
-
-	// A sibling directory under the same projects root, not the project's
-	// own managed path: exactly the shape a caller-supplied req.Workspace
-	// pointing at an unrelated or another project's directory would take.
-	unrelated := filepath.Join(filepath.Dir(expectedPath), "another-project")
-	require.NoError(t, os.MkdirAll(unrelated, 0755))
-
-	if _, err := srv.resolveHubManagedWorkspaceForUpload(unrelated, slug); err == nil {
-		t.Error("expected an unrelated workspace path to be rejected, got nil")
-	}
-
-	// The project's own managed path itself is accepted -- this floor must
-	// not over-refuse the legitimate case.
-	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(expectedPath, slug); err != nil {
-		t.Errorf("expected the project's own managed path to be accepted, got error: %v", err)
-	} else if resolved != expectedPath {
-		t.Errorf("resolved path = %q, want %q", resolved, expectedPath)
-	}
-
-	// Its "workspace" subdirectory is one of the two named shapes the
-	// ~/.scion allow list admits under a project slug (isAllowedProjectSubtree)
-	// and so is also accepted directly, with no root-containment fallback
-	// needed. An unnamed subdirectory of the bare managed path (e.g.
-	// ".../upload-guard-project/sub") is NOT equivalent to this: the allow
-	// list only admits it when the whole bare "<slug>" directory is itself
-	// the value passed in, not some child path computed separately -- see
-	// isAllowedProjectSubtree's own doc comment.
-	workspaceSubdir := filepath.Join(expectedPath, "workspace")
-	require.NoError(t, os.MkdirAll(workspaceSubdir, 0755))
-	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(workspaceSubdir, slug); err != nil {
-		t.Errorf("expected the project's workspace subdirectory to be accepted, got error: %v", err)
-	} else if resolved != workspaceSubdir {
-		t.Errorf("resolved path = %q, want %q", resolved, workspaceSubdir)
-	}
-}
-
-// TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace is the handler-level
-// companion to TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath:
-// that test drives the validation helper directly, proving the helper
-// itself works; this one drives a real POST /api/v1/agents request through
-// the hub-managed-project GCS-upload branch and asserts the upload function
-// itself is never invoked when the workspace is outside the project's
-// managed path, proving the handler actually calls the helper in front of
-// the upload rather than just containing correct logic nothing reaches.
-func TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
-	t.Cleanup(func() {
-		if p, err := hubManagedProjectPath(project.Slug); err == nil {
-			_ = os.RemoveAll(p)
-		}
-	})
-
-	var uploadCalls int
-	previous := syncToGCSForWorkspaceUpload
-	syncToGCSForWorkspaceUpload = func(_ context.Context, _, _, _ string) error {
-		uploadCalls++
-		return nil
-	}
-	t.Cleanup(func() { syncToGCSForWorkspaceUpload = previous })
-
-	// A real, absolute, but entirely unrelated directory -- not under this
-	// project's own managed path -- supplied directly as the request's
-	// Workspace, the same shape TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath
-	// exercises at the helper level.
-	unrelated := t.TempDir()
-
-	agentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:      "upload-guard-agent",
-		ProjectID: project.ID,
-		Workspace: unrelated,
-	})
-	require.Equal(t, http.StatusCreated, agentRec.Code, "body: %s", agentRec.Body.String())
-
-	if uploadCalls != 0 {
-		t.Errorf("expected the GCS upload to be skipped for an unrelated workspace, but it ran %d time(s)", uploadCalls)
-	}
-	require.NotNil(t, disp.capturedAgent, "fixture check: dispatch must have been reached")
-	if disp.capturedAgent.AppliedConfig != nil && disp.capturedAgent.AppliedConfig.WorkspaceStoragePath != "" {
-		t.Errorf("expected WorkspaceStoragePath to remain unset when the upload is skipped, got %q", disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
-	}
-
-	// Confirm the stub is actually wired to something real: a request whose
-	// workspace IS the project's own managed path must reach the upload.
-	// Without this, a test environment where the upload branch is never
-	// reached at all (a wrong condition earlier in the handler, for example)
-	// would also show zero calls above for the wrong reason.
-	legitimateAgentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:      "upload-guard-agent-legit",
-		ProjectID: project.ID,
-	})
-	require.Equal(t, http.StatusCreated, legitimateAgentRec.Code, "body: %s", legitimateAgentRec.Body.String())
-	if uploadCalls != 1 {
-		t.Errorf("expected the GCS upload to run exactly once for the project's own managed workspace, ran %d time(s)", uploadCalls)
-	}
 }
 
 func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
@@ -232,7 +114,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	assert.Empty(t, project.GitRemote, "hub-managed project should have no git remote")
 
 	// Verify the filesystem was initialized
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	scionDir := filepath.Join(workspacePath, ".scion")
@@ -264,7 +146,7 @@ func TestCreateProject_GitBacked_NoFilesystemInit(t *testing.T) {
 	assert.Equal(t, "github.com/test/repo", project.GitRemote)
 
 	// Verify no filesystem was created for git-backed project
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	_, err = os.Stat(workspacePath)
@@ -288,7 +170,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("hub-managed")
+	expectedPath, err := localProjectPath("hub-managed")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for hub-managed projects")
@@ -316,7 +198,7 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
 	// WorkspaceStoragePath. Here we verify the initial workspace is set.
-	expectedPath, err := hubManagedProjectPath("hub-managed-remote")
+	expectedPath, err := localProjectPath("hub-managed-remote")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace)
 }
@@ -605,7 +487,7 @@ func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 		"Agent should use the auto-provided default broker")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -835,7 +717,7 @@ func TestAutoLinkProviders_HubManagedProject_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set for hub-managed project auto-linked provider")
 
 	// Cleanup hub-managed project filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
@@ -1992,7 +1874,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	assert.True(t, project.IsSharedWorkspace(), "project should report as shared workspace")
 
 	// Verify workspace was cloned (it's a git repo)
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2109,7 +1991,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	expectedPath, err := hubManagedProjectPath("shared-ws")
+	expectedPath, err := localProjectPath("shared-ws")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for shared-workspace git projects")
@@ -2236,7 +2118,7 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the workspace was created with a git repo
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2292,7 +2174,7 @@ func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *te
 			"scion.dev/default-branch": "master",
 		},
 	}
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
@@ -2322,7 +2204,7 @@ func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
 	assert.Contains(t, err.Error(), "shared workspace clone failed")
 
 	// Verify the workspace directory was cleaned up
-	workspacePath, pathErr := hubManagedProjectPath(project.Slug)
+	workspacePath, pathErr := localProjectPath(project.Slug)
 	require.NoError(t, pathErr)
 	_, statErr := os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up on clone failure")
@@ -2471,7 +2353,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Clean up the cloned workspace
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 

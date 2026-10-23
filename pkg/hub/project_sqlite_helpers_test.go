@@ -736,7 +736,7 @@ func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

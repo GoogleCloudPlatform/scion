@@ -413,11 +413,15 @@ type runIntentErrStore struct {
 // createRollbackSite is one create failure site: the dispatcher and server
 // setup that make the create fail there, and the stage its rollback records.
 type createRollbackSite struct {
-	name      string
-	disp      AgentDispatcher
-	setup     func(t *testing.T, srv *Server)
-	req       CreateAgentRequest
-	wantStage string
+	name  string
+	disp  AgentDispatcher
+	setup func(t *testing.T, srv *Server)
+	req   CreateAgentRequest
+	// remoteBroker clears the fixture broker's local path for the project
+	// (clearCreateAgentProviderPath): the CLI workspace bootstrap and the
+	// T6 refusal need a remote broker without one.
+	remoteBroker bool
+	wantStage    string
 }
 
 // createTxFaultStore injects failures into the writes of the agent-create

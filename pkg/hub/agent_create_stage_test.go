@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -64,10 +65,11 @@ func createRollbackSites() []createRollbackSite {
 	workspaceFiles := []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}
 	return []createRollbackSite{
 		{
-			name:      "storage",
-			disp:      &createAgentDispatcher{},
-			req:       CreateAgentRequest{WorkspaceFiles: workspaceFiles},
-			wantStage: createStageStorage,
+			name:         "storage",
+			disp:         &createAgentDispatcher{},
+			req:          CreateAgentRequest{WorkspaceFiles: workspaceFiles},
+			remoteBroker: true,
+			wantStage:    createStageStorage,
 		},
 		{
 			name: "upload URL",
@@ -75,24 +77,24 @@ func createRollbackSites() []createRollbackSite {
 			setup: func(t *testing.T, srv *Server) {
 				srv.SetStorage(signErrStorage{newMockStorage("test-bucket")})
 			},
-			req:       CreateAgentRequest{WorkspaceFiles: workspaceFiles},
-			wantStage: createStageUploadURL,
+			req:          CreateAgentRequest{WorkspaceFiles: workspaceFiles},
+			remoteBroker: true,
+			wantStage:    createStageUploadURL,
 		},
 		{
-			// Hub-managed workspace upload for a remote broker, with the
-			// workspace storage mount hung.
+			// A hub-managed project on a remote broker that does not
+			// report the hub's shared workspace storage: the T6 refusal.
 			name: "workspace storage",
 			disp: &createAgentDispatcher{},
 			setup: func(t *testing.T, srv *Server) {
-				tmpHome := t.TempDir()
-				t.Setenv("HOME", tmpHome)
-				mountRoot := filepath.Join(tmpHome, "nfs-mount")
-				hangReadDirFor(t, mountRoot)
+				mountRoot := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+					t.Fatal(err)
+				}
 				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
-				srv.SetStorage(newMockStorage("test-bucket"))
 			},
-			req:       CreateAgentRequest{Workspace: "subdir"},
-			wantStage: createStageWorkspaceStorage,
+			remoteBroker: true,
+			wantStage:    createStageWorkspaceStorage,
 		},
 		{
 			name:      "managed",
@@ -152,6 +154,9 @@ func TestCreateRollbackStageAtEachSite(t *testing.T) {
 	for i, tc := range createRollbackSites() {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, tc.disp)
+			if tc.remoteBroker {
+				clearCreateAgentProviderPath(t, s, project)
+			}
 			if tc.setup != nil {
 				tc.setup(t, srv)
 			}
@@ -190,6 +195,9 @@ func TestCreateCompensationFailureAtEachSite(t *testing.T) {
 	for _, tc := range sites {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, tc.disp)
+			if tc.remoteBroker {
+				clearCreateAgentProviderPath(t, s, project)
+			}
 			if tc.setup != nil {
 				tc.setup(t, srv)
 			}

@@ -33,11 +33,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -690,30 +688,6 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 			}
 		}
 	}
-}
-
-// syncToGCSForWorkspaceUpload is gcp.SyncToGCS by default; a test replaces
-// it with a recording stub so the upload-guard wiring below can be verified
-// without a real GCS bucket or network access, and so a test can tell "the
-// guard refused this and the upload never ran" apart from "the upload itself
-// failed" -- the two are indistinguishable from the HTTP response alone,
-// since both are logged as warnings rather than surfaced as request errors.
-var syncToGCSForWorkspaceUpload = gcp.SyncToGCS
-
-// resolveHubManagedWorkspaceForUpload validates workspace -- normally
-// agent.AppliedConfig.Workspace, which starts as the caller-supplied
-// req.Workspace (buildAppliedConfig) and is only ever replaced by the
-// resolved hub-managed project path when the caller left it empty -- against
-// projectSlug's own managed path before it is used as a GCS upload source. A
-// non-empty, caller-supplied workspace otherwise reaches the upload
-// unresolved and unvalidated. Returns the resolved, symlink-free path to
-// upload, or an error naming why workspace was refused.
-func (s *Server) resolveHubManagedWorkspaceForUpload(workspace, projectSlug string) (string, error) {
-	workspaceRoot, err := s.hubManagedProjectPath(projectSlug)
-	if err != nil {
-		return "", err
-	}
-	return runtime.ValidateWorkspaceSource(workspace, workspaceRoot)
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -2545,130 +2519,24 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Hub-native/shared-workspace project remote broker support: if the project has
-	// a managed workspace and the workspace path is set, upload it to GCS so
-	// a remote broker can download it. Empty-per-agent projects have no
-	// project workspace to ship: each agent's directory is broker-local.
-	if syncsHubProjectWorkspace(project) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
-		// The local-path read, the upload and the swap write run detached
-		// from the client (ptone/scion#1961) under their own budget: a
-		// client that gives up here must not make a broker with a local
-		// path read as one without, or leave the launch below to go ahead
-		// with the unswapped hub-local workspace.
-		uctx, ucancel := context.WithTimeout(detachLaunchFromClient(ctx), hubWorkspaceUploadTimeout)
-		hasLocalPath := false
-		if runtimeBrokerID != "" {
-			provider, err := s.store.GetProjectProvider(uctx, project.ID, runtimeBrokerID)
-			if err == nil && provider.LocalPath != "" {
-				hasLocalPath = true
-			}
+	// Hub-managed and shared-workspace projects: agents mount the project
+	// workspace the hub serves, which lives on the hub's workspace storage.
+	// A remote broker can reach it only through the same shared storage
+	// (design-v4 OQ3: the GCS upload-on-create and sync-back are gone).
+	// A remote broker without it is refused with 409 before dispatch
+	// (topology T6); clone-per-agent and empty-per-agent are unaffected.
+	if mountsHubProjectWorkspace(project) && runtimeBrokerID != "" && !s.isEmbeddedBroker(runtimeBrokerID) {
+		if msg, refused := s.remoteBrokerWorkspaceRefusal(ctx, project, runtimeBrokerID); refused {
+			s.agentLifecycleLog.Warn("Remote runtime broker cannot reach the project workspace; failing agent create",
+				"agent_id", agent.ID, "project_id", project.ID, "broker_id", runtimeBrokerID)
+			// The agent row and quotas exist, nothing has been dispatched
+			// (nil DeleteRuntime) and no credential has been minted (no
+			// revoke), as for the other pre-dispatch failures.
+			failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
+				writeError(w, http.StatusConflict, ErrCodeConflict, msg, nil)
+			})
+			return
 		}
-
-		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
-			if stor := s.GetStorage(); stor != nil {
-				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
-				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
-					// Workspace storage did not respond. Dispatching without
-					// the upload would leave the remote broker resolving the
-					// workspace against its own stale or empty project copy,
-					// so the create fails here and answers 503 without the
-					// path. As with the workspace-bootstrap failures above,
-					// the agent row and quotas exist, nothing has been
-					// dispatched (nil DeleteRuntime) and no credential has
-					// been minted (no revoke). A failed compensation answers
-					// 500 with its correlation ID instead (writeCreateFailure).
-					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
-						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
-					ucancel()
-					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr}, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
-					return
-				} else if workspaceErr != nil {
-					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
-						"agent_id", agent.ID,
-						"project_id", project.ID, "error", workspaceErr)
-				} else if stor.Provider() != storage.ProviderGCS && project.GitRemote != "" {
-					// The upload below is always a GCS sync (gcp.SyncToGCS),
-					// so a hub on any other storage provider cannot run it
-					// (ptone/scion#3765). A shared-workspace project with a
-					// git remote needs no upload: the broker builds the
-					// shared workspace from the remote, so dispatch it with
-					// the hub-managed workspace and skip only the sync.
-				} else if stor.Provider() != storage.ProviderGCS {
-					// A project without a git remote: the remote broker has
-					// no other way to get the workspace, and this hub cannot
-					// upload it (ptone/scion#3765). Fail the create before
-					// dispatch: the agent row and quotas exist, nothing has
-					// been dispatched and no credential has been minted.
-					msg := remoteBrokerNeedsGCSMessage(stor.Provider())
-					s.agentLifecycleLog.Warn("Hub storage cannot carry the workspace upload to a remote broker; failing agent create",
-						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
-						"project_id", project.ID, "broker_id", runtimeBrokerID)
-					ucancel()
-					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
-						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
-					})
-					return
-				} else {
-					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-					// The upload can run for up to its own budget, and
-					// its failure is answered after it: extend this
-					// request's write deadline to cover it
-					// (ptone/scion#3890). A dispatch below moves it again.
-					extendWriteDeadline(uctx, w, s.config.WriteTimeout, hubWorkspaceUploadWriteBudget())
-					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
-						if errors.Is(err, context.DeadlineExceeded) && uctx.Err() != nil {
-							// The upload ran past our own budget: fail the
-							// create rather than launch with the hub-local
-							// workspace. Nothing was dispatched and no
-							// credential minted yet.
-							ucancel()
-							failCreate(createRollback{Stage: createStageWorkspaceUpload, Cause: err}, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
-							return
-						}
-						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
-							"agent_id", agent.ID,
-							"project_id", project.ID, "error", err)
-					} else {
-						// Swap workspace to storage path for remote broker
-						agent.AppliedConfig.Workspace = ""
-						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						// The upload above is a GCS sync (gcp.SyncToGCS), and
-						// the provider check before it means stor is GCS, so
-						// stor.Bucket() names the bucket uploaded to.
-						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
-						// The swap must be on the row before anything is
-						// dispatched: later dispatches (restart, env
-						// finalize, provision then start) are built from
-						// the stored row, and the remote broker cannot use
-						// the hub-local path (ptone/scion#3730). A failed
-						// write fails the create. Nothing was dispatched
-						// and no credential minted yet, so the rollback has
-						// no DeleteRuntime and no revoke. The row is removed
-						// only if no delete holds it (DeleteWon); a delete
-						// that holds or removed it answers 409.
-						if err := s.recordHubWorkspaceStorage(detachLaunchFromClient(ctx), agent); err != nil {
-							s.agentLifecycleLog.Warn("Failed to record workspace storage path; failing agent create",
-								"agent_id", agent.ID, "project_id", project.ID, "error", err)
-							ucancel()
-							deleteWon := false
-							corrID := cleanup(createRollback{Stage: createStageWorkspaceRecord, Cause: err, DeleteWon: &deleteWon})
-							if deleteWon {
-								writeDeletedDuringCreate(w, agent.ID, nil)
-								return
-							}
-							// A failed hub store write, not a broker fault: 500
-							// internal_error, as the managed-record rollback
-							// answers (writeManagedCreateUnrecorded).
-							writeCreateFailure(w, corrID, func() {
-								writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to record workspace storage path", nil)
-							})
-							return
-						}
-					}
-				}
-			}
-		}
-		ucancel()
 	}
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
@@ -3257,10 +3125,7 @@ func (s *Server) updateManagedAgentAfterCreate(ctx context.Context, agent *store
 // than the create's assumed running and is kept, as mergeDispatchedAgent
 // does; the Runtime and annotations are still written, so a later stop or
 // delete can find the interaction, and the create then stops the
-// interaction itself, since that writer's stop could not find it. The
-// hub-managed workspace swap (copyHubWorkspaceStorage) is copied as well,
-// so a retry cannot drop a storage path the create recorded
-// (ptone/scion#3730).
+// interaction itself, since that writer's stop could not find it.
 func mergeManagedCreate(dst, src *store.Agent) {
 	dst.Runtime = src.Runtime
 	for _, key := range []string{annotationCloudProvider, annotationInteractionID, annotationEnvironmentID} {
@@ -3273,67 +3138,11 @@ func mergeManagedCreate(dst, src *store.Agent) {
 		}
 		dst.Annotations[key] = v
 	}
-	copyHubWorkspaceStorage(dst, src)
 	if isTerminalAgentPhase(dst.Phase) {
 		return
 	}
 	dst.Phase = src.Phase
 	dst.Activity = src.Activity
-}
-
-// recordHubWorkspaceStorage writes agent, which carries the hub-managed
-// workspace swap (Workspace cleared, WorkspaceStoragePath and
-// WorkspaceStorageBucket set), to the committed row (ptone/scion#3730).
-//
-// A version conflict gets one re-read and one retry, as
-// updateManagedAgentAfterCreate does: a delete that claimed the row and
-// then failed, or whose lease lapsed, bumps state_version but leaves the
-// agent live. The retry writes the re-read row with only the three
-// workspace fields re-applied, so the concurrent writer's fields are kept.
-// The retry is skipped, and the first conflict returned, when the re-read
-// cannot be used or shows that a delete won (deleteWonOnRead): the caller's
-// rollback then decides the answer. Any other first error, or any error of
-// the retry, is returned as is. There is no loop.
-//
-// On success after a retry, agent keeps its older StateVersion, so the
-// create's next write conflicts and goes through its own re-read and merge,
-// which carry the workspace fields (mergeDispatchedAgent,
-// mergeDispatchedConfig, mergeManagedCreate) and keep a terminal phase a
-// concurrent writer set.
-func (s *Server) recordHubWorkspaceStorage(ctx context.Context, agent *store.Agent) error {
-	err := s.store.UpdateAgent(ctx, agent)
-	if err == nil || !errors.Is(err, store.ErrVersionConflict) {
-		return err
-	}
-
-	fresh, getErr := s.store.GetAgent(ctx, agent.ID)
-	if deleteWonOnRead(fresh, getErr) {
-		return err
-	}
-	if getErr != nil {
-		s.agentLifecycleLog.Warn("failed to re-read agent after a conflicting workspace storage write",
-			"agent_id", agent.ID, "error", getErr)
-		return err
-	}
-
-	copyHubWorkspaceStorage(fresh, agent)
-	return s.store.UpdateAgent(ctx, fresh)
-}
-
-// copyHubWorkspaceStorage copies the hub-managed workspace swap from src
-// onto dst when src has one (a non-empty WorkspaceStoragePath): Workspace
-// (cleared by the swap), WorkspaceStoragePath and WorkspaceStorageBucket.
-// Other applied config on dst is kept.
-func copyHubWorkspaceStorage(dst, src *store.Agent) {
-	if src.AppliedConfig == nil || src.AppliedConfig.WorkspaceStoragePath == "" {
-		return
-	}
-	if dst.AppliedConfig == nil {
-		dst.AppliedConfig = &store.AgentAppliedConfig{}
-	}
-	dst.AppliedConfig.Workspace = src.AppliedConfig.Workspace
-	dst.AppliedConfig.WorkspaceStoragePath = src.AppliedConfig.WorkspaceStoragePath
-	dst.AppliedConfig.WorkspaceStorageBucket = src.AppliedConfig.WorkspaceStorageBucket
 }
 
 func isTerminalAgentPhase(phase string) bool {

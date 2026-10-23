@@ -250,6 +250,15 @@ type ProvisionInput struct {
 	// clone URL, the command line or any file.
 	CloneWithToken bool
 
+	// CloneToken, when non-empty, is the git token for the clone, given to
+	// the clone command alone: its environment gets GITHUB_TOKEN set to it
+	// plus the same credential helper CloneWithToken uses, and clone errors
+	// are redacted with it. The calling process's environment is not read
+	// or changed. The hub sets it when it provisions a project's shared
+	// workspace at create (design-v7, fs-cleanup-arch ruling on
+	// ptone/scion#5813 rev-1 #1); it takes precedence over CloneWithToken.
+	CloneToken string
+
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
 	NFSUID int
@@ -2840,14 +2849,19 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if in.CloneWithToken {
+	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
+	if in.CloneToken != "" {
+		withToken, token = true, in.CloneToken
+		cmd.Env = append(cmd.Env, GitTokenEnv+"="+in.CloneToken)
+	}
+	if withToken {
 		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
 	}
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
+	return cloneError(gc.URL, string(output), err, withToken, token)
 }
 
 // redactedCredential replaces a credential value in clone error output.

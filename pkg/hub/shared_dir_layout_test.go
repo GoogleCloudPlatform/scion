@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -352,6 +353,40 @@ func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 	require.NoError(t, os.MkdirAll(resolveTestSharedDirPath(t, f.project, "scratchpad"), 0o755))
 	rec = doRequest(t, f.srv, http.MethodDelete, url, nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "an unrouted DELETE still answers 405, not the write gate's 503")
+}
+
+// TestSharedDirFiles_CloudRun_NoWorkspaceStorageRefused pins the write gate
+// on a Cloud Run Service with no workspace_storage and no
+// shared_dir_storage at all (P1 security review L2, sec-review-3,
+// ptone/scion#5881): shared dirs resolve to instance-local disk, so upload,
+// write and delete answer 503 and create nothing, while reads are allowed.
+func TestSharedDirFiles_CloudRun_NoWorkspaceStorageRefused(t *testing.T) {
+	f := newSharedDirLayoutFixture(t)
+	t.Setenv("K_SERVICE", "scion-hub")
+	f.srv.config.WorkspaceStorageConfig = nil
+	f.srv.config.SharedDirStorageConfig = nil
+
+	url := f.filesURL(f.project.ID, "scratchpad")
+	for name, do := range map[string]func() *httptest.ResponseRecorder{
+		"upload": func() *httptest.ResponseRecorder {
+			return doMultipartRequest(t, f.srv, http.MethodPost, url, map[string][]byte{"a.txt": []byte("a")})
+		},
+		"write": func() *httptest.ResponseRecorder {
+			return doRequest(t, f.srv, http.MethodPut, url+"/a.txt", ProjectWorkspaceWriteRequest{Content: "a"})
+		},
+		"delete": func() *httptest.ResponseRecorder { return doRequest(t, f.srv, http.MethodDelete, url+"/a.txt", nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := do()
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "shared_dir_writes_unavailable")
+			_, err := os.Stat(resolveTestSharedDirPath(t, f.project, "scratchpad"))
+			assert.True(t, os.IsNotExist(err), "a refused write must not create the local directory")
+		})
+	}
+
+	rec := doRequest(t, f.srv, http.MethodGet, url, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "reads are not gated: %s", rec.Body.String())
 }
 
 // TestSharedDirFiles_LocalLayout_SlugPathUnchanged is the T1 regression

@@ -105,6 +105,17 @@ func TestLoadHubSharedDirStorage(t *testing.T) {
 		assert.Equal(t, "nfs", got.Backend)
 		assert.Error(t, got.Validate())
 	})
+	// P1 security review L1 (sec-review-3, ptone/scion#5847): a legacy
+	// (pre-schema_version) file that mentions shared_dir_storage but from
+	// which no block loads fails closed: an error, never a nil block that
+	// the hub would read as "local".
+	t.Run("legacy file mentioning the key without a block fails closed", func(t *testing.T) {
+		writeGlobalSettingsForTest(t, "shared_dir_storage:\n  backend: nfs\n")
+		require.True(t, GlobalSettingsIsLegacyFormat(), "fixture must load as the legacy format")
+		got, err := LoadHubSharedDirStorage()
+		assert.ErrorContains(t, err, "mention it but it was not loaded")
+		assert.Nil(t, got, "no block (and so no local fallback) is returned")
+	})
 	t.Run("environment is not consulted", func(t *testing.T) {
 		writeGlobalSettingsForTest(t, "schema_version: \"1\"\n")
 		t.Setenv("SCION_SERVER_SHARED_DIR_STORAGE_BACKEND", "nfs")

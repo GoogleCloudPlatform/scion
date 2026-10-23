@@ -659,14 +659,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.projectPreStartHook = hook.ID
 
 	// Hub-managed workspace and shared-dir files of f.project, under a
-	// temporary home so the probes never touch the real one. The workspace
-	// download from object storage (cache notify) is replaced by a no-op.
+	// temporary home so the probes never touch the real one.
 	t.Setenv("HOME", t.TempDir())
-	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error { return nil })
 	liProject, err := s.GetProject(ctx, f.project)
 	require.NoError(t, err)
-	wsPath, err := srv.hubManagedProjectPath(liProject.Slug)
+	wsResolved, err := srv.projectWorkspaceResolved(liProject)
 	require.NoError(t, err)
+	wsPath := wsResolved.HostPath
 	require.NoError(t, os.MkdirAll(wsPath, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(wsPath, "li.txt"), []byte("li\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(wsPath, "li-files.txt"), []byte("li\n"), 0o644))
@@ -1038,11 +1037,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
 		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},
 		"/api/v1/projects/{id}/import-harness-configs":            {"id": f.project},
-		"/api/v1/projects/{id}/sync/status":                       {"id": f.project},
 		"/api/v1/projects/{id}/workspace/archive":                 {"id": f.project},
-		"/api/v1/projects/{id}/workspace/cache/notify":            {"id": f.project},
-		"/api/v1/projects/{id}/workspace/cache/refresh":           {"id": f.project},
-		"/api/v1/projects/{id}/workspace/cache/status":            {"id": f.project},
 		"/api/v1/projects/{id}/workspace/files":                   {"id": f.project},
 		"/api/v1/projects/{id}/workspace/files/{path}":            {"id": f.project, "path": "li-files.txt"},
 		"/api/v1/projects/{id}/workspace/pull":                    {"id": f.project},

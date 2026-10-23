@@ -199,6 +199,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			if k == store.LabelWorkspaceMode {
 				continue // re-derived, not copied raw
 			}
+			if k == store.LabelProjectOrigin {
+				continue // a clone is created on the hub, not linked
+			}
 			if remoteOverridden && isGitSourceLabel(k) {
 				continue // describe the template's repo; re-derived below
 			}
