@@ -544,7 +544,9 @@ each area move otherwise starts with a round of marker fixes. In every
 
 - `// pkgmove:scan-covers pkg/hub/...` plus a reason line, for a walk that
   recurses into every `pkg/hub` subdirectory (`./...`, `pkg/...` and `...`
-  are accepted too);
+  are accepted too), but not in a function that uses a guardScanSubdirs
+  helper: those read each listed directory one level deep, so the claim
+  would be false there;
 - `// pkgmove:scan-covers guardScanSubdirs` plus a reason line, in a function
   that uses one of the guardScanSubdirs helpers (`guardScanDirs`,
   `mustGuardScanDirs`, `readGuardScanDirs`, `globGuardScanDirs`,

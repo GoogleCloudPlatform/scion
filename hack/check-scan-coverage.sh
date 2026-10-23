@@ -20,7 +20,9 @@
 #   - a claim that holds for every pkg/hub area, followed by a reason line:
 #       // pkgmove:scan-covers pkg/hub/...
 #       // <why: e.g. recursive walk of pkg/hub, no SkipDir for a subdirectory>
-#     (also accepted: ./pkg/hub/..., pkg/..., ./... and ...);
+#     (also accepted: ./pkg/hub/..., pkg/..., ./... and ...),
+#     but not in a function that uses a guardScanSubdirs helper (they read
+#     each listed directory one level deep, so the claim would be false);
 #   - the list claim, followed by a reason line, in a function that uses one
 #     of the guardScanSubdirs helpers (guardScanDirs, mustGuardScanDirs,
 #     readGuardScanDirs, globGuardScanDirs, parseNonTestGoFiles):
@@ -84,7 +86,7 @@ trap 'rm -rf "$work"' EXIT
 # scan <root>: checks <root>/pkg/hub. Prints findings on stderr. Returns 0
 # clean, 1 violations, 4 when nothing was analysed.
 scan() {
-  local root="$1" hub="$1/pkg/hub"
+  local hub="$1/pkg/hub"
   if [[ ! -d "$hub" ]]; then
     echo "$name: scan root $hub is missing — NOTHING WAS ANALYSED" >&2
     return 4
@@ -158,7 +160,11 @@ scan() {
           f = (fn == "" ? "-" : fn)
           print file ":" FNR >> calls
           if (helperfn["*"] || helperfn[f]) continue
-          if (anyAt >= 0 && FNR - anyAt <= window) continue
+          if (anyAt >= 0 && FNR - anyAt <= window) {
+            if (!usesHelper[f]) continue
+            printf "pkg/hub/%s:%d: %s in %s: the pkg/hub-wide claim at line %d does not hold for a function that reads through the guardScanSubdirs helpers (they read each listed directory one level deep); use the guardScanSubdirs claim\n", file, FNR, call, f, anyAt
+            continue
+          }
           if (exemptAt >= 0 && FNR - exemptAt <= window) continue
           if (listAt >= 0 && FNR - listAt <= window) {
             if (usesHelper[f]) continue
@@ -367,6 +373,20 @@ func claimOutside() {
 	_ = parser.ParseDir
 	_, _ = parser.ParseDir(nil, ".", nil, 0)
 }
+
+func anyWithHelper() {
+	// pkgmove:scan-covers pkg/hub/...
+	// claims a recursive walk, but reads through the helpers.
+	files, _ := globGuardScanDirs(".", "*.go")
+	_, _ = filepath.Glob("../store/*.go")
+	_ = files
+}
+
+func listNoReason() {
+	// pkgmove:scan-covers guardScanSubdirs
+	_, _ = readGuardScanDirs(".")
+	_, _ = os.ReadDir("../store")
+}
 EOF
   rc=0; out="$(scan "$dir" 2>&1)" || rc=$?
   local want
@@ -379,7 +399,9 @@ EOF
     "pkg/hub/bad_test.go:44: os.Getwd in exemptNoReason has no covering claim" \
     "pkg/hub/bad_test.go:64: filepath.Walk in tooFar has no covering claim" \
     "pkg/hub/bad_test.go:71: parser.ParseDir in claimOutside has no covering claim" \
-    "8 enumeration call(s) without a covering claim"; do
+    "pkg/hub/bad_test.go:78: filepath.Glob in anyWithHelper: the pkg/hub-wide claim at line 75 does not hold for a function that reads through the guardScanSubdirs helpers" \
+    "pkg/hub/bad_test.go:85: os.ReadDir in listNoReason has no covering claim" \
+    "10 enumeration call(s) without a covering claim"; do
     [[ "$out" == *"$want"* ]] || { echo "self-test FAIL: missing \"$want\"" >&2; failed=1; }
   done
   [[ $rc -eq 1 ]] || { echo "self-test FAIL: violations: rc=$rc (want 1)" >&2; failed=1; }
