@@ -15,11 +15,59 @@
 package hubclient
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+func TestTemplateManifest_RecursiveExcludeBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		patterns []string
+		kept     []string
+		dropped  []string
+	}{
+		{"defaults", nil,
+			[]string{"report.DS_Store", "nested/report.DS_Store"},
+			[]string{".DS_Store", "nested/.DS_Store"}},
+		{"custom_directory", []string{"**/cache"},
+			[]string{"mycache/keep.txt", "nested/mycache/keep.txt"},
+			[]string{"cache/drop.txt", "nested/cache/drop.txt"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range append(slices.Clone(tc.kept), tc.dropped...) {
+				path := filepath.Join(dir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(name), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			builder := NewManifestBuilder(dir)
+			builder.IgnorePatterns = append(builder.IgnorePatterns, tc.patterns...)
+			manifest, err := builder.Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, file := range manifest.Files {
+				got = append(got, file.Path)
+			}
+			want := slices.Clone(tc.kept)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("template manifest paths = %v, want %v", got, want)
+			}
+		})
+	}
+}
 
 func TestNewManifestBuilder_UsesSharedDefaultExcludes(t *testing.T) {
 	saved := transfer.DefaultExcludePatterns

@@ -163,9 +163,9 @@ func (b *ManifestBuilder) shouldExclude(relPath string, isDir bool) bool {
 			if strings.HasPrefix(relPath, prefix+"/") || relPath == prefix {
 				return true
 			}
-			// Check if pattern matches directory contents
+			// Match the suffix at a path-component boundary, including the root.
 			suffix := strings.TrimPrefix(pattern, "**/")
-			if suffix != pattern && strings.HasSuffix(relPath, suffix) {
+			if suffix != pattern && (relPath == suffix || strings.HasSuffix(relPath, "/"+suffix)) {
 				return true
 			}
 			continue

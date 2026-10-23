@@ -17,9 +17,71 @@ package transfer
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestManifestBuilder_RecursiveExcludeBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		patterns []string
+		path     string
+		excluded bool
+	}{
+		{"default_root_store", nil, ".DS_Store", true},
+		{"default_nested_store", nil, "nested/.DS_Store", true},
+		{"default_root_lookalike", nil, "report.DS_Store", false},
+		{"default_nested_lookalike", nil, "nested/report.DS_Store", false},
+		{"recursive_file", []string{"**/cache"}, "cache", true},
+		{"recursive_nested_file", []string{"**/cache"}, "nested/cache", true},
+		{"recursive_directory", []string{"**/cache"}, "nested/cache/drop.txt", true},
+		{"recursive_prefixed_file", []string{"**/cache"}, "mycache", false},
+		{"recursive_nested_prefixed_file", []string{"**/cache"}, "nested/mycache", false},
+		{"recursive_prefixed_directory", []string{"**/cache"}, "nested/mycache/keep.txt", false},
+		{"compound_suffix", []string{"**/cache/data.txt"}, "cache/data.txt", true},
+		{"nested_compound_suffix", []string{"**/cache/data.txt"}, "nested/cache/data.txt", true},
+		{"compound_lookalike", []string{"**/cache/data.txt"}, "mycache/data.txt", false},
+		{"nested_compound_lookalike", []string{"**/cache/data.txt"}, "nested/mycache/data.txt", false},
+		{"simple_glob", []string{"*.log"}, "nested/debug.log", true},
+		{"simple_glob_lookalike", []string{"*.log"}, "nested/debug.log.txt", false},
+		{"root_tree", []string{"build/**"}, "build/output.txt", true},
+		{"root_tree_nested", []string{"build/**"}, "nested/build/output.txt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fullPath := filepath.Join(dir, filepath.FromSlash(tc.path))
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fullPath, []byte("content"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			collected, err := CollectFiles(dir, tc.patterns)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := NewManifestBuilder(dir).WithExcludePatterns(tc.patterns).Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{tc.path}
+			if tc.excluded {
+				want = nil
+			}
+			for label, files := range map[string][]FileInfo{"CollectFiles": collected, "Build": manifest.Files} {
+				var got []string
+				for _, f := range files {
+					got = append(got, f.Path)
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("%s collected %v, want %v", label, got, want)
+				}
+			}
+		})
+	}
+}
 
 func TestNewManifestBuilder(t *testing.T) {
 	builder := NewManifestBuilder("/tmp/test")
