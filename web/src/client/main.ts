@@ -1405,6 +1405,10 @@ async function renderRoute(path: string): Promise<void> {
     // redirected first and never reaches it.
     loadsReady.catch(() => undefined);
     cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
+    // A newer navigation started while the check ran: its result, allow or
+    // deny, no longer applies (a deny must not redirect away from the newer
+    // page, ptone/scion#3767).
+    if (thisNav !== navigationId) return;
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {
