@@ -883,7 +883,24 @@ const (
 	// global project (value "true"), as the embedded registration creates it.
 	LabelSystemProject = "scion.io/system"
 	LabelGlobalProject = "scion.io/global"
+	// LabelProjectOrigin records how a project came to exist. It is
+	// server-owned: ProjectOriginLinked when the project is created by
+	// registration from an existing checkout (registerProject),
+	// ProjectOriginHub when it is created on the hub (create, clone).
+	// Projects created before the label existed have none. Clients cannot
+	// set, change or remove it. It distinguishes a linked project without a
+	// git remote from a hub-managed one, which provider records cannot when
+	// the only provider is a remote broker without a local path.
+	LabelProjectOrigin  = "scion.dev/project-origin"
+	ProjectOriginLinked = "linked"
+	ProjectOriginHub    = "hub"
 )
+
+// IsLinkedOrigin reports whether the project was created by registration
+// from an existing checkout (LabelProjectOrigin).
+func (p *Project) IsLinkedOrigin() bool {
+	return p != nil && p.Labels[LabelProjectOrigin] == ProjectOriginLinked
+}
 
 // Project members group marker annotations (ptone/scion#2556).
 const (

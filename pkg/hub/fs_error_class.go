@@ -28,14 +28,18 @@ const (
 	fsErrorClassPermission = "permission"
 	fsErrorClassTimeout    = "timeout"
 	fsErrorClassOther      = "other"
+	// fsErrorClassStorageUnavailable: the hub's shared workspace storage
+	// cannot be used (errWorkspaceStorageUnavailable, a misconfiguration).
+	fsErrorClassStorageUnavailable = "storage_unavailable"
 )
 
 // fsErrorClass maps err to one of the fsErrorClass* tokens. It only inspects
 // err with errors.Is and never formats it.
 func fsErrorClass(err error) string {
 	switch {
-	case errors.Is(err, errWorkspaceContentTimeout),
-		errors.Is(err, context.DeadlineExceeded),
+	case errors.Is(err, errWorkspaceStorageUnavailable):
+		return fsErrorClassStorageUnavailable
+	case errors.Is(err, context.DeadlineExceeded),
 		errors.Is(err, os.ErrDeadlineExceeded):
 		return fsErrorClassTimeout
 	case errors.Is(err, fs.ErrNotExist):

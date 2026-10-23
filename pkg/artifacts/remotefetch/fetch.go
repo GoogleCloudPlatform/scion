@@ -62,6 +62,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 // Defaults for a zero Config field.
@@ -97,7 +99,8 @@ const (
 // Error is a failed fetch.
 type Error struct {
 	Reason Reason
-	// Detail is free text for logs; it may name hosts and addresses.
+	// Detail is free text for logs; it may name hosts and addresses, except
+	// for a URL urlredact.HostAndPath rejects (see hiddenDetail).
 	Detail string
 }
 
@@ -246,14 +249,18 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, auth
 	for hop := 0; ; hop++ {
 		u, err := f.checkURL(current)
 		if err != nil {
-			return nil, err
+			return nil, hideDetail(err, current)
 		}
 		if hop == 0 {
 			authHost = u.Hostname()
 		}
-		addr, err := f.vet(ctx, u.Hostname())
+		shownHost := u.Hostname()
+		if _, ok := urlredact.HostAndPath(current); !ok {
+			shownHost = hiddenHost
+		}
+		addr, err := f.vet(ctx, u.Hostname(), shownHost)
 		if err != nil {
-			return nil, err
+			return nil, hideDetail(err, current)
 		}
 		hopAuth := ""
 		if strings.EqualFold(u.Hostname(), authHost) {
@@ -261,7 +268,7 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, auth
 		}
 		resp, err := f.get(ctx, u, addr, mode, hopAuth)
 		if err != nil {
-			return nil, err
+			return nil, hideDetail(err, current)
 		}
 		if isRedirect(resp.StatusCode) {
 			loc := resp.Header.Get("Location")
@@ -277,11 +284,42 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, auth
 			continue
 		}
 		defer func() { _ = resp.Body.Close() }()
+		var res *Result
 		if mode == modeBytes {
-			return f.readBytes(resp)
+			res, err = f.readBytes(resp)
+		} else {
+			res, err = f.readImage(resp)
 		}
-		return f.readImage(resp)
+		if err != nil {
+			return nil, hideDetail(err, current)
+		}
+		return res, nil
 	}
+}
+
+// hiddenHost stands for the host of a URL that urlredact.HostAndPath
+// rejects, in logs.
+const hiddenHost = "(host not shown)"
+
+// hiddenDetail is the Detail of a failure on a URL that
+// urlredact.HostAndPath rejects (it holds an '@' the shared user info rule
+// cannot place). The host and port of such a URL may be part of a
+// credential (a token read as a host, a password read as a port), and so
+// may any error that quotes them, so none of it is kept.
+const hiddenDetail = "(detail not shown for this URL)"
+
+// hideDetail returns err with its Detail replaced by hiddenDetail when
+// urlredact.HostAndPath rejects rawURL, keeping its Reason; any other error
+// is returned as it is.
+func hideDetail(err error, rawURL string) error {
+	if _, ok := urlredact.HostAndPath(rawURL); ok {
+		return err
+	}
+	var fe *Error
+	if errors.As(err, &fe) {
+		return &Error{Reason: fe.Reason, Detail: hiddenDetail}
+	}
+	return &Error{Reason: ReasonConnect, Detail: hiddenDetail}
 }
 
 // checkURL enforces the per-hop URL rules: https, port 443, no userinfo, a
@@ -363,8 +401,9 @@ func isHostnameRune(r rune) bool {
 
 // vet resolves host once and returns the address to connect to. It fails if
 // any resolved address is denied; it never picks an allowed address out of
-// a mixed answer. Denials are logged here, before any connection.
-func (f *Fetcher) vet(ctx context.Context, host string) (netip.Addr, error) {
+// a mixed answer. Denials are logged here, before any connection, with the
+// host shown as shownHost.
+func (f *Fetcher) vet(ctx context.Context, host, shownHost string) (netip.Addr, error) {
 	var addrs []netip.Addr
 	if a, err := netip.ParseAddr(host); err == nil {
 		addrs = []netip.Addr{a}
@@ -380,7 +419,7 @@ func (f *Fetcher) vet(ctx context.Context, host string) (netip.Addr, error) {
 	for _, a := range addrs {
 		if f.denied(a) {
 			f.cfg.Logger.WarnContext(ctx, "artifacts: remote image address denied before connecting",
-				"host", host, "address", a.String())
+				"host", shownHost, "address", a.String())
 			return netip.Addr{}, fail(ReasonDeniedAddress, "%s resolves to denied address %s", host, a)
 		}
 	}
@@ -498,14 +537,15 @@ func SniffImage(b []byte) string {
 	return ""
 }
 
-// redactURL drops the query and fragment, which may carry tokens, from a URL
-// before it is logged.
+// redactURL drops the user info, query and fragment, which may carry
+// tokens, from a URL before it is logged. A URL that does not parse, or
+// holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is shown as "(unparseable)".
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
+	u, ok := urlredact.HostAndPath(raw)
+	if !ok {
 		return "(unparseable)"
 	}
-	u.RawQuery, u.Fragment, u.User = "", "", nil
 	return u.String()
 }
 

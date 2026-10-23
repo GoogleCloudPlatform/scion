@@ -229,6 +229,36 @@ export default defineConfig([
     },
   },
 
+  // Client requests go through apiFetch() in src/client/api.ts
+  // (ptone/scion#353): credentials, the hub clock sample and the global
+  // 401/403 handling (or `authErrors: 'caller'` to opt out) live in one
+  // place. A direct fetch() needs an explicit, commented exception
+  // (eslint-disable-next-line ... -- reason). Tests and fixtures stub
+  // fetch and are exempt. src/components and src/utils are not covered
+  // yet (follow-up of ptone/scion#5613).
+  {
+    files: ['src/client/**/*.ts'],
+    ignores: ['src/client/**/*.test.ts', 'src/client/__fixtures__/**'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'fetch',
+          message:
+            "Use apiFetch() from client/api.js (with authErrors: 'caller' to handle 401/403 yourself); a direct fetch() needs a commented eslint-disable exception.",
+        },
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['window', 'globalThis', 'self'].map((object) => ({
+          object,
+          property: 'fetch',
+          message: 'Use apiFetch() from client/api.js instead of a direct fetch().',
+        })),
+      ],
+    },
+  },
+
   // Lit components: Lit binds `@event=${this.handler}` template listeners
   // to the host element (the `host` render option), so passing an unbound
   // method there is correct and unbound-method only reports false

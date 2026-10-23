@@ -280,3 +280,70 @@ func assertRecordHasAttr(t *testing.T, rec slog.Record, key, want string) {
 	})
 	assert.True(t, found, "no attr with key %q on record %q", key, rec.Message)
 }
+
+// TestEnsurePrivateDir: a new leaf gets exactly 02755 (no group write, no
+// default ACL); intermediates are created as EnsureLeaf creates them; an
+// existing directory is accepted untouched; a symlinked intermediate or
+// leaf is refused and nothing is created through it; a chmod failure
+// removes the leaf it created.
+func TestEnsurePrivateDir(t *testing.T) {
+	rel := filepath.Join("projects", "pid-1", ".scion")
+	t.Run("new leaf", func(t *testing.T) {
+		hostBase := t.TempDir()
+		fd, existed, err := EnsurePrivateDir(hostBase, rel)
+		require.NoError(t, err)
+		defer func() { _ = CloseFd(fd) }()
+		assert.False(t, existed)
+		var st unix.Stat_t
+		require.NoError(t, unix.Fstat(fd, &st))
+		assert.Equal(t, os.FileMode(0o2755), os.FileMode(st.Mode&0o7777), "leaf mode")
+		for _, r := range []string{"projects", filepath.Join("projects", "pid-1")} {
+			fi, err := os.Stat(filepath.Join(hostBase, r))
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o755)|os.ModeSetgid|os.ModeDir, fi.Mode(), r)
+		}
+		buf := make([]byte, 256)
+		_, xerr := unix.Fgetxattr(fd, xattrPosixACLDefault, buf)
+		assert.Error(t, xerr, "no default ACL on a private directory")
+	})
+	t.Run("existing directory untouched", func(t *testing.T) {
+		hostBase := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostBase, rel), 0o700))
+		fd, existed, err := EnsurePrivateDir(hostBase, rel)
+		require.NoError(t, err)
+		defer func() { _ = CloseFd(fd) }()
+		assert.True(t, existed)
+		var st unix.Stat_t
+		require.NoError(t, unix.Fstat(fd, &st))
+		assert.Equal(t, os.FileMode(0o700), os.FileMode(st.Mode&0o7777))
+	})
+	t.Run("symlinked intermediate refused", func(t *testing.T) {
+		hostBase, victim := t.TempDir(), t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects"), 0o755))
+		require.NoError(t, os.Symlink(victim, filepath.Join(hostBase, "projects", "pid-1")))
+		_, _, err := EnsurePrivateDir(hostBase, rel)
+		require.Error(t, err)
+		entries, rdErr := os.ReadDir(victim)
+		require.NoError(t, rdErr)
+		assert.Empty(t, entries, "nothing is created through the symlinked intermediate")
+	})
+	t.Run("symlinked leaf refused", func(t *testing.T) {
+		hostBase, victim := t.TempDir(), t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "projects", "pid-1"), 0o755))
+		require.NoError(t, os.Symlink(victim, filepath.Join(hostBase, rel)))
+		_, _, err := EnsurePrivateDir(hostBase, rel)
+		require.Error(t, err)
+	})
+	t.Run("chmod failure removes the leaf", func(t *testing.T) {
+		hostBase := t.TempDir()
+		old := chmodLeaf
+		chmodLeaf = func(fd int, mode uint32) error { return unix.EINVAL }
+		t.Cleanup(func() { chmodLeaf = old })
+		_, _, err := EnsurePrivateDir(hostBase, rel)
+		require.Error(t, err)
+		_, statErr := os.Stat(filepath.Join(hostBase, rel))
+		assert.True(t, os.IsNotExist(statErr), "the leaf is removed after a chmod failure")
+		_, statErr = os.Stat(filepath.Join(hostBase, "projects", "pid-1"))
+		assert.NoError(t, statErr, "intermediates survive")
+	})
+}
