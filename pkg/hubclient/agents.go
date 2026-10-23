@@ -356,6 +356,76 @@ type UpdateAgentRequest struct {
 	Annotations  map[string]string `json:"annotations,omitempty"`
 	TaskSummary  string            `json:"taskSummary,omitempty"`
 	StateVersion int64             `json:"stateVersion"` // Required for optimistic locking
+
+	// Config edits the agent's inline config. The hub applies only the
+	// keys the request names, and every api.ScionConfig key is omitempty,
+	// so only non-empty values are sent: this field cannot clear a key.
+	// The response's disposition says when each edit takes effect (applied
+	// now, held until the next start, or held until a reincarnation).
+	Config *api.ScionConfig `json:"config,omitempty"`
+	// GCPIdentity changes the agent's GCP identity. The hub accepts it only
+	// for an agent that has not started yet (created phase).
+	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+	// AgentRole is reserved for held role edits. A hub with held edits on
+	// refuses it (409): the role changes by reincarnating the agent.
+	AgentRole *string `json:"agentRole,omitempty"`
+	// ExplicitTimezone pins (an IANA zone name) or unpins ("") the agent's
+	// container timezone; nil leaves it unchanged. Applies at the next
+	// start, in any phase.
+	ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
+	// Task is the task the agent gets at its next fresh start (a resume
+	// does not send it). It is sent as config.task: Update copies it there,
+	// and refuses a request that sets both Task and Config.Task.
+	Task string `json:"-"`
+}
+
+// MarshalJSON encodes r with Config reduced to its set keys: a key whose
+// value encodes as null (api.ScionConfig.Detached has no omitempty) is left
+// out, so the hub never reads it as an edit of that key.
+func (r UpdateAgentRequest) MarshalJSON() ([]byte, error) {
+	type alias UpdateAgentRequest
+	var cfg json.RawMessage
+	if r.Config != nil {
+		b, err := json.Marshal(r.Config)
+		if err != nil {
+			return nil, err
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(b, &keys); err != nil {
+			return nil, err
+		}
+		for k, v := range keys {
+			if string(v) == "null" {
+				delete(keys, k)
+			}
+		}
+		if cfg, err = json.Marshal(keys); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		alias
+		Config json.RawMessage `json:"config,omitempty"`
+	}{alias: alias(r), Config: cfg})
+}
+
+// wireBody returns the body Update sends for r: r itself, or a copy whose
+// Config carries Task as config.task.
+func (r *UpdateAgentRequest) wireBody() (*UpdateAgentRequest, error) {
+	if r == nil || r.Task == "" {
+		return r, nil
+	}
+	if r.Config != nil && r.Config.Task != "" {
+		return nil, fmt.Errorf("update agent: set Task or Config.Task, not both")
+	}
+	body := *r
+	cfg := api.ScionConfig{}
+	if r.Config != nil {
+		cfg = *r.Config
+	}
+	cfg.Task = r.Task
+	body.Config = &cfg
+	return &body, nil
 }
 
 // DeleteAgentOptions configures agent deletion.
@@ -468,9 +538,13 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
-// Update updates an agent's metadata.
+// Update updates an agent's metadata and config.
 func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAgentRequest) (*Agent, error) {
-	resp, err := s.c.patch(ctx, s.agentPath(agentID), req, nil)
+	body, err := req.wireBody()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.c.patch(ctx, s.agentPath(agentID), body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -857,6 +931,9 @@ type SendMessageOptions struct {
 	// addition to any @mentions the server extracts from the body. The
 	// primary recipient and the sender are excluded automatically.
 	Mentions []string
+	// AttachmentIDs names attachments the sender uploaded
+	// (AttachmentUploader.UploadAttachments), by id (ptone/scion#4596).
+	AttachmentIDs []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
@@ -879,12 +956,14 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
 		Mentions          []string                    `json:"mentions,omitempty"`
+		AttachmentIDs     []string                    `json:"attachment_ids,omitempty"`
 	}{
 		StructuredMessage: msg,
 		Interrupt:         opts.Interrupt,
 		Notify:            opts.Notify,
 		Wake:              opts.Wake,
 		Mentions:          opts.Mentions,
+		AttachmentIDs:     opts.AttachmentIDs,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -965,6 +1044,9 @@ type OutboundMessageRequest struct {
 	// Wake requests that a suspended target agent be resumed before
 	// delivering the message. Ignored for non-agent recipients.
 	Wake bool `json:"wake,omitempty"`
+	// AttachmentIDs names attachments the sending agent uploaded, by id
+	// (ptone/scion#4596). Attachments keeps meaning staged paths.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // OutboundMessageResult is the parsed response from a successful outbound

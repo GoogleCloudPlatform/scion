@@ -127,9 +127,14 @@ type IntegrationStatus struct {
 }
 
 // IntegrationConfigUpdateRequest is the request body for the PUT config endpoint.
+//
+// Settings is merged key by key into the stored config: a key the body
+// omits keeps its stored value, a key with a string value (including "")
+// replaces it, and a key sent as JSON null is deleted from the stored
+// config, so the plugin's own default applies again (ptone/scion#3913).
 type IntegrationConfigUpdateRequest struct {
-	Settings map[string]string `json:"settings"`
-	Secrets  map[string]string `json:"secrets"`
+	Settings map[string]*string `json:"settings"`
+	Secrets  map[string]string  `json:"secrets"`
 }
 
 // AvailableIntegration represents a plugin that could be installed.
@@ -282,18 +287,18 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 		}
 		s.handleIntegrationHealth(w, r, name)
 	case "update":
-		if actionSub != "" && r.Method == http.MethodGet {
+		// .../update/{id} is the status lookup and accepts only GET; only a
+		// POST to the bare .../update starts an update (ptone/scion#2422).
+		if actionSub != "" {
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
 			s.handleGetUpdateStatus(w, r, name, actionSub)
 			return
 		}
 		if r.Method != http.MethodPost {
-			// .../update/{id} also accepts GET (status lookup, handled above);
-			// only the no-actionSub form is POST-only.
-			if actionSub != "" {
-				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
-			} else {
-				MethodNotAllowed(w, http.MethodPost)
-			}
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)
@@ -593,14 +598,24 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			InternalError(w)
 			return
 		}
+		// A stored Postgres row whose config is JSON null loads as a nil
+		// map; start from an empty map so the merge below cannot panic.
+		if existing == nil {
+			existing = make(map[string]string)
+		}
 
 		// Merge new settings into existing, filtering out any secret keys.
+		// A null value deletes the stored key.
 		secretKeys := allSecretConfigKeys(name)
 		for k, v := range req.Settings {
 			if secretKeys[k] {
 				continue
 			}
-			existing[k] = v
+			if v == nil {
+				delete(existing, k)
+				continue
+			}
+			existing[k] = *v
 		}
 
 		if err := provider.Save(ctx, existing); err != nil {

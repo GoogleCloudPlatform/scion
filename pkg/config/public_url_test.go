@@ -116,3 +116,16 @@ func TestIsLoopbackHost(t *testing.T) {
 		}
 	}
 }
+
+// A hostname resolving to loopback does not qualify: IsLoopbackHost never
+// resolves a name, so a hosts-file name (ip6-localhost, ip6-loopback,
+// localhost.localdomain) or a public DNS name that points at 127.0.0.1
+// (localtest.me) is not loopback, whatever it resolves to. Only the literal
+// name "localhost" and loopback IP literals are (ptone/scion#5364).
+func TestIsLoopbackHost_AHostnameResolvingToLoopbackDoesNotQualify(t *testing.T) {
+	for _, host := range []string{"ip6-localhost", "ip6-loopback", "localhost.localdomain", "localtest.me"} {
+		if IsLoopbackHost(host) {
+			t.Errorf("IsLoopbackHost(%q) = true; a name must never qualify by what it resolves to", host)
+		}
+	}
+}

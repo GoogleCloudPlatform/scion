@@ -1041,6 +1041,12 @@ export class ScionPageChat extends LitElement {
    * at connect, before this page writes to the entry.
    */
   private _restoredPanel: ChatPanel | null = null;
+  /**
+   * True until the conversation the URL names first opens, or the user moves
+   * to another panel or conversation. While it holds, a switch into the
+   * mobile layout hands the pending open the panel the entry records.
+   */
+  private _routeOpenPending = true;
   /** The space whose mobile rail view this page last opened from the URL. */
   private _spaceOpenedSlug: string | null = null;
   private _touchStartX = 0;
@@ -4436,7 +4442,12 @@ export class ScionPageChat extends LitElement {
     // panel it records, so it and the entries around it hold again.
     if (e.matches && this.ownsPanelHistory()) {
       const entry = this._panelHistory.current();
-      if (entry) this.mobilePanel = entry.panel;
+      if (entry) {
+        this.mobilePanel = entry.panel;
+        // A conversation the URL names may still be opening (a slug lookup in
+        // flight): it should land on this panel too, not on its fallback.
+        if (this._routeOpenPending) this._restoredPanel = entry.panel;
+      }
       this._panelHistory.observe();
     }
   }
@@ -4450,6 +4461,7 @@ export class ScionPageChat extends LitElement {
    */
   private goToPanel(target: ChatPanel): void {
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (target === this.mobilePanel) return;
     const move =
       this.isMobileViewport() && this.ownsPanelHistory()
@@ -4465,6 +4477,7 @@ export class ScionPageChat extends LitElement {
   private takeRouteOpenPanel(fallback: ChatPanel): ChatPanel {
     const panel = this._restoredPanel ?? fallback;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     return panel;
   }
 
@@ -4504,6 +4517,7 @@ export class ScionPageChat extends LitElement {
     const panel = this._panelHistory.popped(e.state, !this.isMobileLayout);
     if (!panel) return;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (panel === this.mobilePanel) return;
     if (this.mobilePanel === 'center') this.dismissKeyboard();
     this.mobilePanel = panel;
@@ -4572,6 +4586,7 @@ export class ScionPageChat extends LitElement {
   private pushChatPath(path: string): void {
     const seq = this._userNavSeq;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     // Reopening what the URL already names (the open thread picked again,
     // the open DM's peer clicked) adds no entry: Back would only land on the
     // same conversation. In the mobile layout the panel change it makes is

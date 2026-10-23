@@ -544,7 +544,8 @@ func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
 	go func() {
 		_, _, _, err := a.downloadWorkspaceFromGCS(context.Background(), CreateAgentRequest{
 			ID: "agent-dl", Name: "agent-dl", ProjectID: "proj-dl", ProjectSlug: "dl-proj",
-			WorkspaceStoragePath: "uploads/dl", WorkspaceStorageBucket: "bucket"}, api.StartOptions{})
+			WorkspaceStoragePath: "uploads/dl", WorkspaceStorageBucket: "bucket",
+			workspaceAbsentAtAdmission: true}, api.StartOptions{})
 		done <- err
 	}()
 	select {

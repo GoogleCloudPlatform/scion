@@ -70,6 +70,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 	agentDir := filepath.Join(oldRoot, config.DotScion, "agents", relinkAgent)
 	writeRelinkFile(t, filepath.Join(agentDir, "home", "state.txt"), relinkState)
 	writeRelinkFile(t, filepath.Join(agentDir, "scion-agent.json"), `{}`)
+	writeRelinkFile(t, filepath.Join(agentDir, "image-provenance.json"), `{"version": 1}`)
 	writeRelinkFile(t, filepath.Join(agentDir, "home", "agent-info.json"), `{"name": "`+relinkAgent+`"}`)
 	writeRelinkFile(t, filepath.Join(oldRoot, config.SharedDirsSubdir, "cache", "f"), "shared\n")
 	if err := os.Symlink("state.txt", filepath.Join(agentDir, "home", "link")); err != nil {

@@ -261,16 +261,31 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		return nil, err
 	}
 
-	rowLocks := s.usesRowLocks()
-
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			// Already inside a caller's transaction (store.WithTx): run on
+			// it so the update commits or rolls back with the caller's work.
+			return s.updateAccessConstraint(ctx, s.client, uid, c, expectedRevision)
+		}
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	updated, err := s.updateAccessConstraint(ctx, tx.Client(), uid, c, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *AccessConstraintStore) updateAccessConstraint(ctx context.Context, client *ent.Client, uid uuid.UUID, c *store.AccessConstraint, expectedRevision int64) (*store.AccessConstraint, error) {
+	rowLocks := s.usesRowLocks()
 
 	// Read existing constraint inside transaction for optimistic concurrency.
-	q := tx.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
+	q := client.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
 	if rowLocks {
 		q = q.ForUpdate()
 	}
@@ -285,11 +300,11 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	}
 
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx.Client(), c); err != nil {
+	if err := s.validateReferences(ctx, client, c); err != nil {
 		return nil, err
 	}
 
-	builder := tx.AccessConstraint.UpdateOneID(uid).
+	builder := client.AccessConstraint.UpdateOneID(uid).
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
@@ -337,10 +352,6 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	updated, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
 	return entAccessConstraintToStore(updated), nil
@@ -482,7 +493,7 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		// time.
 		if sortField != accessconstraint.FieldName {
 			if _, err := time.Parse(time.RFC3339Nano, cursorVal); err != nil {
-				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidInput, err)
+				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidCursor, err)
 			}
 		}
 		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
@@ -679,12 +690,12 @@ func encodeConstraintCursor(sortVal string, id string) string {
 }
 
 // decodeConstraintCursor is the inverse of encodeConstraintCursor. Every
-// failure wraps store.ErrInvalidInput: a malformed pageToken is caller error,
+// failure wraps store.ErrInvalidCursor: a malformed pageToken is caller error,
 // which the hub maps to HTTP 400 rather than 500 (ptone/scion#1957).
 func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	s := string(raw)
 	// Split at the last comma — UUIDs never contain commas, so the sort
@@ -692,11 +703,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	// everything before the last comma.
 	lastComma := strings.LastIndex(s, ",")
 	if lastComma < 0 {
-		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidInput)
+		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidCursor)
 	}
 	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return s[:lastComma], id, nil
 }

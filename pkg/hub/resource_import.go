@@ -18,10 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/sync/errgroup"
 
@@ -245,29 +249,13 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	// Resolve the project's workspace root on disk.
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	// Snapshot the workspace path through a confined root (the workspace
+	// can be agent-writable; see snapshotWorkspaceDir).
+	resourcesDir, cleanup, err := s.snapshotWorkspaceDir(ctx, project, workspacePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+		return nil, err
 	}
-
-	// Clean and join the workspace path to the project root. Strip the leading
-	// slash so it joins relative to the root.
-	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
-	resourcesDir := filepath.Join(projectRoot, rel)
-
-	// Validate the resolved path is within the project root.
-	absRoot, _ := filepath.Abs(projectRoot)
-	absDir, _ := filepath.Abs(resourcesDir)
-	relPath, err := filepath.Rel(absRoot, absDir)
-	if err != nil || strings.HasPrefix(relPath, "..") {
-		return nil, fmt.Errorf("workspace path must be within the project workspace")
-	}
-
-	info, err := os.Stat(resourcesDir)
-	if err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
-	}
+	defer cleanup()
 
 	// Workspace dirs are real directories, so pass "" as sourceURL: the leaf's
 	// own base name is correct (no content-hash cache directory in play).
@@ -680,25 +668,11 @@ func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Proje
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	resourcesDir, cleanup, err := s.snapshotWorkspaceDir(ctx, project, workspacePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+		return nil, nil, err
 	}
-
-	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
-	resourcesDir := filepath.Join(projectRoot, rel)
-
-	absRoot, _ := filepath.Abs(projectRoot)
-	absDir, _ := filepath.Abs(resourcesDir)
-	relPath, err := filepath.Rel(absRoot, absDir)
-	if err != nil || strings.HasPrefix(relPath, "..") {
-		return nil, nil, fmt.Errorf("workspace path must be within the project workspace")
-	}
-
-	info, err := os.Stat(resourcesDir)
-	if err != nil || !info.IsDir() {
-		return nil, nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
-	}
+	defer cleanup()
 
 	dirs, skipped, err := discoverResourceDirs(resourcesDir, "", kind)
 	if err != nil {
@@ -718,3 +692,130 @@ func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Proje
 	}
 	return names, skippedNames, nil
 }
+
+// Bounds of a workspace snapshot for resource import.
+var (
+	workspaceSnapshotMaxFiles = 10000
+	workspaceSnapshotMaxBytes = int64(256 << 20)
+)
+
+// snapshotWorkspaceDir copies the directory workspacePath (relative to the
+// project's workspace root, e.g. "/.scion/templates") into a private
+// temporary directory and returns it, with a cleanup func the caller must
+// call. The workspace can be agent-writable (the uuid tree on a shared
+// backend, or the workspace on the local backend), so every read goes
+// through an *os.Root: the workspace is opened with Resolved.Open, the
+// sub-directory with Root.OpenRoot (a path or symlink leading out of it is
+// refused), and the tree is walked through the root's FS. Symbolic links
+// and other non-regular files inside it are skipped, never followed. The
+// copy is bounded (workspaceSnapshotMaxFiles, workspaceSnapshotMaxBytes).
+// The import and discovery then read only the private copy, so nothing the
+// workspace changes afterwards (a swapped symlink) can redirect them.
+// Errors carry no host path.
+func (s *Server) snapshotWorkspaceDir(ctx context.Context, project *store.Project, workspacePath string) (string, func(), error) {
+	resolved, err := s.resolveProjectWorkspace(ctx, project)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+	}
+	// As before: a leading slash means the workspace root; a path that
+	// cleans to outside it is refused.
+	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
+	if rel == "" {
+		rel = "."
+	}
+	if rel != "." && !filepath.IsLocal(rel) {
+		return "", nil, fmt.Errorf("workspace path must be within the project workspace")
+	}
+	root, err := resolved.Open(false)
+	if err != nil {
+		return "", nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
+	}
+	defer func() { _ = root.Close() }()
+	sub, err := root.OpenRoot(rel)
+	if err != nil {
+		return "", nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
+	}
+	defer func() { _ = sub.Close() }()
+
+	tmp, err := os.MkdirTemp("", "scion-workspace-import-")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to prepare the workspace import")
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	// The copy keeps the directory's own base name: discovery names a
+	// resource directory given directly by its base name.
+	base := path.Base(rel)
+	if rel == "." {
+		base = "workspace"
+	}
+	dstRoot := filepath.Join(tmp, base)
+	if err := os.Mkdir(dstRoot, 0o755); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to prepare the workspace import")
+	}
+	files, total := 0, int64(0)
+	walkErr := fs.WalkDir(sub.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == "." {
+			return nil
+		}
+		dst := filepath.Join(dstRoot, filepath.FromSlash(p))
+		switch {
+		case d.IsDir():
+			return os.Mkdir(dst, 0o755)
+		case !d.Type().IsRegular():
+			return nil // symlinks and special files are skipped
+		}
+		files++
+		if files > workspaceSnapshotMaxFiles {
+			return errWorkspaceSnapshotTooLarge
+		}
+		// Opened non-blocking and without following a final symlink, and
+		// checked to still be a regular file: an entry swapped for a FIFO
+		// or a link after the walk classified it is skipped, never read
+		// (a FIFO would block the open or the read).
+		in, err := sub.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			if errors.Is(err, syscall.ELOOP) {
+				return nil
+			}
+			return err
+		}
+		defer func() { _ = in.Close() }()
+		if fi, err := in.Stat(); err != nil {
+			return err
+		} else if !fi.Mode().IsRegular() {
+			return nil
+		}
+		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return err
+		}
+		n, err := io.Copy(out, io.LimitReader(in, workspaceSnapshotMaxBytes-total+1))
+		total += n
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		if total > workspaceSnapshotMaxBytes {
+			return errWorkspaceSnapshotTooLarge
+		}
+		return nil
+	})
+	if walkErr != nil {
+		cleanup()
+		if errors.Is(walkErr, errWorkspaceSnapshotTooLarge) {
+			return "", nil, walkErr
+		}
+		s.projectsLogger().Warn("workspace import snapshot failed", "project_id", project.ID, "error", walkErr)
+		return "", nil, fmt.Errorf("workspace path could not be read: %s", workspacePath)
+	}
+	return dstRoot, cleanup, nil
+}
+
+// errWorkspaceSnapshotTooLarge refuses a workspace import over the bounds.
+var errWorkspaceSnapshotTooLarge = errors.New("workspace path is too large to import")

@@ -253,3 +253,50 @@ func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 	assert.Contains(t, err.Error(), "unexpected server response for "+redactedCredential)
 	assert.NoFileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
 }
+
+// CloneToken: a private repository is cloned with the token given in the
+// input alone, with no GITHUB_TOKEN in the process environment, and the
+// process environment is left unchanged (the hub's per-project token at
+// project create, ptone/scion#5813).
+func TestProvisionShared_CloneToken_PrivateRepoWithoutProcessEnv(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	store := isolateGitConfig(t)
+	t.Setenv(GitTokenEnv, "")
+	cloneURL := privateGitServer(t, initBareGitRepo(t))
+
+	in, stateDir := sharedPlainStateDirInput(t, cloneURL)
+	in.CloneToken = testCloneToken
+	require.NoError(t, ProvisionShared(in))
+
+	ws := in.Resolved.HostPath
+	assert.FileExists(t, filepath.Join(ws, "README.md"))
+	assert.FileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+	assert.Empty(t, os.Getenv(GitTokenEnv), "the process environment is not changed")
+	assertTokenAbsent(t, ws)
+	assertTokenAbsent(t, stateDir)
+	assert.NoFileExists(t, store, "a credential helper from git's config must not store the token")
+	assertNoGitConfigEnv(t)
+}
+
+// CloneToken takes precedence over a different GITHUB_TOKEN in the process
+// environment, and a rejected CloneToken is never printed.
+func TestProvisionShared_CloneToken_TakesPrecedenceAndIsRedacted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	isolateGitConfig(t)
+	const wrong = "wrong-test-token-77aa"
+	cloneURL := privateGitServer(t, initBareGitRepo(t))
+
+	t.Setenv(GitTokenEnv, wrong)
+	in, _ := sharedPlainStateDirInput(t, cloneURL)
+	in.CloneToken = testCloneToken
+	require.NoError(t, ProvisionShared(in), "the input token is used, not the process env")
+
+	t.Setenv(GitTokenEnv, testCloneToken)
+	in, stateDir := sharedPlainStateDirInput(t, cloneURL)
+	in.CloneToken = wrong
+	err := ProvisionShared(in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not accept the project's git credential")
+	assert.NotContains(t, err.Error(), wrong)
+	assert.NoFileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+}

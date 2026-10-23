@@ -1,0 +1,217 @@
+# cr-ci PoC workflow (TEMPLATE). GitHub ignores this copy: only files under
+# .github/workflows/ run. To run it (needs ptone's go-ahead), copy it to
+# .github/workflows/ on a throwaway branch named cr-ci-poc-<something> and push
+# that branch: the push trigger below runs it from the pushed commit, with no
+# change to the default branch (a fork's main must mirror upstream, and
+# workflow_dispatch only lists workflows on the default branch). Delete the
+# branch and its caches afterwards. See cr-ci/workflows/README.md.
+#
+# What it measures (design section 7, phase 1): queue-to-start latency, the
+# golangci-lint duration on the Cloud Run runner without the pkg/hub -c=1
+# compiler throttle, peak memory, and how much of /scratch the job uses.
+#
+# runs-on is the runner label ALONE: the mediator only serves jobs whose
+# labels are all RUNNER_LABEL (docs/architecture.md, "Labels"); a list such
+# as [self-hosted, Linux, X64, <label>] would be logged as labels_unservable
+# and never get a runner. The input, and its fallback on push, default to
+# RUNNER_LABEL's default in cr-ci/config.example.env (a test keeps them equal).
+#
+# memory.peak and memory.current are not available under gVisor (Cloud Run), so
+# the lint step samples /proc/meminfo and /scratch every 5 s and prints the peaks.
+# MemTotal-MemAvailable includes anything held in RAM files (tmpfs), such as the
+# RAM build cache.
+#
+# The tools come from the runner image (runner/Dockerfile): Go and
+# golangci-lint are pre-installed, which is part of what the PoC measures.
+# Only people with write access can push a branch or dispatch a workflow, so the
+# fork guard of the routing expression is not needed here; the mediator applies
+# its own fork guard to every run anyway.
+
+name: cr-ci runner PoC
+
+on:
+  push:
+    branches: ['cr-ci-poc-*']
+  workflow_dispatch:
+    inputs:
+      runner-label:
+        description: Runner label to target (must equal the mediator's RUNNER_LABEL)
+        required: true
+        default: scion-cr-8c32g
+      lint-concurrency:
+        description: golangci-lint --concurrency (0 = golangci-lint's default, the CPU count)
+        required: true
+        default: '4'
+
+permissions:
+  contents: read
+
+jobs:
+  lint-on-cloud-run:
+    name: golangci-lint on the cr-ci runner
+    runs-on: ${{ inputs.runner-label || 'scion-cr-8c32g' }}
+    # Below the Cloud Run task timeout (TASK_TIMEOUT, default 45m), so GitHub
+    # cancels a hung job before Cloud Run kills the container.
+    timeout-minutes: 40
+    steps:
+      - name: Check cr-ci cache parity (cr-ci runner only)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          # Verification only; the runner entrypoint sets all of this up
+          # (cr-ci/workflows/README.md, "Cache sharing"). actions/cache stores
+          # paths relative to GITHUB_WORKSPACE and extracts them with
+          # tar -C "$GITHUB_WORKSPACE", where ".." resolves physically. For
+          # entries to land where Go and golangci-lint look, in both directions
+          # between ubuntu-latest and cr-ci, the work folder must be
+          # /home/runner/work (a link to /scratch/_work) and /scratch must
+          # mirror $HOME: ~/.cache -> /scratch/.cache, ~/go -> /scratch/go.
+          # Plus HOME=/home/runner and zstd (the cache version hashes the paths
+          # and the compression method). Fails the job if any of it is off.
+          set -uo pipefail
+          fail=0
+          check() {
+            if [ "$2" = "$3" ]; then
+              echo "ok   $1: $2"
+            else
+              echo "::error title=cr-ci cache parity::$1 is '$2', want '$3'"
+              fail=1
+            fi
+          }
+          check HOME "$HOME" /home/runner
+          check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work
+          check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache
+          check "~/go link" "$(readlink "$HOME/go")" /scratch/go
+          check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
+          check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
+          check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
+          if command -v zstd >/dev/null; then
+            echo "ok   zstd: $(zstd --version)"
+          else
+            echo "::error title=cr-ci cache parity::zstd is not installed"
+            fail=1
+          fi
+          exit "$fail"
+
+      - name: Runner facts
+        shell: bash
+        run: |
+          echo "runner.environment=${RUNNER_ENVIRONMENT:-unset} runner.name=${RUNNER_NAME:-unset}"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE (physically $(pwd -P))"
+          echo "nproc=$(nproc)"
+          go version
+          golangci-lint version
+          for v in GOCACHE GOMODCACHE GOLANGCI_LINT_CACHE TMPDIR RUNNER_TEMP; do echo "$v=${!v:-unset}"; done
+          echo "go env GOCACHE=$(go env GOCACHE)"
+          cat /sys/fs/cgroup/memory.max 2>/dev/null | sed 's/^/memory.max=/' || echo "memory.max unavailable"
+          df -h /scratch
+
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Restore (never save) the lint workload's Go cache that ci.yml saves on
+      # main, with the same key scheme as .github/actions/setup-go-cache, so
+      # the PoC lint is as warm as a CI lint. The parity check above makes the
+      # cache version and the archive's relative paths match ubuntu-latest's.
+      - name: Compute the Go cache key
+        id: key
+        shell: bash
+        env:
+          GO_SUM_HASH: ${{ hashFiles('go.sum') }}
+        run: |
+          set -euo pipefail
+          go_version=$(go env GOVERSION)
+          prefix="go-${RUNNER_OS}-${RUNNER_ARCH}-${go_version#go}-lint-"
+          {
+            echo "prefix=${prefix}"
+            echo "prefix-sum=${prefix}${GO_SUM_HASH}-"
+            echo "key=${prefix}${GO_SUM_HASH}-$(date -u +%Y%m%d)"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomoddownload=$(go env GOMODCACHE)/cache/download"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Go cache (on /scratch)
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.key.outputs.gomoddownload }}
+            ${{ steps.key.outputs.gocache }}
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: |
+            ${{ steps.key.outputs.prefix-sum }}
+            ${{ steps.key.outputs.prefix }}
+
+      # The matched key alone proves nothing: entries can extract next to Go's
+      # cache instead of into it (cr-ci/workflows/README.md, "Cache
+      # sharing"). Measure what Go will actually read.
+      - name: Check that the Go cache is warm
+        shell: bash
+        env:
+          RESTORED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        run: |
+          set -uo pipefail
+          gocache=$(go env GOCACHE)
+          files=$(find "$gocache/" -type f 2>/dev/null | wc -l)
+          size=$(du -sh "$gocache/" 2>/dev/null | cut -f1)
+          echo "restored key: ${RESTORED_KEY:-NONE}"
+          echo "go env GOCACHE=$gocache: ${files} files, ${size:-0}"
+          if [ -n "$RESTORED_KEY" ] && [ "$files" -ge 1000 ]; then
+            echo "go cache warm: yes"
+          else
+            echo "::warning title=cold Go cache::go cache warm: NO (key '${RESTORED_KEY:-none}', $files files in $gocache); compare the lint duration with CI's cold run, and check the parity step"
+            ls -la /scratch /home/runner 2>/dev/null || true
+          fi
+
+      # Same lint as ci.yml, but WITHOUT the pkg/hub -c=1 compiler throttle and
+      # with more analysis concurrency. GOGC stays at 25 until the PoC shows
+      # the headroom (design: pkg/hub's compile peaks near 15 GiB).
+      - name: golangci-lint (no pkg/hub compiler throttle)
+        shell: bash
+        env:
+          GOGC: '25'
+          LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}
+        run: |
+          set -uo pipefail
+          samples="$RUNNER_TEMP/samples.log"
+          : >"$samples"
+          (
+            # On TERM, stop the pending sleep too, so no sleep outlives the step.
+            trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
+            while :; do
+              mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+              ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+              used_kb=$(df -k --output=used /scratch | tail -1 | tr -d ' ')
+              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) scratch_used_mb=$(( used_kb / 1024 ))" | tee -a "$samples"
+              sleep 5 &
+              nap=$!
+              wait "$nap"
+            done
+          ) &
+          sampler=$!
+          start=$(date +%s)
+          rc=0
+          golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
+          echo "golangci-lint exit=$rc duration=$(( $(date +%s) - start ))s"
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[2] + 0 > max[kv[1]]) max[kv[1]] = kv[2] + 0 }}
+            END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], NR}' "$samples"
+          exit "$rc"
+
+      - name: Memory and disk report
+        if: always()
+        shell: bash
+        run: |
+          echo "memory.peak (bytes):"
+          cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "unavailable (expected under gVisor; see the lint step's sample peaks)"
+          grep -E '^(MemTotal|MemAvailable):' /proc/meminfo || true
+          df -h /scratch
+          du -sh /scratch/* 2>/dev/null || true
+          ls -ld "$HOME/.cache" 2>/dev/null || true
+          ls -ld "$HOME/go" /home/runner/work 2>/dev/null || true
+          du -sh "$HOME/.cache/" "$HOME/go/" 2>/dev/null || true   # trailing slash: follows the links to /scratch
+          du -shx "$HOME" 2>/dev/null || true             # what stayed on the in-memory root filesystem
