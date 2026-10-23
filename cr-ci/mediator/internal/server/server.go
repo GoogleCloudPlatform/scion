@@ -298,6 +298,26 @@ func (s *Server) runnerRepo(fullName string) githubapp.Repo {
 	return githubapp.Repo{}
 }
 
+// servedRepos lists the repos whose jobs GitHub may hand a runner registered
+// through r (the runner's job guard allowlist, GH_REPOS): r alone in repo scope;
+// in org scope every target repo of r's owner, since org-level runners take any
+// of their jobs with the label.
+func (s *Server) servedRepos(r githubapp.Repo) []string {
+	if !s.o.OrgScope {
+		return []string{r.String()}
+	}
+	var out []string
+	for _, t := range s.o.TargetRepos {
+		if strings.EqualFold(t.Owner, r.Owner) {
+			out = append(out, t.String())
+		}
+	}
+	if len(out) == 0 {
+		out = []string{r.String()}
+	}
+	return out
+}
+
 // scopeKey identifies the runner list a repo's runners live in.
 func (s *Server) scopeKey(r githubapp.Repo) string {
 	if s.o.OrgScope {

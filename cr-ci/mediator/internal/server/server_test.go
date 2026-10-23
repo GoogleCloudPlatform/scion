@@ -96,6 +96,7 @@ type harnessOpts struct {
 	max       int
 	claimTTL  time.Duration
 	orgScope  bool
+	targets   []githubapp.Repo // default: example-owner/example-repo
 	mediator  string
 	reuseFrom *harness // share the fakes (simulates a mediator restart)
 }
@@ -146,8 +147,11 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		},
 	})
 	h.claims = claim.NewStore(o.claimTTL, h.clock.Now)
+	if o.targets == nil {
+		o.targets = []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}}
+	}
 	h.srv = New(Options{
-		TargetRepos:   []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}},
+		TargetRepos:   o.targets,
 		OrgScope:      o.orgScope,
 		RunnerLabel:   testLabel,
 		StackLabel:    testStackLabel,
@@ -958,6 +962,35 @@ func TestOrgScopeListsRunnersOncePerOwner(t *testing.T) {
 	rn, ok := h.gh.RunnerByName("cr-job-100")
 	if !ok || rn.Scope != "org:example-owner" {
 		t.Errorf("org scope registered %+v", rn)
+	}
+}
+
+// TestLaunchCarriesServedRepos: the launch env's GH_REPOS (the runner's job guard
+// allowlist) is the runner's registration scope: the repo alone in repo scope, every
+// target repo of the owner in org scope (an org runner may take any of their jobs).
+func TestLaunchCarriesServedRepos(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		org     bool
+		targets []githubapp.Repo
+		want    string
+	}{
+		{"repo scope", false, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo"},
+		{"org scope", true, []githubapp.Repo{{Owner: "example-owner", Name: "example-repo"}, {Owner: "example-owner", Name: "second-repo"}}, "example-owner/example-repo,example-owner/second-repo"},
+		{"org scope, one repo", true, nil, "example-owner/example-repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{orgScope: tc.org, targets: tc.targets})
+			h.addSameRepoRun(10)
+			h.queued(100, 10)
+			ex := h.executions()
+			if len(ex) != 1 {
+				t.Fatalf("executions = %d, want 1", len(ex))
+			}
+			if got := ex[0].Env[launcher.EnvRepos]; got != tc.want {
+				t.Errorf("GH_REPOS = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

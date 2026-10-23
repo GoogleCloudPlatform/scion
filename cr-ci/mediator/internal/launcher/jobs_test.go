@@ -28,7 +28,7 @@ func newLauncher(t *testing.T) (*JobsLauncher, *fakes.CloudRun) {
 
 func TestLaunchEnvOverrides(t *testing.T) {
 	l, cr := newLauncher(t)
-	ref, err := l.Launch(context.Background(), LaunchSpec{JobID: 77, RunID: 7, Repo: "o/r", RunnerName: "cr-job-77", ClaimToken: "0123456789abcdef0123456789abcdef"})
+	ref, err := l.Launch(context.Background(), LaunchSpec{JobID: 77, RunID: 7, Repo: "o/r", ServedRepos: []string{"o/r", "o/s"}, RunnerName: "cr-job-77", ClaimToken: "0123456789abcdef0123456789abcdef"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestLaunchEnvOverrides(t *testing.T) {
 	}
 	want := map[string]string{
 		EnvClaimToken: "0123456789abcdef0123456789abcdef", EnvMediatorURL: "https://mediator.example.com",
-		EnvJobID: "77", EnvRunnerName: "cr-job-77", EnvRepo: "o/r",
+		EnvJobID: "77", EnvRunnerName: "cr-job-77", EnvRepos: "o/r,o/s",
 	}
 	if len(ex[0].Env) != len(want) {
 		t.Errorf("env = %v, want exactly %v", ex[0].Env, want)
@@ -61,9 +61,11 @@ func TestLaunchRejectsIncompleteSpec(t *testing.T) {
 	if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1"}); err == nil {
 		t.Error("launch without a claim token succeeded")
 	}
-	// The runner's job guard binds to GH_REPO, so a launch must carry it.
-	if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1", ClaimToken: "0123456789abcdef0123456789abcdef"}); err == nil {
-		t.Error("launch without a repository succeeded")
+	// The runner's job guard binds to GH_REPOS, so a launch must carry a well-formed list.
+	for _, served := range [][]string{nil, {""}, {"o"}, {"o/"}, {"/r"}, {"o/r,x/y"}, {"o/r", "o/ s"}} {
+		if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1", ClaimToken: "0123456789abcdef0123456789abcdef", ServedRepos: served}); err == nil {
+			t.Errorf("launch with served repositories %q succeeded", served)
+		}
 	}
 	if len(cr.RunBodies) != 0 {
 		t.Error("incomplete spec reached Cloud Run")

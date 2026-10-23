@@ -64,10 +64,15 @@ type envVar struct {
 }
 
 // Launch calls jobs.run with env overrides RUNNER_CLAIM_TOKEN, MEDIATOR_URL,
-// GH_JOB_ID, RUNNER_NAME and GH_REPO, and returns the execution resource name.
+// GH_JOB_ID, RUNNER_NAME and GH_REPOS, and returns the execution resource name.
 func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, error) {
-	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || spec.Repo == "" || l.MediatorURL == "" {
+	if spec.ClaimToken == "" || spec.RunnerName == "" || spec.JobID == 0 || len(spec.ServedRepos) == 0 || l.MediatorURL == "" {
 		return "", errors.New("launch: incomplete launch spec")
+	}
+	for _, r := range spec.ServedRepos {
+		if owner, name, ok := strings.Cut(r, "/"); !ok || owner == "" || name == "" || strings.ContainsAny(r, ", ") {
+			return "", fmt.Errorf("launch: served repository %q is not owner/name", r)
+		}
 	}
 	body := map[string]any{
 		"overrides": map[string]any{
@@ -78,7 +83,7 @@ func (l *JobsLauncher) Launch(ctx context.Context, spec LaunchSpec) (string, err
 					{EnvMediatorURL, l.MediatorURL},
 					{EnvJobID, strconv.FormatInt(spec.JobID, 10)},
 					{EnvRunnerName, spec.RunnerName},
-					{EnvRepo, spec.Repo},
+					{EnvRepos, strings.Join(spec.ServedRepos, ",")},
 				},
 			}},
 		},
