@@ -75,7 +75,7 @@ func TestAnalyticsDrainerStopFinalAttempt(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub")
 	c := &capture{fail: errors.New("down")}
-	d := NewAnalyticsDrainer(o, c.send, nil)
+	d := NewAnalyticsDrainer(o, c.send, trustedHub("hub"))
 	d.interval = time.Hour
 	d.Start(context.Background())
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)

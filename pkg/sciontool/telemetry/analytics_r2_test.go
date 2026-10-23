@@ -196,7 +196,7 @@ func TestOutboxFinalizeLeftoverRotatedFile(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub")
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
-	if _, err := o.rotateStaging(); err != nil {
+	if _, err := o.rotateStaging(o.PinnedHubID()); err != nil {
 		t.Fatal(err)
 	}
 	if left, _ := o.finalizingFiles(); len(left) != 1 {
@@ -206,7 +206,7 @@ func TestOutboxFinalizeLeftoverRotatedFile(t *testing.T) {
 		t.Error("a rotated, unfinalized file must count as pending")
 	}
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:b", 1), AppendWritten) // appenders not blocked
-	n, err := o.Finalize()
+	n, err := o.Finalize(o.PinnedHubID())
 	if err != nil || n != 2 {
 		t.Fatalf("Finalize = %d, %v; want 2 (leftover + new)", n, err)
 	}
@@ -241,7 +241,7 @@ func TestOutboxPersistentSyncFailureHoldsThenResolves(t *testing.T) {
 		if _, err := o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:other", 1)); !errors.Is(err, ErrAnalyticsOutboxHeld) {
 			t.Errorf("append while held = %v", err)
 		}
-		if n, err := o.Finalize(); n != 0 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
+		if n, err := o.Finalize(o.PinnedHubID()); n != 0 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
 			t.Errorf("Finalize while held = %d, %v", n, err)
 		}
 		staged, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
@@ -390,7 +390,7 @@ func TestOutboxFinalizingNamesMonotonic(t *testing.T) {
 	_, _ = o.PinHubID("hub")
 	for i := 0; i < 2; i++ {
 		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:"+string(rune('a'+i)), 1), AppendWritten)
-		if _, err := o.rotateStaging(); err != nil {
+		if _, err := o.rotateStaging(o.PinnedHubID()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -399,7 +399,7 @@ func TestOutboxFinalizingNamesMonotonic(t *testing.T) {
 	if len(files) != 2 || files[0] != want[0] || files[1] != want[1] {
 		t.Errorf("finalizing files = %v, want %v", files, want)
 	}
-	if n, err := o.Finalize(); err != nil || n != 2 {
+	if n, err := o.Finalize(o.PinnedHubID()); err != nil || n != 2 {
 		t.Errorf("Finalize = %d, %v", n, err)
 	}
 }
@@ -410,7 +410,7 @@ func TestOutboxFinalizeStreamsLeftoversWhileHeld(t *testing.T) {
 	o := testOutbox(t)
 	_, _ = o.PinHubID("hub")
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:old", 1), AppendWritten)
-	if _, err := o.rotateStaging(); err != nil {
+	if _, err := o.rotateStaging(o.PinnedHubID()); err != nil {
 		t.Fatal(err)
 	}
 	o.fsyncFile = func(*os.File) error { return errInjectedSync }
@@ -420,7 +420,7 @@ func TestOutboxFinalizeStreamsLeftoversWhileHeld(t *testing.T) {
 	}
 	o.fsyncFile = func(f *os.File) error { return f.Sync() }
 	o.fsyncDir = func(string) error { return errInjectedSync } // staging stays unsyncable
-	n, err := o.Finalize()
+	n, err := o.Finalize(o.PinnedHubID())
 	if n != 1 || !errors.Is(err, ErrAnalyticsOutboxHeld) {
 		t.Errorf("Finalize while held = %d, %v; want the leftover finalized and the hold reported", n, err)
 	}
@@ -504,7 +504,7 @@ func TestOutboxFinalizeDeadLettersInvalidLines(t *testing.T) {
 	f, _ := os.OpenFile(filepath.Join(o.Dir(), "staging.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
 	_, _ = f.WriteString(`{"schema_version":99,"event_type":"agent.usage"}` + "\n")
 	_ = f.Close()
-	if n, err := o.Finalize(); err != nil || n != 1 {
+	if n, err := o.Finalize(o.PinnedHubID()); err != nil || n != 1 {
 		t.Fatalf("Finalize = %d, %v", n, err)
 	}
 	dl, _ := os.ReadFile(filepath.Join(o.Dir(), "dead_letter.jsonl"))
@@ -562,7 +562,7 @@ func TestOutboxLedgerSnapshotTracksWritePaths(t *testing.T) {
 	big.SessionID = strings.Repeat("s", analyticsMaxLineBytes)
 	mustAppend(t, o, big, AppendOversize)
 
-	_, _ = o.Finalize()
+	_, _ = o.Finalize(o.PinnedHubID())
 	_, _ = o.Drain(context.Background(), func(context.Context, []byte) error { return PermanentSendError(errors.New("no")) })
 
 	o.maxPending = 1 // overflow, seq 6
@@ -804,8 +804,8 @@ func TestFailedStartStateMethodsAndOwnership(t *testing.T) {
 	for name, err := range map[string]error{
 		"AppendUsage":     func() error { _, err := o.AppendUsage(requestIDDraft(1)); return err }(),
 		"PinHubID":        func() error { _, err := o.PinHubID("hub"); return err }(),
-		"Finalize":        func() error { _, err := o.Finalize(); return err }(),
-		"FinalizeContext": func() error { _, err := o.FinalizeContext(context.Background()); return err }(),
+		"Finalize":        func() error { _, err := o.Finalize(o.PinnedHubID()); return err }(),
+		"FinalizeContext": func() error { _, err := o.FinalizeContext(context.Background(), o.PinnedHubID()); return err }(),
 		"Drain":           func() error { _, err := o.Drain(context.Background(), nil); return err }(),
 		"ExpireIndex":     func() error { _, err := o.ExpireIndex(); return err }(),
 		"LedgerSnapshot":  func() error { _, err := o.LedgerSnapshot(); return err }(),
@@ -910,7 +910,7 @@ func TestOutboxStaleCursorAfterQuarantineLosesNothing(t *testing.T) {
 	}
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after1", 1), AppendWritten)
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:after2", 1), AppendWritten)
-	if _, err := o.Finalize(); err != nil {
+	if _, err := o.Finalize(o.PinnedHubID()); err != nil {
 		t.Fatal(err)
 	}
 	if next, _ := o.readyFiles(); len(next) != 1 || next[0] == n {

@@ -117,13 +117,22 @@ type AnalyticsDrainer struct {
 	// (drainer goroutine only).
 	resolveBackoff time.Duration
 	resolveAfter   time.Time
+	// resolved is set once this process resolved the hub ID and passed it
+	// to PinHubID (drainer goroutine only). hubMu guards verifiedHub (the
+	// resolution, when it equals the pin: this process's finalize
+	// authorization) and observedHub (the resolution, whatever the pin).
+	resolved    bool
+	hubMu       sync.Mutex
+	verifiedHub string
+	observedHub string
 
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-// NewAnalyticsDrainer builds a drainer for outbox. resolve may be nil when
-// the hub ID is already pinned.
+// NewAnalyticsDrainer builds a drainer for outbox. With a nil resolve the
+// drainer never verifies a hub, so it finalizes nothing (provisional lines
+// are held); already-final ready lines still drain.
 func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
 	bounded := func(ctx context.Context, line []byte) error {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
@@ -137,6 +146,38 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 		interval: analyticsDrainInterval,
 		now:      time.Now,
 	}
+}
+
+// ObservedHubID returns the hub ID this process resolved, whatever the
+// outbox pin says, or "" before the first successful resolution. It is
+// process-fixed: the drainer resolves once per process and never replaces
+// the value (a later hub change in a live process is not a supported path
+// and is not re-resolved). It is published only after PinHubID returned,
+// i.e. after the pin comparison and any relocated/hub_mismatch write
+// completed under the outbox lock, so a LedgerSnapshot taken after a
+// non-empty read sees the relocation marker if one was written. It is the
+// attribution source for per-process events (telemetry.health).
+func (d *AnalyticsDrainer) ObservedHubID() string {
+	if d == nil {
+		return ""
+	}
+	d.hubMu.Lock()
+	defer d.hubMu.Unlock()
+	return d.observedHub
+}
+
+// VerifiedHubID returns this process's usage finalize authorization: the
+// resolved hub ID when it equals the outbox pin, else "" (unresolved, or
+// relocated: it is never set on a mismatch). Published under the same rule
+// as ObservedHubID. Finalize still re-checks the persisted relocation
+// marker under the outbox lock.
+func (d *AnalyticsDrainer) VerifiedHubID() string {
+	if d == nil {
+		return ""
+	}
+	d.hubMu.Lock()
+	defer d.hubMu.Unlock()
+	return d.verifiedHub
 }
 
 // Start runs the drain loop in a goroutine until Stop.
@@ -177,7 +218,9 @@ func (d *AnalyticsDrainer) Stop(ctx context.Context) {
 	d.runOnce(ctx, true)
 }
 
-// RunOnce performs one drain step: pin the hub ID if needed, finalize,
+// RunOnce performs one drain step: resolve the hub ID once per process
+// (pinning it, verifying it against the pin, or recording a relocation),
+// finalize if verified,
 // send (unless backing off), and occasionally expire the index. It returns
 // the number of lines sent.
 func (d *AnalyticsDrainer) RunOnce(ctx context.Context) int {
@@ -193,12 +236,16 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	if ctx.Err() != nil {
 		return 0
 	}
-	if d.outbox.PinnedHubID() == "" && d.resolve != nil && !d.now().Before(d.resolveAfter) {
+	// Resolve once per process, even when a pin is on disk: provisional
+	// lines are finalized only under a hub this process verified, and a
+	// home now under a different hub is recorded as relocated.
+	if !d.resolved && d.resolve != nil && !d.now().Before(d.resolveAfter) {
 		rctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
 		id, err := d.resolve(rctx)
 		cancel()
+		pinned := ""
 		if err == nil {
-			_, err = d.outbox.PinHubID(id)
+			pinned, err = d.outbox.PinHubID(id)
 		}
 		if err != nil {
 			// Back off like sends do (1 s .. 5 min), so an agent whose hub
@@ -212,10 +259,22 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			log.Debug("Analytics drainer: hub ID not resolved yet (retry in %s): %v", d.resolveBackoff, err)
 		} else {
 			d.resolveBackoff, d.resolveAfter = 0, time.Time{}
+			d.resolved = true
+			d.hubMu.Lock()
+			d.observedHub = id
+			if pinned == id {
+				d.verifiedHub = id
+			}
+			d.hubMu.Unlock()
+			if pinned != id {
+				log.Warn("Analytics outbox relocated: pinned hub %q, current hub %q; new usage is refused and provisional lines are held", pinned, id)
+			}
 		}
 	}
-	if d.outbox.PinnedHubID() != "" {
-		if _, err := d.outbox.FinalizeContext(ctx); err != nil {
+	if verified := d.VerifiedHubID(); verified != "" {
+		// Re-checked under the outbox lock (another process may have
+		// recorded a relocation since this one verified).
+		if _, err := d.outbox.FinalizeContext(ctx, verified); err != nil {
 			log.Debug("Analytics drainer: finalize: %v", err)
 		}
 	}

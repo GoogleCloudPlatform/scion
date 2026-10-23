@@ -120,7 +120,22 @@ const (
 	// AppendOversize means the event line exceeded analyticsMaxLineBytes;
 	// it was refused like an overflow (seq consumed, persisted count).
 	AppendOversize
+	// AppendRefusedRelocated means the outbox recorded a hub ID mismatch
+	// (the home now runs under a different hub than the pinned one): new
+	// observations are refused rather than attributed to the old hub (seq
+	// consumed, persisted relocated_refused count). Lines already appended
+	// keep their bytes and still finalize and drain with the pinned hub.
+	AppendRefusedRelocated
 )
+
+// ErrAnalyticsOutboxRelocated is returned by Finalize once the outbox has
+// recorded a hub ID mismatch: provisional lines stay held, never finalized
+// under the old pin.
+var ErrAnalyticsOutboxRelocated = errors.New("analytics outbox: relocated to a different hub; provisional lines held")
+
+// ErrAnalyticsHubNotVerified is returned by Finalize when verifiedHub is
+// empty or is not the pinned hub ID.
+var ErrAnalyticsHubNotVerified = errors.New("analytics outbox: hub ID not verified by this process")
 
 // ErrAnalyticsOutboxLocked is returned when the outbox lock could not be
 // taken within analyticsLockWait.
@@ -137,6 +152,7 @@ type AnalyticsOutboxStats struct {
 	// (dead-lettered); Torn counts only fragments without a newline.
 	InvalidLines                                       int64
 	HubIDMismatch, Conflicts, Quarantined, DeadLetters int64
+	RelocatedRefused                                   int64
 	SyncUncertain, CorruptIntents, Unresolved          int64
 	CommitDeferred                                     int64
 	PersistedSyncUncertain, PersistedCommitDeferred    int64
@@ -144,8 +160,13 @@ type AnalyticsOutboxStats struct {
 	HeldIntent                                  bool
 	PersistedOverflow, PersistedOversize        int64
 	PersistedAppendFailed, PersistedDeadLetters int64
-	PendingBytes, RetainedBytes                 int64
-	OldestPendingAge                            time.Duration
+	// PersistedHubMismatch and PersistedRelocatedRefused are the durable
+	// hub ID mismatch and refused-append counts; Relocated is true once a
+	// mismatch was recorded.
+	PersistedHubMismatch, PersistedRelocatedRefused int64
+	Relocated                                       bool
+	PendingBytes, RetainedBytes                     int64
+	OldestPendingAge                                time.Duration
 }
 
 // AnalyticsOutbox is a handle on one outbox directory. It is safe for use
@@ -161,6 +182,7 @@ type AnalyticsOutbox struct {
 	appended, certainDup, overflow, appendFailed atomic.Int64
 	finalized, delivered, sendFailures, torn     atomic.Int64
 	hubIDMismatch, conflicts, quarantined        atomic.Int64
+	relocatedRefused                             atomic.Int64
 
 	// owner, when set and the process runs as root, receives ownership of
 	// every created file and directory.
@@ -496,6 +518,8 @@ func (o *AnalyticsOutbox) AppendUsage(ev *telemetrycontract.UsageEvent) (AppendO
 		o.certainDup.Add(1)
 	case outcome == AppendOverflow, outcome == AppendOversize:
 		o.overflow.Add(1)
+	case outcome == AppendRefusedRelocated:
+		o.relocatedRefused.Add(1)
 	}
 	return outcome, err
 }
@@ -566,11 +590,24 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 		}
 	}()
 
+	// A relocated outbox refuses new observations: they would carry the
+	// old pinned hub_id (and continue an epoch another copy may also be
+	// writing). The seq is consumed, so the refusal is a visible gap.
+	if relocated, rerr := o.readTrimmed("relocated"); rerr != nil {
+		return 0, rerr
+	} else if relocated != "" {
+		if err := o.refuseLocked(seq, "relocated_refused"); err != nil {
+			return 0, err
+		}
+		return AppendRefusedRelocated, nil
+	}
+
 	ev.ProducerEpoch = epoch
 	ev.ProducerSeq = seq
-	if hubID, _ := o.readTrimmed("hub_id"); hubID != "" {
-		ev.HubID = hubID
-	}
+	// Never stamp hub_id at append: a staged line is provisional, and only
+	// a finalize authorized by a hub verification in the finalizing process
+	// gives it the pin (a pin on disk may be stale: a copied home).
+	ev.HubID = ""
 
 	// Occurrence from the persisted index. A verified request ID repeat is
 	// a certain duplicate only if its semantic content matches a recorded
@@ -1060,7 +1097,10 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 }
 
 // PinHubID records hubID as the outbox's hub on first call; later calls
-// with a different value keep the pinned one and report a mismatch.
+// with a different value keep the pinned one (never restamping anything)
+// and record the mismatch durably: the persisted hub_mismatch count, and
+// on the first mismatch the relocated file (the observed hub ID), after
+// which AppendUsage refuses new observations.
 func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 	if o == nil {
 		return "", errNilOutbox
@@ -1080,6 +1120,9 @@ func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 	if current != "" {
 		if current != hubID {
 			o.hubIDMismatch.Add(1)
+			if err := o.recordRelocationLocked(hubID); err != nil {
+				return current, err
+			}
 		}
 		return current, nil
 	}
@@ -1087,6 +1130,24 @@ func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 		return "", err
 	}
 	return hubID, nil
+}
+
+// recordRelocationLocked persists a hub ID mismatch: it increments the
+// hub_mismatch count and, if not yet set, writes observed to relocated.
+// The caller holds the lock.
+func (o *AnalyticsOutbox) recordRelocationLocked(observed string) error {
+	n, err := o.readInt("hub_mismatch")
+	if err != nil {
+		return err
+	}
+	if err := o.writeFileAtomic("hub_mismatch", []byte(strconv.FormatInt(n+1, 10))); err != nil {
+		return err
+	}
+	relocated, err := o.readTrimmed("relocated")
+	if err != nil || relocated != "" {
+		return err
+	}
+	return o.writeFileAtomic("relocated", []byte(observed))
 }
 
 // validHubID bounds a hub ID taken from an unauthenticated /healthz body:
@@ -1118,19 +1179,27 @@ func (o *AnalyticsOutbox) PinnedHubID() string {
 // staging under the lock, streaming outside it).
 //
 // Finalize moves staging lines to a new ready file as final bytes: lines
-// that carry hub_id are copied unchanged; lines without it get the pinned
-// hub ID and are re-marshaled. It does nothing until a hub ID is pinned.
+// that carry hub_id (written by an older build) are copied unchanged;
+// lines without it get the pinned hub ID and are re-marshaled.
+//
+// verifiedHub is the caller's process-local authorization: the hub ID this
+// process resolved and found equal to the pin (AnalyticsDrainer). Finalize
+// does nothing (ErrAnalyticsHubNotVerified) unless verifiedHub equals the
+// pin, and nothing (ErrAnalyticsOutboxRelocated) once a relocation is
+// recorded -- checked under the outbox lock at rotation and again before
+// each ready file is committed, so a relocation recorded by another
+// process after this one verified is never bypassed.
 // Undecodable (torn) lines are dropped and counted. A crash after the
 // ready file is synced but before staging is truncated repeats the copy;
 // the duplicate lines are byte-identical, which is neutral downstream.
-func (o *AnalyticsOutbox) Finalize() (int, error) {
-	return o.FinalizeContext(context.Background())
+func (o *AnalyticsOutbox) Finalize(verifiedHub string) (int, error) {
+	return o.FinalizeContext(context.Background(), verifiedHub)
 }
 
 // FinalizeContext is Finalize that stops between files when ctx is done.
 // Leftover finalizing files are streamed even when rotation is held or
 // fails (a stuck intent stalls only staging, not what is already rotated).
-func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context) (int, error) {
+func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context, verifiedHub string) (int, error) {
 	if o == nil {
 		return 0, errNilOutbox
 	}
@@ -1138,8 +1207,10 @@ func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context) (int, error) {
 	// finalizing file (cheap renames), so appenders never wait for the
 	// copy. The finalizing files are then streamed into ready files
 	// without the lock: only this goroutine touches them.
-	_, rotErr := o.rotateStaging()
-	hubID := o.PinnedHubID()
+	hubID, rotErr := o.rotateStaging(verifiedHub)
+	if errors.Is(rotErr, ErrAnalyticsOutboxRelocated) || errors.Is(rotErr, ErrAnalyticsHubNotVerified) {
+		return 0, rotErr
+	}
 	if hubID == "" {
 		return 0, rotErr
 	}
@@ -1163,29 +1234,30 @@ func (o *AnalyticsOutbox) FinalizeContext(ctx context.Context) (int, error) {
 	return total, rotErr
 }
 
-// rotateStaging renames a non-empty staging file to finalizing-<n>.jsonl
-// under the lock, after recovering any intent (its line is then either
-// committed or absent). It returns the pinned hub ID ("" = not yet, do
-// nothing).
-func (o *AnalyticsOutbox) rotateStaging() (string, error) {
+// rotateStaging checks the finalize authorization, then renames a
+// non-empty staging file to finalizing-<n>.jsonl under the lock, after
+// recovering any intent (its line is then either committed or absent). It
+// returns the pinned hub ID once authorized, even when rotation itself
+// fails (leftover finalizing files are still streamed).
+func (o *AnalyticsOutbox) rotateStaging(verifiedHub string) (string, error) {
 	unlock, err := o.lock()
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
-	if err := o.recoverIntentLocked(); err != nil {
+	if err := o.authorizedLocked(verifiedHub); err != nil {
 		return "", err
 	}
-	hubID, err := o.readTrimmed("hub_id")
-	if err != nil || hubID == "" {
-		return "", err
+	hubID := verifiedHub
+	if err := o.recoverIntentLocked(); err != nil {
+		return hubID, err
 	}
 	info, err := os.Stat(o.path("staging.jsonl"))
 	if errors.Is(err, os.ErrNotExist) || err == nil && info.Size() == 0 {
 		return hubID, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("analytics outbox: %w", err)
+		return hubID, fmt.Errorf("analytics outbox: %w", err)
 	}
 	// Monotonic name among existing finalizing files (highest + 1,
 	// zero-padded so lexical order is numeric order); numbers restart once
@@ -1193,25 +1265,46 @@ func (o *AnalyticsOutbox) rotateStaging() (string, error) {
 	// creates and consumes them. An existing file is never replaced.
 	existing, err := o.finalizingFiles()
 	if err != nil {
-		return "", err
+		return hubID, err
 	}
 	next := int64(1)
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		n, perr := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(last, "finalizing-"), ".jsonl"), 10, 64)
 		if perr != nil {
-			return "", fmt.Errorf("analytics outbox: unexpected file %s", last)
+			return hubID, fmt.Errorf("analytics outbox: unexpected file %s", last)
 		}
 		next = n + 1
 	}
 	name := fmt.Sprintf("finalizing-%020d.jsonl", next)
 	if _, err := os.Stat(o.path(name)); err == nil {
-		return "", fmt.Errorf("analytics outbox: %s already exists", name)
+		return hubID, fmt.Errorf("analytics outbox: %s already exists", name)
 	}
 	if err := os.Rename(o.path("staging.jsonl"), o.path(name)); err != nil {
-		return "", fmt.Errorf("analytics outbox: rotating staging: %w", err)
+		return hubID, fmt.Errorf("analytics outbox: rotating staging: %w", err)
 	}
 	return hubID, o.fsyncDir(o.dir)
+}
+
+// authorizedLocked reports whether a finalize authorized by verifiedHub
+// may proceed: no relocation recorded and verifiedHub equal to the pin.
+// The caller holds the lock.
+func (o *AnalyticsOutbox) authorizedLocked(verifiedHub string) error {
+	relocated, err := o.readTrimmed("relocated")
+	if err != nil {
+		return err
+	}
+	if relocated != "" {
+		return ErrAnalyticsOutboxRelocated
+	}
+	pinned, err := o.readTrimmed("hub_id")
+	if err != nil {
+		return err
+	}
+	if verifiedHub == "" || pinned != verifiedHub {
+		return ErrAnalyticsHubNotVerified
+	}
+	return nil
 }
 
 // finalizingFiles lists finalizing files oldest first (including leftovers
@@ -1248,7 +1341,7 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 	}
 	n := 0
 	errNothing := errors.New("nothing to finalize")
-	err = o.writeFileFrom(o.dir, readyName(next), func(w io.Writer) error {
+	err = o.writeFileFromCommit(o.dir, readyName(next), func(w io.Writer) error {
 		r := bufio.NewReaderSize(src, 64<<10)
 		for {
 			line, readErr := r.ReadBytes('\n')
@@ -1292,6 +1385,19 @@ func (o *AnalyticsOutbox) finalizeFile(name, hubID string) (int, error) {
 			return errNothing
 		}
 		return nil
+	}, func(commit func() error) error {
+		// Re-check the authorization under the lock right before the
+		// ready file appears: another process may have recorded a
+		// relocation since rotation.
+		unlock, err := o.lock()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := o.authorizedLocked(hubID); err != nil {
+			return err
+		}
+		return commit()
 	})
 	if err != nil && !errors.Is(err, errNothing) {
 		return 0, err
@@ -1681,6 +1787,12 @@ type OutboxLedger struct {
 	Epoch       string // never "" for an opened outbox
 	LastSeq     int64  // last allocated producer_seq
 	PinnedHubID string // "" until pinned
+	// RelocatedHubID is the first hub ID observed to differ from the pin
+	// ("" unless relocated); while set, new appends are refused.
+	RelocatedHubID string
+
+	HubMismatchTotal      int64 // resolutions that differed from the pin
+	RelocatedRefusedTotal int64 // appends refused because relocated
 
 	OverflowTotal, OversizeTotal, AppendFailedTotal, DeadLettersTotal int64
 	SyncUncertainTotal, CommitDeferredTotal                           int64
@@ -1726,8 +1838,12 @@ func (o *AnalyticsOutbox) ledgerLocked() (OutboxLedger, error) {
 	if d.PinnedHubID, err = o.readTrimmed("hub_id"); err != nil {
 		return d, err
 	}
+	if d.RelocatedHubID, err = o.readTrimmed("relocated"); err != nil {
+		return d, err
+	}
 	for name, dst := range map[string]*int64{
 		"seq": &d.LastSeq, "overflow": &d.OverflowTotal, "oversize": &d.OversizeTotal, "dead_letters": &d.DeadLettersTotal,
+		"hub_mismatch": &d.HubMismatchTotal, "relocated_refused": &d.RelocatedRefusedTotal,
 	} {
 		if *dst, err = o.readInt(name); err != nil {
 			return d, err
@@ -1788,6 +1904,7 @@ func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
 		SendFailures:      o.sendFailures.Load(),
 		Torn:              o.torn.Load(),
 		HubIDMismatch:     o.hubIDMismatch.Load(),
+		RelocatedRefused:  o.relocatedRefused.Load(),
 		Conflicts:         o.conflicts.Load(),
 		Quarantined:       o.quarantined.Load(),
 		DeadLetters:       o.deadLetters.Load(),
@@ -1817,6 +1934,9 @@ func (o *AnalyticsOutbox) Stats() AnalyticsOutboxStats {
 	s.PersistedSyncUncertain = d.SyncUncertainTotal
 	s.PersistedCommitDeferred = d.CommitDeferredTotal
 	s.PersistedDeadLetters = d.DeadLettersTotal
+	s.PersistedHubMismatch = d.HubMismatchTotal
+	s.PersistedRelocatedRefused = d.RelocatedRefusedTotal
+	s.Relocated = d.RelocatedHubID != ""
 	s.PendingBytes = d.PendingBytes
 	s.RetainedBytes = d.RetainedBytes
 	if !d.OldestPending.IsZero() {
@@ -1963,6 +2083,12 @@ func (o *AnalyticsOutbox) writeFileIn(dir, name string, data []byte) error {
 
 // writeFileFrom is writeFileIn with streamed content.
 func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) error) error {
+	return o.writeFileFromCommit(dir, name, fill, nil)
+}
+
+// writeFileFromCommit is writeFileFrom whose final rename runs inside
+// guard (when non-nil), which may refuse it; the temp file is then removed.
+func (o *AnalyticsOutbox) writeFileFromCommit(dir, name string, fill func(io.Writer) error, guard func(commit func() error) error) error {
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("analytics outbox: %w", err)
@@ -1979,7 +2105,12 @@ func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) e
 		err = o.own(tmpName)
 	}
 	if err == nil {
-		err = os.Rename(tmpName, filepath.Join(dir, name))
+		rename := func() error { return os.Rename(tmpName, filepath.Join(dir, name)) }
+		if guard != nil {
+			err = guard(rename)
+		} else {
+			err = rename()
+		}
 	}
 	if err != nil {
 		_ = os.Remove(tmpName)
