@@ -562,6 +562,10 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. See [subpath_root](#subpath_root). |
 
+:::note[Kubernetes runtime and `gke-shared-volume`]
+The Hub keeps project files on a `gke-shared-volume` backend, but the `kubernetes` runtime does not mount it into agent pods yet: agent workspaces get an `emptyDir` volume and are lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for persistent agent workspaces on Kubernetes. See [Stopping, Starting and Restarting Agents](/scion/hosted/ha/kubernetes/#stopping-starting-and-restarting-agents) and ptone/scion#1075.
+:::
+
 :::note[Cloud Run runtime needs `nfs`]
 The `cloudrun` runtime (Cloud Run Instances) only works with the `nfs` backend, backed by a Filestore share. It mounts the agent's workspace, home and staged files from that share, and has no other way to provide them. Set `backend` to `"nfs"`, put the Filestore share's `server` and `export` in `nfs.shares[0]`, and mount the export on the Runtime Broker under `nfs.mount_root`, because the broker provisions workspaces on the share. With any other backend, or none, agent start on the `cloudrun` runtime fails right away with an error that says this, before any instance is created. The runtime's own `cloudrun.nfs_server` and `cloudrun.nfs_export` settings are optional. If you set them, they must match `nfs.shares[0]`. This does not apply to the `cloudrun-sandbox` runtime.
 :::
