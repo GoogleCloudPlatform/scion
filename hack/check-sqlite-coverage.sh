@@ -140,7 +140,7 @@ self_test() {
   mk go.mod 'module example.com/x'
   mk pkg/a/a_test.go '//go:build !no_sqlite'
   mk pkg/a/sub/s_test.go '//go:build !no_sqlite && unix'
-  mk pkg/b/b_test.go '//go:build volume_test && !no_sqlite'
+  mk pkg/b/b_test.go '//go:build fake_tag && !no_sqlite'
   mk cmd/c_test.go '//go:build !no_sqlite'
   mk cmd/sub/d_test.go '//go:build !no_sqlite'
   mk pkg/nosql/n_test.go '//go:build no_sqlite'

@@ -17,14 +17,59 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"entgo.io/ent/dialect"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// errSettingsRevisionRowReserved refuses a caller write or delete of the
+// store.HubSettingsRevisionSection row, which only bumpSettingsRevision
+// writes.
+var errSettingsRevisionRowReserved = fmt.Errorf("%w: hub setting section %q is reserved",
+	store.ErrInvalidInput, store.HubSettingsRevisionSection)
+
+// isOperationalSection reports whether a write of section bumps the
+// operational-settings revision: the sections registered in opsettings.
+// Other rows in the table (migration markers, the release-update notice,
+// caches) do not, so they never change the revision a settings reader or a
+// revision-checked save compares.
+func isOperationalSection(section string) bool {
+	return opsettings.SectionByName(section) != nil
+}
+
+// bumpSettingsRevision increments the operational-settings revision in the
+// store.HubSettingsRevisionSection row inside tx, creating the row at 1
+// when it does not exist, and returns the new value. It is the one place
+// that writes the row. The upsert takes the row lock on Postgres (held to
+// commit, after the section row lock, so the order is always section row
+// then revision row) and runs under SQLite's single writer, so concurrent
+// writers get distinct, increasing values.
+func bumpSettingsRevision(ctx context.Context, tx *ent.Tx) (int64, error) {
+	err := tx.HubSetting.Create().
+		SetSection(store.HubSettingsRevisionSection).
+		SetValue(json.RawMessage(`{}`)).
+		SetRevision(1).
+		OnConflictColumns(hubsetting.FieldSection).
+		AddRevision(1).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("bump settings revision: %w", err)
+	}
+	row, err := tx.HubSetting.Query().
+		Where(hubsetting.SectionEQ(store.HubSettingsRevisionSection)).
+		Only(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read settings revision: %w", err)
+	}
+	return row.Revision, nil
+}
 
 // HubSettingStore implements store.HubSettingStore backed by Ent.
 type HubSettingStore struct {
@@ -96,6 +141,19 @@ func (s *HubSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetti
 // The upsert is atomic: a transaction with SELECT FOR UPDATE (Postgres) or
 // implicit single-writer serialization (SQLite) ensures that two concurrent
 // CAS writers cannot both succeed.
+//
+// For -1, a lost create race is retried in a fresh transaction (at most
+// upsertCreateRaceAttempts attempts), so the "always succeeds" contract
+// holds on Postgres too. Concurrent writers there all find no row (FOR
+// UPDATE locks nothing), all INSERT, and the losers fail on the unique
+// section index once the winner commits. Postgres aborts the loser's whole
+// transaction, so nothing of it (no revision bump) survives. The retry runs
+// in a new transaction: under READ COMMITTED its SELECT ... FOR UPDATE sees
+// the winner's committed row and locks it, and the write takes the update
+// path, bumping the operational-settings revision as the last lock, held to
+// commit. Every committed write thus gets exactly one revision, distinct and
+// in commit order. Create-only (0) and CAS (>0) keep returning
+// ErrRevisionConflict for a lost create race.
 func (s *HubSettingStore) UpsertHubSetting(
 	ctx context.Context,
 	section string,
@@ -104,7 +162,42 @@ func (s *HubSettingStore) UpsertHubSetting(
 	expectedRevision int64,
 	origin string,
 ) (*store.HubSetting, error) {
+	for attempt := 1; ; attempt++ {
+		row, err := s.upsertHubSettingOnce(ctx, section, value, updatedBy, expectedRevision, origin)
+		if errors.Is(err, errHubSettingCreateRace) {
+			if expectedRevision == -1 && attempt < upsertCreateRaceAttempts {
+				continue
+			}
+			return nil, store.ErrRevisionConflict
+		}
+		return row, err
+	}
+}
+
+// upsertCreateRaceAttempts bounds UpsertHubSetting's attempts for -1 after a
+// lost create race.
+const upsertCreateRaceAttempts = 3
+
+// errHubSettingCreateRace reports that the create path lost a concurrent
+// insert of the same section (a unique-constraint error).
+// UpsertHubSetting retries it for -1 and maps it to ErrRevisionConflict
+// otherwise.
+var errHubSettingCreateRace = errors.New("hub setting create lost a concurrent insert")
+
+// upsertHubSettingOnce is one transaction of UpsertHubSetting.
+func (s *HubSettingStore) upsertHubSettingOnce(
+	ctx context.Context,
+	section string,
+	value json.RawMessage,
+	updatedBy string,
+	expectedRevision int64,
+	origin string,
+) (*store.HubSetting, error) {
+	if section == store.HubSettingsRevisionSection {
+		return nil, errSettingsRevisionRowReserved
+	}
 	useLock := s.usesRowLocks()
+	bump := isOperationalSection(section)
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -140,17 +233,25 @@ func (s *HubSettingStore) UpsertHubSetting(
 		if err != nil {
 			if ent.IsConstraintError(err) {
 				// Concurrent insert race — the other writer won.
-				return nil, store.ErrRevisionConflict
+				return nil, errHubSettingCreateRace
 			}
 			return nil, fmt.Errorf("upsert hub setting: create: %w", err)
 		}
+		var settingsRev int64
+		if bump {
+			if settingsRev, err = bumpSettingsRevision(ctx, tx); err != nil {
+				return nil, fmt.Errorf("upsert hub setting: %w", err)
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			if ent.IsConstraintError(err) {
-				return nil, store.ErrRevisionConflict
+				return nil, errHubSettingCreateRace
 			}
 			return nil, fmt.Errorf("upsert hub setting: commit create: %w", err)
 		}
-		return entHubSettingToStore(row), nil
+		out := entHubSettingToStore(row)
+		out.SettingsRevision = settingsRev
+		return out, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("upsert hub setting: query: %w", err)
@@ -183,46 +284,121 @@ func (s *HubSettingStore) UpsertHubSetting(
 	if err != nil {
 		return nil, fmt.Errorf("upsert hub setting: update: %w", err)
 	}
+	var settingsRev int64
+	if bump {
+		if settingsRev, err = bumpSettingsRevision(ctx, tx); err != nil {
+			return nil, fmt.Errorf("upsert hub setting: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("upsert hub setting: commit update: %w", err)
 	}
-	return entHubSettingToStore(row), nil
+	out := entHubSettingToStore(row)
+	out.SettingsRevision = settingsRev
+	return out, nil
 }
 
-// DeleteHubSetting removes a hub setting by section name.
+// DeleteHubSetting removes a hub setting by section name. Deleting an
+// operational section bumps the operational-settings revision in the same
+// transaction (see DeleteHubSettingRevision).
 func (s *HubSettingStore) DeleteHubSetting(ctx context.Context, section string) error {
-	n, err := s.client.HubSetting.Delete().
+	_, err := s.DeleteHubSettingRevision(ctx, section)
+	return err
+}
+
+// DeleteHubSettingRevision is DeleteHubSetting, also returning the
+// operational-settings revision the delete's transaction bumped to (0 for
+// a section that is not operational). It implements the optional
+// store.HubSettingRevisionDeleter.
+func (s *HubSettingStore) DeleteHubSettingRevision(ctx context.Context, section string) (int64, error) {
+	if section == store.HubSettingsRevisionSection {
+		return 0, errSettingsRevisionRowReserved
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete hub setting: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	n, err := tx.HubSetting.Delete().
 		Where(hubsetting.SectionEQ(section)).
 		Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("delete hub setting: %w", err)
+		return 0, fmt.Errorf("delete hub setting: %w", err)
 	}
 	if n == 0 {
-		return store.ErrNotFound
+		return 0, store.ErrNotFound
 	}
-	return nil
+	var settingsRev int64
+	if isOperationalSection(section) {
+		if settingsRev, err = bumpSettingsRevision(ctx, tx); err != nil {
+			return 0, fmt.Errorf("delete hub setting: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("delete hub setting: commit: %w", err)
+	}
+	return settingsRev, nil
 }
 
 // BackfillOrigin sets the origin column for existing rows that predate
 // the origin field. Rows with updated_by="seed" keep origin="seeded" (the
 // column default). Rows with updated_by!="seed" (admin writes) get
-// origin="managed". The _meta row is exempt. Idempotent — rows that
+// origin="managed". The _meta row is exempt. The
+// store.HubSettingsRevisionSection row is never matched: bumpSettingsRevision
+// leaves its updated_by NULL, as opsettings.EffectiveOrigin also reads it.
+// Idempotent — rows that
 // already have the correct origin are unaffected because the column
 // default is "seeded" and this only updates the non-seed rows.
+//
+// The origin of an operational section is part of the settings a reader
+// sees (a seeded endpoints row's public_url is not a saved value), so when
+// an operational row changes, the operational-settings revision is bumped
+// in the same transaction.
 func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
-	_, err := s.client.HubSetting.Update().
-		Where(
-			hubsetting.UpdatedByNEQ("seed"),
-			hubsetting.SectionNEQ("_meta"),
-			hubsetting.OriginEQ(hubsetting.OriginSeeded),
-		).
-		SetOrigin(hubsetting.OriginManaged).
-		Save(ctx)
+	tx, err := s.client.Tx(ctx)
 	if err != nil {
+		return fmt.Errorf("backfill origin: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	match := []predicate.HubSetting{
+		hubsetting.UpdatedByNEQ("seed"),
+		hubsetting.SectionNEQ("_meta"),
+		hubsetting.OriginEQ(hubsetting.OriginSeeded),
+	}
+	sections, err := tx.HubSetting.Query().Where(match...).Select(hubsetting.FieldSection).Strings(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill origin: query: %w", err)
+	}
+	if len(sections) == 0 {
+		return nil
+	}
+	if _, err := tx.HubSetting.Update().
+		Where(match...).
+		SetOrigin(hubsetting.OriginManaged).
+		Save(ctx); err != nil {
 		return fmt.Errorf("backfill origin: %w", err)
+	}
+	for _, section := range sections {
+		if isOperationalSection(section) {
+			if _, err := bumpSettingsRevision(ctx, tx); err != nil {
+				return fmt.Errorf("backfill origin: %w", err)
+			}
+			break
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("backfill origin: commit: %w", err)
 	}
 	return nil
 }
 
-// Compile-time assertion.
-var _ store.HubSettingStore = (*HubSettingStore)(nil)
+// Compile-time assertions. The composite store the hub server runs on
+// promotes the optional revision-returning delete from the embedded
+// HubSettingStore.
+var (
+	_ store.HubSettingStore           = (*HubSettingStore)(nil)
+	_ store.HubSettingRevisionDeleter = (*HubSettingStore)(nil)
+	_ store.HubSettingRevisionDeleter = (*CompositeStore)(nil)
+)

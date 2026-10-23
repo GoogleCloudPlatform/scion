@@ -98,6 +98,10 @@ type reincarnationStepUpdate struct {
 	// sets them.
 	startEcho             *reincarnationStartEcho
 	containerStatusBefore string
+	// txWork, when non-nil, runs in one transaction with the agent read and
+	// write, after the write, on the row as written; an error rolls the
+	// agent write back. A version conflict retries both.
+	txWork func(ctx context.Context, tx store.Store, agent *store.Agent) error
 }
 
 // reincarnationStartEcho is what a start dispatch's broker answer wrote onto
@@ -168,71 +172,24 @@ func (e *reincarnationStartEcho) apply(agent *store.Agent, containerStatusBefore
 func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, upd reincarnationStepUpdate, maxAttempts int) (*store.Agent, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		agent, err := s.store.GetAgent(ctx, agentID)
+		var agent *store.Agent
+		var err error
+		if upd.txWork == nil {
+			agent, err = writeReincarnationStep(ctx, s.store, agentID, upd)
+		} else {
+			err = s.store.WithTx(ctx, func(tx store.Store) error {
+				written, err := writeReincarnationStep(ctx, tx, agentID, upd)
+				if err != nil {
+					return err
+				}
+				if err := upd.txWork(ctx, tx, written); err != nil {
+					return err
+				}
+				agent = written
+				return nil
+			})
+		}
 		if err != nil {
-			return nil, err
-		}
-		agent.ReincarnationState = upd.reincarnationState
-		stepNow := upd.now
-		if stepNow.IsZero() {
-			stepNow = time.Now()
-		}
-		agent.ReincarnationUpdatedAt = &stepNow
-		if upd.phase != "" {
-			agent.Phase = upd.phase
-		}
-		if upd.activity != nil {
-			agent.Activity = *upd.activity
-		}
-		if upd.appliedConfig != nil {
-			// Store a copy, never the caller's pointer (ptone/scion#1907):
-			// the returned agent is handed to the dispatcher, whose
-			// applyBrokerResponse writes the broker's echo onto
-			// agent.AppliedConfig in place. Aliasing the caller's struct
-			// would let that echo leak into it silently; the worker instead
-			// takes the echo explicitly with copyBrokerEcho. A shallow copy
-			// is enough, given what the reprovision and start dispatch paths
-			// do to agent.AppliedConfig:
-			//   - applyBrokerAgentConfig and forgetRuntimeTarget assign
-			//     top-level string fields only (the copy absorbs them; fresh
-			//     never carries RuntimeTarget/RuntimeTargetCandidate);
-			//   - the resolved-env merge into Env is skipped on reprovision
-			//     and is not on the start path;
-			//   - adoptLegacyTZ (buildCreateRequest on reprovision,
-			//     buildStartEnv on start) deletes TZ from the SHARED Env and
-			//     InlineConfig.Env maps and may set ExplicitTimezone* on the
-			//     copy only. For fresh this is a no-op: resolveDerivedConfig's
-			//     captureCreateTZ and buildFreshAppliedConfig's
-			//     stripAgentEnvTZ already removed TZ from both maps, so there
-			//     is nothing to delete or adopt.
-			// The copy still shares Env, InlineConfig and the other
-			// reference fields with the caller, so any new in-place mutation
-			// of those on these paths must revisit this.
-			cfg := *upd.appliedConfig
-			agent.AppliedConfig = &cfg
-		}
-		if upd.generation != nil {
-			agent.Generation = *upd.generation
-		}
-		if upd.runtimeBrokerID != nil {
-			agent.RuntimeBrokerID = *upd.runtimeBrokerID
-		}
-		if upd.runtime != nil {
-			agent.Runtime = *upd.runtime
-		}
-		if upd.clearExit {
-			agent.ExitCode = nil
-			agent.ExitReason = ""
-		}
-		if upd.startEcho != nil {
-			upd.startEcho.apply(agent, upd.containerStatusBefore)
-		}
-		if upd.message != nil {
-			agent.Message = *upd.message
-		} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
-			agent.Message = ""
-		}
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			if errors.Is(err, store.ErrVersionConflict) {
 				lastErr = err
 				continue
@@ -242,6 +199,80 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 		return agent, nil
 	}
 	return nil, lastErr
+}
+
+// writeReincarnationStep is one attempt of updateReincarnationStep through
+// st: re-read the agent, apply upd's fields and write it back. A version
+// conflict is returned as is, for the caller to retry.
+func writeReincarnationStep(ctx context.Context, st store.Store, agentID string, upd reincarnationStepUpdate) (*store.Agent, error) {
+	agent, err := st.GetAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	agent.ReincarnationState = upd.reincarnationState
+	stepNow := upd.now
+	if stepNow.IsZero() {
+		stepNow = time.Now()
+	}
+	agent.ReincarnationUpdatedAt = &stepNow
+	if upd.phase != "" {
+		agent.Phase = upd.phase
+	}
+	if upd.activity != nil {
+		agent.Activity = *upd.activity
+	}
+	if upd.appliedConfig != nil {
+		// Store a copy, never the caller's pointer (ptone/scion#1907):
+		// the returned agent is handed to the dispatcher, whose
+		// applyBrokerResponse writes the broker's echo onto
+		// agent.AppliedConfig in place. Aliasing the caller's struct
+		// would let that echo leak into it silently; the worker instead
+		// takes the echo explicitly with copyBrokerEcho. A shallow copy
+		// is enough, given what the reprovision and start dispatch paths
+		// do to agent.AppliedConfig:
+		//   - applyBrokerAgentConfig and forgetRuntimeTarget assign
+		//     top-level string fields only (the copy absorbs them; fresh
+		//     never carries RuntimeTarget/RuntimeTargetCandidate);
+		//   - the resolved-env merge into Env is skipped on reprovision
+		//     and is not on the start path;
+		//   - adoptLegacyTZ (buildCreateRequest on reprovision,
+		//     buildStartEnv on start) deletes TZ from the SHARED Env and
+		//     InlineConfig.Env maps and may set ExplicitTimezone* on the
+		//     copy only. For fresh this is a no-op: resolveDerivedConfig's
+		//     captureCreateTZ and buildFreshAppliedConfig's
+		//     stripAgentEnvTZ already removed TZ from both maps, so there
+		//     is nothing to delete or adopt.
+		// The copy shares Env, InlineConfig and the other
+		// reference fields with the caller, so any new in-place mutation
+		// of those on these paths must revisit this.
+		cfg := *upd.appliedConfig
+		agent.AppliedConfig = &cfg
+	}
+	if upd.generation != nil {
+		agent.Generation = *upd.generation
+	}
+	if upd.runtimeBrokerID != nil {
+		agent.RuntimeBrokerID = *upd.runtimeBrokerID
+	}
+	if upd.runtime != nil {
+		agent.Runtime = *upd.runtime
+	}
+	if upd.clearExit {
+		agent.ExitCode = nil
+		agent.ExitReason = ""
+	}
+	if upd.startEcho != nil {
+		upd.startEcho.apply(agent, upd.containerStatusBefore)
+	}
+	if upd.message != nil {
+		agent.Message = *upd.message
+	} else if upd.clearMessageIfEquals != "" && agent.Message == upd.clearMessageIfEquals {
+		agent.Message = ""
+	}
+	if err := st.UpdateAgent(ctx, agent); err != nil {
+		return nil, err
+	}
+	return agent, nil
 }
 
 // copyBrokerEcho copies the fields a broker answer writes onto the
@@ -1193,7 +1224,7 @@ func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher
 		return
 	}
 	s.rollbackMove(ctx, md, agentID, reincarnationID, move, srcAgent, targetUntouched)
-	s.writeFailedAgent(ctx, agentID, errMsg, previous, failNow)
+	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, previous, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
@@ -1226,7 +1257,7 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 			"agent_id", agentID, "reincarnation_id", reincarnationID)
 		return
 	}
-	s.writeFailedAgent(ctx, agentID, errMsg, restoreConfig, failNow)
+	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, restoreConfig, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
@@ -1236,7 +1267,14 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 // AppliedConfig replaced with restoreConfig when non-nil (design §3.7). Only
 // called after the caller's own record-side CAS has already won — see both
 // callers' doc comments for why that ordering is required.
-func (s *Server) writeFailedAgent(ctx context.Context, agentID, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
+//
+// When restoreConfig is non-nil, the same transaction restores the
+// service-account assignment the reincarnation reincarnationID replaced
+// (restoreReincarnationAssignment), recording cause on the replacement, so
+// the active assignment and the restored configuration change together.
+// Without restoreConfig the disk keeps the new generation's configuration,
+// and the assignment recorded for it stays.
+func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
 	upd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateFailed,
 		phase:              "error",
@@ -1246,16 +1284,28 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, errMsg string, r
 	}
 	if restoreConfig != nil {
 		upd.appliedConfig = restoreConfig
+		upd.txWork = func(ctx context.Context, tx store.Store, agent *store.Agent) error {
+			if err := restoreReincarnationAssignment(ctx, tx, agent, reincarnationID, cause, now); err != nil {
+				return fmt.Errorf("assignment restore: %w", err)
+			}
+			return nil
+		}
 	}
 	// Extra attempts, same reasoning as the completion write: a lost write
-	// here wedges the agent behind a permanent 409 with no worker left to
-	// retry it, and the boot/periodic sweep only clears non-terminal
-	// records/agent-states — an agent stuck mid-transition because this
-	// write never landed would not even match that backstop.
+	// here leaves the agent in its in-flight state, refused with 409, with
+	// no worker left to retry it, until the sweep's orphaned agent-state
+	// reset marks it failed (without restoring the configuration). With a
+	// restore, the assignment restore is lost with it: both roll back
+	// together.
 	agent, err := s.updateReincarnationStep(ctx, agentID, upd, reincarnationStepMaxAttempts+3)
 	if err != nil {
-		s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
-			"agent_id", agentID, "error", err)
+		if restoreConfig != nil {
+			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries; the agent write and the assignment restore are not applied, and the agent is left for the orphaned agent-state sweep",
+				"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		} else {
+			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
+				"agent_id", agentID, "error", err)
+		}
 	} else if s.events != nil {
 		s.events.PublishAgentStatus(ctx, agent)
 	}
@@ -1288,7 +1338,11 @@ func (s *Server) failListedReincarnationRecordOnly(ctx context.Context, rec *sto
 // state" and so could still fail a record — and restore restoreConfig — out
 // from under a worker that has genuinely moved it on since the sweep listed
 // it as stale.
-func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentReincarnation, errMsg string, restoreConfig *store.AgentAppliedConfig, cutoff time.Time) bool {
+//
+// cause is recorded on the service-account assignment the reincarnation's
+// claim recorded, when the failure restores the previous one (see
+// writeFailedAgent).
+func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentReincarnation, errMsg string, cause store.EdgeDeactivationCause, restoreConfig *store.AgentAppliedConfig, cutoff time.Time) bool {
 	s.agentLifecycleLog.Error("reincarnation failed (sweep)",
 		"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", errMsg)
 
@@ -1298,7 +1352,7 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 	if err != nil || !ok {
 		return false
 	}
-	s.writeFailedAgent(ctx, rec.AgentID, errMsg, restoreConfig, failNow)
+	s.writeFailedAgent(ctx, rec.AgentID, rec.ID, cause, errMsg, restoreConfig, failNow)
 	s.reconcileFailedMove(ctx, rec.ID)
 	return true
 }
@@ -1743,7 +1797,10 @@ const reincarnationOrphanDidNotStartReason = "did not start, so no changes were 
 //
 // A failure to even read the agent falls through to the restore-from-
 // rec.State path: there is no better signal available.
-func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReincarnation, reason string, cutoff time.Time) bool {
+//
+// cause is recorded on a restored service-account assignment
+// (failListedReincarnation).
+func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReincarnation, reason string, cause store.EdgeDeactivationCause, cutoff time.Time) bool {
 	agent, err := s.store.GetAgent(ctx, rec.AgentID)
 	if err == nil {
 		switch agent.ReincarnationState {
@@ -1759,7 +1816,7 @@ func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReinc
 		// changed.
 		restoreConfig = reincarnationRecoveryConfig(rec.PreviousAppliedConfig, rec.ToGeneration, rec.Handoff, rec.State)
 	}
-	return s.failListedReincarnation(ctx, rec, reason, restoreConfig, cutoff)
+	return s.failListedReincarnation(ctx, rec, reason, cause, restoreConfig, cutoff)
 }
 
 // sweepStaleReincarnations is the replica-safe sweep (design §3.7): it marks
@@ -1816,9 +1873,9 @@ func (s *Server) sweepStaleReincarnationsWithCutoffs(ctx context.Context, cutoff
 	const reason = "hub restarted during reincarnation"
 	swept := 0
 	for _, rec := range stale {
-		recCutoff, recReason := cutoff, reason
+		recCutoff, recReason, recCause := cutoff, reason, store.EdgeDeactivationReincarnateStaleSwept
 		if rec.State == store.AgentReincarnationStatePending {
-			recCutoff, recReason = pendingCutoff, reincarnationDidNotStartReason
+			recCutoff, recReason, recCause = pendingCutoff, reincarnationDidNotStartReason, store.EdgeDeactivationReincarnatePendingSwept
 		}
 		if !rec.UpdatedAt.Before(recCutoff) {
 			continue
@@ -1827,7 +1884,7 @@ func (s *Server) sweepStaleReincarnationsWithCutoffs(ctx context.Context, cutoff
 		// actually won — a record advanceListedRecord found already moved on
 		// (state or staleness) was not this pass's doing, and counting it
 		// anyway would overstate how much the sweep actually changed.
-		if s.sweepFailStaleRecord(ctx, rec, recReason, recCutoff) {
+		if s.sweepFailStaleRecord(ctx, rec, recReason, recCause, recCutoff) {
 			swept++
 		}
 	}

@@ -3943,6 +3943,15 @@ type projectAgentAuthzFixture struct {
 func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return projectAgentAuthzSetupOn(t, srv, s)
+}
+
+// projectAgentAuthzSetupOn builds the projectAgentAuthzFixture on an existing
+// server and its raw store. Tests that need a store fault wrapper call
+// installStoreFault on srv first, so the wrapper is in place before any
+// audited setup step reads srv.store.
+func projectAgentAuthzSetupOn(t *testing.T, srv *Server, s store.Store) *projectAgentAuthzFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &projectAgentAuthzFixture{srv: srv, store: s}
 
