@@ -439,13 +439,20 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
-		// Only a caller the artifact service lets read attachments (a
-		// session) may name one; any other caller's id is looked up in the
-		// AttachmentStore only, so an artifact id gets the answer of an
-		// unknown one (user access tokens: ptone/scion#4596).
+		// Only a caller attachmentWriterKind admits may name one; any other
+		// caller's id is looked up in the AttachmentStore only, so an
+		// artifact id gets the answer of an unknown one.
 		var svc *artifacts.Service
-		if s.attachmentArtifactsReady() && s.attachmentCallerIsSession(ctx) {
+		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
 			svc = s.attachmentService()
+		}
+		// A user access token names its uploads only where it may post
+		// (chatTokenMaySend, ptone/scion#4596 section 9); otherwise its ids
+		// get the answer of an unknown one.
+		if token := chatToken(ctx); svc != nil && token != nil {
+			if allowed, err := s.chatTokenMaySend(ctx, token, target.Key, target.ProjectID); err != nil || !allowed {
+				svc = nil
+			}
 		}
 		for _, aid := range in.Attachments {
 			// An attachment stored as an artifact (ptone/scion#4595) is
@@ -471,9 +478,7 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 				}
 				if state == artifacts.AttachmentUsable {
-					attachmentRefs = append(attachmentRefs, AttachmentRef{
-						ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true,
-					})
+					attachmentRefs = append(attachmentRefs, newArtifactAttachmentRef(info))
 					continue
 				}
 			}
@@ -499,6 +504,12 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 				Size:     meta.Size,
 			})
 		}
+	}
+	// Delivery writes the attachments of one message into one directory
+	// under their names, so two attachments may not share a name, artifact
+	// and AttachmentStore ones alike (ptone/scion#4596).
+	if msg := duplicateAttachmentRefusal(attachmentRefs); msg != "" {
+		return "", nil, chatSendValidationError(msg)
 	}
 	return content, attachmentRefs, nil
 }
@@ -667,6 +678,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
+		// The send reaches agents: its attachments stored as artifacts must
+		// fit the delivery budget (ptone/scion#4596).
+		if msg := s.checkAttachmentDeliveryBudget(attachmentRefs); msg != "" {
+			return nil, chatSendValidationError(msg)
+		}
 		// DM registration happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,

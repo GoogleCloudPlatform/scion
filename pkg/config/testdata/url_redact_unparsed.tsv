@@ -1,0 +1,39 @@
+# URLs that url.Parse rejects, as RedactURL (pkg/config) and
+# redactURLCredentials (pkg/apiclient) show them. Both packages run this
+# table. One case per line, tab-separated: name, input, want, and a
+# made-up secret that no 4-byte substring of the output may contain
+# ("-" for none).
+
+slash in password	https://alice:fake/Pw9q@hub.example.com/api	https://xxxxx	fake/Pw9q
+question mark in password	https://alice:fake?Pw9q@hub.example.com/api	https://xxxxx	fake?Pw9q
+hash in password	https://alice:fake#Pw9q@hub.example.com/api	https://xxxxx	fake#Pw9q
+all three in password, port and query	http://alice:fa/ke?Pw#9q@hub.example.com:8080/x?limit=5	http://xxxxx	fa/ke?Pw#9q
+slash in password, no scheme	//alice:fake/Pw9q@hub.example.com/	xxxxx	fake/Pw9q
+bad escape and @ after the host	https://hub.example.com/%zz/alice@x	https://xxxxx	-
+user info the rule matches	https://alice:s3cretPw@hub example.com/%zz?token=tok3nVal	https://xxxxx@hub example.com/%zz?token=xxxxx	s3cretPw
+user name the rule matches	https://tok3nVal@hub example.com/	https://xxxxx@hub example.com/	tok3nVal
+bad escape without user info	https://hub.example.com/a%zzb?next=https://app.example.com/x?token=tok3nVal	https://hub.example.com/a%zzb?next=https://app.example.com/x?token=xxxxx	tok3nVal
+space in host without user info	http://hub example.com	http://hub example.com	-
+parsed password	https://alice:s3cretPw@hub.example.com/a/b?c=d#e	https://alice:xxxxx@hub.example.com/a/b?c=d#e	s3cretPw
+port, path, query and fragment	https://hub.example.com:8443/api/v1/agents?limit=5&sort=name#top	https://hub.example.com:8443/api/v1/agents?limit=5&sort=name#top	-
+@ in a parsed path	https://hub.example.com/users/a@b.example.com/profile	https://hub.example.com/users/a@b.example.com/profile	-
+relative path	/api/v1/agents?limit=5	/api/v1/agents?limit=5	-
+empty			-
+user name with slash and underscore	https://tok_fake/Pw9q@hub.example.com/	https://xxxxx	tok_fake/Pw9q
+user name with slash and plus	https://tok+fake/Pw9q@hub.example.com/	https://xxxxx	tok+fake/Pw9q
+user name with slash and equals	https://tokfake=/Pw9q@hub.example.com/	https://xxxxx	tokfake=/Pw9q
+user name with slash and tilde	https://tok~fake/Pw9q@hub.example.com/	https://xxxxx	tok~fake/Pw9q
+path starting with @	https://hub.example.com/@alice/repo	https://hub.example.com/@alice/repo	-
+e-mail address in a query	https://hub.example.com/invite?to=a@b.example.com&n=1	https://hub.example.com/invite?to=a@b.example.com&n=1	-
+@ in the path of an IP literal host	http://[::1]:8080/u/a@b.example.com	http://[::1]:8080/u/a@b.example.com	-
+@ in the path of a non-ASCII host	https://café.example/u/a@b	https://café.example/u/a@b	-
+'@' then ':' and '/' in password	https://alice:p@ss:x/w0rd@hub.example.com/api	https://xxxxx	p@ss:x/w0rd
+'@' then ':' and '?' in password	https://alice:p@ss:x?w0rd@hub.example.com/api	https://xxxxx	p@ss:x?w0rd
+'@' then ':' and '#' in password	https://alice:p@ss:x#w0rd@hub.example.com/api	https://xxxxx	p@ss:x#w0rd
+two '@' in password, bad port	http://user:s3@cret@127.0.0.1:99999x	http://xxxxx@127.0.0.1:99999x	s3@cret
+two '@' in password, bad port and path	http://user:s3@cret@127.0.0.1:99999x/api?limit=5	http://xxxxx@127.0.0.1:99999x/api?limit=5	s3@cret
+user info and '@' in the path	https://alice:p@ss/w0rd@hub.example.com	https://xxxxx	p@ss/w0rd
+user info and '@' in the query	https://alice:p@ss?w0rd@hub.example.com	https://xxxxx	p@ss?w0rd
+user info and '@' in the fragment	https://alice:p@ss#w0rd@hub.example.com	https://xxxxx	p@ss#w0rd
+user name and '@' in the path	https://tok3n@ss/w0rd@hub.example.com/x	https://xxxxx	tok3n@ss/w0rd
+user info and no '@' after the host	https://alice:s3cretPw@hub.example.com/u/profile?x=1	https://alice:xxxxx@hub.example.com/u/profile?x=1	s3cretPw

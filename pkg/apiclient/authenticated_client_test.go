@@ -27,7 +27,8 @@ import (
 )
 
 // These tests are sequential because the fallback cases replace DefaultClient.
-func authenticatedClientForTest(t *testing.T, base *http.Client, useDefault bool) *http.Client {
+// hubURL is the transport's BaseURL; only requests to its origin get auth.
+func authenticatedClientForTest(t *testing.T, base *http.Client, useDefault bool, hubURL string) *http.Client {
 	t.Helper()
 	configured := base
 	if useDefault {
@@ -36,7 +37,7 @@ func authenticatedClientForTest(t *testing.T, base *http.Client, useDefault bool
 		t.Cleanup(func() { http.DefaultClient = previous })
 		configured = nil
 	}
-	transport := NewTransport("https://hub.invalid",
+	transport := NewTransport(hubURL,
 		WithHTTPClient(configured),
 		WithAuth(&BearerAuth{Token: "test-token"}),
 		WithUserAgent("test-client"),
@@ -85,7 +86,7 @@ func TestAuthenticatedHTTPClient_PreservesRedirectPolicy(t *testing.T) {
 						}
 					}
 				}
-				client := authenticatedClientForTest(t, base, source == "default")
+				client := authenticatedClientForTest(t, base, source == "default", server.URL)
 				if client == base || base.Transport != originalTransport || client.Timeout != base.Timeout {
 					t.Fatal("wrapping must preserve the timeout without mutating the base client")
 				}
@@ -163,7 +164,7 @@ func TestAuthenticatedHTTPClient_PreservesCookieJar(t *testing.T) {
 			}
 			jar.SetCookies(serverURL, []*http.Cookie{{Name: "session", Value: "initial", Path: "/"}})
 			base := &http.Client{Jar: jar, Timeout: 5 * time.Second}
-			client := authenticatedClientForTest(t, base, source == "default")
+			client := authenticatedClientForTest(t, base, source == "default", server.URL)
 			resp, err := client.Get(server.URL + "/start")
 			if err != nil {
 				t.Fatal(err)

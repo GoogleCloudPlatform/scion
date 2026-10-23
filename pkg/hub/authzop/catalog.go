@@ -631,8 +631,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/admin_user_invite.go — hub admin: user invite
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/admin_user_invite.go", Function: "createPendingUserTx", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared pending-user creation core: called by handleAdminUserInvite (user.admin.invite, route guard user.invite) and handleProvisionUser (user.admin.provision, session-only gate plus live user.invite on the hub user collection, inside WithTx with the user_provision mutation audit); creates only status=invited records and never modifies an existing record", Scope: "pkg/hub/admin_user_invite.go"}},
-	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInviteBulk", Symbol: "CreateUser", OperationID: "user.admin.invite"},
+	{File: "pkg/hub/admin_user_invite.go", Function: "createPendingUserTx", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared pending-user creation core: called by handleAdminUserInvite (user.admin.invite, route guard user.invite), handleProvisionUser (user.admin.provision, session-only gate plus live user.invite on the hub user collection, inside WithTx with the user_provision mutation audit) and, through inviteBatchUserStep, handleAdminUserInviteBulk (user.admin.invite, route guard user.invite, one WithTx per address); creates only status=invited records and never modifies an existing record", Scope: "pkg/hub/admin_user_invite.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_chat_secrets.go — chat integration secrets
@@ -715,9 +714,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Pre-start hook: generates GCP token for hook execution", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/maintenance_executors.go — maintenance operations
+	// pkg/hub/maintenance/maintenance_executors.go — maintenance operations
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance_executors.go"}},
+	{File: "pkg/hub/maintenance/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance/maintenance_executors.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/system_identity.go

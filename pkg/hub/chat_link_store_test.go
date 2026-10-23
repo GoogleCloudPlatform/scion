@@ -35,7 +35,7 @@ import (
 func newTestChatLinkStore(t *testing.T) *ChatLinkStore {
 	t.Helper()
 
-	client, err := entc.OpenSQLite(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name()), entc.PoolConfig{})
+	client, err := entc.OpenSQLite(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name()), entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() }) //nolint:errcheck
 

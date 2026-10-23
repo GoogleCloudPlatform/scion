@@ -18,11 +18,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -419,22 +419,9 @@ func legacyAgentInfoRunID(projectPath, agentName string) string {
 	if err != nil {
 		return ""
 	}
-	path := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	lfi, err := os.Lstat(path)
-	if err != nil || !lfi.Mode().IsRegular() {
-		return ""
-	}
-	f, err := os.Open(path)
+	// Read confined to the agent home (agenthome.ReadFileAt).
+	data, err := agenthome.ReadFileAt(config.GetAgentHomePath(projectDir, agentName), agenthome.AgentInfoFile, maxLegacyAgentInfoSize)
 	if err != nil {
-		return ""
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil || !os.SameFile(lfi, fi) {
-		return ""
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxLegacyAgentInfoSize+1))
-	if err != nil || len(data) > maxLegacyAgentInfoSize {
 		return ""
 	}
 	var info struct {

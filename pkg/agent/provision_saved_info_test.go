@@ -50,9 +50,7 @@ func TestSavedAgentInfoGetters(t *testing.T) {
 		get  func(string, string) string
 		want string
 	}{
-		{name: "profile", get: GetSavedProfile, want: "balanced"},
-		{name: "runtime", get: GetSavedRuntime, want: "docker"},
-		{name: "harness config", get: GetSavedHarnessConfig, want: "claude"},
+		{name: "profile", get: savedInfoProfile, want: "balanced"},
 		{name: "phase", get: GetSavedPhase, want: "stopped"},
 	}
 	for _, tt := range tests {
@@ -69,9 +67,7 @@ func TestSavedAgentInfoGettersReturnEmptyForUnreadableMetadata(t *testing.T) {
 	agentName := "saved-agent"
 
 	getters := []func(string, string) string{
-		GetSavedProfile,
-		GetSavedRuntime,
-		GetSavedHarnessConfig,
+		savedInfoProfile,
 		GetSavedPhase,
 	}
 	for _, get := range getters {

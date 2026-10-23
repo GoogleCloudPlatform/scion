@@ -141,9 +141,9 @@ func TestHarnessPolicyHook_CreateRefusesBeforeSideEffects(t *testing.T) {
 	root := t.TempDir()
 	scion := filepath.Join(root, ".scion")
 	writeHarnessConfigDirAt(t, filepath.Join(scion, "harness-configs", "tpl-hc"), scriptedHarnessYAML)
-	// Templates resolve against the project path as given, as launch
-	// resolves them.
-	tplDir := filepath.Join(root, "templates", "tplx")
+	// For a project path that is a workspace root, templates resolve
+	// against its .scion directory, as launch resolves them.
+	tplDir := filepath.Join(scion, "templates", "tplx")
 	if err := os.MkdirAll(tplDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +321,8 @@ func TestHarnessPolicyHook_NotEvaluatedRefusal(t *testing.T) {
 }
 
 // TestHarnessPolicyHook_RestartEarlyCheckBeforeStop (final-broker #3): restart
-// evaluates the harness-config policy against the agent's saved harness-config
-// before the stop. A scripted harness-config with the policy attached is
+// evaluates the harness-config policy against the agent's recorded
+// harness-config (its broker-side scion-agent.json) before the stop. A scripted harness-config with the policy attached is
 // refused with 403, the agent is not stopped, and the refusal carries no
 // start-attempted details.
 func TestHarnessPolicyHook_RestartEarlyCheckBeforeStop(t *testing.T) {
@@ -335,6 +335,10 @@ func TestHarnessPolicyHook_RestartEarlyCheckBeforeStop(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), []byte(`{"name": "restart-gate-agent", "harnessConfig": "scripted-hc"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(agentHome), "scion-agent.json"), []byte(`{"harness_config": "scripted-hc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeProvisionedProfile(t, globalScion, "restart-gate-agent", "")
 	mgr.agents = []api.AgentInfo{{
 		ID: "restart-gate-agent", Name: "restart-gate-agent", ContainerID: "restart-gate-agent",
 		ProjectPath: globalScion, Phase: "running",

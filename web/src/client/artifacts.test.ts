@@ -21,21 +21,30 @@ import {
   artifactListUrl,
   artifactPagePath,
   baseName,
+  canPublishIn,
+  defaultProjectChoice,
   expiryImpact,
+  filterPublishable,
   formatArtifactRef,
   formatBytes,
   isInlineType,
   linkLifetimeChoices,
+  findGlobalProject,
+  listReadableProjects,
   listProjectArtifacts,
   orderArtifactRefs,
   parseArtifactPagePath,
   PublishError,
   publishErrorMessage,
   publishFiles,
+  PUBLISH_CHECK_CONCURRENCY,
+  READABLE_PROJECTS_CAP,
   rendererFor,
   sha256Hex,
   shareLinkUrl,
+  sortProjectChoices,
   type ArtifactGrant,
+  type ProjectChoice,
   type MessageArtifactRef,
   type ShareLink,
 } from './artifacts.js';
@@ -643,5 +652,228 @@ describe('sharing helpers', () => {
       grantsRemoved: 2,
     });
     expect(expiryImpact(null, links, grants, now)).toEqual({ linksCutShort: 0, grantsRemoved: 0 });
+  });
+});
+
+describe('where the caller may publish (ptone/scion#5477)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const choice = (id: string, name: string, slug = id): ProjectChoice => ({ id, name, slug });
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('orders the global project first, then by name', () => {
+    const sorted = sortProjectChoices([
+      choice('w', 'Web'),
+      choice('g', 'Global', 'global'),
+      choice('a', 'Alpha'),
+    ]);
+    expect(sorted.map((p) => p.id)).toEqual(['g', 'a', 'w']);
+  });
+
+  it('preselects the global project, else the only choice, else nothing', () => {
+    const global = choice('g', 'Global', 'global');
+    expect(defaultProjectChoice([choice('a', 'A'), global])).toBe('g');
+    expect(defaultProjectChoice([choice('a', 'A')])).toBe('a');
+    expect(defaultProjectChoice([choice('a', 'A'), choice('b', 'B')])).toBe('');
+    expect(defaultProjectChoice([])).toBe('');
+  });
+
+  it('keeps only the projects that pass the check, in order', async () => {
+    const projects = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => choice(id, id));
+    const allowed = new Set(['b', 'e', 'f']);
+    const check = vi.fn((id: string) => Promise.resolve(allowed.has(id)));
+    const out = await filterPublishable(projects, { check });
+    expect(out.map((p) => p.id)).toEqual(['b', 'e', 'f']);
+    expect(check).toHaveBeenCalledTimes(6);
+  });
+
+  it('with firstOnly, starts no new check after the first pass', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    // The first project (global, in real use) passes: its answer comes back
+    // first, so no further check starts.
+    const check = vi.fn((id: string) => Promise.resolve(id === 'p0' || id === 'p15'));
+    const out = await filterPublishable(projects, { check, firstOnly: true });
+    expect(out.map((p) => p.id)).toEqual(['p0']);
+    // Only the first pool's worth of checks ran, not all twenty.
+    expect(check).toHaveBeenCalledTimes(PUBLISH_CHECK_CONCURRENCY);
+  });
+
+  it('keeps at most PUBLISH_CHECK_CONCURRENCY checks in flight', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    let inFlight = 0;
+    let peak = 0;
+    const check = async (): Promise<boolean> => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 0));
+      inFlight--;
+      return true;
+    };
+    const out = await filterPublishable(projects, { check });
+    expect(out).toHaveLength(20);
+    expect(peak).toBe(PUBLISH_CHECK_CONCURRENCY);
+  });
+
+  it('reports the publishable projects so far, in order, as checks pass', async () => {
+    const projects = ['a', 'b', 'c'].map((id) => choice(id, id));
+    // c answers first, then a; b is not publishable.
+    const delays: Record<string, number> = { a: 5, b: 1, c: 0 };
+    const check = (id: string): Promise<boolean> =>
+      new Promise((r) => setTimeout(() => r(id !== 'b'), delays[id]));
+    const updates: string[][] = [];
+    const out = await filterPublishable(projects, {
+      check,
+      onUpdate: (sofar) => updates.push(sofar.map((p) => p.id)),
+    });
+    expect(updates).toEqual([['c'], ['a', 'c']]);
+    expect(out.map((p) => p.id)).toEqual(['a', 'c']);
+  });
+
+  it('fails the whole filter when one check fails', async () => {
+    const check = (id: string): Promise<boolean> =>
+      id === 'b' ? Promise.reject(new Error('boom')) : Promise.resolve(true);
+    await expect(
+      filterPublishable([choice('a', 'a'), choice('b', 'b')], { check })
+    ).rejects.toThrow('boom');
+  });
+
+  it('reads canCreate from a one-row list narrowed to the project', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        urls.push(url);
+        if (url.includes('scope=yes'))
+          return Promise.resolve(json({ artifacts: [], canCreate: true }));
+        if (url.includes('scope=no')) return Promise.resolve(json({ artifacts: [] }));
+        if (url.includes('scope=hidden')) {
+          return Promise.resolve(json({ error: { code: 'forbidden', message: 'no' } }, 403));
+        }
+        return Promise.resolve(json({ error: { code: 'internal', message: 'boom' } }, 500));
+      })
+    );
+    expect(await canPublishIn('yes')).toBe(true);
+    expect(await canPublishIn('no')).toBe(false);
+    expect(await canPublishIn('hidden')).toBe(false);
+    await expect(canPublishIn('broken')).rejects.toThrow();
+    expect(urls[0]).toBe('/api/v1/artifacts?mine=1&scope=yes&limit=1');
+  });
+
+  it('lists the projects the caller can see across pages, global first, without mine', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        urls.push(url);
+        if (url.includes('cursor=c1')) {
+          return Promise.resolve(json({ projects: [{ id: 'g', name: 'Global', slug: 'global' }] }));
+        }
+        return Promise.resolve(
+          json({
+            projects: [
+              { id: 'w', name: 'Web', slug: 'web' },
+              { id: 'x', slug: 'x' },
+            ],
+            nextCursor: 'c1',
+          })
+        );
+      })
+    );
+    const out = await listReadableProjects();
+    expect(out).toEqual({
+      projects: [
+        { id: 'g', name: 'Global', slug: 'global' },
+        { id: 'w', name: 'Web', slug: 'web' },
+        { id: 'x', name: 'x', slug: 'x' },
+      ],
+      truncated: false,
+    });
+    expect(urls).toEqual(['/api/v1/projects?limit=200', '/api/v1/projects?limit=200&cursor=c1']);
+    // mine=true means projects the caller owns: a member may publish too.
+    for (const u of urls) expect(new URL(u, 'http://x').searchParams.has('mine')).toBe(false);
+  });
+
+  it('looks up the global project by slug, exactly', async () => {
+    const urls: string[] = [];
+    let answer: unknown = { projects: [{ id: 'g', name: 'Global', slug: 'global' }] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        urls.push(requestUrl(input));
+        return Promise.resolve(json(answer));
+      })
+    );
+    expect(await findGlobalProject()).toEqual({ id: 'g', name: 'Global', slug: 'global' });
+    expect(urls).toEqual(['/api/v1/projects?slug=global&limit=1']);
+    answer = { projects: [] };
+    expect(await findGlobalProject()).toBeNull();
+    // Only the exact slug counts.
+    answer = { projects: [{ id: 'x', slug: 'global-1' }] };
+    expect(await findGlobalProject()).toBeNull();
+  });
+
+  it('leaves the skipped project (global) out of the paged list', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          json({
+            projects: [
+              { id: 'g', name: 'Global', slug: 'global' },
+              { id: 'w', name: 'Web', slug: 'web' },
+            ],
+          })
+        )
+      )
+    );
+    const out = await listReadableProjects({ skip: 'g' });
+    expect(out.projects.map((p) => p.id)).toEqual(['w']);
+  });
+
+  it('stops checking and reports nothing more once aborted', async () => {
+    const projects = Array.from({ length: 20 }, (_, i) => choice(`p${i}`, `p${i}`));
+    const abort = new AbortController();
+    const check = vi.fn(async (): Promise<boolean> => {
+      await new Promise((r) => setTimeout(r, 0));
+      return true;
+    });
+    const updates: number[] = [];
+    const run = filterPublishable(projects, {
+      check,
+      signal: abort.signal,
+      onUpdate: (sofar) => updates.push(sofar.length),
+    });
+    abort.abort();
+    await expect(run).rejects.toThrow();
+    // The first pool had started; nothing after the abort.
+    expect(check).toHaveBeenCalledTimes(PUBLISH_CHECK_CONCURRENCY);
+    expect(updates).toEqual([]);
+  });
+
+  it('stops at the cap and says the list was truncated', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        n++;
+        const projects = Array.from({ length: 200 }, (_, i) => ({
+          id: `p${n}-${i}`,
+          slug: `s${n}-${i}`,
+        }));
+        return Promise.resolve(json({ projects, nextCursor: `c${n}` }));
+      })
+    );
+    const out = await listReadableProjects();
+    expect(out.projects).toHaveLength(READABLE_PROJECTS_CAP);
+    expect(out.truncated).toBe(true);
+    expect(n).toBe(READABLE_PROJECTS_CAP / 200);
   });
 });

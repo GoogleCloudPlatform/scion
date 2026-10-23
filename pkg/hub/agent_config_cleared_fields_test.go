@@ -112,11 +112,15 @@ func TestLegacyCreateInputsDropClearedFields(t *testing.T) {
 	old := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{
 		MaxTurns:      4,
 		ClearedFields: []string{"env.FOO", "resources"},
+		ChangedFields: []string{"system_prompt"},
 	}}
 	ci, _ := legacyCreateInputsFromAppliedConfig(old)
 	require.NotNil(t, ci)
 	require.NotNil(t, ci.InlineConfig)
 	assert.Nil(t, ci.InlineConfig.ClearedFields)
+	// changed_fields is reset by a reincarnation too (ptone/scion#3982).
+	assert.Nil(t, ci.InlineConfig.ChangedFields)
 	assert.Equal(t, 4, ci.InlineConfig.MaxTurns)
 	assert.Equal(t, []string{"env.FOO", "resources"}, old.InlineConfig.ClearedFields)
+	assert.Equal(t, []string{"system_prompt"}, old.InlineConfig.ChangedFields)
 }

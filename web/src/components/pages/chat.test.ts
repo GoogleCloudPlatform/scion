@@ -2154,6 +2154,52 @@ describe('chat page — late route lookups', () => {
     expect(window.location.pathname).toBe('/chat/alpha/topic-1');
   });
 
+  /** The window narrowing into the mobile layout. */
+  function narrowed(el: any): void {
+    el._handleMobileLayoutChange({ matches: true } as MediaQueryListEvent);
+  }
+
+  it('a slug lookup landing after a switch to the mobile layout keeps the panel the entry records', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    const lookups = trackAsyncCalls(el, 'resolveSlugAndOpenThread');
+    // Created wide: the entry records the rail and nothing is restored.
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [], run: 1 } },
+      '',
+      '/chat/alpha/topic-1'
+    );
+    el.parseV2Route();
+    narrowed(el);
+    expect(el.mobilePanel).toBe('left');
+
+    release();
+    await lookups.settled();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' });
+    expect(el.mobilePanel).toBe('left');
+    expect(window.history.state.scionInPage).toMatchObject({ panel: 'left' });
+  });
+
+  it('a switch to the mobile layout after the route has opened does not carry over to a later open', () => {
+    const el = mountedPage();
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [], run: 1 } },
+      '',
+      '/chat/alpha/topic-1'
+    );
+    el._slugToProjectId.set('alpha', 'p1');
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+    narrowed(el);
+    expect(el._restoredPanel).toBeNull();
+
+    // A later open from the URL lands on the conversation.
+    el.v2Conversation = null;
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+  });
+
   it('a late slug lookup on a page that is no longer mounted does nothing', async () => {
     const release = holdSlugLookup();
     const el = mountedPage();

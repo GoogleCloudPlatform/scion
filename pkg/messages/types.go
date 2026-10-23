@@ -162,6 +162,27 @@ type StructuredMessage struct {
 	// the value otherwise.
 	ArtifactRefsAdmitted bool `json:"-"`
 
+	// StoredMessageID, when set, is the id of the row the sending handler
+	// already stored for this message (ptone/scion#4596, decision D2): the
+	// persisting subscriber then runs only its post-persist steps and stores
+	// no second row. Hub-internal like ConversationAsserted: never rendered,
+	// never accepted from request JSON. Empty means the subscriber persists
+	// the message as before.
+	StoredMessageID string `json:"-"`
+
+	// AttachmentDeliveries are the attachments stored as artifacts, bound to
+	// a stored message, that the hub delivers into the recipient agent's
+	// home with this dispatch (ptone/scion#4596). Set by the hub's send path
+	// after binding, from references it built itself; never read from a
+	// request, never serialized, and cleared on observer copies.
+	AttachmentDeliveries []AttachmentDelivery `json:"-"`
+
+	// AttachmentPlan is the per-recipient plan of AttachmentDeliveries,
+	// set by the hub at the render site; the dispatcher issues download
+	// capabilities from it (ptone/scion#4596). Hub-internal, never
+	// serialized.
+	AttachmentPlan []AttachmentPlanEntry `json:"-"`
+
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no
 	// formatting. Phase 13 deletes this field along with the rest of
@@ -353,4 +374,58 @@ func SenderPrefix(identity string) string {
 		}
 	}
 	return identity
+}
+
+// AttachmentDelivery names one attachment stored as an artifact, bound to
+// message MessageID, for delivery into a recipient agent's home
+// (ptone/scion#4596). Hub-internal: it travels only in process.
+type AttachmentDelivery struct {
+	ArtifactID string
+	MessageID  string
+	Name       string
+	MimeType   string
+	Size       int64
+	SHA256     string
+}
+
+// Attachment plan states (ptone/scion#4596): what the hub decided, for one
+// recipient, about one attachment of a message it dispatches.
+const (
+	// AttachmentDeliverable: the recipient reads the attachment and its
+	// broker can receive it; the envelope lists InboxPath.
+	AttachmentDeliverable = "deliverable"
+	// AttachmentUndeliverableRuntime: the recipient reads the attachment
+	// but its broker cannot receive attachments; the envelope says so.
+	AttachmentUndeliverableRuntime = "undeliverable_runtime"
+	// AttachmentWithheld: the recipient may not read the attachment; it is
+	// not mentioned to the recipient at all.
+	AttachmentWithheld = "withheld"
+)
+
+// AttachmentPlanEntry is the hub's decision for one attachment and one
+// recipient (ptone/scion#4596). Hub-internal: it travels only in process.
+type AttachmentPlanEntry struct {
+	Delivery AttachmentDelivery
+	// InboxPath is where the file lands in the recipient's home,
+	// ~/.scion/inbox/<message-id>/<name>, with the hub-reduced name. Set
+	// for every state but withheld.
+	InboxPath string
+	// Name is the hub-reduced file name.
+	Name  string
+	State string
+}
+
+// WireAttachment is one attachment of a message request the hub sends to
+// a broker (ptone/scion#4596): the file the broker downloads from URL,
+// verifies (size, sha256) and writes to Path in the agent's home before it
+// delivers the message text. An entry without URL is reported to the agent
+// as not delivered.
+type WireAttachment struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Mime   string `json:"mime,omitempty"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Path   string `json:"path"`
+	URL    string `json:"url,omitempty"`
 }
