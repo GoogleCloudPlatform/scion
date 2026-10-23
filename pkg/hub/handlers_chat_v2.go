@@ -65,6 +65,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
@@ -1278,15 +1279,17 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 //     for a project topic thread it is also staged from its stored bytes
 //     and listed as a legacy entry, and otherwise it gets no scratchpad
 //     copy;
-//   - an AttachmentStore attachment is staged from the hub-private store;
-//     when staging is unavailable the hub-local path is sent, which
-//     host-process agents can still read.
+//   - an AttachmentStore attachment is staged from the hub-private store.
+//     On a shared backend it is staged only when the whole project reads
+//     the message; on the local backend for every send. When it is not
+//     staged the hub-local path is sent, which host-process agents can
+//     still read.
 //
 // Without artifact delivery (the last case) staging is the only way a
-// containerised agent reads the file, so it happens for every send; on a
-// hub without object storage (T1) a DM's attachment is therefore readable
-// by the project's other agents, a known T1-only Low that ends when the
-// hub enables attachment artifacts.
+// containerised agent reads the file. On the local backend it therefore
+// happens for every send, so on a workstation hub a DM's attachment is
+// readable by the project's other agents: a known limitation that ends
+// when the hub stores attachments as artifacts.
 //
 // key is the message's thread key and messageID the stored message the
 // attachments are bound to.
@@ -1310,7 +1313,16 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 	}
 	staging := s.resolveAttachmentStaging(ctx, projectID)
 	artifactsOn := s.experimentEnabled(experiments.AttachmentArtifacts)
-	projectAudience := -1 // unknown until an artifact attachment asks
+	projectAudience := -1 // unknown until an attachment asks
+	wholeProject := func() bool {
+		if projectAudience < 0 {
+			projectAudience = 0
+			if s.projectionAudienceIsProject(ctx, key, projectID) {
+				projectAudience = 1
+			}
+		}
+		return projectAudience == 1
+	}
 	for i := range attachmentRefs {
 		ref := attachmentRefs[i]
 		if ref.artifact {
@@ -1318,13 +1330,7 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 			// recipient's home (ptone/scion#4596) whatever the experiment
 			// says now, so a scratchpad copy is only ever an addition for
 			// sibling agents, made only when they all read the message.
-			if projectAudience < 0 {
-				projectAudience = 0
-				if s.projectionAudienceIsProject(ctx, key, projectID) {
-					projectAudience = 1
-				}
-			}
-			if projectAudience == 0 {
+			if !wholeProject() {
 				continue
 			}
 			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
@@ -1359,6 +1365,17 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 			}
 		}
 		hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
+		// On a shared backend (NFS) every agent of the project reads the
+		// scratchpad, so a legacy attachment is copied there only when the
+		// whole project reads the message, as for artifact attachments;
+		// otherwise it is left out as it was before shared backends were
+		// staged at all. On the local backend (the workstation) the copy is
+		// the recipient's only way to read the file, so it is staged for
+		// every send: the documented workstation limitation.
+		if staging != nil && staging.resolved.Backend != projectfs.BackendLocal && !wholeProject() {
+			paths = append(paths, hostPath)
+			continue
+		}
 		if staging != nil {
 			staged, err := staging.stageFrom(func() (io.ReadCloser, error) {
 				rc, _, err := localAS.Get(ctx, storedIn, ref.ID)
