@@ -35,12 +35,27 @@ import (
 // run. The emptied legacy agents/<agent ID> directory is removed with the
 // project's legacy trees (ptone/scion#5835).
 
-// LegacyCloudRunAgentDir is the retired Cloud Run per-agent directory name
-// below a project root: agents/<agent ID>. Only this migration step and the
-// Cloud Run runtime's refusal to start an agent whose home has not moved yet
-// build it, to read the legacy location.
-func LegacyCloudRunAgentDir(projectRel, agentID string) string {
-	return filepath.Join(projectRel, "agents", agentID)
+// cloudRunHomesPresent reports whether any of agents has a legacy Cloud
+// Run home or secrets directory on l (an unreadable one counts), so step 5
+// has something to move.
+func cloudRunHomesPresent(l projectfs.Layout, projectID string, agents []AgentRef) bool {
+	l.SharedDirs = nil
+	root, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if !projectfs.ValidAgentID(a.ID) {
+			continue
+		}
+		legacy := projectfs.LegacyCloudRunAgentDir(root.RelPath, a.ID)
+		for _, name := range []string{"home", "secrets"} {
+			if k, err := entryKind(Tree{Base: l.HostBase, Rel: filepath.Join(legacy, name)}); err != nil || k != kindAbsent {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cloudRunHomes moves the Cloud Run homes and secrets of a project's agents
@@ -60,7 +75,7 @@ func cloudRunHomes(l projectfs.Layout, projectID string, agents []AgentRef, rech
 		if !projectfs.ValidAgentID(a.ID) {
 			continue // no Cloud Run home is keyed by anything but a hub agent ID
 		}
-		legacy := LegacyCloudRunAgentDir(root.RelPath, a.ID)
+		legacy := projectfs.LegacyCloudRunAgentDir(root.RelPath, a.ID)
 		sources := []Tree{{Base: l.HostBase, Rel: filepath.Join(legacy, "home")}, {Base: l.HostBase, Rel: filepath.Join(legacy, "secrets")}}
 		present := false
 		for _, src := range sources {

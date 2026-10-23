@@ -4436,6 +4436,13 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 // provisionFileLockName, and provisionClockProbeFile is defined as
 // provisionFileLockName plus a suffix specifically so this one prefix check
 // catches all of them.
+// IsProvisioningArtifact reports whether name is provisioning bookkeeping
+// rather than workspace content: the provisioning file lock or one of its
+// satellites (isLockArtifactPath), or the provisioning sentinel.
+func IsProvisioningArtifact(name string) bool {
+	return isLockArtifactPath(name) || filepath.Base(name) == ProvisionSentinelFile
+}
+
 func isLockArtifactPath(path string) bool {
 	base := filepath.Base(path)
 	return base == provisionFileLockName || strings.HasPrefix(base, provisionFileLockName+".")

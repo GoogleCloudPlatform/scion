@@ -30,6 +30,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -308,7 +309,7 @@ func TestSharedLayout_TwoBrokersShareMountsNotJournals(t *testing.T) {
 func TestFindAgentInSharedProject(t *testing.T) {
 	f := newSharedRootFixture(t, true)
 	ctx := context.Background()
-	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID); !handled || err != nil || got != "" {
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID, true); !handled || err != nil || got != "" {
 		t.Fatalf("no agent yet: (%q, %v, %v)", got, handled, err)
 	}
 	root, err := config.AgentsRootForProject(f.scionDir, false, sharedRootProjectID)
@@ -318,20 +319,20 @@ func TestFindAgentInSharedProject(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "a1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID); !handled || err != nil || got != f.scionDir {
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "a1", sharedRootProjectID, true); !handled || err != nil || got != f.scionDir {
 		t.Fatalf("findAgentInSharedProject = (%q, %v, %v), want %q", got, handled, err, f.scionDir)
 	}
-	if _, handled, _ := f.srv.findAgentInSharedProject(ctx, "a1", ""); handled {
+	if _, handled, _ := f.srv.findAgentInSharedProject(ctx, "a1", "", true); handled {
 		t.Errorf("a look-up without a project ID is not handled here")
 	}
-	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "../a1", sharedRootProjectID); !handled || err != nil || got != "" {
+	if got, handled, err := f.srv.findAgentInSharedProject(ctx, "../a1", sharedRootProjectID, true); !handled || err != nil || got != "" {
 		t.Errorf("a non-element agent name must find nothing: (%q, %v, %v)", got, handled, err)
 	}
 	// A stray in-project agents dir on the share is not agent state.
 	if err := os.MkdirAll(filepath.Join(f.scionDir, "agents", "ghost"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, err := f.srv.findAgentInSharedProject(ctx, "ghost", sharedRootProjectID); err != nil || got != "" {
+	if got, _, err := f.srv.findAgentInSharedProject(ctx, "ghost", sharedRootProjectID, true); err != nil || got != "" {
 		t.Errorf("an agents dir on the share must not count: (%q, %v)", got, err)
 	}
 }
@@ -377,7 +378,7 @@ func TestFindAgentInSharedProject_FailsClosed(t *testing.T) {
 			}
 			tc.prepare(t, f)
 
-			got, handled, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID)
+			got, handled, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID, true)
 			if !handled || got != "" || !errors.Is(err, errDeleteTargetUnknown) {
 				t.Fatalf("findAgentInSharedProject = (%q, %v, %v), want errDeleteTargetUnknown", got, handled, err)
 			}
@@ -835,5 +836,47 @@ func TestSharedBootstrapEmptyAndLateContent(t *testing.T) {
 	skipped, err := g.srv.applySharedBootstrap(context.Background(), gws, rel, func(context.Context) error { applied = true; return nil })
 	if err != nil || !skipped || applied {
 		t.Fatalf("apply over late content = (skipped %v, err %v, applied %v), want skipped", skipped, err, applied)
+	}
+}
+
+// A shared workspace that comes into use between admission and the
+// provisioning locks is skipped there, and the synchronous create is told
+// so it can answer with the skipped warning.
+func TestDownloadWorkspace_InLockSkipIsReported(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	f.srv.config.StorageBucket = "test-bucket"
+	downloaded := false
+	f.srv.SetWorkspaceDownloader(func(context.Context, string, string, string) error { downloaded = true; return nil })
+	ws := filepath.Join(f.root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "late.txt"), []byte("late"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := CreateAgentRequest{ID: "agent-uuid-a1", Name: "a1", ProjectID: sharedRootProjectID, ProjectSlug: "web",
+		ProjectPath: f.root, WorkspaceStoragePath: "workspaces/x/files",
+		workspaceAdmissionChecked: true, workspaceAbsentAtAdmission: true}
+	var out bootstrapOutcome
+	if _, _, _, err := f.srv.downloadWorkspaceFromGCS(context.WithValue(context.Background(), bootstrapOutcomeKey{}, &out), req, api.StartOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if downloaded || !out.skipped {
+		t.Fatalf("downloaded %v, reported skipped %v; want a reported skip", downloaded, out.skipped)
+	}
+}
+
+// The own-runtime look-up checks the share without a mount probe: a
+// mounted share resolves, a missing one refuses.
+func TestFindAgentInSharedProject_NoProbe(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	if _, handled, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID, false); !handled || err != nil {
+		t.Fatalf("mounted share: (%v, %v)", handled, err)
+	}
+	if err := os.RemoveAll(f.layout.HostBase); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.srv.findAgentInSharedProject(context.Background(), "a1", sharedRootProjectID, false); !errors.Is(err, errDeleteTargetUnknown) {
+		t.Fatalf("missing share: %v, want a refusal", err)
 	}
 }

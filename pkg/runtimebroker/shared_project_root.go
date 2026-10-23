@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -150,7 +149,11 @@ func isSharedHubProjectRoot(projectPath string) bool {
 // errDeleteTargetUnknown, so a delete is not acknowledged as done. dir is ""
 // (with no error) only when the checks pass and the agent has no state of
 // the project here.
-func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projectID string) (dir string, handled bool, err error) {
+//
+// probeMount runs the share mount check (EnsureShareMounted, which may
+// reconcile or mount); without it (the own-runtime look-up on every
+// existing-agent request) only the host base is checked to be a directory.
+func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projectID string, probeMount bool) (dir string, handled bool, err error) {
 	layout := s.config.StorageLayout
 	if !layout.Backend.Shared() || projectID == "" {
 		return "", false, nil
@@ -162,9 +165,17 @@ func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projec
 	if err != nil {
 		return "", true, fmt.Errorf("%w: resolve project root: %v", errDeleteTargetUnknown, err)
 	}
-	mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
-	defer cancel()
-	if err := s.ensureLayoutShareMounted(mountCtx, layout); err != nil {
+	var mountErr error
+	if probeMount {
+		mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
+		mountErr = s.ensureLayoutShareMounted(mountCtx, layout)
+		cancel()
+	} else if info, statErr := os.Stat(layout.HostBase); statErr != nil {
+		mountErr = statErr
+	} else if !info.IsDir() {
+		mountErr = fmt.Errorf("%s is not a directory", layout.HostBase)
+	}
+	if err := mountErr; err != nil {
 		s.agentLifecycleLog.Error("Agent look-up: project storage share is not mounted on this broker", "agent", agentName,
 			"project_id", projectID, "host_base", layout.HostBase, "error", err)
 		return "", true, fmt.Errorf("%w: project storage share is not mounted", errDeleteTargetUnknown)
@@ -266,8 +277,8 @@ func (s *Server) sharedBootstrapWorkspace(req CreateAgentRequest) (ws, rel strin
 // in use, so a workspace bootstrap (a sync that makes the target match the
 // upload) must never be applied to it: it carries the provisioning sentinel
 // (in the project state directory, or at the workspace root where an older
-// layout kept it), or it holds any entry other than provisioning lock
-// litter (content a migration, the hub or an agent placed there without a
+// layout kept it), or it holds any entry other than provisioning
+// bookkeeping (provision.IsProvisioningArtifact; content a migration, the hub or an agent placed there without a
 // sentinel). An unreadable workspace counts as in use.
 func sharedWorkspaceProvisioned(ws string) bool {
 	if provision.SentinelPresent(provision.ProjectStateDir(ws), ws) {
@@ -281,7 +292,7 @@ func sharedWorkspaceProvisioned(ws string) bool {
 		return true
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), ".scion-provision") {
+		if !provision.IsProvisioningArtifact(e.Name()) {
 			return true
 		}
 	}

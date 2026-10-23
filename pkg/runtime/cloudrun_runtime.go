@@ -44,7 +44,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
@@ -878,7 +877,7 @@ func refuseUnmigratedCloudRunHome(hp *cloudRunNFSHostProvisionPaths, subPathRoot
 	if err != nil {
 		return fmt.Errorf("cloudrun: invalid NFS %w", err)
 	}
-	legacyHome := filepath.Join(hp.hostBase, migrate.LegacyCloudRunAgentDir(filepath.Join(root, projectID), agentID), "home")
+	legacyHome := filepath.Join(hp.hostBase, projectfs.LegacyCloudRunAgentDir(filepath.Join(root, projectID), agentID), "home")
 	if _, err := os.Lstat(legacyHome); err == nil {
 		return fmt.Errorf("cloudrun: agent %s has its home at the location used before this version; run the project-storage-migrate maintenance operation (with the agent stopped) before starting it", agentID)
 	}

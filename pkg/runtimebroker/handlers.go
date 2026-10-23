@@ -1621,10 +1621,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// through the async gate above (flag absent, ProvisionOnly, Reprovision,
 	// no LaunchID, or a too-small LaunchTimeoutSeconds), so an eligible async
 	// create never downloads twice.
+	var bootstrapSkipped bootstrapOutcome
 	if req.WorkspaceStoragePath != "" {
 		var attemptMsg, httpMessage string
 		var dlErr error
-		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
+		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(context.WithValue(ctx, bootstrapOutcomeKey{}, &bootstrapSkipped), req, opts)
 		if dlErr != nil {
 			span.SetStatus(codes.Error, dlErr.Error())
 			if errors.Is(dlErr, errInvalidWorkspaceDir) {
@@ -1995,7 +1996,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
 		Created: true,
 	}
-	if bootstrapSkipsExistingWorkspace(req) && resp.Agent != nil {
+	if (bootstrapSkipsExistingWorkspace(req) || bootstrapSkipped.skipped) && resp.Agent != nil {
 		resp.Agent.Warnings = append(resp.Agent.Warnings, bootstrapSkippedWarning)
 	}
 	if attempt != nil {
@@ -2177,6 +2178,10 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		if skipped {
 			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace came into use meanwhile",
 				"agent_id", req.ID, "project_id", req.ProjectID)
+			// The create answers with bootstrapSkippedWarning too.
+			if out, ok := ctx.Value(bootstrapOutcomeKey{}).(*bootstrapOutcome); ok {
+				out.skipped = true
+			}
 		}
 		opts.Workspace = workspaceDir
 		return opts, "", "", nil
@@ -2222,6 +2227,15 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	return opts, "", "", nil
 }
+
+// bootstrapOutcome records, for the synchronous create path, that the
+// workspace bootstrap was skipped because the shared workspace came into
+// use between admission and the provisioning locks, so the create answers
+// with bootstrapSkippedWarning as for a skip decided at admission. Carried
+// in the download's context under bootstrapOutcomeKey.
+type bootstrapOutcome struct{ skipped bool }
+
+type bootstrapOutcomeKey struct{}
 
 // bootstrapSkippedWarning is the create warning for a workspace bootstrap
 // whose upload was not applied because the project workspace already
@@ -8772,7 +8786,7 @@ func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint strin
 	// A hub-managed project (no linked path hint) on the shared Layout is
 	// resolved there only, fail-closed, never by the broker-local scan.
 	if projectPathHint == "" {
-		if dir, handled, err := s.findAgentInSharedProject(context.Background(), agentName, projectID); handled {
+		if dir, handled, err := s.findAgentInSharedProject(context.Background(), agentName, projectID, true); handled {
 			return dir, err
 		}
 	}

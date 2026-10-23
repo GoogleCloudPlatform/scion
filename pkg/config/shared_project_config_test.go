@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -259,5 +260,31 @@ func TestSharedProjectConfigLeavesGitProjectsAlone(t *testing.T) {
 	}
 	if got := GetProjectName(scionDir); got != "repo" {
 		t.Errorf("GetProjectName = %q, want %q", got, "repo")
+	}
+}
+
+// Without a usable project-slug the agent-state root is unavailable to a
+// start (ErrAgentStateDirUnavailable), and no agent-dir helper ever returns
+// a path in the configuration directory on the share or one named by the
+// UUID.
+func TestSharedProjectMissingSlugStateRoot(t *testing.T) {
+	for _, slug := range []string{"", "../bad"} {
+		scionDir, home := sharedProjectFixture(t, "")
+		if slug != "" {
+			mustWrite(t, filepath.Join(scionDir, projectkeys.ProjectSlugFile), slug+"\n")
+		}
+		if got, err := AgentsRootForProject(scionDir, false, sharedTestProjectID); err == nil || !errors.Is(err, ErrAgentStateDirUnavailable) {
+			t.Errorf("slug %q: AgentsRootForProject = (%q, %v), want ErrAgentStateDirUnavailable", slug, got, err)
+		}
+		uuidRoot := filepath.Join(home, GlobalDir, ProjectConfigsDir, sharedTestProjectID+"__0f9e8d7c")
+		for name, got := range map[string]string{
+			"SelectAgentsRoot": SelectAgentsRoot(scionDir, false),
+			"GetAgentDir":      GetAgentDir(scionDir, "a1", false),
+			"ResolveAgentDir":  ResolveAgentDir(scionDir, "a1"),
+		} {
+			if strings.HasPrefix(got, scionDir) || strings.HasPrefix(got, uuidRoot) || got == "" {
+				t.Errorf("slug %q: %s = %q, must be neither on the share nor UUID-named", slug, name, got)
+			}
+		}
 	}
 }

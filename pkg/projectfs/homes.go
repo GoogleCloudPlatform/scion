@@ -76,3 +76,12 @@ func (l Layout) agentLeaf(projectID, agent, agentID, prefix string) (Resolved, e
 // below its project root on a shared backend (<ProjectRoot>/workspace, the
 // project-level workspace Resolve gives).
 const ProjectWorkspaceDirName = workspaceDir
+
+// LegacyCloudRunAgentDir is the retired Cloud Run per-agent directory below
+// a project root (relative path projectRel): agents/<agent ID>. Only the
+// project-storage migration (which moves its home and secrets) and the
+// Cloud Run runtime's refusal to start an agent whose home has not moved
+// yet read it (ptone/scion#5825); nothing places anything there.
+func LegacyCloudRunAgentDir(projectRel, agentID string) string {
+	return filepath.Join(projectRel, agentsDir, agentID)
+}

@@ -228,6 +228,12 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 				}
 				lock, wsTree := in.ProvisionLock, Tree{Base: ws.HostBase, Rel: ws.RelPath}
 				pi.CloudRunHomes = func(opts Options) []Result {
+					// A dry run never locks or writes, and a project with no
+					// legacy Cloud Run home has nothing to move: neither takes
+					// the provisioning locks (which create the state dir).
+					if opts.DryRun || !cloudRunHomesPresent(layout, projectID, agents) {
+						return step(opts)
+					}
 					var out []Result
 					err := lock(wsTree, func(lockCtx context.Context) error {
 						o := opts

@@ -240,3 +240,40 @@ func TestRun_CloudRunHomesStep(t *testing.T) {
 		t.Errorf("locked %d times, re-checked %d times; want the step under the lock with one re-check", locked, rechecked)
 	}
 }
+
+// Step 5 never locks (nor writes) in a dry run, and a project whose agents
+// have no legacy Cloud Run home takes no lock at all.
+func TestRun_CloudRunHomesLockOnlyWhenNeeded(t *testing.T) {
+	run := func(t *testing.T, l projectfs.Layout, agents []AgentRef, dry bool) int {
+		t.Helper()
+		locked := 0
+		_, err := Run(context.Background(), HubInput{
+			Workspace:  l,
+			SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal},
+			GlobalDir:  t.TempDir(),
+			Projects:   []ProjectRef{{ID: crhProject, Slug: "web", NoWorkspace: true, Agents: agents}},
+			ProvisionLock: func(ws Tree, section func(lockCtx context.Context) error) error {
+				locked++
+				return section(context.Background())
+			},
+		}, Options{DryRun: dry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return locked
+	}
+	l, proj := crhLayout(t)
+	if n := run(t, l, crhAgents[:1], true); n != 0 {
+		t.Errorf("dry run took the lock %d times", n)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "agents", "dev")); !os.IsNotExist(err) {
+		t.Errorf("a dry run must write nothing (err %v)", err)
+	}
+	empty := projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: t.TempDir(), SubPathRoot: "projects"}
+	if n := run(t, empty, crhAgents, false); n != 0 {
+		t.Errorf("a project without legacy homes took the lock %d times", n)
+	}
+	if n := run(t, l, crhAgents[:1], false); n != 1 {
+		t.Errorf("a project with a legacy home took the lock %d times, want 1", n)
+	}
+}

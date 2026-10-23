@@ -160,7 +160,7 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 	if defMgr, defRT, _ := s.defaultPair(); defMgr == nil || defRT == nil || s.isFlat() {
 		return ctx
 	}
-	projectDir := s.knownAgentProjectDir(id, projectID, projectPathHint)
+	projectDir := s.knownAgentProjectDir(ctx, id, projectID, projectPathHint)
 	if projectDir == "" {
 		return ctx
 	}
@@ -327,14 +327,14 @@ func (s *Server) runtimeOfManager(mgr agent.Manager) scionrt.Runtime {
 // recorded identity is projectID (linkedProjectAgentDir, the check the
 // delete path uses); and the broker's own working project. When the hint
 // names one of the candidates, that one is used. "" when none matches.
-func (s *Server) knownAgentProjectDir(id, projectID, projectPathHint string) string {
+func (s *Server) knownAgentProjectDir(ctx context.Context, id, projectID, projectPathHint string) string {
 	if !isSingleCleanPathElement(id) {
 		return ""
 	}
 	var candidates []string
 	sharedDir, sharedHandled, sharedErr := "", false, error(nil)
 	if projectPathHint == "" {
-		sharedDir, sharedHandled, sharedErr = s.findAgentInSharedProject(context.Background(), id, projectID)
+		sharedDir, sharedHandled, sharedErr = s.findAgentInSharedProject(ctx, id, projectID, false)
 	}
 	switch {
 	case sharedHandled && sharedErr != nil:
