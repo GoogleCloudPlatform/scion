@@ -19,38 +19,25 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
-// urlUserInfoRe matches the user info of a URL that url.Parse rejects: up
-// to the last '@' before the path, query or fragment.
-var urlUserInfoRe = regexp.MustCompile("^(" + urlSchemePrefix + ")?[^/?#]*@")
-
-// redactedSecret replaces each credential redactURLCredentials masks.
+// redactedSecret replaces each credential parameter value
+// redactURLCredentials masks.
 const redactedSecret = "xxxxx"
 
 // redactURLCredentials returns raw with its credentials redacted as
-// config.RedactURL does: the user info, and the value of every query or
-// fragment parameter with a credential-like name, or all but the scheme
-// when the user info cannot be delimited. It is a copy of those
-// rules (this package imports no scion package); change both together.
+// config.RedactURL does: the user info by the shared rule
+// (urlredact.RedactUserInfo), or all but the scheme when the user info
+// cannot be delimited, and the value of every query or fragment parameter
+// with a credential-like name. The parameter rules below are a copy of
+// pkg/config's; change both together.
 func redactURLCredentials(raw string) string {
-	if undelimitedUserInfo(raw, urlUserInfoRe) {
-		return maskWholeURL(raw)
+	if urlredact.Undelimited(raw) {
+		return urlredact.MaskWhole(raw, urlredact.Mask)
 	}
-	s := raw
-	if u, err := url.Parse(raw); err == nil {
-		if u.User != nil {
-			if _, hasPassword := u.User.Password(); hasPassword {
-				s = u.Redacted()
-			} else {
-				u.User = url.User(redactedSecret)
-				s = u.String()
-			}
-		}
-	} else {
-		s = urlUserInfoRe.ReplaceAllString(raw, "${1}"+redactedSecret+"@")
-	}
-	return redactURLParams(s)
+	return redactURLParams(urlredact.RedactUserInfo(raw))
 }
 
 // The rules below are a copy of pkg/config/url_redact.go; change both
@@ -163,12 +150,9 @@ func redactURLParams(raw string) string {
 	return out
 }
 
-// urlSchemePrefix is a URL's scheme and "://", the anchored prefix the
-// user info rules (userInfoRe) also start with.
-const urlSchemePrefix = `[A-Za-z][A-Za-z0-9+.-]*://`
-
-// urlSchemePrefixRe matches urlSchemePrefix at the start of a string only.
-var urlSchemePrefixRe = regexp.MustCompile("^" + urlSchemePrefix)
+// urlSchemePrefixRe matches a URL's scheme and "://" at the start of a
+// string only.
+var urlSchemePrefixRe = regexp.MustCompile("^" + urlredact.SchemePrefix)
 
 // redactPathParams masks the credential values of the path parameters in
 // base (a URL up to its query, or only its path): each ";name=value" in a
@@ -252,124 +236,6 @@ func redactParam(pair string, depth int) string {
 	return pair
 }
 
-// undelimitedUserInfo reports whether raw may carry user info that the
-// rules above cannot tell apart from its host and path, so that only its
-// scheme can be shown (see maskWholeURL). A '/', '?' or '#' in the user
-// info moves where the authority seems to end, and an '@' in a password
-// moves where the user info seems to end. That is the case when raw holds
-// an '@' and either:
-//   - raw does not parse, and userInfo (the user info rule for URLs
-//     url.Parse rejects) does not match it, or raw holds another '@' after
-//     the match (a password such as "p@ss:x/w0rd": the rule stops at the
-//     first '/', and the rest of the password follows);
-//   - raw parses with user info and another '@' follows its authority, in
-//     the path, query or fragment (a password such as "p@ss/w0rd" parses as
-//     user "p", host "ss" and a path);
-//   - raw parses but its authority, cut from raw itself, does not end in a
-//     host (see rawAuthorityIsHost).
-//
-// The '@' is looked for in raw, never in a part of it; without one there
-// is no user info, and an '@' after the host of a URL without user info
-// (an e-mail address, "/@name") is not masked.
-func undelimitedUserInfo(raw string, userInfo *regexp.Regexp) bool {
-	if !strings.Contains(raw, "@") {
-		return false
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		m := userInfo.FindStringIndex(raw)
-		return m == nil || strings.Contains(raw[m[1]:], "@")
-	}
-	authority, rest, hasAuthority := cutRawAuthority(raw)
-	if u.User != nil && strings.Contains(rest, "@") {
-		return true
-	}
-	return hasAuthority && !rawAuthorityIsHost(authority)
-}
-
-// maskWholeURL returns the scheme of raw and "://" followed by a fixed
-// mask, or the mask alone when raw has no scheme. Nothing else of raw is
-// kept.
-func maskWholeURL(raw string) string {
-	return urlSchemePrefixRe.FindString(raw) + "xxxxx"
-}
-
-// cutRawAuthority cuts raw, after its scheme and "://" (or a leading
-// "//"), at its first '/', '?' or '#': the authority, and the rest from
-// that delimiter on. hasAuthority is false when raw has neither prefix.
-func cutRawAuthority(raw string) (authority, rest string, hasAuthority bool) {
-	if scheme := urlSchemePrefixRe.FindString(raw); scheme != "" {
-		authority, hasAuthority = raw[len(scheme):], true
-	} else {
-		authority, hasAuthority = strings.CutPrefix(raw, "//")
-	}
-	if !hasAuthority {
-		return "", "", false
-	}
-	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
-		authority, rest = authority[:i], authority[i:]
-	}
-	return authority, rest, true
-}
-
-// rawAuthorityIsHost reports whether authority (see cutRawAuthority) ends
-// in a host: after its last '@', if any, a name of ASCII letters, digits,
-// '-', '.' and any non-ASCII character but U+FFFD (none of which can hide
-// a '/', '?' or '#'), or a bracketed IP literal, then an optional ':' and
-// digits. An empty authority passes.
-func rawAuthorityIsHost(authority string) bool {
-	rest := authority
-	if rest == "" {
-		return true
-	}
-	if i := strings.LastIndex(rest, "@"); i >= 0 {
-		rest = rest[i+1:]
-	}
-	host, port := rest, ""
-	if strings.HasPrefix(host, "[") {
-		end := strings.IndexByte(host, ']')
-		if end < 2 {
-			return false
-		}
-		for _, r := range host[1:end] {
-			if !isASCIIAlnum(r) && !strings.ContainsRune(":.%-", r) {
-				return false
-			}
-		}
-		if after := host[end+1:]; after != "" {
-			p, hasPort := strings.CutPrefix(after, ":")
-			if !hasPort {
-				return false
-			}
-			port = p
-		}
-		host = ""
-	} else {
-		if i := strings.LastIndexByte(host, ':'); i >= 0 {
-			host, port = host[:i], host[i+1:]
-		}
-		if host == "" {
-			return false
-		}
-	}
-	for _, r := range port {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	for _, r := range host {
-		if !isASCIIAlnum(r) && r != '-' && r != '.' && (r < 0x80 || r == '\uFFFD') {
-			return false
-		}
-	}
-	return true
-}
-
-// isASCIIAlnum reports whether r is an ASCII letter or digit.
-func isASCIIAlnum(r rune) bool {
-	return r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
-}
-
 // redactURLError returns err with the URL of the *url.Error in its chain
 // shown without its credentials (see redactURLCredentials). It changes
 // that *url.Error in place, so it is applied to the error net/http or
@@ -378,7 +244,7 @@ func isASCIIAlnum(r rune) bool {
 func redactURLError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		if undelimitedUserInfo(ue.URL, urlUserInfoRe) {
+		if urlredact.Undelimited(ue.URL) {
 			// The parse or dial error may quote a part of such a URL.
 			ue.Err = &urlDetailsHidden{err: ue.Err}
 		}

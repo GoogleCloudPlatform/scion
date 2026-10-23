@@ -253,7 +253,7 @@ func wantRefusal(t *testing.T, err error, substr string) {
 // with opts.Profile = profile, settled for a create.
 func (f *plFixture) createResolution(t *testing.T, profile string) runtimeResolution {
 	t.Helper()
-	res, err := f.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion, Profile: profile}, profileLenient, slog.LevelWarn)
+	res, err := f.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion, Profile: profile}, profileLenient)
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
@@ -334,11 +334,11 @@ func TestResolvePlacement_ProvenanceProfileWins_5(t *testing.T) {
 	writePlacementAgent(t, f.dotScion, id, `{"version": 1, "profile": "gpu"}`, "saved", `{}`)
 
 	opts := api.StartOptions{Name: id, ProjectPath: f.dotScion, Profile: "saved"}
-	runtimeOpts, provisioned, err := runtimeSelectionOpts(opts, id, false)
+	runtimeOpts, provisioned, err := runtimeSelectionOpts(opts, id, false, func() (string, error) { return opts.Profile, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.srv.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	res, err := f.srv.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestResolvePlacement_RestartUsesRecomputedProfile_13(t *testing.T) {
 	f.projectSettings(plProjectVS("", map[string]config.V1ProfileConfig{"gpu": {Runtime: "gke"}, "gpu2": {Runtime: "gke"}}), nil)
 	for _, profile := range []string{"gpu", "gpu2"} {
 		res, err := f.srv.resolveExistingAgentManager(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion, Profile: profile},
-			profileStrictProvisioned, slog.LevelDebug, pinnedRuntime{})
+			profileStrictProvisioned, pinnedRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -521,14 +521,14 @@ func TestResolvePlacement_Unrecorded_S1_S2_S3(t *testing.T) {
 		f.projectSettings(plProjectVS("gpu", map[string]config.V1ProfileConfig{"gpu": {Runtime: "gke"}}), nil)
 
 		// Start: the strict resolver with the empty selection profile.
-		start, err := f.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion}, profileLenient, slog.LevelDebug)
+		start, err := f.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion}, profileLenient)
 		if err != nil {
 			t.Fatal(err)
 		}
 		start = start.forExistingAgent("agent-1")
 		// Restart: pinned to the runtime the container was found on.
 		mgr, rt, rec := f.srv.defaultPair()
-		restart, err := f.srv.resolveExistingAgentManager(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion}, profileLenient, slog.LevelDebug, pinnedRuntimeOf(mgr, rt, rec))
+		restart, err := f.srv.resolveExistingAgentManager(api.StartOptions{Name: "agent-1", ProjectPath: f.dotScion}, profileLenient, pinnedRuntimeOf(mgr, rt, rec))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -585,14 +585,14 @@ func TestResolvePlacement_EmptyProvenanceProfile_S5(t *testing.T) {
 	const id = "empty-prov"
 	writePlacementAgent(t, f.dotScion, id, `{"version": 1, "profile": ""}`, "gpu", `{}`)
 	for _, restart := range []bool{false, true} {
-		runtimeOpts, provisioned, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: f.dotScion, Profile: "gpu"}, id, restart)
+		runtimeOpts, provisioned, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: f.dotScion, Profile: "gpu"}, id, restart, func() (string, error) { return "gpu", nil })
 		if err != nil {
 			t.Fatal(err)
 		}
 		if runtimeOpts.Profile != "" {
 			t.Fatalf("selection profile = %q, want empty (provenance)", runtimeOpts.Profile)
 		}
-		res, err := f.srv.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+		res, err := f.srv.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -758,7 +758,7 @@ runtimes:
 `)
 	f.srv.SwapRuntime(f.rt, config.RuntimeBuildRecord{})
 	f.srv.config.ForceRuntime = "kubernetes"
-	writePlacementAgent(t, f.dotScion, "agent-1", "", "", `{}`)
+	writePlacementAgent(t, f.dotScion, "agent-1", `{"version": 1, "profile": ""}`, "", `{}`)
 	w := postAgentOpFor(t, f.srv, "agent-1", "start", `{"projectPath": `+strconvQuote(f.dotScion)+`}`)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "cannot determine whether runtime entry gke targets this agent's runtime (runtime has no build record or client)") {
 		t.Fatalf("start: got %d %s", w.Code, w.Body.String())
@@ -1137,7 +1137,6 @@ func TestResolvePlacement_DefaultsOnlyParity(t *testing.T) {
 		{"profile-elsewhere-with-placement", resolutionProfile, "far", true},
 		{"unrecorded", resolutionUnrecorded, "", false},
 		{"default-fallback", resolutionDefaultFallback, "", false},
-		{"strict-fallback", resolutionStrictFallback, "", false},
 		{"unset", resolutionUnset, "", false},
 		{"forced", resolutionForced, "", false},
 	}

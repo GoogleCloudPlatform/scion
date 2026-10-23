@@ -340,7 +340,7 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	})
 	t.Run("mintable but not delegable", func(t *testing.T) {
 		body := hubRead()
-		body["permissions"] = []string{"project:read"}
+		body["permissions"] = []string{"agent:list"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
 		adtAssertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
 	})
@@ -659,7 +659,11 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/stop"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/message"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/messages"},
-		{http.MethodGet, "/api/v1/projects/" + f.other.ID},
+		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/"},
+		{http.MethodPatch, "/api/v1/projects/" + f.other.ID},
+		{http.MethodDelete, "/api/v1/projects/" + f.other.ID},
+		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/members"},
+		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/settings"},
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents/" + f.agentB.ID},
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents"},
 		{http.MethodGet, "/api/v1/auth/tokens"},

@@ -174,6 +174,10 @@ type HTTPAgentDispatcher struct {
 	debug             bool
 	log               *slog.Logger
 
+	// attachmentIssuer issues the attachment delivery capabilities of a
+	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
+	attachmentIssuer AttachmentIssuer
+
 	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
 	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
 	// the dispatcher writes durable intent + signals the owning node + waits
@@ -1445,6 +1449,17 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// reads agent-info.json from (ptone/scion#5113).
 	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
+}
+
+// dispatchProfile is the profile a start or restart sends: the agent's
+// recorded AppliedConfig.Profile, or "" when it has none. It is never nil,
+// so the broker always receives the hub's value.
+func dispatchProfile(agent *store.Agent) *string {
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return &profile
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -3680,6 +3695,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		inlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
 	}
+	// A broker that does not re-render provision-rendered keys at start
+	// (no changedFields capability) starts with their previous files: say
+	// so in the start response (ptone/scion#3982).
+	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
 
 	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
@@ -3712,6 +3731,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
@@ -3986,6 +4006,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ResolvedSecrets:      startEnv.secrets,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	if agent.AppliedConfig != nil {
 		extras.HarnessConfig = agent.AppliedConfig.HarnessConfig
 		extras.HarnessConfigID = agent.AppliedConfig.HarnessConfigID
@@ -4220,6 +4241,18 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 	return nil
 }
 
+// AttachmentIssuer issues the download capabilities of a message's attachment
+// plan for one dispatch attempt to recipient on broker brokerID
+// (ptone/scion#4596). The hub's attachmentDelivery implements it.
+type AttachmentIssuer interface {
+	Issue(ctx context.Context, recipient *store.Agent, brokerID string, plan []messages.AttachmentPlanEntry) []messages.WireAttachment
+}
+
+// SetAttachmentIssuer installs the attachment capability issuer.
+func (d *HTTPAgentDispatcher) SetAttachmentIssuer(i AttachmentIssuer) {
+	d.attachmentIssuer = i
+}
+
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -4231,6 +4264,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
+
+	// Fresh capabilities on every attempt, retries included, from the plan
+	// the render site stored on the message (ptone/scion#4596).
+	// Under the legacy envelope (no rendered text) the plan is applied to
+	// the copy sent, never to the caller's message.
+	structuredMsg = legacyAttachmentCopy(structuredMsg)
+	if d.attachmentIssuer != nil && structuredMsg != nil && len(structuredMsg.AttachmentPlan) > 0 {
+		ctx = withDispatchAttachments(ctx, d.attachmentIssuer.Issue(ctx, agent, agent.RuntimeBrokerID, structuredMsg.AttachmentPlan))
+		if r, ok := d.attachmentIssuer.(interface{ InboxRetentionDays() int }); ok {
+			ctx = withDispatchRetention(ctx, r.InboxRetentionDays())
+		}
+	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
