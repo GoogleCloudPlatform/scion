@@ -550,7 +550,8 @@ func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
 
 // execSparseGitCheckout is the production sparse-checkout runner: it performs
 // a sparse git checkout to get only the needed folder.
-// When token is non-empty it is embedded in the remote URL for authentication.
+// When token is non-empty it is supplied through a credential helper scoped to
+// the remote URL's host (util.ScopedCredentialHelperEnv), never in the URL.
 func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
 	// Create a temporary directory for the git clone
 	tmpDir, err := os.MkdirTemp("", "scion-git-sparse-*")
@@ -559,18 +560,21 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	var repoURL string
-	if token != "" {
-		repoURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, parts.Owner, parts.Repo)
-	} else {
-		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
-	}
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
 
 	// Host-side git for the template cache: run with the fixed pins (no
 	// repository hooks, fsmonitor, pager; ext transport off) and with the LFS
 	// smudge skipped, so the checkout below never resolves an LFS pointer
 	// through an endpoint named in the template's own tracked .lfsconfig.
 	gitEnv := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	if token != "" {
+		// The token is never embedded in the remote URL. It is supplied
+		// through a credential helper scoped to the remote URL's host, so git
+		// offers it to https://github.com and to no other endpoint.
+		if scoped, ok := util.ScopedCredentialHelperEnv(gitEnv, repoURL, token); ok {
+			gitEnv = scoped
+		}
+	}
 
 	// Initialize git repo with sparse checkout
 	commands := [][]string{
