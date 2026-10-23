@@ -845,6 +845,12 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		// A deferred message was never dispatched, so its attachments never
+		// reached this agent's home (ptone/scion#4596). The hub lists them
+		// only to a reader.
+		for _, a := range msg.DeferredAttachments {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
+		}
 	}
 	return tw.Flush()
 }

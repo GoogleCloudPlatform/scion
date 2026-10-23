@@ -180,3 +180,30 @@ func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentAppliedConfigResponseViewDropsChangedFields: the inline config's
+// changed_fields is hub-internal bookkeeping (ptone/scion#3982), so no
+// viewer gets it, a GET echoed into a PATCH never carries it, and the
+// stored config keeps it.
+func TestAgentAppliedConfigResponseViewDropsChangedFields(t *testing.T) {
+	for _, canAttach := range []bool{false, true} {
+		original := &AgentAppliedConfig{InlineConfig: &api.ScionConfig{
+			SystemPrompt:  "p",
+			ChangedFields: []string{"system_prompt"},
+		}}
+		view := original.ResponseView(canAttach)
+		data, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "changed_fields") {
+			t.Errorf("canAttach=%v: response carries changed_fields: %s", canAttach, data)
+		}
+		if view.InlineConfig.SystemPrompt != "p" {
+			t.Errorf("canAttach=%v: other inline fields must be kept, got %+v", canAttach, view.InlineConfig)
+		}
+		if len(original.InlineConfig.ChangedFields) != 1 {
+			t.Errorf("canAttach=%v: the stored list must be unchanged, got %v", canAttach, original.InlineConfig.ChangedFields)
+		}
+	}
+}

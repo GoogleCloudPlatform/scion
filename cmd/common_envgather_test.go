@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -545,4 +546,58 @@ func TestGatherAndSubmitEnv_InteractiveSecretEmptyInput(t *testing.T) {
 	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("project-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MY_SECRET")
+}
+
+// An env submit that the hub answers after the hub client's usual timeout
+// still succeeds: the submit carries the launch and gets the create
+// request's longer timeout. The timeouts are scaled down; the usual one is
+// 50ms here, as hubClientTimeout (30s) is in production.
+func TestGatherAndSubmitEnv_SlowSubmitOutlastsClientTimeout(t *testing.T) {
+	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
+	origTimeout := hubCreateRequestTimeout
+	t.Cleanup(func() {
+		nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm
+		hubCreateRequestTimeout = origTimeout
+	})
+	nonInteractive, autoConfirm = true, true
+	hubCreateRequestTimeout = 10 * time.Second
+	t.Setenv("TEST_SLOW_SUBMIT_KEY", "slow-value")
+
+	projectID := tid("project-1")
+	var submits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		submits.Add(1)
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"agent": map[string]interface{}{"id": tid("agent-1"), "status": "running"},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client, err := hubclient.New(server.URL, hubclient.WithTimeout(50*time.Millisecond))
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	resp := &hubclient.CreateAgentResponse{
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
+		EnvGather: &hubclient.EnvGatherResponse{
+			AgentID:  tid("agent-1"),
+			Required: []string{"TEST_SLOW_SUBMIT_KEY"},
+			Needs:    []string{"TEST_SLOW_SUBMIT_KEY"},
+		},
+	}
+
+	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, projectID, resp)
+	require.NoError(t, err, "an env submit slower than the client timeout must not be cut off")
+	require.NotNil(t, result)
+	require.NotNil(t, result.Agent)
+	assert.Equal(t, tid("agent-1"), result.Agent.ID)
+	assert.Equal(t, int32(1), submits.Load(), "the submit is sent once")
 }

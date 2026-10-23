@@ -93,6 +93,37 @@ func TestTunnelStatusEmptyAndText(t *testing.T) {
 	assert.Contains(t, out.String(), "a2")
 }
 
+// An idle --local-port listener is shown with its local port, in JSON as
+// local_port and in text under LOCAL PORT, with no open tunnel.
+func TestTunnelStatusListsListeners(t *testing.T) {
+	opened := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+	rec := tunnelclient.Record{
+		Schema: tunnelclient.RecordSchema, PID: 1, StartedAt: opened, Endpoint: "https://hub.example.com",
+		Credential: tunnelclient.Identity{Kind: tunnelclient.CredentialDev, Subject: "u1", Scope: tunnelclient.ScopeHub},
+		SessionIDs: []string{"s1"},
+		Tunnels:    []tunnelclient.TunnelRecord{},
+		Listeners:  []tunnelclient.ListenerRecord{{Agent: "a1", Project: "proj", Kind: "tcp", LocalPort: 15173, OpenedAt: opened}},
+	}
+	store := &tunnelMemStateStore{records: []tunnelclient.Record{rec}}
+
+	var out bytes.Buffer
+	require.NoError(t, writeTunnelStatus(&out, store, "", true))
+	var st tunnelclient.Status
+	require.NoError(t, json.Unmarshal(out.Bytes(), &st))
+	require.Len(t, st.Entries, 1)
+	assert.Equal(t, rec.Listeners, st.Entries[0].Listeners)
+	assert.Empty(t, st.Entries[0].Tunnels)
+	assert.Contains(t, out.String(), `"local_port": 15173`)
+
+	out.Reset()
+	require.NoError(t, writeTunnelStatus(&out, store, "", false))
+	text := out.String()
+	assert.Contains(t, text, "Listeners:")
+	assert.Contains(t, text, "LOCAL PORT")
+	assert.Regexp(t, `a1\s+proj\s+tcp\s+15173\s`, text)
+	assert.Contains(t, text, "No open tunnels.")
+}
+
 func TestTunnelStatusStoreErrorExits1(t *testing.T) {
 	err := writeTunnelStatus(&bytes.Buffer{}, &tunnelMemStateStore{err: errors.New("refusing tunnel state: group- or world-accessible")}, "", true)
 	assert.Equal(t, tunnelclient.ExitError, tunnelclient.CodeOf(err))

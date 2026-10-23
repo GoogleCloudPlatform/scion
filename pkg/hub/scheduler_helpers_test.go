@@ -199,6 +199,20 @@ func (m *mockScheduledEventStore) CancelScheduledEvent(_ context.Context, id str
 	return nil
 }
 
+func (m *mockScheduledEventStore) CancelScheduledEventWithReason(_ context.Context, id string, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	evt, ok := m.events[id]
+	if !ok || evt.Status != store.ScheduledEventPending {
+		return store.ErrNotFound
+	}
+	evt.Status = store.ScheduledEventCancelled
+	if reason != "" {
+		evt.Error = reason
+	}
+	return nil
+}
+
 func (m *mockScheduledEventStore) ListScheduledEvents(_ context.Context, _ store.ScheduledEventFilter, _ store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
 	return &store.ListResult[store.ScheduledEvent]{}, nil
 }

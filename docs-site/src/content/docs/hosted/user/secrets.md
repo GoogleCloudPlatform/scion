@@ -31,7 +31,28 @@ Both variables and secrets can be scoped to different levels. Scion resolves the
 ```text
 runtime_broker  <  hub  <  project  <  user
 ```
-Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
+Therefore, user-scoped settings have the highest priority of the four scopes: a user-scoped variable overrides project, hub and broker-scoped variables of the same name, and a user-scoped secret overrides project, hub and broker-scoped secrets of the same name. The scope order applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret. Environment values in the agent-create request (from the API, the web form or `--config`) outrank all four scopes when they are non-empty; an empty value yields to the scopes. A template's `env` block is a fallback, used only for keys that no other source sets. See [Settings Precedence](/scion/reference/settings-precedence/#system-a--environment-variables) for the full order.
+
+### Scope and Sharing
+
+A scope decides which agents receive a variable or secret, not which people can use it. The Hub applies the scopes to every agent it starts, whoever starts it:
+
+| Scope | Agents that receive it |
+| :--- | :--- |
+| **Hub** | Every agent on the Hub, started by any user. |
+| **Broker** | Every agent running on that Runtime Broker, started by any user. |
+| **Project** | Every agent in that Project, whoever starts it. |
+| **User** | Only agents owned by that user. An agent started by another agent (a child agent) is owned by its parent agent, so it receives user-scoped values only if they are marked for progeny, with `--allow-progeny` or the hub-wide default (see [Propagation to Descendant Agents](#propagation-to-descendant-agents-progeny)). |
+
+Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
+
+The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode.
+
+:::caution[Hub and Broker scopes are shared]
+Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
+
+Store sensitive secrets at **User** scope, so that only your own agents receive them, or at **Project** scope. A Project-scoped secret is shared with every member of the Project: their agents receive it, and those agents can also read it at runtime (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval)).
+:::
 
 ### Reserved Names
 
@@ -471,13 +492,15 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 - **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
 
 ### Resolution Hierarchy
-When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. The Hub merges secret values in this order (last one wins for the same key):
-1. Hub Secrets (global defaults)
-2. User Secrets
-3. Project Secrets
-4. Broker Secrets
-5. Template `env` block
-6. CLI `--env` flags
+When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub and combines it with the template `env` block. For the same key, a later entry in this list wins over an earlier one:
+1. Template `env` block (a fallback: applied only to keys that no other source sets)
+2. Broker Secrets
+3. Hub Secrets (global defaults)
+4. Project Secrets
+5. User Secrets
+6. Environment values in the agent-create request (API, web form or `--config`), when non-empty
+
+The scope order (items 2 to 5) applies within variables and within secrets. For the same key, a variable from any scope takes precedence over an environment-type secret.
 
 ### Security
 Secrets are transmitted over TLS between the Hub and Runtime Brokers. They are only decrypted by the Hub during the dispatch process and sent over an encrypted channel to the Runtime Broker. The Broker then injects them directly into the container's memory space. Brokers never persist agent secrets to disk.
