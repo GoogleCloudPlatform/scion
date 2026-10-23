@@ -37,14 +37,15 @@ import (
 // against the NFS export (see the comment on sharedDirHostPath).
 
 // nfsAttachmentServer mirrors agentAttachmentServer, but with
-// server.shared_dir_storage: nfs configured in global settings -- which
-// must be written, and HOME set, BEFORE testServer(t) runs (see
-// setNFSSharedDirStorageGlobalSettings's own docstring).
+// server.shared_dir_storage: nfs in the hub's server config (and in the
+// global settings file under a fresh HOME, set BEFORE testServer(t) runs;
+// see setNFSSharedDirStorageGlobalSettings's own docstring).
 func nfsAttachmentServer(t *testing.T) (srv *Server, project *store.Project, hostBase string) {
 	t.Helper()
 
 	hostBase = setNFSSharedDirStorageGlobalSettings(t)
 	srv, s := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 
 	db := openTestMemorySQLite(t, "sqlite")
 
@@ -154,7 +155,7 @@ func TestIngestAgentAttachments_NFSBackend_RefusedNoLeak(t *testing.T) {
 // TestSharedDirHostPath_NFSResolutionError_SymlinkedPid_NoFallback: when the
 // project's shared_dir_storage is nfs-configured but resolution itself
 // errors -- here, a symlinked <pid> component with an existing victim leaf,
-// caught by resolveNFSSharedDirPath's own symlink-escape backstop --
+// caught by the shared-dir resolution's symlink-escape backstop --
 // sharedDirHostPath must fail closed and never fall back to a stale local
 // project-configs directory, even though that directory exists on disk.
 func TestSharedDirHostPath_NFSResolutionError_SymlinkedPid_NoFallback(t *testing.T) {
@@ -186,8 +187,7 @@ func TestSharedDirHostPath_NFSResolutionError_InvalidBlock_NoFallback(t *testing
 
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n    nfs:\n      shares:\n        - id: nfs-export\n"), 0o644))
+	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	staleLocalDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
 	require.NoError(t, os.MkdirAll(staleLocalDir, 0o755))
@@ -235,10 +235,7 @@ func TestSharedDirHostPath_NFSBackend_ResolveErrorWarnLoggedIndependentlyOfSkipL
 	// Now the same project's NFS-configured resolution starts failing
 	// (invalid block, mount_root missing) -- the Warn must still fire, not
 	// be suppressed by the Info log's own dedup key.
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n    nfs:\n      shares:\n        - id: nfs-export\n"), 0o644))
+	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
 	warnCount := strings.Count(buf.String(), "NFS-configured shared dir resolution failed")

@@ -1,7 +1,10 @@
 # cr-ci PoC workflow (TEMPLATE). GitHub ignores this copy: only files under
-# .github/workflows/ run. Copying it there (on the default branch, because
-# workflow_dispatch only lists workflows from the default branch) is a P6
-# step that needs ptone's go-ahead. See cr-ci/workflows/README.md.
+# .github/workflows/ run. To run it (needs ptone's go-ahead), copy it to
+# .github/workflows/ on a throwaway branch named cr-ci-poc-<something> and push
+# that branch: the push trigger below runs it from the pushed commit, with no
+# change to the default branch (a fork's main must mirror upstream, and
+# workflow_dispatch only lists workflows on the default branch). Delete the
+# branch and its caches afterwards. See cr-ci/workflows/README.md.
 #
 # What it measures (design section 7, phase 1): queue-to-start latency, the
 # golangci-lint duration on the Cloud Run runner without the pkg/hub -c=1
@@ -10,18 +13,25 @@
 # runs-on is the runner label ALONE: the mediator only serves jobs whose
 # labels are all RUNNER_LABEL (docs/architecture.md, "Labels"); a list such
 # as [self-hosted, Linux, X64, <label>] would be logged as labels_unservable
-# and never get a runner. The input defaults to RUNNER_LABEL's default in
-# cr-ci/config.example.env (a test keeps them equal).
+# and never get a runner. The input, and its fallback on push, default to
+# RUNNER_LABEL's default in cr-ci/config.example.env (a test keeps them equal).
+#
+# memory.peak and memory.current are not available under gVisor (Cloud Run), so
+# the lint step samples /proc/meminfo and /scratch every 5 s and prints the peaks.
+# MemTotal-MemAvailable includes anything held in RAM files (tmpfs), such as the
+# RAM build cache.
 #
 # The tools come from the runner image (runner/Dockerfile): Go and
 # golangci-lint are pre-installed, which is part of what the PoC measures.
-# Only people with write access can dispatch a workflow, so the fork guard of
-# the routing expression is not needed here; the mediator applies its own
-# fork guard to every run anyway.
+# Only people with write access can push a branch or dispatch a workflow, so the
+# fork guard of the routing expression is not needed here; the mediator applies
+# its own fork guard to every run anyway.
 
 name: cr-ci runner PoC
 
 on:
+  push:
+    branches: ['cr-ci-poc-*']
   workflow_dispatch:
     inputs:
       runner-label:
@@ -39,7 +49,7 @@ permissions:
 jobs:
   lint-on-cloud-run:
     name: golangci-lint on the cr-ci runner
-    runs-on: ${{ inputs.runner-label }}
+    runs-on: ${{ inputs.runner-label || 'scion-cr-8c32g' }}
     # Below the Cloud Run task timeout (TASK_TIMEOUT, default 45m), so GitHub
     # cancels a hung job before Cloud Run kills the container.
     timeout-minutes: 40
@@ -163,13 +173,33 @@ jobs:
         shell: bash
         env:
           GOGC: '25'
-          LINT_CONCURRENCY: ${{ inputs.lint-concurrency }}
+          LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}
         run: |
           set -uo pipefail
+          samples="$RUNNER_TEMP/samples.log"
+          : >"$samples"
+          (
+            # On TERM, stop the pending sleep too, so no sleep outlives the step.
+            trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
+            while :; do
+              mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+              ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+              used_kb=$(df -k --output=used /scratch | tail -1 | tr -d ' ')
+              echo "$(date -u +%H:%M:%S) mem_used_mb=$(( (mt - ma) / 1024 )) scratch_used_mb=$(( used_kb / 1024 ))" | tee -a "$samples"
+              sleep 5 &
+              nap=$!
+              wait "$nap"
+            done
+          ) &
+          sampler=$!
           start=$(date +%s)
           rc=0
           golangci-lint run --new-from-merge-base=origin/main --concurrency="$LINT_CONCURRENCY" || rc=$?
           echo "golangci-lint exit=$rc duration=$(( $(date +%s) - start ))s"
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          awk '{for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[2] + 0 > max[kv[1]]) max[kv[1]] = kv[2] + 0 }}
+            END {printf "sample peaks: mem_used_mb=%d scratch_used_mb=%d (%d samples)\n", max["mem_used_mb"], max["scratch_used_mb"], NR}' "$samples"
           exit "$rc"
 
       - name: Memory and disk report
@@ -177,7 +207,7 @@ jobs:
         shell: bash
         run: |
           echo "memory.peak (bytes):"
-          cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "unavailable (no cgroup v2 memory.peak in this sandbox)"
+          cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo "unavailable (expected under gVisor; see the lint step's sample peaks)"
           grep -E '^(MemTotal|MemAvailable):' /proc/meminfo || true
           df -h /scratch
           du -sh /scratch/* 2>/dev/null || true

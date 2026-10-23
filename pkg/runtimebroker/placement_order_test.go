@@ -43,7 +43,8 @@ func newOrderFixture(t *testing.T, global string, rec config.RuntimeBuildRecord,
 	t.Helper()
 	f := newPlacementFixture(t, global, k8s.ConnKubeconfig, rec)
 	f.srv.config.ForceRuntime = "kubernetes"
-	agentDir := writePlacementAgent(t, f.dotScion, plOrderAgent, "", "", scionAgent)
+	// Provisioned with no profile (an empty provisioned profile).
+	agentDir := writePlacementAgent(t, f.dotScion, plOrderAgent, `{"version": 1, "profile": ""}`, "", scionAgent)
 	f.mgr.agents = []api.AgentInfo{{
 		ID: plOrderAgent, Name: plOrderAgent, ContainerID: plOrderAgent, ProjectPath: f.dotScion, Phase: "running",
 		Labels: map[string]string{"scion.name": plOrderAgent},

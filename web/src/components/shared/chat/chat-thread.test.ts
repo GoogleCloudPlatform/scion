@@ -9397,3 +9397,49 @@ describe('scion-chat-thread attachment upload scope', () => {
     });
   });
 });
+
+describe('scion-chat-thread null conversation key', () => {
+  // conversationKey is typed as a string, but a binding that resolves to
+  // null, or a removed attribute, can set null at runtime.
+  const nullKey = null as unknown as string;
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('removing a thread whose key was just set to null does not throw', async () => {
+    const el = await mount();
+
+    el.conversationKey = nullKey;
+    expect(() => el.remove()).not.toThrow();
+  });
+
+  it('renders with a null key, reads it as empty, and disconnects cleanly', async () => {
+    const el = await mount();
+
+    el.conversationKey = nullKey;
+    await el.updateComplete;
+
+    expect(el.conversationKey).toBe('');
+    expect(() => el.remove()).not.toThrow();
+  });
+
+  it('a DM thread renders with a null key', async () => {
+    const el = await mount();
+    el.isDM = true;
+    await el.updateComplete;
+
+    el.conversationKey = nullKey;
+    expect(() => el.remove()).not.toThrow();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.conversationKey).toBe('');
+    expect(el.shadowRoot).not.toBeNull();
+  });
+});

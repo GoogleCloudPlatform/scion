@@ -15,6 +15,7 @@
 package util
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1072,6 +1073,112 @@ func TestScopedCredentialHelperEnv(t *testing.T) {
 	}
 	if _, ok := ScopedCredentialHelperEnv(nil, "git@github.com:o/r.git", "t"); ok {
 		t.Error("expected not ok for a non-http(s) URL")
+	}
+}
+
+// The token appears in the environment only as the scoped-credential variable,
+// never in a GIT_CONFIG_VALUE (which the helper text reads at run time), and the
+// helper text is a constant with no credential value.
+func TestScopedCredentialHelperEnv_TokenOnlyInEnvVar(t *testing.T) {
+	const token = "sup3r-s3cret-t0ken"
+	env, ok := ScopedCredentialHelperEnv(nil, "https://github.com/o/r.git", token)
+	if !ok {
+		t.Fatal("expected ok for an https URL")
+	}
+	var carriers []string
+	for _, kv := range env {
+		if strings.Contains(kv, token) {
+			carriers = append(carriers, kv)
+		}
+	}
+	if len(carriers) != 1 || !strings.HasPrefix(carriers[0], scopedGitCredentialEnv+"=") {
+		t.Errorf("token must appear only in %s, got carriers: %v", scopedGitCredentialEnv, carriers)
+	}
+	// No GIT_CONFIG_VALUE carries the token, and the helper text is a credential-free constant.
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_VALUE_") && strings.Contains(kv, token) {
+			t.Errorf("a GIT_CONFIG_VALUE carries the token: %q", kv)
+		}
+	}
+	if strings.Contains(scopedCredentialHelperText, token) {
+		t.Error("the helper text constant must not contain any credential")
+	}
+}
+
+// HostGitEnv drops an inherited scoped-credential variable, so it never reaches a
+// host git call that did not set it. ScopedCredentialHelperEnv then re-adds it
+// (scrub-then-append) for the one command that needs it.
+func TestHostGitEnv_ScrubsScopedCredential(t *testing.T) {
+	in := []string{"PATH=/usr/bin", scopedGitCredentialEnv + "=leftover-token", "HOME=/home/x"}
+	for _, kv := range HostGitEnv(in) {
+		if strings.HasPrefix(kv, scopedGitCredentialEnv+"=") {
+			t.Errorf("HostGitEnv must drop an inherited %s, got: %q", scopedGitCredentialEnv, kv)
+		}
+	}
+	// Scrub-then-append: scoping the scrubbed env re-adds exactly one carrier.
+	scoped, ok := ScopedCredentialHelperEnv(HostGitEnv(in), "https://github.com/o/r.git", "tok")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	n := 0
+	for _, kv := range scoped {
+		if strings.HasPrefix(kv, scopedGitCredentialEnv+"=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("expected exactly one scoped-credential var after scrub-then-scope, got %d", n)
+	}
+}
+
+// End-to-end functional check of the PRODUCTION scoped-credential path: the env
+// built by ScopedCredentialHelperEnv (which installs scopedCredentialHelperText)
+// delivers the token to git (test d — e2e auth), while GIT_TRACE — which logs the
+// credential helper's run_command argv — never shows the token. This fails if the
+// token is ever formatted back into the helper text (the helper argv would carry
+// it) or into a config value, so it kills that mutant. A shell-metacharacter token
+// confirms the quoted ${VAR} expansion.
+func TestScopedCredentialHelper_NoTokenOnAnyArgv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	const token = `argv-must-not-have-me$;&|` // includes shell metacharacters
+	dir := t.TempDir()
+
+	// The production scoped env, built on an isolated base (no ambient helper or
+	// token). ScopedCredentialHelperEnv installs scopedCredentialHelperText and the
+	// SCION_SCOPED_GIT_CREDENTIAL value; HostGitEnv keeps the isolation vars.
+	base := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	env, ok := ScopedCredentialHelperEnv(HostGitEnv(base), "https://example.com/o/r.git", token)
+	if !ok {
+		t.Fatal("ScopedCredentialHelperEnv returned ok=false for an https URL")
+	}
+
+	// GIT_TRACE=2 logs the credential helper's run_command argv to stderr.
+	cmd := exec.Command("git", "credential", "fill")
+	cmd.Dir = dir
+	cmd.Env = append(env, "GIT_TRACE=2")
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=example.com\n\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git credential fill failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	// Test d: git received the exact token from the production helper.
+	if !strings.Contains(stdout.String(), "password="+token) {
+		t.Errorf("git did not receive the token from the scoped helper:\n%s", stdout.String())
+	}
+	// GIT_TRACE logs the helper's run_command argv; it must not contain the token,
+	// so formatting the token back into the helper text is caught here.
+	if strings.Contains(stderr.String(), token) {
+		t.Error("the token appeared in the git trace (a helper or argv carried it)")
 	}
 }
 

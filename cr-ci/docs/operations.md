@@ -118,8 +118,9 @@ All tool versions and checksums are pinned in one place, the `ARG` block of
 1. Change the version **and** its sha256 there, and commit.
 2. `scripts/build-runner-image.sh --apply`: builds and pushes a new tag
    (`git-<tree hash of runner/>`), as `BUILD_SA_NAME`.
-3. `scripts/deploy-job.sh --apply`: points the job at the new tag. New
-   executions use it; running ones finish on the old image.
+3. `scripts/deploy-job.sh --apply --warm-up`: points the job at the new tag and
+   runs one no-op execution, so the first real job does not pay the image import.
+   New executions use the new tag; running ones finish on the old image.
 
 **Rollback:** `scripts/deploy-job.sh --tag <previous tag> --apply`. Old tags
 stay in `ARTIFACT_REPO` (list them with
@@ -136,8 +137,9 @@ with `go.mod` and `GOLANGCI_LINT_VERSION` with the version CI pins.
 
 `MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
 and are dispatched first in, first out as executions finish. Each execution
-uses `RUNNER_DISK_GI` (at most 10 GiB) of the regional ephemeral-disk quota
-(default 100 GiB: 5 x 10 GiB fits, with room for 10 runners). To raise the cap, first request the quota increase
+uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
+5 x 10 GiB fits, 4 x 25 GiB fits). Above 10 GiB per runner, the per-instance
+quota must be raised as well. To raise the cap, first request the quota increase
 ([gcp-setup.md, step 9](gcp-setup.md#9-quotas)), then raise
 `MAX_CONCURRENT_RUNNERS` and run `scripts/deploy-mediator.sh --apply`. A
 persistent `capacity_full` with few jobs actually running points to stuck
@@ -210,6 +212,9 @@ logged (a unit test enforces this).
   budget. The job is backfilled after its registration is reaped.
 - **Webhook deliveries failing with 401:** the webhook secret in Secret
   Manager and in the App settings differ (see rotation above).
+- **Webhook deliveries get 404:** the App's webhook URL lacks `/webhook`. It must
+  be `MEDIATOR_URL/webhook` (App settings, **General**, **Webhook URL**), then
+  redeliver from **Advanced**, **Recent Deliveries**.
 - **503 from `/webhook` and `/reconcile` with `not_configured`:** `MEDIATOR_URL`
   is empty; set it and redeploy.
 - **Image build fails with "the --chmod option requires BuildKit":** the

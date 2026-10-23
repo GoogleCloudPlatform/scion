@@ -196,13 +196,23 @@ func TestListHubSettings(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list, 4)
 
-	// Should be ordered by section name. The operational-settings revision
-	// row comes with the sections (three operational writes so far).
-	assert.Equal(t, store.HubSettingsRevisionSection, list[0].Section)
-	assert.Equal(t, int64(3), list[0].Revision)
-	assert.Equal(t, "access", list[1].Section)
-	assert.Equal(t, "maintenance", list[2].Section)
-	assert.Equal(t, "telemetry", list[3].Section)
+	// The operational-settings revision row comes with the sections (three
+	// operational writes so far). It is found by name: its position depends
+	// on the database collation (Postgres ignores the leading underscore,
+	// SQLite sorts bytes).
+	var sections []string
+	revisionRows := 0
+	for _, row := range list {
+		if row.Section == store.HubSettingsRevisionSection {
+			revisionRows++
+			assert.Equal(t, int64(3), row.Revision)
+			continue
+		}
+		sections = append(sections, row.Section)
+	}
+	assert.Equal(t, 1, revisionRows)
+	// The sections are ordered by section name.
+	assert.Equal(t, []string{"access", "maintenance", "telemetry"}, sections)
 }
 
 // =============================================================================

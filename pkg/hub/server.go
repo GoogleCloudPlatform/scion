@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -492,6 +493,18 @@ type ServerConfig struct {
 	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 
+	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
+	// once at startup from the global settings file through the same
+	// env-free loader the brokers use (config.LoadHubSharedDirStorage);
+	// never re-read per request, never from the DB or project settings.
+	// With WorkspaceStorageConfig it decides where the hub's shared-dir
+	// browser resolves shared dirs (sharedDirLayout).
+	SharedDirStorageConfig *config.V1SharedDirStorageConfig
+	// SharedDirStorageError is set when the settings file plausibly
+	// configures server.shared_dir_storage but could not be loaded; shared-dir
+	// resolution then fails closed rather than using the local layout.
+	SharedDirStorageError error
+
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
 	// the chat interface. Nil means enabled — chat shipped default-on, so an
@@ -794,6 +807,13 @@ type StartExtras struct {
 	// state survived the stop is started from that state as before.
 	TemplateID   string
 	TemplateHash string
+	// Profile is the agent's settings profile as the hub records it
+	// (AppliedConfig.Profile), sent on every start and restart (wire key
+	// profile), even when empty, so the broker can tell "no profile" from
+	// an older hub that sends none. The broker uses its own provisioning
+	// record of the profile when it has one, and this value otherwise.
+	// Nil sends nothing.
+	Profile *string
 	// The fields below are set on a restart only (see the type comment).
 	ProjectPath       string
 	ProjectSlug       string
@@ -872,6 +892,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateHash != "" {
 		payload["templateHash"] = extras.TemplateHash
+	}
+	if extras.Profile != nil {
+		payload["profile"] = *extras.Profile
 	}
 	if extras.ProjectPath != "" {
 		payload["projectPath"] = extras.ProjectPath
@@ -2181,6 +2204,10 @@ type Server struct {
 	// dbMetrics/dispatchMetrics.
 	reaperMetrics reapermetrics.Recorder
 
+	// eventStreamMetrics counts scion.hub.events.published on the event
+	// publisher (event_streams.go); nil until SetEventStreamMetrics.
+	eventStreamMetrics ssemetrics.Recorder
+
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
 
@@ -2458,6 +2485,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
+	}
+	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
+		slog.Warn(warning)
 	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
@@ -4720,7 +4750,11 @@ func (s *Server) SetGCPProjectID(projectID string) {
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
 	s.events = ep
+	rec := s.eventStreamMetrics
 	s.mu.Unlock()
+	if p, ok := ep.(publishMetricsSetter); ok && rec != nil {
+		p.SetPublishMetrics(rec)
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
