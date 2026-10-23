@@ -119,7 +119,6 @@ async function waitServed(agentId: string): Promise<void> {
   throw new Error(`agent ${agentId} did not serve its port within ${READY_TIMEOUT_MS}ms: ${last}`);
 }
 
-/** Opens a page and records the response of each proxied sub-resource. */
 /** What the browser exposed for one proxied sub-resource of a page. */
 interface SubRecord {
   request?: Request;
