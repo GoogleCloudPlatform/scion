@@ -1597,7 +1597,11 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 		return
 	}
 	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return provision.SafeGitCommand(ctx, projectRoot, args...)
+		cmd, err := provision.SafeGitCommand(ctx, projectRoot, args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.Cmd, nil
 	}
 	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
 		slog.Warn("worktree-per-agent: could not remove the partial worktree's git entry",

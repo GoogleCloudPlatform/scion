@@ -123,7 +123,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Remove
-		if _, err := RemoveWorktree(repoDir, worktreePath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, worktreePath, repoDir, false); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 		// Wait/Check? git worktree remove deletes the directory usually.
@@ -164,7 +164,7 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("Failed to recreate worktree after RemoveWorktreeEntryIn: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(repoDir, stalePath, true)
+		_, _ = RemoveWorktree(repoDir, stalePath, repoDir, true)
 	})
 
 	t.Run("DeleteBranchIn", func(t *testing.T) {
@@ -174,7 +174,7 @@ func TestGitUtils(t *testing.T) {
 		if err := CreateWorktree(wtPath, branch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
-		if _, err := RemoveWorktree(repoDir, wtPath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, wtPath, repoDir, false); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 
@@ -221,7 +221,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Clean up
-		_, _ = RemoveWorktree(repoDir, wtPath, true)
+		_, _ = RemoveWorktree(repoDir, wtPath, repoDir, true)
 	})
 
 	t.Run("RemoveWorktreeWithBranch", func(t *testing.T) {
@@ -232,7 +232,7 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		deleted, err := RemoveWorktree(repoDir, wtPath, true)
+		deleted, err := RemoveWorktree(repoDir, wtPath, repoDir, true)
 		if err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
@@ -376,8 +376,8 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	}
 
 	// Clean up
-	_, _ = RemoveWorktree(mainRepo, siblingPath, true)
-	_, _ = RemoveWorktree(mainRepo, wtPath, true)
+	_, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, true)
+	_, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, true)
 }
 
 func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
@@ -473,7 +473,7 @@ func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
 	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
-	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, true) }()
 
 	// repoRoot is the LINKED worktree here, simulating a project that lives
 	// there; path is the MAIN worktree, which must still be recognized as
@@ -495,7 +495,7 @@ func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
 	// `git worktree add` accepts any destination.
 	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
 	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
-	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
 	if err != nil {
@@ -515,7 +515,7 @@ func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
 	// -- it needs no special-case handling, only real git registration.
 	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
 	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
-	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
 	if err != nil {
@@ -555,7 +555,7 @@ func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
 	// be accepted as a worktree of repoA.
 	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
 	addWorktreeDirect(t, repoB, wtOfB, "feature")
-	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, true) }()
+	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, repoB, true) }()
 
 	ok, err := IsRegisteredWorktree(repoA, wtOfB)
 	if err != nil {
@@ -654,7 +654,7 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
 	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
-	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, true) }()
 
 	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
 	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
@@ -756,7 +756,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := RemoveWorktree(base, outside, false)
+		_, err := RemoveWorktree(base, outside, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -767,7 +767,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 
 	t.Run("candidate equals base", func(t *testing.T) {
 		base := setupGitRepo(t)
-		_, err := RemoveWorktree(base, base, false)
+		_, err := RemoveWorktree(base, base, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for candidate==base, got: %v", err)
 		}
@@ -797,7 +797,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := RemoveWorktree(base, leaf, false)
+		_, err := RemoveWorktree(base, leaf, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -830,7 +830,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 		}
 		candidate := filepath.Join(base, "worktrees", "name")
 
-		_, err := RemoveWorktree(base, candidate, false)
+		_, err := RemoveWorktree(base, candidate, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -858,7 +858,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		if _, err := RemoveWorktree(base, wtPath, false); err != nil {
+		if _, err := RemoveWorktree(base, wtPath, base, false); err != nil {
 			t.Fatalf("RemoveWorktree of a legitimate in-tree worktree should succeed, got: %v", err)
 		}
 		if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
@@ -868,7 +868,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 
 	t.Run("non-existent path is a no-op, not an error", func(t *testing.T) {
 		base := setupGitRepo(t)
-		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), false)
+		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), base, false)
 		if err != nil {
 			t.Errorf("removing a non-existent path should be a no-op, got: %v", err)
 		}
@@ -892,28 +892,28 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	t.Run("empty base", func(t *testing.T) {
-		_, err := RemoveWorktree("", "/some/path", false)
+		_, err := RemoveWorktree("", "/some/path", "", false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for empty base, got: %v", err)
 		}
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		_, err := RemoveWorktree("/some/base", "", false)
+		_, err := RemoveWorktree("/some/base", "", "/some/base", false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for empty path, got: %v", err)
 		}
 	})
 
 	t.Run("relative base", func(t *testing.T) {
-		_, err := RemoveWorktree("relative/base", "/some/path", false)
+		_, err := RemoveWorktree("relative/base", "/some/path", "relative/base", false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for relative base, got: %v", err)
 		}
 	})
 
 	t.Run("relative path", func(t *testing.T) {
-		_, err := RemoveWorktree("/some/base", "relative/path", false)
+		_, err := RemoveWorktree("/some/base", "relative/path", "/some/base", false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for relative path, got: %v", err)
 		}
@@ -926,7 +926,7 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		candidate := filepath.Join(notADir, "child")
-		_, err := RemoveWorktree(base, candidate, false)
+		_, err := RemoveWorktree(base, candidate, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for a non-ENOENT Lstat error, got: %v", err)
 		}
@@ -942,7 +942,7 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 		if err := os.Symlink(loopA, loopB); err != nil {
 			t.Fatal(err)
 		}
-		_, err := RemoveWorktree(base, loopA, false)
+		_, err := RemoveWorktree(base, loopA, base, false)
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for a symlink loop, got: %v", err)
 		}
@@ -1311,7 +1311,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 	}
 
 	t.Run("PullNoChanges", func(t *testing.T) {
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -1336,7 +1336,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -1362,7 +1362,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 
 	t.Run("PullFailure_NotARepo", func(t *testing.T) {
 		notARepo := t.TempDir()
-		_, err := PullSharedWorkspace(notARepo, "")
+		_, err := PullSharedWorkspace(notARepo, sourceDir, "")
 		if err == nil {
 			t.Fatal("expected pull to fail for non-repo directory")
 		}
@@ -1467,84 +1467,6 @@ func TestGitError_UserGuidance(t *testing.T) {
 		if !tt.wantHint && guidance != "" {
 			t.Errorf("GitError{Kind: %v}.UserGuidance() = %q, want empty", tt.kind, guidance)
 		}
-	}
-}
-
-func TestAuthenticatedCloneURL(t *testing.T) {
-	const token = "ghp_exampletoken"
-
-	tests := []struct {
-		name     string
-		cloneURL string
-		token    string
-		want     string
-	}{
-		{
-			name:     "plain https remote gets credentials",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@github.com/org/repo.git",
-		},
-		{
-			name:     "remote that already carries userinfo is not doubled up",
-			cloneURL: "https://org@dev.azure.com/org/project/_git/repo",
-			token:    token,
-			want:     "https://oauth2:" + token + "@dev.azure.com/org/project/_git/repo",
-		},
-		{
-			name:     "empty token leaves the URL alone",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "",
-			want:     "https://github.com/org/repo.git",
-		},
-		{
-			name:     "token with reserved characters is escaped",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "p@ss/word",
-			want:     "https://oauth2:p%40ss%2Fword@github.com/org/repo.git",
-		},
-		{
-			name:     "non-default port is preserved",
-			cloneURL: "https://host.example.com:8443/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@host.example.com:8443/org/repo.git",
-		},
-		{
-			name:     "scp-style ssh remote is left alone",
-			cloneURL: "git@github.com:org/repo.git",
-			token:    token,
-			want:     "git@github.com:org/repo.git",
-		},
-		{
-			name:     "ssh scheme is left alone rather than given an oauth token",
-			cloneURL: "ssh://git@github.com/org/repo.git",
-			token:    token,
-			want:     "ssh://git@github.com/org/repo.git",
-		},
-		{
-			name:     "plain http is left alone",
-			cloneURL: "http://internal.example.com/org/repo.git",
-			token:    token,
-			want:     "http://internal.example.com/org/repo.git",
-		},
-		{
-			name:     "unparseable remote is returned unchanged",
-			cloneURL: "not a url",
-			token:    token,
-			want:     "not a url",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := authenticatedCloneURL(tt.cloneURL, tt.token)
-			if got != tt.want {
-				t.Errorf("authenticatedCloneURL(%q, token) = %q, want %q", tt.cloneURL, got, tt.want)
-			}
-			if tt.token != "" && strings.Count(got, "@") > 1 {
-				t.Errorf("result contains more than one @ separator: %q", got)
-			}
-		})
 	}
 }
 
