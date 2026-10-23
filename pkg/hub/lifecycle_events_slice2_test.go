@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -173,7 +174,11 @@ func TestLifecycleEvents_ExperimentToggle(t *testing.T) {
 	t.Cleanup(func() { srv.stopLifecycleEvents(context.Background()) })
 	assert.False(t, ls.AgentWriteObserverInstalled(), "off by default")
 	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricObserverState, telemetryemit.ObserverStateDisabledExperimentOff))
-	assert.Equal(t, int64(1), counters.Get(telemetryemit.MetricSinkKind, "other"), "a MemorySink is neither cloud logging nor stdout")
+	// A MemorySink is none of the three wire kinds (cloud_logging, stdout,
+	// none), and MemoryCounters records only those, so all three read 0.
+	for _, k := range []string{telemetryemit.SinkKindCloudLogging, telemetryemit.SinkKindStdout, telemetryemit.SinkKindNone} {
+		assert.Zero(t, counters.Get(telemetryemit.MetricSinkKind, k), "a MemorySink is not sink kind %s", k)
+	}
 
 	lcSetExperiment(t, srv, true)
 	ApplySnapshot(srv, Layer1Snapshot{})
@@ -184,7 +189,12 @@ func TestLifecycleEvents_ExperimentToggle(t *testing.T) {
 	srv.lifecycleEvents.mu.Unlock()
 	assert.True(t, running, "an installed observer has a running drainer")
 	id := lifecycleCreateAgent(t, srv, projectID, "lc-toggle-on")
-	require.Eventually(t, func() bool { return len(sink.Delivered()) > 0 }, 30*time.Second, 20*time.Millisecond)
+	// Wait until the running drainer has delivered every row of the create,
+	// so nothing is still in flight when the count is taken below.
+	require.Eventually(t, func() bool {
+		st, err := ls.LifecycleOutboxStats(context.Background())
+		return err == nil && st.Pending == 0 && len(sink.Delivered()) > 0
+	}, 30*time.Second, 20*time.Millisecond)
 
 	lcSetExperiment(t, srv, false)
 	ApplySnapshot(srv, Layer1Snapshot{})
@@ -366,7 +376,18 @@ func TestLifecycleEvents_CreateRollback(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "lc-rollback", ProjectID: projectID, Task: "x"})
 	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
 	lifecycleDrain(t, ls, sink, func() time.Time { return time.Now().Add(time.Hour) })
-	evs := lifecycleDecode(t, sink.Delivered())
+	// The running drainer and this drain can both deliver a row (the
+	// shifted clock expires its lease): keep one copy per event_id, in
+	// revision order.
+	seen := map[string]bool{}
+	var evs []*tc.LifecycleEvent
+	for _, e := range lifecycleDecode(t, sink.Delivered()) {
+		if !seen[e.EventID] {
+			seen[e.EventID] = true
+			evs = append(evs, e)
+		}
+	}
+	sort.Slice(evs, func(i, j int) bool { return evs[i].TransitionRevision < evs[j].TransitionRevision })
 	require.NotEmpty(t, evs)
 	seq := lcSeqFull(evs)
 	assert.Regexp(t, regexp.MustCompile(`^created@1 .*launch_failed@(\d+)\(create_rolled_back\) deleted@\d+\(create_rolled_back\)$`), seq)
