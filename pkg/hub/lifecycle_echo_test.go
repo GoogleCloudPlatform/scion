@@ -433,7 +433,13 @@ type echoFaultStore struct {
 	store.Store
 	mu        sync.Mutex
 	failEcho  int    // effective writes still to fail
-	adoptMode string // "", "error" or "refuse"
+	adoptMode string // "", "error" or "refuse": the applied settle (AdoptAgentRunID)
+	// settleMode is adoptMode for the completed settle (SettleLaunchedRun,
+	// WP1 slice 3b). beforeSettle, when set, runs right before
+	// SettleLaunchedRun delegates, as a hub write landing between the
+	// handler's check and the swap would.
+	settleMode   string
+	beforeSettle func(ctx context.Context, agentID string)
 }
 
 var errInjectedEcho = errors.New("injected effective-config failure")
@@ -462,6 +468,22 @@ func (w *echoFaultStore) AdoptAgentRunID(ctx context.Context, agentID, expectedR
 		return false, nil
 	}
 	return w.Store.AdoptAgentRunID(ctx, agentID, expectedRunID, newRunID, unchangedSince)
+}
+
+func (w *echoFaultStore) SettleLaunchedRun(ctx context.Context, agentID string, f store.LaunchSettleFence) (bool, error) {
+	w.mu.Lock()
+	mode, hook := w.settleMode, w.beforeSettle
+	w.mu.Unlock()
+	switch mode {
+	case "error":
+		return false, errInjectedEcho
+	case "refuse":
+		return false, nil
+	}
+	if hook != nil {
+		hook(ctx, agentID)
+	}
+	return w.Store.SettleLaunchedRun(ctx, agentID, f)
 }
 
 // echoReportFixture is an agent with an active create launch bound to its
@@ -626,14 +648,17 @@ func TestLifecycleEvents_AsyncEchoReplayRecovers(t *testing.T) {
 // fixture, review r4 R2): the report names run-b and the settle fails, so
 // the row keeps its launch's own run: stale{launch_report,
 // unsettled_adoption} with the INFO line, on the first report and again on
-// the identical replay. No configured, no effective_* anywhere.
-// TestLifecycleEvents_StaleEchoReport is the same with the adoption
-// refused instead of failing.
+// the identical replay, whose completed settle (WP1 slice 3b) fails too.
+// No configured, no effective_* anywhere. The "refuse" mode is the same
+// with the adoption refused instead of failing.
+// TestLifecycleEvents_AsyncEchoReplayAdoptionRecovers is the replay whose
+// settle succeeds.
 func TestLifecycleEvents_AsyncEchoReplayAdoptionSkipped(t *testing.T) {
 	for _, mode := range []string{"error", "refuse"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newEchoReportFixture(t, "lc-async-skip-"+mode)
 			f.wrap.adoptMode = mode
+			f.wrap.settleMode = mode
 			require.Equal(t, store.LaunchReportResultApplied, f.report(t, "run-b", false))
 			assert.Equal(t, int64(1), staleEchoes(f.counters, telemetryemit.StaleEchoPathLaunchReport, store.StaleEchoUnsettledAdoption), f.counters.String())
 			assert.Equal(t, 1, f.unsettledLines())
@@ -651,6 +676,36 @@ func TestLifecycleEvents_AsyncEchoReplayAdoptionSkipped(t *testing.T) {
 	}
 }
 
+// TestLifecycleEvents_AsyncEchoReplayAdoptionRecovers (WP1 slice 3b, cause
+// 3): the applied settle fails or is refused, so the first report's echo
+// is unsettled_adoption. The broker's identical replay is answered
+// completed; the row still holds the launch's own run, so the completed
+// settle adopts run-b and the echo applies: one configured for run-b with
+// the adoption provenance, and no second stale echo.
+func TestLifecycleEvents_AsyncEchoReplayAdoptionRecovers(t *testing.T) {
+	for _, mode := range []string{"error", "refuse"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newEchoReportFixture(t, "lc-async-recover-adopt-"+mode)
+			f.wrap.adoptMode = mode
+			require.Equal(t, store.LaunchReportResultApplied, f.report(t, "run-b", false))
+			require.Equal(t, int64(1), staleEchoes(f.counters, telemetryemit.StaleEchoPathLaunchReport, store.StaleEchoUnsettledAdoption), f.counters.String())
+
+			assert.Equal(t, store.LaunchReportResultCompleted, f.report(t, "run-b", false))
+			row := mustGetAgent(t, f.raw, f.agent.ID)
+			assert.Equal(t, "run-b", row.RunID, "the completed replay settles")
+			require.NotNil(t, row.EffectiveConfig)
+			assert.Equal(t, "run-b", row.EffectiveConfig.RunID)
+			assert.Equal(t, int64(1), staleEchoes(f.counters, telemetryemit.StaleEchoPathLaunchReport, store.StaleEchoUnsettledAdoption), f.counters.String())
+			assert.Equal(t, 1, f.unsettledLines())
+			echoed := configuredWithEcho(f.events(t))
+			require.Len(t, echoed, 1)
+			assert.Equal(t, "run-b", echoed[0].LaunchID)
+			assert.Equal(t, "run-m", echoed[0].AdoptedFromLaunchID)
+			assert.Equal(t, store.AdoptionSourceCAS, echoed[0].AdoptionSource)
+		})
+	}
+}
+
 // runningObserved makes the launch RunningObserved: a status report of
 // running for the minted run before the succeeded report.
 func (f *echoReportFixture) runningObserved(t *testing.T) {
@@ -663,21 +718,32 @@ func (f *echoReportFixture) runningObserved(t *testing.T) {
 	require.Equal(t, store.LaunchEndReasonRunningObserved, row.LaunchEndReason)
 }
 
-// TestLifecycleEvents_AsyncEchoRunningObservedUnsettled (review r2 R1b):
-// the agent is seen running before the succeeded report, which names
-// run-b. The answer is completed (changed) and slice 3 does not settle it:
-// no configured, no effective_*, stale{unsettled_adoption} and the INFO
-// line. Slice 3b (ptone/scion#5927) settles this path and flips this test.
-func TestLifecycleEvents_AsyncEchoRunningObservedUnsettled(t *testing.T) {
+// TestLifecycleEvents_AsyncRunningObservedAdoptedRunAttributed (WP1 slice
+// 3b design v9 section 7; formerly AsyncEchoRunningObservedUnsettled,
+// review r2 R1b, which asserted slice 3's unsettled behaviour): the agent
+// is seen running before the succeeded report, which names run-b. The
+// answer is completed (changed); the row still holds the launch's run, so
+// the completed settle adopts run-b, the echo is recorded for run-b with
+// the reporting broker, and configured carries launch_id run-b,
+// effective_* and the adoption provenance (run-m, cas). Nothing is stale.
+func TestLifecycleEvents_AsyncRunningObservedAdoptedRunAttributed(t *testing.T) {
 	f := newEchoReportFixture(t, "lc-async-ro")
 	f.runningObserved(t)
 	assert.Equal(t, store.LaunchReportResultCompleted, f.report(t, "run-b", false))
-	assert.Equal(t, "run-m", mustGetAgent(t, f.raw, f.agent.ID).RunID, "slice 3 does not settle a completed answer")
-	assert.Equal(t, int64(1), staleEchoes(f.counters, telemetryemit.StaleEchoPathLaunchReport, store.StaleEchoUnsettledAdoption), f.counters.String())
-	assert.Equal(t, 1, f.unsettledLines())
+	row := mustGetAgent(t, f.raw, f.agent.ID)
+	assert.Equal(t, "run-b", row.RunID, "slice 3b settles the completed answer")
+	require.NotNil(t, row.EffectiveConfig)
+	assert.Equal(t, "run-b", row.EffectiveConfig.RunID)
+	assert.Equal(t, f.brokerID, row.EffectiveConfig.BrokerID)
+	assertNoStaleEcho(t, f.counters)
+	assert.Zero(t, f.unsettledLines())
 	evs := f.events(t)
-	assert.Zero(t, countOf(evs, tc.TransitionConfigured), lcSeqFull(evs))
-	assertNoEffective(t, evs)
+	echoed := configuredWithEcho(evs)
+	require.Len(t, echoed, 1, lcSeqFull(evs))
+	assert.Equal(t, "run-b", echoed[0].LaunchID)
+	assert.Equal(t, "model-echo-1", effModel(echoed[0]))
+	assert.Equal(t, "run-m", echoed[0].AdoptedFromLaunchID)
+	assert.Equal(t, store.AdoptionSourceCAS, echoed[0].AdoptionSource)
 }
 
 // TestLifecycleEvents_RunningObservedAfterSyncRestart (review r4 R1): the

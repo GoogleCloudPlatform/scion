@@ -42,6 +42,7 @@ var agentRunIDWriteMethods = map[string]bool{
 	"CompareAndSwapAgentRunID": true,
 	"RevertAgentRunID":         true,
 	"AdoptAgentRunID":          true,
+	"SettleLaunchedRun":        true,
 }
 
 // wantAgentRunIDWriters is the complete set of functions outside the store

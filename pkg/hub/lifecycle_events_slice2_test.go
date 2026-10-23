@@ -68,6 +68,9 @@ type lcBrokerClient struct {
 	*mockRuntimeBrokerClient
 	phase   string
 	echoRun bool
+	// runID, when set, is the run the answer names instead (a broker that
+	// kept another running entry; the Hub adopts it by compare-and-swap).
+	runID string
 }
 
 func (c *lcBrokerClient) shape(resp *RemoteAgentResponse, req *RemoteCreateAgentRequest) {
@@ -79,6 +82,9 @@ func (c *lcBrokerClient) shape(resp *RemoteAgentResponse, req *RemoteCreateAgent
 	}
 	if c.echoRun {
 		resp.Agent.RunID = req.RunID
+	}
+	if c.runID != "" {
+		resp.Agent.RunID = c.runID
 	}
 }
 
