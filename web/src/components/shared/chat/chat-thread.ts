@@ -568,9 +568,13 @@ export class ScionChatThread extends LitElement {
   @property({ type: Array })
   agentMembers: ChatAgentMember[] = [];
 
-  /** Whether v2 mode is active. Derived from conversationKey presence. */
+  /**
+   * Whether v2 mode is active. Derived from conversationKey presence.
+   * Tolerates a null key (a binding can set one at runtime); it is read on
+   * disconnect, before willUpdate has coerced the key.
+   */
   private get isV2(): boolean {
-    return this.conversationKey.length > 0;
+    return (this.conversationKey?.length ?? 0) > 0;
   }
 
   /**
@@ -638,6 +642,9 @@ export class ScionChatThread extends LitElement {
   private messageRowsVersion = 0;
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
+    // The key is typed as a string, but a binding or a removed attribute
+    // can set null at runtime: render and the readers below see ''.
+    if ((this.conversationKey as string | null | undefined) == null) this.conversationKey = '';
     // A new (or cleared) send error starts collapsed.
     if (changedProperties.has('sendError')) {
       this.sendErrorExpanded = false;
@@ -2727,7 +2734,7 @@ export class ScionChatThread extends LitElement {
 
   /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
   private get isAgentDM(): boolean {
-    return this.isDM && this.conversationKey.startsWith('dm:agent:');
+    return this.isDM && this.conversationKey?.startsWith('dm:agent:') === true;
   }
 
   /** Whether there are inter-agent markers to render in this conversation. */
@@ -2737,7 +2744,7 @@ export class ScionChatThread extends LitElement {
 
   /** Whether this is a human-to-human DM (the only place read receipts apply). */
   private get isHumanDM(): boolean {
-    return this.isDM && this.conversationKey.startsWith('dm:user:');
+    return this.isDM && this.conversationKey?.startsWith('dm:user:') === true;
   }
 
   // ---------------------------------------------------------------------------

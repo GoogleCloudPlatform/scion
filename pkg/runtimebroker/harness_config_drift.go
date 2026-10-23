@@ -54,7 +54,7 @@ func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath
 			"agent_id", agentID, "path", hydratedPath)
 		return
 	}
-	local, err := config.FindHarnessConfigDir(name, harnessConfigProjectDir(projectPath))
+	local, err := config.FindHarnessConfigDir(name, harnessConfigProjectTier(projectPath))
 	if err != nil || local == nil || local.Path == "" {
 		return
 	}

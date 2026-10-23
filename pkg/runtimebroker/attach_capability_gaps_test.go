@@ -110,12 +110,17 @@ func TestHandlePTYStream_RuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) {
 // lookup, the primary stage filters the unlabelled agent out
 // (agentsForProject), so it can only be found by the no-project-label
 // fallback stage.
-func newFallbackOnlyAuxServer() (*Server, *attachCapableTestRuntime) {
+func newFallbackOnlyAuxServer(t *testing.T) (*Server, *attachCapableTestRuntime) {
+	t.Helper()
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
-	auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1", Labels: map[string]string{"scion.name": "some-agent"}}}}
+	auxMgr := &mockManager{agents: []api.AgentInfo{{
+		Name: "some-agent", ID: "cid-1", ContainerID: "cid-1",
+		ProjectPath: legacyProjectPath(t, scopeProjA),
+		Labels:      map[string]string{"scion.name": "some-agent"},
+	}}}
 	auxRT := &attachCapableTestRuntime{
 		MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "aux-fake" }},
 		supportsAttach: false,
@@ -131,9 +136,9 @@ func newFallbackOnlyAuxServer() (*Server, *attachCapableTestRuntime) {
 // the no-project-label fallback stage. A missed assignment there would
 // leave Runtime as the (attach-capable) default and fail open.
 func TestLookupAgent_NoProjectLabelFallback_AuxMatch_SetsRuntimeToAuxInstance(t *testing.T) {
-	srv, auxRT := newFallbackOnlyAuxServer()
+	srv, auxRT := newFallbackOnlyAuxServer(t)
 
-	result, err := srv.LookupAgent(context.Background(), "some-agent", "proj-1")
+	result, err := srv.LookupAgent(context.Background(), "some-agent", scopeProjA)
 	require.NoError(t, err)
 	require.Equal(t, "aux-fake", result.RuntimeName)
 	if result.Runtime != auxRT {
@@ -147,9 +152,9 @@ func TestLookupAgent_NoProjectLabelFallback_AuxMatch_SetsRuntimeToAuxInstance(t 
 // TestHandleAgentAttach_NoProjectLabelFallback_AuxRuntimeUnsupported_Rejects
 // is the end-to-end form of the above through the direct-connect handler.
 func TestHandleAgentAttach_NoProjectLabelFallback_AuxRuntimeUnsupported_Rejects(t *testing.T) {
-	srv, _ := newFallbackOnlyAuxServer()
+	srv, _ := newFallbackOnlyAuxServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/some-agent/attach?projectId=proj-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/some-agent/attach?projectId="+scopeProjA, nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	rec := httptest.NewRecorder()

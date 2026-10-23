@@ -15,9 +15,12 @@
 package harness
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	"path"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 )
 
 // ProjectPreStartHookFilename is the name of the staged project hook script
@@ -38,27 +41,40 @@ const ProjectPreStartHookFilename = "30-project-custom"
 // An empty scriptContent means "no hook applies" and removes any previously
 // staged script, so a hook deleted at the Hub does not survive on a reused
 // agent home.
+//
+// The write and the removal are confined to the agent home (pkg/agenthome):
+// a link at the hook is replaced or removed itself, never followed, and a
+// linked directory component is refused.
 func WriteProjectPreStartHook(agentHome, scriptContent string) error {
-	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
-	target := filepath.Join(dir, ProjectPreStartHookFilename)
+	target := path.Join(hookDirRel, ProjectPreStartHookFilename)
 
 	if scriptContent == "" {
-		// Nothing staged (no hook directory at all, or no such file) is the
-		// common case and not an error; only a real removal failure is.
-		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		// Nothing staged (no home, no hook directory at all, or no such
+		// file) is the common case and not an error; only a real removal
+		// failure is.
+		home, err := agenthome.Open(agentHome)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer func() { _ = home.Close() }()
+		if err := home.Remove(target); err != nil {
 			return fmt.Errorf("remove stale pre-start hook: %w", err)
 		}
 		return nil
 	}
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create pre-start.d: %w", err)
-	}
-	if err := os.WriteFile(target, []byte(scriptContent), 0700); err != nil {
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
 		return err
 	}
-	// WriteFile leaves the mode of a pre-existing file alone, so tighten it
-	// explicitly: an agent home staged by an older build may still hold a
-	// world-readable 0755 script.
-	return os.Chmod(target, 0700)
+	defer func() { _ = home.Close() }()
+	if err := home.MkdirAll(hookDirRel, 0755); err != nil {
+		return fmt.Errorf("create pre-start.d: %w", err)
+	}
+	// WriteFile installs a new file with exactly this mode, so a script
+	// staged world-readable by an older build is replaced by a 0700 one.
+	return home.WriteFile(target, []byte(scriptContent), 0700)
 }

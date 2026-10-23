@@ -67,10 +67,14 @@ type inheritedSources struct {
 		// the hub's only source of a template's job keys
 		// (ptone/scion#4222).
 		AgentConfig *api.ScionConfig `json:"agentConfig"`
+		// DefaultHarnessConfig is the template list item's declared
+		// default_harness_config, the hub's template harness-config rung.
+		DefaultHarnessConfig string `json:"defaultHarnessConfig"`
 	} `json:"template"`
 	ProjectSettings json.RawMessage `json:"projectSettings"`
 	HubSettings     struct {
 		DefaultModel           string `json:"defaultModel"`
+		DefaultHarnessConfig   string `json:"defaultHarnessConfig"`
 		AutoExposePortsEnabled *bool  `json:"autoExposePortsEnabled"`
 	} `json:"hubSettings"`
 }
@@ -131,6 +135,7 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	// Hub tier.
 	srv.mu.Lock()
 	srv.config.AgentDefaults.DefaultModel = src.HubSettings.DefaultModel
+	srv.config.AgentDefaults.DefaultHarnessConfig = src.HubSettings.DefaultHarnessConfig
 	srv.config.AutoExposePortsDefault = src.HubSettings.AutoExposePortsEnabled
 	srv.mu.Unlock()
 
@@ -140,6 +145,9 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	require.NoError(t, json.Unmarshal(pub.Body.Bytes(), &pubBody))
 	if src.HubSettings.DefaultModel != "" {
 		assert.Equal(t, src.HubSettings.DefaultModel, pubBody["defaultModel"])
+	}
+	if src.HubSettings.DefaultHarnessConfig != "" {
+		assert.Equal(t, src.HubSettings.DefaultHarnessConfig, pubBody["defaultHarnessConfig"])
 	}
 	if src.HubSettings.AutoExposePortsEnabled != nil {
 		assert.Equal(t, *src.HubSettings.AutoExposePortsEnabled, pubBody["autoExposePortsEnabled"])
@@ -159,14 +167,15 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 
 	// Template tier.
 	tmpl := &store.Template{
-		ID:          tid("template-inherited-" + tier),
-		Name:        "inherited-" + tier,
-		Slug:        "inherited-" + tier,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Scope:       store.TemplateScopeGlobal,
-		Status:      store.TemplateStatusActive,
-		AgentConfig: src.Template.AgentConfig,
+		ID:                   tid("template-inherited-" + tier),
+		Name:                 "inherited-" + tier,
+		Slug:                 "inherited-" + tier,
+		Harness:              "claude",
+		ContentHash:          "d00dfeed",
+		Scope:                store.TemplateScopeGlobal,
+		Status:               store.TemplateStatusActive,
+		AgentConfig:          src.Template.AgentConfig,
+		DefaultHarnessConfig: src.Template.DefaultHarnessConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
 
@@ -193,6 +202,10 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 			dispatched[key] = v
 		}
 	}
+	// The harness-config name the hub resolved for a create with none in
+	// the request (project > template default_harness_config > hub,
+	// ptone/scion#3914); the form's harness picker shows it.
+	set("harnessConfig", resp.Agent.AppliedConfig.HarnessConfig)
 	set("config.model", req.ResolvedEnv["SCION_MODEL"])
 	set("config.thinking_level", req.ResolvedEnv["SCION_THINKING_LEVEL"])
 	set("config.auth_selectedType", req.Config.HarnessAuth)

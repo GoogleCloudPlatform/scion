@@ -444,9 +444,11 @@ func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
 		{"invite", "/api/v1/admin/users/invite", func(e string) interface{} {
 			return extra(map[string]interface{}{"email": e})
 		}, http.StatusCreated},
+		// Bulk invite decodes strictly (ptone/scion#4952): the role field
+		// is refused with 422 and nothing is created.
 		{"invite bulk", "/api/v1/admin/users/invite/bulk", func(e string) interface{} {
 			return extra(map[string]interface{}{"emails": []interface{}{extra(map[string]interface{}{"email": e})}})
-		}, http.StatusOK},
+		}, http.StatusUnprocessableEntity},
 		{"allow-list add", "/api/v1/admin/allow-list", func(e string) interface{} {
 			return extra(map[string]interface{}{"email": e})
 		}, http.StatusCreated},
@@ -459,6 +461,11 @@ func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
 			email := itfUniqueName("inauth") + "@example.com"
 			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, tc.path, tc.body(email))
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			if tc.status == http.StatusUnprocessableEntity {
+				_, err := f.s.GetUserByEmail(ctx, email)
+				assert.ErrorIs(t, err, store.ErrNotFound, "a refused request creates no record")
+				return
+			}
 			u, err := f.s.GetUserByEmail(ctx, email)
 			require.NoError(t, err)
 			assert.Equal(t, store.UserStatusInvited, u.Status)
