@@ -363,7 +363,7 @@ func TestTemplateRepair_RetriesConflictOnce(t *testing.T) {
 		armed    int32
 		wantHash func(files []store.TemplateFile) string
 	}{
-		{name: "one conflict", armed: 1, wantHash: computeContentHash},
+		{name: "one conflict", armed: 1, wantHash: defaultContentHash},
 		{name: "two conflicts", armed: 2, wantHash: func([]store.TemplateFile) string { return "sha256:concurrent-2" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
