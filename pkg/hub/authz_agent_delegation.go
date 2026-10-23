@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -106,12 +107,15 @@ type agentDelegationHooks struct {
 	// standing returns nil only when the agent is in good standing
 	// (Server.agentStanding).
 	standing func(ctx context.Context, agentID string) error
+	// policy returns the hub's narrowing of the agent-delegation policy
+	// (the agent_delegation_policy settings section). An error denies.
+	policy func() (opsettings.AgentDelegationPolicySettings, error)
 	// now returns the current time.
 	now func() time.Time
 }
 
 func (h agentDelegationHooks) complete() bool {
-	return h.enabled != nil && h.audience != nil && h.reservedIdentity != nil && h.standing != nil && h.now != nil
+	return h.enabled != nil && h.audience != nil && h.reservedIdentity != nil && h.standing != nil && h.policy != nil && h.now != nil
 }
 
 // catalogOperationByID returns the catalog operation with id.
@@ -308,7 +312,7 @@ func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzR
 	if !ok {
 		return deny(agentDelegationCodeCredentialNotAdmitted)
 	}
-	if _, listed := agentDelegationAdmissionFor(entry.Method, entry.RouteID); !listed {
+	if listed, ok := agentDelegationAdmissionFor(entry.Method, entry.RouteID); !ok || listed.Operation != entry.Operation {
 		return deny(agentDelegationCodeCredentialNotAdmitted)
 	}
 	if !a.agentDelegation.complete() || !a.agentDelegation.enabled() {
@@ -351,9 +355,14 @@ func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzR
 	}
 
 	// 9. The hub agent-delegation policy holds it for the grant's boundary
-	// kind.
+	// kind, and the hub setting has not removed it. A setting the hub
+	// cannot read denies.
 	boundary := identity.Boundary()
-	if !permissions.AgentDelegable(permissionID, permissions.BoundaryKind(boundary.Kind)) {
+	narrowing, err := a.agentDelegation.policy()
+	if err != nil {
+		return deny(agentDelegationCodeLookupError)
+	}
+	if !agentDelegableUnder(narrowing, permissionID, permissions.BoundaryKind(boundary.Kind)) {
 		return deny(agentDelegationCodePermissionNotDelegable)
 	}
 

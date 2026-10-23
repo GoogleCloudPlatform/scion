@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,7 +70,7 @@ func TestApplyStartPlacement_NilHandOff_12(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			placementGlobalHome(t, tc.settings)
-			out, _, err := managerOn(tc.runtime).applyStartPlacement(api.StartOptions{Name: "a"}, agentBlock)
+			out, _, err := managerOn(tc.runtime).applyStartPlacement(context.Background(), api.StartOptions{Name: "a"}, agentBlock)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Equal(t, tc.wantErr, err.Error())
@@ -82,18 +83,50 @@ func TestApplyStartPlacement_NilHandOff_12(t *testing.T) {
 	}
 }
 
+// A start without resolved placement reads the request's settings view: a
+// flat instance request has no profile tier, so placement on a profile does
+// not refuse it, while placement on a Kubernetes runtime entry still does.
+func TestApplyStartPlacement_NilHandOffRequestView(t *testing.T) {
+	const profileOnly = "schema_version: \"1\"\nruntimes:\n  gke:\n    type: kubernetes\nprofiles:\n  p:\n    runtime: gke\n    node_selector:\n      a: b\n"
+	const entry = "schema_version: \"1\"\nruntimes:\n  gke:\n    type: kubernetes\n    runtime_class_name: gvisor\n"
+	flat := config.WithFlatInstancePolicy(context.Background(), &config.FlatInstancePolicy{InstanceKey: "k8s"})
+
+	cases := []struct {
+		name     string
+		settings string
+		ctx      context.Context
+		wantErr  string
+	}{
+		{"legacy request, profile placement", profileOnly, context.Background(), placementUnresolvedCause},
+		{"flat request, profile placement", profileOnly, flat, ""},
+		{"flat request, runtime entry placement", entry, flat, placementUnresolvedCause},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			placementGlobalHome(t, tc.settings)
+			_, _, err := managerOn("kubernetes").applyStartPlacement(tc.ctx, api.StartOptions{Name: "a"}, nil)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Equal(t, tc.wantErr, err.Error())
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
 // (12b): a Kubernetes start without resolved placement fails with a fixed
 // cause when the global settings cannot be read.
 func TestApplyStartPlacement_NilHandOffUnreadableGlobal_12b(t *testing.T) {
 	dir := placementGlobalHome(t, "")
 	// A directory where the settings file is expected cannot be read.
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "settings.yaml"), 0o755))
-	_, _, err := managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	_, _, err := managerOn("kubernetes").applyStartPlacement(context.Background(), api.StartOptions{Name: "a"}, nil)
 	require.Error(t, err)
 	assert.Equal(t, placementGlobalUnreadableCause, err.Error())
 
 	// Not Kubernetes: unaffected.
-	_, _, err = managerOn("docker").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	_, _, err = managerOn("docker").applyStartPlacement(context.Background(), api.StartOptions{Name: "a"}, nil)
 	assert.NoError(t, err)
 }
 
@@ -103,12 +136,12 @@ func TestApplyStartPlacement_NilHandOffUnreadableGlobal_12b(t *testing.T) {
 func TestApplyStartPlacement_NilHandOffUnstatableAndLegacy(t *testing.T) {
 	dir := placementGlobalHome(t, "")
 	require.NoError(t, os.Symlink("settings.yaml", filepath.Join(dir, "settings.yaml")))
-	_, _, err := managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	_, _, err := managerOn("kubernetes").applyStartPlacement(context.Background(), api.StartOptions{Name: "a"}, nil)
 	require.Error(t, err)
 	assert.Equal(t, placementGlobalUnreadableCause, err.Error())
 
 	placementGlobalHome(t, "harnesses:\n  claude:\n    image: x\n# runtimeClassName: set here\n")
-	_, _, err = managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a"}, nil)
+	_, _, err = managerOn("kubernetes").applyStartPlacement(context.Background(), api.StartOptions{Name: "a"}, nil)
 	require.Error(t, err)
 	assert.Equal(t, placementLegacyGlobalCause, err.Error())
 }
@@ -124,7 +157,7 @@ func TestApplyStartPlacement_Resolved(t *testing.T) {
 	opts := api.StartOptions{Name: "a", ResolvedPlacement: rp, PlacementResolved: true}
 	agentBlock := &api.KubernetesConfig{Namespace: "ns", NodeSelector: map[string]string{"pool": "mine", "extra": "x"}}
 
-	out, warnings, err := managerOn("kubernetes").applyStartPlacement(opts, agentBlock)
+	out, warnings, err := managerOn("kubernetes").applyStartPlacement(context.Background(), opts, agentBlock)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"pool": "agents", "extra": "x"}, out.NodeSelector)
 	assert.Equal(t, rp.Tolerations, out.Tolerations)
@@ -132,17 +165,17 @@ func TestApplyStartPlacement_Resolved(t *testing.T) {
 	assert.Len(t, warnings, 1, "the agent's value for a key the placement sets is ignored with a warning")
 	assert.Equal(t, map[string]string{"pool": "mine", "extra": "x"}, agentBlock.NodeSelector, "input not mutated")
 
-	_, _, err = managerOn("kubernetes").applyStartPlacement(opts, &api.KubernetesConfig{
+	_, _, err = managerOn("kubernetes").applyStartPlacement(context.Background(), opts, &api.KubernetesConfig{
 		Tolerations: []api.K8sToleration{{Operator: "Exists"}}})
 	require.Error(t, err, "match-all agent toleration refused while placement is in effect")
 
-	out, warnings, err = managerOn("docker").applyStartPlacement(opts, agentBlock)
+	out, warnings, err = managerOn("docker").applyStartPlacement(context.Background(), opts, agentBlock)
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 	assert.Equal(t, agentBlock, out, "dropped off Kubernetes")
 
 	// Resolved with nothing configured: the agent's block as is.
-	out, _, err = managerOn("kubernetes").applyStartPlacement(api.StartOptions{Name: "a", PlacementResolved: true}, agentBlock)
+	out, _, err = managerOn("kubernetes").applyStartPlacement(context.Background(), api.StartOptions{Name: "a", PlacementResolved: true}, agentBlock)
 	require.NoError(t, err)
 	assert.Equal(t, agentBlock, out)
 }

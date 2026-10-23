@@ -194,6 +194,9 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		// (nextClearedFields); a new agent starts with none, whatever the
 		// request carries (ptone/scion#3906).
 		req.Config.ClearedFields = nil
+		// changed_fields likewise records changes made after creation
+		// (nextChangedFields; ptone/scion#3982).
+		req.Config.ChangedFields = nil
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later

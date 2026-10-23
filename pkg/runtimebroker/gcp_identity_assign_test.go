@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -108,19 +109,12 @@ func postRestart(t *testing.T, srv *Server, urlID string) *httptest.ResponseReco
 	return w
 }
 
-// TestRestartAgent_LateKubernetesAssignRuntimeChangeRunsBeforeStop reverses
-// newTestServerForLateCheckOrdering's saved profiles: the Kubernetes profile
-// is saved under the agent's Name, which buildStartContext reads, so it
-// resolves a ServiceAccount from the global mapping; nothing is saved under
-// the URL id, which the handler's later resolution reads, so that one falls
-// back to the active profile (docker). The restart must be refused with 409
-// before the agent is stopped or started.
-//
-// On start, a request carries no profile of its own, and when the project
-// path is resolved, startAgent passes the URL id to buildStartContext and
-// reads the saved profile under the same id and project afterwards, so the
-// two resolutions agree. When the project path is not resolved, startAgent
-// leaves the profile unset for the later resolution; see
+// TestRestartAgent_LateKubernetesAssignRuntimeChangeRunsBeforeStop: the
+// agent's provisioned Kubernetes profile resolves a ServiceAccount from the
+// global mapping in buildStartContext, and a settings change before the
+// handler's later resolution moves the profile to docker
+// (changeProfileRuntimeBetweenLoads). The restart must be refused with 409
+// before the agent is stopped or started. See also
 // TestStartAgent_LateKubernetesAssignRuntimeChangeWithoutProjectPath.
 func TestRestartAgent_LateKubernetesAssignRuntimeChangeRunsBeforeStop(t *testing.T) {
 	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
@@ -128,11 +122,7 @@ func TestRestartAgent_LateKubernetesAssignRuntimeChangeRunsBeforeStop(t *testing
 		t.Fatal("the agent must not run once the late runtime change is refused")
 		return "", nil
 	}
-	dotScion := mgr.agents[0].ProjectPath
-	writeSavedAgentProfile(t, dotScion, "actual-agent-name", "local")
-	if err := os.RemoveAll(config.GetAgentHomePath(dotScion, "url-id")); err != nil {
-		t.Fatal(err)
-	}
+	changeProfileRuntimeBetweenLoads(srv, "local", "", "docker")
 	newTestGlobalSettings(t, testLateCheckMappingGlobalSettingsYAML)
 
 	w := postRestart(t, srv, "url-id")
@@ -145,11 +135,10 @@ func TestRestartAgent_LateKubernetesAssignRuntimeChangeRunsBeforeStop(t *testing
 	}
 }
 
-// TestRestartAgent_LateKubernetesAssignRuntimeEntryChangeRunsBeforeStop
-// saves two Kubernetes profiles on different runtime entries: "local"
-// (runtime entry "kubernetes") under the agent's Name, which
-// buildStartContext reads, and "team" (runtime entry "k8s-team") under the
-// URL id, which the handler's later resolution reads. Both entries map the
+// TestRestartAgent_LateKubernetesAssignRuntimeEntryChangeRunsBeforeStop: the
+// agent's provisioned profile "local" is on runtime entry "kubernetes" when
+// buildStartContext resolves it, and a settings change moves it to
+// "k8s-team" before the handler's later resolution. Both entries map the
 // GSA, so both resolutions reach Kubernetes; only the runtime entry
 // differs. The restart must be refused with 409 before the agent is stopped
 // or started, and the message must name both selections.
@@ -180,8 +169,19 @@ runtimes:
 	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(projectSettingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
-	writeSavedAgentProfile(t, dotScion, "actual-agent-name", "local")
-	writeSavedAgentProfile(t, dotScion, "url-id", "team")
+	// The settings file moves "local" to k8s-team just before the handler's
+	// later resolution (the second runtime-settings load), after
+	// buildStartContext has made its selection.
+	var loads atomic.Int32
+	srv.loadSettings = func(projectDir string) (*config.VersionedSettings, []string, error) {
+		if loads.Add(1) == 2 {
+			changed := strings.Replace(projectSettingsYAML, "    local:\n        runtime: kubernetes\n", "    local:\n        runtime: k8s-team\n", 1)
+			if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(changed), 0644); err != nil {
+				t.Error(err)
+			}
+		}
+		return config.LoadEffectiveSettings(projectDir)
+	}
 	newTestGlobalSettings(t, `schema_version: "1"
 runtimes:
     kubernetes:
@@ -201,7 +201,7 @@ runtimes:
 		t.Errorf("expected the agent not to be stopped, got %d stop calls", mgr.stopCalls)
 	}
 	body := w.Body.String()
-	for _, want := range []string{`\"local\"`, `\"kubernetes\"`, `\"team\"`, `\"k8s-team\"`, "recreate the agent"} {
+	for _, want := range []string{`\"local\"`, `\"kubernetes\"`, `\"k8s-team\"`, "recreate the agent"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected the 409 message to contain %s, got %s", want, body)
 		}
@@ -211,14 +211,15 @@ runtimes:
 	}
 }
 
-// TestRestartAgent_LateKubernetesAssignWithoutServiceAccountRunsBeforeStop
-// uses newTestServerForLateCheckOrdering as is: buildStartContext resolves
-// docker and builds the metadata emulator env for "assign", and only the
-// handler's later resolution reaches Kubernetes, for which no ServiceAccount
-// was resolved. The restart must be refused with 409 before the agent is
+// TestRestartAgent_LateKubernetesAssignWithoutServiceAccountRunsBeforeStop:
+// buildStartContext resolves docker (changeLocalProfileAfterFirstLoad) and
+// builds the metadata emulator env for "assign", and only the handler's
+// later resolution reaches Kubernetes, for which no ServiceAccount was
+// resolved. The restart must be refused with 409 before the agent is
 // stopped or started.
 func TestRestartAgent_LateKubernetesAssignWithoutServiceAccountRunsBeforeStop(t *testing.T) {
 	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	changeLocalProfileAfterFirstLoad(srv)
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
 		t.Fatal("the agent must not run once the late runtime change is refused")
 		return "", nil
@@ -573,11 +574,9 @@ runtimes:
 // TestStartAgent_LateKubernetesAssignRuntimeChangeWithoutProjectPath covers
 // a start whose project path is not resolved: the agent record carries no
 // project path and the request names none, so the project is found from
-// the working directory. buildStartContext still reads the saved profile
-// under the URL id, while startAgent leaves the profile unset for its later
-// resolution, which falls back to the active profile. When the two differ
-// in runtime, or in runtime entry on Kubernetes, the start must be refused
-// with 409 before the agent runs.
+// the working directory. buildStartContext and startAgent's later
+// resolution both take the agent's provisioned profile from that project,
+// so they agree and the start runs on that profile's Kubernetes runtime.
 func TestStartAgent_LateKubernetesAssignRuntimeChangeWithoutProjectPath(t *testing.T) {
 	const twoEntryProjectSettingsYAML = `schema_version: "1"
 active_profile: local
@@ -612,9 +611,10 @@ runtimes:
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+			var runs atomic.Int32
 			remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
-				t.Fatal("the agent must not run once the late runtime change is refused")
-				return "", nil
+				runs.Add(1)
+				return "pod-id", nil
 			}
 			dotScion := mgr.agents[0].ProjectPath
 			mgr.agents[0].ProjectPath = ""
@@ -636,8 +636,11 @@ runtimes:
 			w := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(w, req)
 
-			if w.Code != http.StatusConflict {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+			}
+			if runs.Load() != 1 {
+				t.Errorf("Kubernetes runtime runs = %d, want 1", runs.Load())
 			}
 		})
 	}

@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
@@ -50,14 +51,14 @@ const legacyPlacementNotice = "kubernetes placement fields in the agent config a
 // runtime entry or profile; otherwise it proceeds without placement. On a
 // runtime other than Kubernetes a resolved placement is dropped with a
 // warning.
-func (m *AgentManager) applyStartPlacement(opts api.StartOptions, agentK8s *api.KubernetesConfig) (*api.KubernetesConfig, []string, error) {
+func (m *AgentManager) applyStartPlacement(ctx context.Context, opts api.StartOptions, agentK8s *api.KubernetesConfig) (*api.KubernetesConfig, []string, error) {
 	isKubernetes := m.Runtime != nil && m.Runtime.Name() == "kubernetes"
 	if isKubernetes && hasLegacyPlacement(agentK8s) {
 		slog.Info(legacyPlacementNotice, "agent", opts.Name)
 	}
 	if !opts.PlacementResolved {
 		if isKubernetes {
-			if err := checkUnresolvedPlacement(opts.Name); err != nil {
+			if err := checkUnresolvedPlacement(ctx, opts.Name); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -109,8 +110,10 @@ func hasLegacyPlacement(k *api.KubernetesConfig) bool {
 // stat'd), when they are in the legacy format and mention a placement key,
 // or when they configure placement on a Kubernetes runtime entry or on a
 // profile of one (a profile whose runtime entry is not defined counts).
-func checkUnresolvedPlacement(agentName string) error {
-	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+// It reads the request's settings view, so a flat instance request, which
+// has no profile tier, is checked against its runtime entries only.
+func checkUnresolvedPlacement(ctx context.Context, agentName string) error {
+	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		slog.Warn("Start: global settings could not be read; refusing a Kubernetes start without resolved placement",
 			"agent", agentName, "error", err)

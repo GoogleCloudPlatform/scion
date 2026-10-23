@@ -18,7 +18,9 @@
  * The artifact Share dialog: share links (create once-shown, revoke),
  * people and projects (grants) and retention with the warning of what an
  * expiry change cuts; and its review mode (Grant review access), limited
- * to giving a user a write grant.
+ * to giving a user a write grant; and its retention mode (Retention and
+ * access, ptone/scion#4535 mock states S5 and S6): retention first, links
+ * with Revoke only, grants with Remove only.
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -234,7 +236,7 @@ async function settle(el: ScionArtifactShareDialog): Promise<void> {
 
 async function mount(
   a: Artifact = artifact(),
-  mode: 'share' | 'review' = 'share'
+  mode: 'share' | 'review' | 'retention' = 'share'
 ): Promise<ScionArtifactShareDialog> {
   const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
   el.artifact = a;
@@ -775,5 +777,144 @@ describe('share dialog', () => {
       expect($$(el, '.granted')).toEqual([]);
       expect(button(el, 'Add').hasAttribute('disabled')).toBe(false);
     });
+  });
+});
+
+describe('share dialog, retention mode (Retention and access)', () => {
+  beforeAll(async () => {
+    await import('./artifact-share-dialog.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    resetPrincipalNames();
+  });
+
+  const RESEARCH: ArtifactGrant = {
+    id: 'g-research',
+    subjectKind: 'scope',
+    subjectRef: 'proj-2',
+    permission: 'read',
+    createdAt: '2026-10-03T12:00:00Z',
+  };
+
+  it('S5: retention first, links with Revoke only, grants with Remove only (no steward clause)', async () => {
+    mockServer({ links: [link('l-1', 3), link('l-2', 60)], grants: [HOME, PRIYA, RESEARCH] });
+    const el = await mount(artifact(), 'retention');
+    expect($(el, 'sl-dialog')!.getAttribute('label')).toBe(
+      'Retention and access: “Q3 rollout plan”'
+    );
+    const headings = $$(el, 'h3').map((h) => h.textContent!.trim());
+    expect(headings).toEqual(['Retention', 'Share links', 'People and projects']);
+    expect(el.shadowRoot!.textContent).toContain(
+      'You can revoke links. Only the owner can create them.'
+    );
+    expect(el.shadowRoot!.textContent).toContain(
+      'You can remove access. Only the owner can give it.'
+    );
+    // No way to create links or give access.
+    expect($(el, '#ttl')).toBeNull();
+    expect(() => button(el, 'Create link')).toThrow();
+    expect(() => button(el, 'Add')).toThrow();
+    expect($(el, '.picker')).toBeNull();
+    // Permissions are text, never a select.
+    expect($$(el, '.grant sl-select')).toHaveLength(0);
+    expect($$(el, 'sl-button').filter((b) => b.textContent!.trim() === 'Revoke')).toHaveLength(2);
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(3);
+    // The home project's grant is shown but never removable.
+    expect(grants[0]!.textContent).toContain('(home project)');
+    expect(grants[0]!.textContent).toContain('Can view');
+    expect(grants[0]!.querySelector('sl-button')).toBeNull();
+    expect(grants[1]!.textContent).toContain('Can edit');
+    expect(grants[1]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    expect(grants[2]!.querySelector('sl-button')!.textContent!.trim()).toBe('Remove');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('S5: a steward is told to create links and give access with the CLI, not that only the owner can', async () => {
+    mockServer({ links: [link('l-1', 3)], grants: [HOME, PRIYA] });
+    const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
+    el.artifact = artifact();
+    el.currentUserId = 'user-me';
+    el.mode = 'retention';
+    el.shareAuthority = 'project_owner';
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+    expect(text).toContain('You can revoke links here. Create links with scion artifact share.');
+    expect(text).toContain('You can remove access here. Give access with scion artifact grants.');
+    expect(text).not.toContain('Only the owner');
+    // Still no way to create links or give access in the dialog itself.
+    expect($(el, '#ttl')).toBeNull();
+    expect($(el, '.picker')).toBeNull();
+  });
+
+  it('S5: Revoke and Remove act at once', async () => {
+    const s = mockServer({ links: [link('l-1', 3)], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    button(el, 'Revoke').click();
+    await settle(el);
+    button(el, 'Remove').click();
+    await settle(el);
+    expect(s.calls.filter((c) => c.method === 'DELETE').map((c) => c.url)).toEqual([
+      `${BASE}/links/l-1`,
+      `${BASE}/grants/g-priya`,
+    ]);
+    expect(el.shadowRoot!.textContent).toContain('No active links.');
+    expect(el.shadowRoot!.textContent).toContain('No other people or projects have access.');
+  });
+
+  it('S5: a changed expiry warns what it cuts and saves with PATCH', async () => {
+    const s = mockServer({ links: [link('l-1', 60)], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    choose($(el, '#retention')!, '30d');
+    await settle(el);
+    expect(el.shadowRoot!.textContent).toContain('was: Never');
+    expect($(el, 'sl-alert[variant="warning"]')!.textContent).toContain(
+      '1 link will be cut short and 2 grants will be removed'
+    );
+    expect(button(el, 'Cancel')).toBeTruthy();
+    button(el, 'Save').click();
+    await settle(el);
+    const patch = s.calls.find((c) => c.method === 'PATCH')!;
+    expect(patch.url).toBe(BASE);
+    expect(typeof (patch.body as { expiresAt: string }).expiresAt).toBe('string');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('S6: no links, only the home grant, no expiry', async () => {
+    mockServer({ links: [], grants: [HOME] });
+    const el = await mount(artifact(), 'retention');
+    expect(el.shadowRoot!.textContent).toContain('No active links.');
+    expect(el.shadowRoot!.textContent).toContain('No other people or projects have access.');
+    expect($$(el, '.grant')).toHaveLength(1);
+    const sel = $(el, '#retention') as HTMLElement & { value: string };
+    expect(sel.value).toBe('never');
+    expect(button(el, 'Done')).toBeTruthy();
+  });
+
+  it('shows the hub refusal and keeps the dialog open', async () => {
+    mockServer({ links: [], grants: [HOME, PRIYA] });
+    const el = await mount(artifact(), 'retention');
+    // A refused remove: the hub answers 403.
+    vi.mocked(fetch).mockImplementation((input) =>
+      requestUrl(input as RequestInfo).includes('/grants/')
+        ? Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: 'forbidden', message: 'no longer allowed' } }),
+              {
+                status: 403,
+              }
+            )
+          )
+        : Promise.resolve(new Response('{}'))
+    );
+    button(el, 'Remove').click();
+    await settle(el);
+    expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain('no longer allowed');
+    expect(el.open).toBe(true);
   });
 });

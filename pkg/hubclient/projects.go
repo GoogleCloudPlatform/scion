@@ -44,6 +44,11 @@ type ProjectService interface {
 	// the hub refuses (409) while the project has agents not yet deleted.
 	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
 
+	// AssignableRoles lists the project-scoped membership roles with
+	// whether the caller could grant each one through the members PUT
+	// (GET /api/v1/projects/{id}/members/assignable-roles).
+	AssignableRoles(ctx context.Context, projectID string) ([]AssignableProjectRole, error)
+
 	// ListAgents returns agents in a project.
 	ListAgents(ctx context.Context, projectID string, opts *ListAgentsOptions) (*ListAgentsResponse, error)
 
@@ -507,4 +512,33 @@ func (s *projectService) Clone(ctx context.Context, sourceID string, req ClonePr
 		return nil, err
 	}
 	return apiclient.DecodeRequired[Project](resp)
+}
+
+// AssignableProjectRole is one project-scoped membership role with the
+// caller's ability to grant it. Reason, DenialCode and Details are empty
+// when Grantable is true.
+type AssignableProjectRole struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	RoleKind    string                 `json:"roleKind"`
+	Grantable   bool                   `json:"grantable"`
+	Reason      string                 `json:"reason"`
+	DenialCode  string                 `json:"denialCode,omitempty"`
+	Details     map[string]interface{} `json:"details,omitempty"`
+}
+
+// AssignableRoles lists the project's assignable membership roles.
+func (s *projectService) AssignableRoles(ctx context.Context, projectID string) ([]AssignableProjectRole, error) {
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/members/assignable-roles", nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[struct {
+		Items []AssignableProjectRole `json:"items"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	return out.Items, nil
 }

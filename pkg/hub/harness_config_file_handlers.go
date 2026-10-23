@@ -297,7 +297,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 	fileSize := int64(len(content))
 
-	next := upsertTemplateFile(hc.Files, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: "0644"})
+	next := upsertTemplateFile(hc.Files, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: newFileMode(hc.Files, filePath)})
 	if err := s.commitHarnessConfigFiles(ctx, hc, next, harnessConfigCommitOpts{
 		content: map[string][]byte{filePath: content},
 		written: map[string]bool{blobPath: true},
@@ -394,7 +394,8 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		}
 		fileSize := int64(len(data))
 
-		next = upsertTemplateFile(next, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: "0644"})
+		mode := newFileMode(next, filePath)
+		next = upsertTemplateFile(next, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: mode})
 		written[blobPath] = true
 		content[filePath] = data
 
@@ -402,7 +403,7 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 			Path:    filePath,
 			Size:    fileSize,
 			ModTime: hc.Updated.UTC().Format("2006-01-02T15:04:05Z"),
-			Mode:    "0644",
+			Mode:    mode,
 		})
 	}
 

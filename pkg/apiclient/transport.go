@@ -103,6 +103,27 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	return t
 }
 
+// requestTimeoutKey is the context key of WithRequestTimeout.
+type requestTimeoutKey struct{}
+
+// WithRequestTimeout returns a copy of ctx under which a Transport sends its
+// requests with client timeout d instead of its HTTPClient's Timeout. It
+// is for the few calls that can legitimately outlast the usual timeout,
+// such as a synchronous agent create; other requests keep theirs. A d of
+// zero or less leaves the usual timeout in place.
+func WithRequestTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, requestTimeoutKey{}, d)
+}
+
+// requestTimeoutFrom returns the client timeout WithRequestTimeout set on
+// ctx, if any (a positive duration). Do and DoNoRetry each send with their
+// own copy of the client and apply it to that copy, so the Transport's
+// HTTPClient is never changed.
+func requestTimeoutFrom(ctx context.Context) (time.Duration, bool) {
+	d, ok := ctx.Value(requestTimeoutKey{}).(time.Duration)
+	return d, ok && d > 0
+}
+
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
 //
@@ -128,6 +149,9 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var err error
 
 	client := t.hubScopedClient()
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		client.Timeout = d
+	}
 	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
@@ -307,6 +331,9 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 	once := *base
 	once.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
+	}
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		once.Timeout = d
 	}
 
 	resp, err := once.Do(req.WithContext(ctx))

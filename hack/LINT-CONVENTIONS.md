@@ -104,3 +104,44 @@ Recommended order for new check scripts:
 4. Add a CI workflow step in `.github/workflows/ci.yml` with its own error
    annotation.
 5. Update the `.PHONY` line in the Makefile.
+
+## golangci-lint: two passes
+
+`make golangci-lint` and the CI `golangci-lint` job run golangci-lint through
+`hack/golangci-lint-split.sh`, in two passes over the root module:
+
+1. every package except `./pkg/hub`, with tests (golangci-lint's default);
+2. `./pkg/hub` with `--tests=false`.
+
+With tests, golangci-lint's loader compiles pkg/hub's test variant (about
+2,300 files in one package) for export data nothing uses. That compile alone
+reached ~14.5 GB RSS and 12-16 minutes on the 16 GB ubuntu-latest runner
+(ptone/scion#4208). Split, the whole lint takes about 3 minutes and ~7 GB, at
+default settings. The script fails closed (exit 4) if `./pkg/hub` is not in
+`go list ./...` exactly once, so a moved or renamed pkg/hub cannot silently
+turn the split off. Its tests: `make golangci-lint-split-selftest`.
+
+What this changes for pkg/hub (`./pkg/hub` only; its sub-packages keep
+full test-file lint):
+
+- **Not linted any more:** pkg/hub's `_test.go` files, for errcheck,
+  staticcheck, unused and ineffassign (golangci-lint v2's other default
+  linters). govet is still covered: `go vet` checks them
+  (`make vet-hub-shard`, in the hub shard CI jobs).
+- **`unused` reports test-only helpers.** pkg/hub has helpers in non-test
+  files that only its tests call (47 when the split landed, for example
+  `applySettingsUpdates` in admin_settings.go or `verifyTestAdminAuditChain`
+  in test_admin_audit_sink.go). Without the test files, `unused` reports
+  them. CI reports only issues on lines a PR changes
+  (`--new-from-merge-base`), so an existing one shows up only when a PR edits
+  its declaration. If a PR adds a new test-only helper to a non-test file,
+  expect an `unused` report: move the helper into a `_test.go` file (or delete
+  it if nothing needs it).
+
+**Tracking item (open, ptone/scion#5878):** move pkg/hub's existing test-only helpers from
+non-test files into `_test.go` files, so that a full (non-diff) lint of
+pkg/hub reports none of them. List them with
+`golangci-lint run --tests=false --enable-only=unused ./pkg/hub`. This touches
+many pkg/hub files, so land it as its own change, coordinated with ongoing
+pkg/hub work. Restoring test-file lint for pkg/hub is a separate question for
+when pkg/hub is split into smaller packages.

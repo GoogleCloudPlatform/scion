@@ -270,6 +270,7 @@ func NewManager(rt runtime.Runtime) Manager {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
+	mgr.msgBuffer.preDeliver = mgr.runPreDelivery
 	return mgr
 }
 
@@ -633,6 +634,9 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// Ctrl+C immediately to get the agent's attention, and the accompanying
 	// message (if any) should follow without delay.
 	if interrupt {
+		// Work the message needs in the container (its attachments) runs
+		// right before the text, on this immediate path too.
+		message += m.runPreDelivery(ctx, agentID, projectID, PreDeliveryFromContext(ctx))
 		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
 	}
 
@@ -654,7 +658,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// A failure handler on ctx (set by the runtime broker) is invoked if the
 	// buffered delivery later fails, so the hub can mark the message failed
 	// rather than leave it "dispatched" (#1820).
-	m.msgBuffer.SendWithFailureHandler(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx))
+	m.msgBuffer.SendWithHooks(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
 	return nil
 }
 

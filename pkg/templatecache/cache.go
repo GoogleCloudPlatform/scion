@@ -161,6 +161,16 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 // os.Root opened on the entry directory, so cache entries are only ever
 // created inside the cache directory.
 func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error) {
+	return c.PutWithModes(contentHash, files, nil)
+}
+
+// PutWithModes is Put with a file mode per path: each file is written with
+// exactly the mode modes names for it (ptone/scion#5652), independent of
+// the process umask. A path modes does not name is written 0644, as Put
+// writes every file. Callers normalise modes first (transfer.NormalizeMode)
+// and key entries whose files carry an executable bit with EntryKey, so an
+// entry written before modes were carried is not reused for them.
+func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes map[string]os.FileMode) (string, error) {
 	if err := validateEntryName(contentHash); err != nil {
 		return "", fmt.Errorf("invalid contentHash: %w", err)
 	}
@@ -212,7 +222,7 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
-	if err := writeFilesInDir(root, tmpName, files); err != nil {
+	if err := writeFilesInDir(root, tmpName, files, modes); err != nil {
 		_ = root.RemoveAll(tmpName)
 		return "", err
 	}
@@ -235,9 +245,45 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	return templatePath, nil
 }
 
+// EntryKey returns the cache entry name for a resource with the given
+// content hash and file modes. The content hash does not cover file modes,
+// so a resource with an executable file is keyed by a hash derived from the
+// content hash and its sorted executable paths: entries cached before modes
+// were carried (every file 0644) and entries for the same content with other
+// executable bits are then never reused for it. A resource with no
+// executable file keeps the bare content hash, so its existing entries stay
+// valid.
+//
+// The derived key has the same "sha256:<64 hex>" form as a content hash
+// (transfer.IsContentHash), because the broker treats a hydrated template
+// directory's name as the template hash it records for the agent
+// (agent-info TemplateHash) and later looks up in this cache. For a
+// resource with executables that recorded hash is therefore this key,
+// not the hub's ContentHash; it is only ever used as a cache key.
+func EntryKey(contentHash string, modes map[string]os.FileMode) string {
+	var exec []string
+	for p, m := range modes {
+		if m&0o111 != 0 {
+			exec = append(exec, p)
+		}
+	}
+	if len(exec) == 0 {
+		return contentHash
+	}
+	sort.Strings(exec)
+	var b strings.Builder
+	b.WriteString("scion-cache-entry-v1\x00")
+	b.WriteString(contentHash)
+	for _, p := range exec {
+		b.WriteString("\x00x:")
+		b.WriteString(p)
+	}
+	return transfer.HashBytes([]byte(b.String()))
+}
+
 // writeFilesInDir writes files beneath the directory name inside parent,
 // through an os.Root opened from parent.
-func writeFilesInDir(parent *os.Root, name string, files map[string][]byte) error {
+func writeFilesInDir(parent *os.Root, name string, files map[string][]byte, modes map[string]os.FileMode) error {
 	dir, err := parent.OpenRoot(name)
 	if err != nil {
 		return fmt.Errorf("failed to open template directory: %w", err)
@@ -245,7 +291,11 @@ func writeFilesInDir(parent *os.Root, name string, files map[string][]byte) erro
 	defer func() { _ = dir.Close() }()
 
 	for relativePath, content := range files {
-		if err := transfer.WriteFileInRoot(dir, relativePath, content, 0644); err != nil {
+		mode, ok := modes[relativePath]
+		if !ok {
+			mode = transfer.ModeRegular
+		}
+		if err := transfer.WriteFileInRootMode(dir, relativePath, content, mode); err != nil {
 			return fmt.Errorf("failed to write file %s: %w", relativePath, err)
 		}
 	}
