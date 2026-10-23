@@ -902,8 +902,7 @@ const (
 
 	// EnvKindSecretInjected is a value produced at dispatch time that
 	// exists in no store. Delivery channel is TBD (P3b).
-	// Examples: GITHUB_TOKEN from GitHub App, SCION_DEV_TOKEN,
-	// SCION_GIT_CLONE_URL.
+	// Examples: GITHUB_TOKEN from GitHub App, SCION_GIT_CLONE_URL.
 	EnvKindSecretInjected EnvKind = "secret-injected"
 
 	// EnvKindSecretBootstrap is a credential that bootstraps the secret
