@@ -42,6 +42,13 @@ import (
 // provenance (run-m, cas), and no stale echo.
 func assertEchoForRunB(t *testing.T, f *echoReportFixture) {
 	t.Helper()
+	assertEchoForRunBFrom(t, f, "run-m")
+}
+
+// assertEchoForRunBFrom is assertEchoForRunB with the run the adoption
+// moved the row from.
+func assertEchoForRunBFrom(t *testing.T, f *echoReportFixture, from string) {
+	t.Helper()
 	row := mustGetAgent(t, f.raw, f.agent.ID)
 	assert.Equal(t, "run-b", row.RunID)
 	require.NotNil(t, row.EffectiveConfig)
@@ -50,7 +57,7 @@ func assertEchoForRunB(t *testing.T, f *echoReportFixture) {
 	echoed := configuredWithEcho(evs)
 	require.Len(t, echoed, 1, lcSeqFull(evs))
 	assert.Equal(t, "run-b", echoed[0].LaunchID)
-	assert.Equal(t, "run-m", echoed[0].AdoptedFromLaunchID)
+	assert.Equal(t, from, echoed[0].AdoptedFromLaunchID)
 	assert.Equal(t, store.AdoptionSourceCAS, echoed[0].AdoptionSource)
 }
 
@@ -244,27 +251,53 @@ func reportAlreadyRunning(t *testing.T, f *echoReportFixture, run string) string
 	return body.Result
 }
 
-// TestLifecycleEvents_3bAsyncStartLaunchSettles: an async start launch binds
-// its minted run (slice 3 22bb022, after upstream added the async start
-// caller), so a start observed running before its succeeded report is
-// settled on the completed answer exactly like a create: run-b adopted, the
-// echo recorded for it, one configured with the adoption provenance.
+// TestLifecycleEvents_3bAsyncStartLaunchSettles: async start and restart
+// launches bind their own minted run (slice 3 22bb022, after upstream added
+// the async start caller), so their succeeded report settles exactly like a
+// create's: on the applied answer through AdoptAgentRunID, and on the
+// completed answer (running observed first) through SettleLaunchedRun. Each
+// case mints run-s for the launch, distinct from the create fixture's
+// run-m, so the binding checked is the start launch's own (wp1s3b-r3 O1,
+// O2): run-b is adopted from run-s, the echo is recorded for run-b, one
+// configured carries adopted_from run-s with cas, nothing is stale.
 func TestLifecycleEvents_3bAsyncStartLaunchSettles(t *testing.T) {
-	f := newEchoReportFixture(t, "lc-3b-start")
-	ctx := context.Background()
-	row := mustGetAgent(t, f.raw, f.agent.ID)
-	row.Phase = string(state.PhaseStarting)
-	require.NoError(t, f.raw.UpdateAgent(ctx, row))
-	launchID, err := f.raw.BeginStartLaunch(ctx, f.agent.ID, store.LaunchKindStart, 5*time.Minute,
-		store.BeginLaunchOptions{RunID: "run-m"})
-	require.NoError(t, err)
-	f.launchID = launchID
-	started := mustGetAgent(t, f.raw, f.agent.ID)
-	require.Equal(t, store.LaunchKindStart, started.LaunchKind)
-	require.Equal(t, "run-m", started.LaunchRunID, "the start launch binds its minted run")
-	f.runningObserved(t)
+	for _, tt := range []struct {
+		name     string
+		kind     string
+		phase    string
+		observed bool
+		result   string
+	}{
+		{"start, completed after running was observed", store.LaunchKindStart, string(state.PhaseStarting), true, store.LaunchReportResultCompleted},
+		{"start, applied", store.LaunchKindStart, string(state.PhaseStarting), false, store.LaunchReportResultApplied},
+		{"restart, completed after running was observed", store.LaunchKindRestart, string(state.PhaseRunning), true, store.LaunchReportResultCompleted},
+		{"restart, applied", store.LaunchKindRestart, string(state.PhaseRunning), false, store.LaunchReportResultApplied},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newEchoReportFixture(t, "lc-3b-start")
+			ctx := context.Background()
+			row := mustGetAgent(t, f.raw, f.agent.ID)
+			row.Phase = tt.phase
+			require.NoError(t, f.raw.UpdateAgent(ctx, row))
+			_, err := f.raw.SetAgentRunID(ctx, f.agent.ID, "run-s", nil)
+			require.NoError(t, err)
+			launchID, err := f.raw.BeginStartLaunch(ctx, f.agent.ID, tt.kind, 5*time.Minute,
+				store.BeginLaunchOptions{RunID: "run-s"})
+			require.NoError(t, err)
+			f.launchID = launchID
+			started := mustGetAgent(t, f.raw, f.agent.ID)
+			require.Equal(t, tt.kind, started.LaunchKind)
+			require.Equal(t, "run-s", started.LaunchRunID, "the launch binds its own minted run")
+			if tt.observed {
+				require.NoError(t, f.raw.UpdateAgentStatus(ctx, f.agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), ReportSource: store.StatusReportSourceRuntime, ReportRunID: "run-s",
+				}))
+				require.Equal(t, store.LaunchEndReasonRunningObserved, mustGetAgent(t, f.raw, f.agent.ID).LaunchEndReason)
+			}
 
-	assert.Equal(t, store.LaunchReportResultCompleted, f.report(t, "run-b", false))
-	assertEchoForRunB(t, f)
-	assertNoStaleEcho(t, f.counters)
+			assert.Equal(t, tt.result, f.report(t, "run-b", false))
+			assertEchoForRunBFrom(t, f, "run-s")
+			assertNoStaleEcho(t, f.counters)
+		})
+	}
 }
