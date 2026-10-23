@@ -1572,6 +1572,59 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 	return ""
 }
 
+// backfillLinkedOrigin labels an existing non-git project as linked
+// (store.LabelProjectOrigin) when a broker registers it from a checkout, the
+// project was already linked from one (it has a provider with a local path)
+// and it carries no origin label: it was linked before the label existed.
+// The label only matters on the local backend (workspaceOnRemoteBrokers), so
+// it is backfilled only there, and never for a project the hub holds a
+// workspace for (~/.scion/projects/<slug> exists: hub-managed, even after a
+// checkout was registered against it). An existing label is never changed.
+// The caller has already passed register's project-update gate.
+// Best-effort: a failed write is logged and retried on the next register.
+func (s *Server) backfillLinkedOrigin(ctx context.Context, project *store.Project, brokerRegister bool, path string) {
+	if !brokerRegister || path == "" || project.GitRemote != "" || s.workspaceBackendShared() {
+		return
+	}
+	if _, set := project.Labels[store.LabelProjectOrigin]; set {
+		return
+	}
+	hubDir, err := localProjectPath(project.Slug)
+	if err != nil {
+		return
+	}
+	if _, err := os.Lstat(hubDir); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		s.projectsLogger().Warn("register: could not read providers to backfill the project origin",
+			"project_id", project.ID, "error", err)
+		return
+	}
+	linked := false
+	for _, p := range providers {
+		if p.LocalPath != "" {
+			linked = true
+			break
+		}
+	}
+	if !linked {
+		return
+	}
+	if project.Labels == nil {
+		project.Labels = map[string]string{}
+	}
+	project.Labels[store.LabelProjectOrigin] = store.ProjectOriginLinked
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		delete(project.Labels, store.LabelProjectOrigin)
+		s.projectsLogger().Warn("register: could not backfill the project origin label",
+			"project_id", project.ID, "error", err)
+		return
+	}
+	s.projectsLogger().Info("register: labeled a project linked before the origin label existed", "project_id", project.ID)
+}
+
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -2047,6 +2100,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			"project_id", project.ID, "slug", project.Slug)
 		s.createProjectGroup(ctx, project)
 		s.createProjectMembersGroup(ctx, project)
+		s.backfillLinkedOrigin(ctx, project, req.BrokerID != "" || req.Broker != nil, req.Path)
 	}
 
 	// Handle broker linking - two paths:

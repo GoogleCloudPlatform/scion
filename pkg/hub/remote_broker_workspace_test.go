@@ -357,3 +357,50 @@ func TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_SharedBackendServesUUIDTre
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"a.txt"`, "GET lists the uuid tree")
 }
+
+// TestProjectRegister_BackfillsOriginForPreviouslyLinkedNonGitProject: on
+// a local-backend hub, a non-git project linked from a checkout before the
+// origin label existed (a provider with a local path, no label, no hub
+// workspace directory) is labeled linked when a broker registers it again
+// from a checkout. A hub-managed project (the hub holds its workspace) is
+// not relabeled, also not on a second register after the first one linked a
+// checkout to it.
+func TestProjectRegister_BackfillsOriginForPreviouslyLinkedNonGitProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{ID: "aaaaaaaa-0000-4000-8000-0000000000f1", Name: "Backfill Broker", Slug: "backfill-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	other := &store.RuntimeBroker{ID: "aaaaaaaa-0000-4000-8000-0000000000f2", Name: "Earlier Broker", Slug: "earlier-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, other))
+
+	legacy := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000f3", Name: "Legacy Linked", Slug: "legacy-linked"}
+	require.NoError(t, s.CreateProject(ctx, legacy))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: legacy.ID, BrokerID: other.ID, BrokerName: other.Name, LocalPath: filepath.Join(t.TempDir(), "legacy-linked"),
+	}))
+	hubManaged := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000f4", Name: "Hub Managed", Slug: "hub-managed-backfill"}
+	require.NoError(t, s.CreateProject(ctx, hubManaged))
+	hubDir, err := localProjectPath(hubManaged.Slug)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(hubDir, 0o755), "the hub holds the hub-managed project's workspace")
+
+	checkouts := t.TempDir()
+	for _, p := range []*store.Project{legacy, hubManaged, hubManaged} {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			ID: p.ID, Name: p.Name, BrokerID: broker.ID, Path: filepath.Join(checkouts, p.Slug),
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", p.Name, rec.Body.String())
+	}
+
+	got, err := s.GetProject(ctx, legacy.ID)
+	require.NoError(t, err)
+	assert.True(t, got.IsLinkedOrigin(), "a project linked before the label existed is backfilled")
+	provider, err := s.GetProjectProvider(ctx, hubManaged.ID, broker.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, provider.LocalPath, "fixture check: the checkout is linked to the hub-managed project")
+	got, err = s.GetProject(ctx, hubManaged.ID)
+	require.NoError(t, err)
+	assert.False(t, got.IsLinkedOrigin(), "a hub-managed project is never relabeled by register")
+}
