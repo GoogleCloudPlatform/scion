@@ -55,7 +55,7 @@ func TestResolveGitHubRef_UsesLsRemoteSeam(t *testing.T) {
 
 	assert.Equal(t, "feature/x", parts.Branch)
 	assert.Equal(t, "templates/one", parts.Path)
-	// The URL is anonymous; the token travels separately.
+	// The seam receives the plain repository URL and the token as separate arguments.
 	assert.Equal(t, []string{"https://github.com/org/repo.git"}, gotURLs)
 	assert.Equal(t, []string{"tok"}, gotTokens)
 
@@ -121,8 +121,9 @@ func TestExecGitLsRemote_Invocation(t *testing.T) {
 
 // lsRemoteFakeGit puts a fake `git` on PATH that logs each argument on its
 // own line to argvLog and the GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n entries of
-// its environment ("key=value", one per line) to configLog, and prints no
-// refs. It uses shell builtins only (PATH holds nothing else).
+// its environment ("key=value", one per line) plus a CRED= entry (the value of
+// scopedCredentialVar, or "<unset>") to configLog, and prints no refs. It uses
+// shell builtins only (PATH holds nothing else).
 func lsRemoteFakeGit(t *testing.T) (argv, config func() []string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -142,6 +143,7 @@ while [ "$i" -lt "$n" ]; do
   printf '%s=%s\n' "$k" "$v" >> "$FAKE_GIT_CONFIG_LOG"
   i=$((i+1))
 done
+printf 'CRED=%s\n' "${SCION_SCOPED_GIT_CREDENTIAL-<unset>}" >> "$FAKE_GIT_CONFIG_LOG"
 exit 0
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
@@ -162,8 +164,9 @@ exit 0
 
 // TestResolveGitHubRef_TokenFromScopedCredentialHelper runs branch resolution
 // end to end through the production ls-remote runner (fake git, no network):
-// the token is on no git argv and in no URL, and reaches git only through the
-// credential helper scoped to https://github.com.
+// git's arguments are the host-side pins, ls-remote and the plain repository
+// URL, and the token reaches git through the credential helper scoped to
+// https://github.com, which reads it from the git command's environment.
 func TestResolveGitHubRef_TokenFromScopedCredentialHelper(t *testing.T) {
 	const token = "ghs_lsremote_test_token"
 	argv, config := lsRemoteFakeGit(t)
@@ -175,24 +178,22 @@ func TestResolveGitHubRef_TokenFromScopedCredentialHelper(t *testing.T) {
 	want := append(append([]string{}, util.HostGitArgs()...), "ls-remote", "--heads", "https://github.com/org/repo.git")
 	assert.Equal(t, want, args)
 	for _, a := range args {
-		assert.NotContains(t, a, token, "token must never appear on git's argv")
+		assert.NotContains(t, a, token, "git arguments contain no secret values")
 		if strings.Contains(a, "://") {
 			u, err := url.Parse(a)
 			require.NoError(t, err)
-			assert.Nil(t, u.User, "no URL may carry credentials: %s", a)
+			assert.Nil(t, u.User, "repository URL is the plain URL: %s", a)
 		}
 	}
 
-	var creds []string
-	for _, e := range config() {
-		if strings.HasPrefix(e, "credential.") {
-			creds = append(creds, e)
-		}
-	}
+	entries := config()
+	creds := credentialEntries(entries)
 	require.Len(t, creds, 2, "%v", creds)
 	assert.Equal(t, "credential.helper=", creds[0], "configured credential helpers are reset")
 	assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), creds[1])
-	assert.Contains(t, creds[1], "password="+token)
+	assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", "the helper reads the credential variable at run time")
+	assert.NotContains(t, creds[1], token, "git config values contain no secret values")
+	assert.Equal(t, "CRED="+token, credentialVarEntry(entries), "the token is in the git command's environment")
 }
 
 // TestResolveGitHubRef_NoTokenNoCredentialHelper: without a token, ls-remote
@@ -205,9 +206,9 @@ func TestResolveGitHubRef_NoTokenNoCredentialHelper(t *testing.T) {
 
 	want := append(append([]string{}, util.HostGitArgs()...), "ls-remote", "--heads", "https://github.com/org/repo.git")
 	assert.Equal(t, want, argv())
-	for _, e := range config() {
-		assert.False(t, strings.HasPrefix(e, "credential."), "unexpected credential entry %q", e)
-	}
+	entries := config()
+	assert.Empty(t, credentialEntries(entries), "no credential helper without a token")
+	assert.Equal(t, "CRED=<unset>", credentialVarEntry(entries), "no credential variable without a token")
 }
 
 // writeSleepingFakeGit puts a fake `git` on PATH that blocks far longer than

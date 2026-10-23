@@ -762,7 +762,9 @@ func TestFetchGitHubTarball(t *testing.T) {
 // execSparseGitCheckout runs end to end without touching the network
 // (ptone/scion#3750). It returns a func that reads the logged invocations.
 // When SCION_FAKE_GIT_ENV_LOG is set (see fakeGitConfigEnv), each invocation
-// also logs its GIT_CONFIG_* entries there.
+// also logs its GIT_CONFIG_* entries there, and a CRED= entry with the value
+// of the scoped credential helper's environment variable (scopedCredentialVar)
+// or "<unset>".
 func installFakeGit(t *testing.T) (calls, rawCalls func() []string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -789,6 +791,7 @@ if [ -n "$SCION_FAKE_GIT_ENV_LOG" ]; then
     printf '%s %s=%s\n' "$1" "$k" "$v" >> "$SCION_FAKE_GIT_ENV_LOG"
     i=$((i+1))
   done
+  printf '%s CRED=%s\n' "$1" "${SCION_SCOPED_GIT_CREDENTIAL-<unset>}" >> "$SCION_FAKE_GIT_ENV_LOG"
 fi
 if [ "$1" = "fetch" ]; then
   echo "fatal: Authentication failed (fake git)" >&2
@@ -838,6 +841,20 @@ func fakeGitConfigEnv(t *testing.T) func() map[string][]string {
 	}
 }
 
+// scopedCredentialVar is the environment variable util.ScopedCredentialHelperEnv
+// sets for the git command and its constant helper reads at run time.
+const scopedCredentialVar = "SCION_SCOPED_GIT_CREDENTIAL"
+
+// credentialVarEntry returns the CRED= entry the fake git logged for a call.
+func credentialVarEntry(entries []string) string {
+	for _, e := range entries {
+		if strings.HasPrefix(e, "CRED=") {
+			return e
+		}
+	}
+	return ""
+}
+
 // credentialEntries returns the credential.* entries of a "key=value" list.
 func credentialEntries(entries []string) []string {
 	var out []string
@@ -850,10 +867,10 @@ func credentialEntries(entries []string) []string {
 }
 
 func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
-	// execSparseGitCheckout never embeds the token in the remote URL; it
-	// supplies it through a credential helper scoped to https://github.com
-	// (util.ScopedCredentialHelperEnv), never an unscoped credential.helper.
-	// A fake git on PATH records argv and GIT_CONFIG_* env so this runs
+	// execSparseGitCheckout uses the plain remote URL and authenticates
+	// through the credential helper scoped to https://github.com
+	// (util.ScopedCredentialHelperEnv). A fake git on PATH records argv,
+	// GIT_CONFIG_* entries and the helper's credential variable, so this runs
 	// offline.
 	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main", Path: "templates"}
 	const anonRemote = "remote add origin https://github.com/test/nonexistent-repo-12345.git"
@@ -898,21 +915,26 @@ func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
 				creds := credentialEntries(env[sub])
 				if tt.token == "" {
 					assert.Empty(t, creds, "%s: no credential helper without a token", sub)
+					assert.Equal(t, "CRED=<unset>", credentialVarEntry(env[sub]), "%s: no credential variable without a token", sub)
 					continue
 				}
 				// The empty credential.helper reset (so no configured helper
 				// runs or stores the token), then the one helper scoped to
-				// the remote's host.
+				// the remote's host. The helper value is the constant that
+				// reads the credential variable at run time; the token is in
+				// the git command's environment only.
 				require.Len(t, creds, 2, "%s: %v", sub, creds)
 				assert.Equal(t, "credential.helper=", creds[0], sub)
 				assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), "%s: %s", sub, creds[1])
-				assert.Contains(t, creds[1], "password="+tt.token, sub)
+				assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", sub)
+				assert.NotContains(t, creds[1], tt.token, "%s: git config values contain no secret values", sub)
+				assert.Equal(t, "CRED="+tt.token, credentialVarEntry(env[sub]), sub)
 			}
 
 			if tt.token != "" {
-				assert.NotContains(t, err.Error(), tt.token, "token must never appear in error text")
+				assert.NotContains(t, err.Error(), tt.token, "error text contains no secret values")
 				for _, r := range raw {
-					assert.NotContains(t, r, tt.token, "token must never appear on git's argv")
+					assert.NotContains(t, r, tt.token, "git arguments contain no secret values")
 				}
 			}
 		})
