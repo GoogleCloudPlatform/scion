@@ -74,12 +74,13 @@ func waitForMoveSourceCleanup(t *testing.T, s store.Store, reincarnationID strin
 // waits for the record's source cleanup outcome. On the completed and
 // failed-with-rollback paths that outcome is the worker's last write
 // (cleanUpMoveSource after a completed move; reconcileFailedMove after a
-// failed one, which records it only after releasing and restoring the
-// source's broker reservation). On the ambiguous-start path it is written
-// before the record fails, and the reconcile that follows writes nothing
-// because the agent stays on the target. A test that counts reservations
-// as soon as the record and agent row settle would otherwise read the
-// count between that release and the restore. A record that is not a move
+// failed one, which records it only after ensureBrokerReservationOn has
+// put the source reservation back, a no-op when the rollback already did).
+// On the ambiguous-start path it is written before the record fails, and
+// the reconcile that follows writes nothing because the agent stays on the
+// target. A test that counts reservations as soon as the record and agent
+// row settle would otherwise read the count before the reservation is back
+// on the source. A record that is not a move
 // (no source broker) returns at once.
 func waitForMoveSettled(t *testing.T, s store.Store, agentID string) *store.AgentReincarnation {
 	t.Helper()

@@ -179,8 +179,9 @@ func TestReincarnateForceMove_TargetHasFilesRefused(t *testing.T) {
 	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
 
 	// startForceMove waits for the source cleanup outcome, which
-	// reconcileFailedMove records only after it released and restored the
-	// source reservation.
+	// reconcileFailedMove records only after ensureBrokerReservationOn has
+	// put the source reservation back (a no-op when the rollback already
+	// did).
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	assert.Equal(t, sourceCleanupSkippedInterrupted, r.SourceCleanup)
