@@ -189,3 +189,6 @@ export const AGENT_BADGES_FLAG = 'web.agent_badges';
  * the hub behaves the same either way. Default OFF.
  */
 export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
+
+/** Web UI localization; presentation-only, default OFF. */
+export const I18N_FLAG = 'web.i18n';
