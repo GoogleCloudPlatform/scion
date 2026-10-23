@@ -197,6 +197,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					// broker sends no brokerBuild, so the hub records
 					// nothing, as for an older broker.
 					a.Harness, a.Model, a.TemplateHash = "", "", ""
+					a.ConfigResolved = false
 					return &a, nil
 				}
 			}
@@ -2697,6 +2698,7 @@ authDone:
 				// The effective configuration the hub records (WP1 slice 3).
 				a.Harness = harnessName
 				a.Model = effectiveModel
+				a.ConfigResolved = true
 				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
 					a.TemplateHash = th
 				}
@@ -2724,6 +2726,7 @@ authDone:
 		Harness:               harnessName,
 		Model:                 effectiveModel,
 		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
+		ConfigResolved:        true,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 		WorkspacePlacement:    workspacePlacement,

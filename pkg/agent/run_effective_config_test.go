@@ -97,6 +97,9 @@ func TestStart_ReportsEffectiveHarnessAndModel(t *testing.T) {
 			if info.Model != "model-x-1" {
 				t.Errorf("Model = %q, want model-x-1", info.Model)
 			}
+			if !info.ConfigResolved {
+				t.Error("ConfigResolved = false on a resolving return path")
+			}
 		})
 	}
 }
@@ -133,6 +136,7 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 			return []api.AgentInfo{{
 				ContainerID: "running-id", Name: "eff-agent", Phase: "running", RunID: "run-b",
 				Harness: "listed-harness", Model: "listed-model", TemplateHash: "sha256:listed",
+				ConfigResolved: true,
 			}}, nil
 		},
 		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
@@ -152,5 +156,8 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 	}
 	if info.Harness != "" || info.Model != "" || info.TemplateHash != "" {
 		t.Errorf("an already-running start reports effective fields: harness %q model %q template hash %q", info.Harness, info.Model, info.TemplateHash)
+	}
+	if info.ConfigResolved {
+		t.Error("ConfigResolved = true on the already-running return")
 	}
 }

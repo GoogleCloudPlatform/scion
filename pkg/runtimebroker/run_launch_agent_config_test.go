@@ -46,6 +46,7 @@ func (m *resolvedConfigManager) Start(ctx context.Context, opts api.StartOptions
 		info.Harness = "claude-code"
 		info.Model = "model-x-1"
 		info.HarnessConfigRevision = "rev-7"
+		info.ConfigResolved = true
 	}
 	return info, err
 }
@@ -131,6 +132,7 @@ func (m *alreadyRunningManager) Start(ctx context.Context, opts api.StartOptions
 	if info != nil {
 		info.Image, info.Template, info.RunID = "img:listed", "tmpl", "run-b"
 		info.Harness, info.Model, info.TemplateHash = "", "", ""
+		info.ConfigResolved = false
 	}
 	return info, err
 }
