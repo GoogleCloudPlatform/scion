@@ -247,11 +247,14 @@ func waitForHandlers(g *configGen, log *slog.Logger, what string) {
 // then closes its send queue (messages still queued are sent first) and its
 // store.
 //
-// Handlers keep their configuration's API client and component handlers,
-// but read the broker's current store at each use, so a handler of an older
-// configuration may be using this configuration's store.
-// Waiting for the previous retirement, which itself waited for the older
-// handlers, keeps this store open until those handlers have finished too.
+// Handlers keep their configuration's API client and component handlers.
+// The component handlers (command, callback and registration) hold the store
+// that was current when they were created, so waiting for this
+// configuration's handlers keeps this store open until they have finished.
+// The broker's own handler code reads the broker's current store at each
+// use, so a handler of an older configuration may also be using this store;
+// waiting for the previous retirement, which itself waited for the older
+// handlers, keeps it open until those handlers have finished too.
 func (r *retiredConfig) shutdown(log *slog.Logger) {
 	if r.done != nil {
 		defer close(r.done)
