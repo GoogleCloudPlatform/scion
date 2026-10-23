@@ -212,8 +212,8 @@ func TestOutboxIdentityNoneIsAmbiguousWithRandomID(t *testing.T) {
 func TestOutboxFinalizeWaitsForHubAndStampsOnce(t *testing.T) {
 	o := testOutbox(t)
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
-	if n, err := o.Finalize(); err != nil || n != 0 {
-		t.Fatalf("Finalize before hub pinned = %d, %v; want 0 (held)", n, err)
+	if n, err := o.Finalize(o.PinnedHubID()); !errors.Is(err, ErrAnalyticsHubNotVerified) || n != 0 {
+		t.Fatalf("Finalize before hub pinned = %d, %v; want 0, ErrAnalyticsHubNotVerified (held)", n, err)
 	}
 	c := &capture{}
 	if n, _ := o.Drain(context.Background(), c.send); n != 0 {
@@ -223,13 +223,16 @@ func TestOutboxFinalizeWaitsForHubAndStampsOnce(t *testing.T) {
 	if pinned, err := o.PinHubID("hub-A"); err != nil || pinned != "hub-A" {
 		t.Fatalf("PinHubID = %q, %v", pinned, err)
 	}
-	// Appended after pinning: carries hub_id already and is copied verbatim.
+	// Appended after pinning: still provisional (B1: never stamped at
+	// append); only an authorized finalize stamps it.
 	late := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:b", 2), AppendWritten)
-	if late.HubID != "hub-A" {
-		t.Errorf("post-pin append hub_id = %q", late.HubID)
+	if late.HubID != "" {
+		t.Errorf("post-pin append hub_id = %q, want provisional (empty)", late.HubID)
 	}
-	lateLine := stagingLines(t, o)[1]
-	if n, err := o.Finalize(); err != nil || n != 2 {
+	if n, err := o.Finalize("hub-B"); !errors.Is(err, ErrAnalyticsHubNotVerified) || n != 0 {
+		t.Fatalf("Finalize authorized by another hub = %d, %v; want refused", n, err)
+	}
+	if n, err := o.Finalize("hub-A"); err != nil || n != 2 {
 		t.Fatalf("Finalize = %d, %v; want 2", n, err)
 	}
 	if len(stagingLines(t, o)) != 0 {
@@ -238,20 +241,13 @@ func TestOutboxFinalizeWaitsForHubAndStampsOnce(t *testing.T) {
 	if _, err := o.Drain(context.Background(), c.send); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.lines) != 2 || c.lines[1] != lateLine {
-		t.Fatalf("sent = %q; second must be byte-identical to its staging line", c.lines)
+	if len(c.lines) != 2 {
+		t.Fatalf("sent = %q; want 2", c.lines)
 	}
-	if ev := decodeUsage(t, c.lines[0]); ev.HubID != "hub-A" {
-		t.Errorf("finalized line hub_id = %q", ev.HubID)
-	}
-
-	// The pinned hub is never replaced.
-	if pinned, _ := o.PinHubID("hub-B"); pinned != "hub-A" || o.Stats().HubIDMismatch != 1 {
-		t.Errorf("re-pin = %q mismatch %d; want hub-A, 1", pinned, o.Stats().HubIDMismatch)
-	}
-	reopened, _ := OpenAnalyticsOutbox(o.Dir())
-	if reopened.PinnedHubID() != "hub-A" {
-		t.Error("pinned hub must survive restart")
+	for i, line := range c.lines {
+		if ev := decodeUsage(t, line); ev.HubID != "hub-A" {
+			t.Errorf("finalized line %d hub_id = %q", i, ev.HubID)
+		}
 	}
 }
 
@@ -263,7 +259,7 @@ func TestOutboxDrainRetryAndCrashResendSameBytes(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:%d", i), int64(i)), AppendWritten)
 	}
-	if _, err := o.Finalize(); err != nil {
+	if _, err := o.Finalize(o.PinnedHubID()); err != nil {
 		t.Fatal(err)
 	}
 	c := &capture{fail: errors.New("unavailable")}
@@ -310,9 +306,9 @@ func TestOutboxFinalizeCrashRepeatIsByteIdentical(t *testing.T) {
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:a", 1), AppendWritten)
 	staged, _ := os.ReadFile(filepath.Join(o.Dir(), "staging.jsonl"))
 	_, _ = o.PinHubID("hub")
-	_, _ = o.Finalize()
+	_, _ = o.Finalize(o.PinnedHubID())
 	_ = os.WriteFile(filepath.Join(o.Dir(), "staging.jsonl"), staged, 0o600) // truncate "lost"
-	_, _ = o.Finalize()
+	_, _ = o.Finalize(o.PinnedHubID())
 	c := &capture{}
 	_, _ = o.Drain(context.Background(), c.send)
 	if len(c.lines) != 2 || c.lines[0] != c.lines[1] {
@@ -335,7 +331,7 @@ func TestOutboxTornLineIsIsolatedAndCounted(t *testing.T) {
 		t.Fatalf("torn fragment must stay its own line: %q", lines)
 	}
 	_, _ = o.PinHubID("hub")
-	if n, _ := o.Finalize(); n != 2 {
+	if n, _ := o.Finalize(o.PinnedHubID()); n != 2 {
 		t.Errorf("finalized %d, want 2", n)
 	}
 	// The next writer terminated the fragment with a newline, so it is a
@@ -363,7 +359,7 @@ func TestOutboxOverflowLeavesSeqGapAndDeliveredFreesCap(t *testing.T) {
 		t.Fatal("overflowed event was written")
 	}
 
-	_, _ = o.Finalize()
+	_, _ = o.Finalize(o.PinnedHubID())
 	c := &capture{}
 	_, _ = o.Drain(context.Background(), c.send)
 	next := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:b", 2), AppendWritten)
@@ -438,7 +434,7 @@ func TestOutboxConcurrentWritersAndDrainer(t *testing.T) {
 	go func() {
 		defer close(drained)
 		for ctx.Err() == nil {
-			_, _ = drainer.Finalize()
+			_, _ = drainer.Finalize(drainer.PinnedHubID())
 			_, _ = drainer.Drain(context.Background(), c.send)
 			time.Sleep(time.Millisecond)
 		}
@@ -463,7 +459,7 @@ func TestOutboxConcurrentWritersAndDrainer(t *testing.T) {
 	wg.Wait()
 	cancel()
 	<-drained
-	_, _ = drainer.Finalize()
+	_, _ = drainer.Finalize(drainer.PinnedHubID())
 	_, _ = drainer.Drain(context.Background(), c.send)
 
 	byID := map[string]string{}
@@ -567,7 +563,7 @@ func TestOutboxFinalizeRecoversIntentFirst(t *testing.T) {
 	writer, _ := OpenAnalyticsOutbox(o.Dir())
 	writer.crashAt = "line"
 	_, _ = writer.AppendUsage(requestIDDraft(5))
-	if n, err := o.Finalize(); err != nil || n != 1 {
+	if n, err := o.Finalize(o.PinnedHubID()); err != nil || n != 1 {
 		t.Fatalf("Finalize = %d, %v", n, err)
 	}
 	c := &capture{}
@@ -637,7 +633,7 @@ func preparedReady(t *testing.T, n int) (*AnalyticsOutbox, []string) {
 	for i := 0; i < n; i++ {
 		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:%d", i), int64(i)), AppendWritten)
 	}
-	if _, err := o.Finalize(); err != nil {
+	if _, err := o.Finalize(o.PinnedHubID()); err != nil {
 		t.Fatal(err)
 	}
 	files, _ := o.readyFiles()
@@ -689,7 +685,7 @@ func TestOutboxDrainTruncatedReadyIsQuarantined(t *testing.T) {
 	truncated := data[:len(data)-10]
 	_ = os.WriteFile(path, truncated, 0o600)
 	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:later", 9), AppendWritten)
-	_, _ = o.Finalize()
+	_, _ = o.Finalize(o.PinnedHubID())
 
 	c := &capture{}
 	if _, err := o.Drain(context.Background(), c.send); err != nil {
