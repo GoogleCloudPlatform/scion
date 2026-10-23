@@ -319,7 +319,7 @@ func TestCheckStorageBlocksLoaded(t *testing.T) {
 		legacy bool
 		data   string
 	}{
-		"v1 file is authoritative":          {&GlobalConfig{}, false, "server:\n  shared_dir_storage:\n    backend: nfs\n"},
+		"check disabled":                    {&GlobalConfig{}, false, "server:\n  shared_dir_storage:\n    backend: nfs\n"},
 		"block loaded":                      {&GlobalConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "nfs"}}, true, string(legacyBlock)},
 		"live field containing the name":    {&GlobalConfig{}, true, "runtimes:\n  k8s:\n    shared_dir_storage_class: rwx\n"},
 		"leftover override key":             {&GlobalConfig{}, true, "profiles:\n  p:\n    home_storage_backend: nfs\n"},

@@ -589,7 +589,7 @@ The Hub refuses to start, and `scion config validate` reports an error, when the
 - `homes` is not `local` or `nfs`, or is `nfs` while `backend` is not `nfs`;
 - a `homes_options` value is invalid;
 - (Hub) the Hub cannot build its storage layout: for example, the share's host base is not an absolute path, because `nfs.mount_root` is empty or relative. The Hub serves files from its own mount, so it refuses to start rather than refuse every shared-directory request later;
-- (Hub) a legacy-format global settings file (no `schema_version: "1"`) has a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) as a mapping key that was not loaded, for example a block not under `server:`. The Hub refuses to fall back to the local backend. A `schema_version: "1"` file is used as loaded; a comment, or a key such as `shared_dir_storage_class` that only contains the name, never triggers this.
+- (Hub) the global settings file, in any format, has a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) as a parsed mapping key, but the block was not loaded: for example a block not under `server:`, a missing `schema_version: "1"`, or a server section that fails to decode. The Hub refuses to fall back to the local backend. A comment, or a key such as `shared_dir_storage_class` that only contains the name, never triggers this.
 
 #### Migrating from the deprecated blocks
 

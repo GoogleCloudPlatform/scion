@@ -33,8 +33,9 @@ func homesOrLocal(b Backend) Backend {
 // per disagreement, or nil when the broker places the project tree where
 // the hub does (design §P2: "broker and hub compare Layout identity").
 //
-// Only a shared Layout has an identity to compare: on a local Layout every
-// broker keeps its own trees and nil is returned. Compared: the backend;
+// Only a shared Layout, or a local Layout with a shared-dir split, has an
+// identity to compare: on a local Layout without a split every broker keeps
+// its own trees and nil is returned. Compared: the backend;
 // for nfs the share's server and export (trailing slashes ignored) and the
 // subpath root; the export identity marker when both sides know it
 // (hubExportID, d.NFS.ExportID); and homes. A broker that reports no

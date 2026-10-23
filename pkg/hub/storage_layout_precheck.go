@@ -43,8 +43,8 @@ func (d *HTTPAgentDispatcher) SetStorageLayout(layout func() (projectfs.Layout, 
 // elsewhere (another backend, share, subpath root or homes) must not run
 // the agent. The refusal is a 409 carrying the diff. Projects the broker
 // provides from its own path (linked projects), per-agent workspace modes
-// and local hubs are not checked; a broker the store cannot return is
-// left to the dispatch itself.
+// and local hubs without a shared-dir split are not checked; a broker the
+// store cannot return is left to the dispatch itself.
 func (d *HTTPAgentDispatcher) storageLayoutPrecheck(ctx context.Context, agent *store.Agent) error {
 	if d.storageLayout == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return nil
