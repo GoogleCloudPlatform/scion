@@ -30,12 +30,16 @@ import { createSession } from './harness/auth.js';
 import { getE2EEnv } from './harness/env.js';
 
 const EXPERIMENT = 'web.chat_starred_messages';
+// More than one history page (HISTORY_PAGE_SIZE is 50 in chat-thread.ts), so the target is outside
+// the latest page and the jump has to load it.
 const FILLER_COUNT = 60;
 const TARGET_TEXT = 'Mock starred target: the rollout starts after the migration.';
 
 interface ApiResult {
   status: number;
   body: unknown;
+  /** Retry-After in seconds, when the hub sent one (a 429). */
+  retryAfter: number | null;
 }
 
 async function api(
@@ -61,7 +65,12 @@ async function api(
   } catch {
     // keep text
   }
-  return { status: res.status, body: parsed };
+  const retryAfter = Number(res.headers.get('Retry-After'));
+  return {
+    status: res.status,
+    body: parsed,
+    retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null,
+  };
 }
 
 async function setExperiment(token: string, value: boolean | null): Promise<void> {
@@ -98,6 +107,8 @@ test.describe('Starred messages (phase 1)', () => {
   let memberToken = '';
 
   test.beforeAll(async () => {
+    // Seeding pauses for the hub's send rate limit (below), about a minute per run.
+    test.setTimeout(240_000);
     const before = await api(env.devToken, 'GET', '/api/v1/admin/experiments');
     const entry = (
       before.body as { experiments: Array<{ name: string; override: boolean | null }> }
@@ -117,13 +128,18 @@ test.describe('Starred messages (phase 1)', () => {
     expect(topic.status, JSON.stringify(topic.body)).toBeLessThan(300);
     topicId = (topic.body as { id: string }).id;
 
+    // The hub allows a human sender 30 sends a minute (a bucket of 30 that refills one every 2 s)
+    // and answers 429 with Retry-After when it is empty. The seed waits as told and sends again,
+    // so the history can be longer than the burst without any test-only bypass.
     const send = async (content: string): Promise<string> => {
-      const res = await api(
-        env.devToken,
-        'POST',
-        `/api/v1/chat/conversations/${topicId}/messages`,
-        { content }
-      );
+      let res: ApiResult;
+      for (let attempt = 0; ; attempt++) {
+        res = await api(env.devToken, 'POST', `/api/v1/chat/conversations/${topicId}/messages`, {
+          content,
+        });
+        if (res.status !== 429 || attempt >= 20) break;
+        await new Promise((resolve) => setTimeout(resolve, (res.retryAfter ?? 2) * 1000 + 100));
+      }
       expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
       const body = res.body as { id?: string; message?: { id: string } };
       return body.id ?? body.message?.id ?? '';
