@@ -2887,6 +2887,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
+			if delegatedSender {
+				// As for the agent's own send (ExecuteAgentDM, AC-3), a
+				// delegated send that could not be stored is not dispatched.
+				WriteAgentDMError(w, persistFailedDMError())
+				return
+			}
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID

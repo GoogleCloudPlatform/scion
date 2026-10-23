@@ -515,11 +515,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 8. Persist message (AC-3: CreateMessage failure prevents dispatch).
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("agent DM: failed to persist message", "error", err)
-		return nil, &AgentDMError{
-			Code:       ErrCodeInternalError,
-			Message:    "Failed to persist message",
-			HTTPStatus: http.StatusInternalServerError,
-		}
+		return nil, persistFailedDMError()
 	}
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
@@ -842,4 +838,14 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 		body["artifact_warning"] = result.ArtifactWarning
 	}
 	writeJSON(w, httpStatus, body)
+}
+
+// persistFailedDMError is the refusal of an agent send whose message could
+// not be stored: it is not dispatched (AC-3).
+func persistFailedDMError() *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeInternalError,
+		Message:    "Failed to persist message",
+		HTTPStatus: http.StatusInternalServerError,
+	}
 }

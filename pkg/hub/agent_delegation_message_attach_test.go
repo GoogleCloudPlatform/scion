@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -332,9 +333,10 @@ func TestAgentDelegatedMessage_ObserverCopyFollowsTheActorProject(t *testing.T) 
 // TestAgentDelegatedMessage_DeliveryChecksAsForAnAgentSend: a delegated
 // send gets the delivery checks the actor agent's own send gets
 // (ExecuteAgentDM), before anything is written. A held target (still
-// running) is refused with 409 agent_not_running like a suspended one, and
-// a stopped target with the agent send's phase refusal; each refusal is the
-// same as for agent A's own JWT send, and nothing is dispatched or stored.
+// running) is refused with 409 agent_not_running like a suspended one, a
+// stopped target with the agent send's phase refusal, and a message that
+// cannot be stored with 500 and no dispatch; each refusal is the same as
+// for agent A's own JWT send, and nothing is dispatched.
 func TestAgentDelegatedMessage_DeliveryChecksAsForAnAgentSend(t *testing.T) {
 	ctx := context.Background()
 	f := newADTFixture(t, "adt-msg-held")
@@ -364,6 +366,16 @@ func TestAgentDelegatedMessage_DeliveryChecksAsForAnAgentSend(t *testing.T) {
 		f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "stopped" })
 		defer func() { _ = f.mutateAgent(t, f.agentB.ID, func(a *store.Agent) { a.Phase = "running" }) }()
 		sameRefusal(t)
+	})
+	t.Run("message that cannot be stored is not dispatched", func(t *testing.T) {
+		f.faults.inject(t, adtFaults{createMessage: errors.New("message write failed")})
+		defer f.faults.clear()
+		calls := len(dispatcher.getCalls())
+		delegated := adtAssertAPIError(t, f.sendMessage(t, cred.Token, path, adtText("x")), http.StatusInternalServerError, ErrCodeInternalError)
+		own := adtAssertAPIError(t, f.do(t, http.MethodPost, path, adtText("x"), map[string]string{"X-Scion-Agent-Token": agentToken}),
+			http.StatusInternalServerError, ErrCodeInternalError)
+		assert.Equal(t, own.Message, delegated.Message, "the same refusal as the agent's own send")
+		assert.Len(t, dispatcher.getCalls(), calls, "nothing unstored was dispatched")
 	})
 	t.Run("held target", func(t *testing.T) {
 		_, err := f.store.CreateAgentHolds(ctx, []*store.AgentHold{{

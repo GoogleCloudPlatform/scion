@@ -491,6 +491,8 @@ type adtFaults struct {
 	// expireCredential makes every delegated credential row read outside a
 	// transaction look expired, as it does once its lifetime has passed.
 	expireCredential bool
+	// createMessage fails every message write outside a transaction.
+	createMessage error
 }
 
 // adtFaultStore is the switch-gated store wrapper the agent delegation
@@ -547,6 +549,13 @@ func (s *adtFaultStore) GetAgentDelegatedCredentialByKeyHash(ctx context.Context
 		return &expired, nil
 	}
 	return cred, err
+}
+
+func (s *adtFaultStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	if f := s.active(); f != nil && f.createMessage != nil {
+		return f.createMessage
+	}
+	return s.Store.CreateMessage(ctx, m)
 }
 
 // adtFaultTx is the transaction-scoped side of adtFaultStore.
