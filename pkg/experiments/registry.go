@@ -229,6 +229,15 @@ const AgentBadges = "web.agent_badges"
 // serves streams the same way whether or not it is on.
 const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 
+// SecretRotation gates opt-in Hub server keyring configuration
+// (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
+// file refuses to start while it is off. It is checked once at startup
+// (the keyring is loaded once, before any listener opens); turning it off
+// later changes nothing until the next restart. Readers of persisted
+// keyring-format data must never depend on it. The design names it
+// "server.secret-rotation"; NamePattern allows no hyphen.
+const SecretRotation = "server.secret_rotation"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -422,6 +431,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#4933",
 		Owner:       "harness",
 		ReviewBy:    "2027-01-13",
+	},
+	{
+		Name:        SecretRotation,
+		Title:       "Server keyring (session cookie pilot)",
+		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. Checked at startup; a hub with a keyring file refuses to start while it is off. Full server-secret rotation is not available yet.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#1530",
+		Owner:       "secret-rotation",
+		ReviewBy:    "2027-01-31",
 	},
 }
 

@@ -879,6 +879,9 @@ var tiaKeyMaterialPrimitives = map[string]bool{
 	"github.com/gorilla/sessions.NewCookieStore":                        true,
 	"github.com/gorilla/securecookie.New":                               true,
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": true,
+	// keyring.CookieCodecs builds the web session cookie codecs (securecookie
+	// keys derived per keyring generation) outside pkg/hub (ptone/scion#1530).
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring.CookieCodecs": true,
 }
 
 // tiaDefaultImportNames are the package names of the primitive import
@@ -891,6 +894,7 @@ var tiaDefaultImportNames = map[string]string{
 	"github.com/gorilla/sessions":                            "sessions",
 	"github.com/gorilla/securecookie":                        "securecookie",
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant": "grant",
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring":       "keyring",
 }
 
 // tiaKeyMaterialSites maps "path:function:importpath.Func" (path relative
@@ -911,7 +915,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"authorized_list.go:newListCursorSealer:crypto/cipher.NewGCM":                                   "list_cursor",
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
 	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
-	"web.go:NewWebServer:github.com/gorilla/sessions.NewCookieStore":                                "web_session",
+	"web.go:NewWebServer:github.com/GoogleCloudPlatform/scion/pkg/keyring.CookieCodecs":             "web_session",
 	"handlers_test_identity_web.go:newTestIdentityWebState:github.com/gorilla/securecookie.New":     "exempt: test identity web session marker key, hub-local by construction (generated at test-infra mark, stored with the DB marker, never derived from any shared secret; DEC-8)",
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",

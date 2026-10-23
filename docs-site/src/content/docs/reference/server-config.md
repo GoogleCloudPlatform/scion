@@ -1032,6 +1032,17 @@ The env also now overrides the settings that live at the top level of `settings.
 
 `server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.
 
+`server.keyring_file` (`--keyring-file`, `SCION_SERVER_KEYRING_FILE`) is an experimental session-cookie pilot (ptone/scion#1530). It is the path of a version-1 JSON keyring file holding versioned signing and encryption keys. Mount the file through your secret delivery mechanism; only the path belongs in settings. The hub and web server process reads it once at startup, and `--role relay` never reads it. Startup is refused when:
+
+- the `server.secret_rotation` experiment is off;
+- `--session-secret`, `SCION_SERVER_SESSION_SECRET` or `SESSION_SECRET` is also set;
+- the file is invalid (unknown fields, duplicate key IDs, more than three entries per ring, inconsistent deadlines or key lengths).
+- the file is writable or executable by others, or readable by others without `server.keyring_file_allow_world_readable`.
+
+In this release only web session cookies use the keyring. The active generation signs new cookies, and cookies signed by any generation in the file are accepted until that generation's `verify_until`. Once the active generation reaches its `sign_until`, the server stops issuing cookies and `/readyz` reports `signing_issuance_closed`. Every other purpose (JWTs, signed URLs, cursors, conduit tokens, local secret encryption) still uses the file's `legacy` entry unchanged. The `legacy` entry's deadlines govern session cookies only. Full server-secret rotation, and a procedure for it, are not available yet. The admin API never returns or accepts this setting.
+
+File permissions: mount the keyring file with mode 0400 (0440 when a group must read it), for example Kubernetes `defaultMode: 0400`. A world-readable keyring file (such as the Kubernetes Secret volume default 0644, or 0444) refuses startup unless the operator sets `server.keyring_file_allow_world_readable` (`--keyring-file-allow-world-readable`, `SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE`; default false), which loads it with a warning. A file writable or executable by others is always refused, and a group-readable file loads with a warning. The override is operator-only: the admin API never returns or accepts it.
+
 **Examples:**
 - `server.hub.port` -> `SCION_SERVER_HUB_PORT`
 - `server.hub.gcp_project_id` -> `SCION_SERVER_HUB_GCPPROJECTID`
@@ -1403,6 +1414,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` (`log_format` is accepted but ignored) |
+| Server keyring | `keyring_file`, `keyring_file_allow_world_readable` (experimental; never returned or accepted by the admin API) |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
