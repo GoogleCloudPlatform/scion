@@ -146,10 +146,14 @@ test.describe('open at the unread divider', () => {
 
   test('the quick switcher opens at the divider', async ({ page }, testInfo) => {
     await setUp(page, testInfo);
-    test.skip(!isDesktop(testInfo), 'keyboard shortcut: desktop only');
+    test.skip(!isDesktop(testInfo), 'checked on desktop only');
     await openChatRail(page, (p) => mockUnread(p, true));
     await expandSpace(page);
-    await page.keyboard.press('Control+k');
+    // The rail's Quick switcher button, as in palette-footer.pw.ts.
+    await page.locator('.v2-rail > .palette-footer > .palette-footer-btn').click();
+    await expect(
+      page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]')
+    ).toBeVisible();
     const input = page.locator('scion-quick-palette #palette-query-input');
     await expect(input).toBeFocused();
     await input.fill(`${SWITCHER_THREAD_ID} discussion`);
