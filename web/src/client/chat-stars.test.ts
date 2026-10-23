@@ -316,7 +316,8 @@ describe('ChatStarsController', () => {
     expect(c.state(M2)).toBe('unknown');
     gates[1].resolve([]);
     await vi.waitFor(() => expect(gates.length).toBe(3));
-    expect(fetchState.mock.calls[2][0]).toContain(M2);
+    // The extra pass asks only for the live message, not every known state.
+    expect(fetchState.mock.calls[2][0]).toEqual([M2]);
     gates[2].resolve([M2]);
     await refresh;
     expect(c.state(M2)).toBe('starred');
@@ -325,6 +326,31 @@ describe('ChatStarsController', () => {
     c.markLive([M3]);
     expect(c.state(M3)).toBe('unstarred');
     expect(fetchState).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not mark live after an invalidation whose refresh failed', async () => {
+    let fail = false;
+    const fetchState = vi.fn(() =>
+      fail ? Promise.reject(new Error('offline')) : Promise.resolve([])
+    );
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    await c.load([M1]);
+    fail = true;
+    await c.invalidate(); // the refresh fails: the states did not catch up
+    c.markLive([M2]);
+    expect(c.state(M2)).toBe('unknown');
+    await vi.waitFor(() => expect(fetchState.mock.calls.flatMap((cl) => cl[0])).toContain(M2));
+    fail = false;
+    // The refresh markLive started may still run; the retry then makes it
+    // pass once more.
+    await c.retryFailed();
+    await vi.waitFor(() => expect(c.state(M2)).toBe('unstarred'));
+    // Caught up: the next live message is marked without a request.
+    const calls = fetchState.mock.calls.length;
+    c.markLive([mid(3)]);
+    expect(c.state(mid(3))).toBe('unstarred');
+    expect(fetchState).toHaveBeenCalledTimes(calls);
   });
 
   it('refetches the IDs of a load that was in flight during an invalidation', async () => {

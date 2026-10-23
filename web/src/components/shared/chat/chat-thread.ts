@@ -4184,10 +4184,6 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
-   * Scroll to a specific message by ID, with optional highlight animation.
-   * Can be called externally (e.g. from search navigation on same conversation).
-   */
-  /**
    * Bumped by every jump to a message (search, reply, deep link, a star):
    * a caller that resolves a target first can tell whether a newer jump
    * happened meanwhile.
@@ -4196,6 +4192,10 @@ export class ScionChatThread extends LitElement {
     return this._jumpSeq;
   }
 
+  /**
+   * Scroll to a specific message by ID, with optional highlight animation.
+   * Can be called externally (e.g. from search navigation on same conversation).
+   */
   async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
     // Explicit programmatic navigation (search-jump, reply-jump, deep link)
     // takes precedence over the open-time unread anchor (rule 5). Without
