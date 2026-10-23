@@ -563,7 +563,7 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. See [subpath_root](#subpath_root). |
 
 :::note[Kubernetes runtime and `gke-shared-volume`]
-The Hub keeps project files on a `gke-shared-volume` backend, but the `kubernetes` runtime does not mount it into agent pods yet: agent workspaces get an `emptyDir` volume and are lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for persistent agent workspaces on Kubernetes. See [Stopping, Starting and Restarting Agents](/scion/hosted/ha/kubernetes/#stopping-starting-and-restarting-agents) and ptone/scion#1075.
+The Hub keeps project files on a `gke-shared-volume` backend, but the `kubernetes` runtime does not mount it into agent pods yet: agent workspaces get an `emptyDir` volume and are lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for persistent agent workspaces on Kubernetes. See [Stopping, Starting and Restarting Agents](/scion/hosted/ha/kubernetes/#stopping-starting-and-restarting-agents) and [ptone/scion#1075](https://github.com/ptone/scion/issues/1075).
 :::
 
 :::note[Cloud Run runtime needs `nfs`]

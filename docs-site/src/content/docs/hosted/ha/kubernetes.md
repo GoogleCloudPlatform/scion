@@ -246,7 +246,7 @@ Stopping an agent deletes its Pod. What survives depends on the workspace volume
 With an `emptyDir` workspace, push work you want to keep before stopping or restarting the agent, or use a persistent backend. The same distinction decides the phase an agent gets when its Pod is preempted or evicted; see [Preempted and evicted status](#preempted-and-evicted-status).
 
 :::caution[`gke-shared-volume` is not mounted into agent pods]
-With `workspace_storage.backend: gke-shared-volume`, the Hub keeps project files on the shared volume, but the Kubernetes runtime does not mount that volume into agent pods yet. In every workspace mode the agent's workspace is an `emptyDir` and is lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for agent workspaces that persist. See ptone/scion#1075.
+With `workspace_storage.backend: gke-shared-volume`, the Hub keeps project files on the shared volume, but the Kubernetes runtime does not mount that volume into agent pods yet. In every workspace mode the agent's workspace is an `emptyDir` and is lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for agent workspaces that persist. See [ptone/scion#1075](https://github.com/ptone/scion/issues/1075).
 :::
 
 A start or restart sends the agent's git clone settings, branch, workspace mode and template. If the broker no longer has the agent's own state (for example after the broker itself was replaced), it provisions the agent again; an agent created from a Hub template gets that template again rather than the default one.
