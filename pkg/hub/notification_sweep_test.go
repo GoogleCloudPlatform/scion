@@ -208,6 +208,7 @@ func TestRetryDispatch_SubscriberDeleted(t *testing.T) {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when subscriber is permanently deleted")
 			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Equal(t, store.NotificationReasonSubscriberGone, n.DispatchReason, "the reason must be recorded")
 			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
@@ -239,6 +240,7 @@ func TestRetryDispatch_WatchedAgentDeleted(t *testing.T) {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when watched agent is deleted")
 			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Equal(t, store.NotificationReasonWatchedAgentGone, n.DispatchReason, "the reason must be recorded")
 			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
@@ -576,9 +578,16 @@ func TestRetryDispatch_DeliveryFailure_RevertsClaim(t *testing.T) {
 	assert.False(t, notificationDispatched(t, env, notifs[0].ID),
 		"a failed retry delivery must release its claim")
 
+	// The claim is released with a retry backoff (ptone/scion#5763): the
+	// sweep leaves it out until then, and clearing the backoff (time
+	// passing) makes it eligible again.
 	again, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
-	require.Len(t, again, 1, "the next sweep must see the notification again")
+	assert.Empty(t, again, "the sweep must wait out the retry backoff")
+	clearRetryBackoff(t, env, notifs[0].ID)
+	again, err = env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, again, 1, "a later sweep must see the notification again")
 	assert.Equal(t, notifs[0].ID, again[0].ID)
 }
 
@@ -653,12 +662,20 @@ func TestSweepHandler_FailedDeliveryRetriedNextSweep(t *testing.T) {
 	}
 	handler := srv.notificationDispatchSweepHandler()
 
-	handler(ctx)
-	require.Len(t, env.dispatcher.getCalls(), 1)
 	pending, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
-	require.Len(t, pending, 1, "a failed delivery must stay undispatched")
+	require.Len(t, pending, 1)
+	id := pending[0].ID
 
+	handler(ctx)
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	assert.False(t, notificationDispatched(t, env, id), "a failed delivery must stay undispatched")
+
+	// The retry backoff holds it back from the next pass; once it has
+	// passed (cleared here), the next sweep delivers it.
+	handler(ctx)
+	require.Len(t, env.dispatcher.getCalls(), 1, "no sweep attempt inside the retry backoff")
+	clearRetryBackoff(t, env, id)
 	env.dispatcher.setReturnErr(nil)
 
 	handler(ctx)
@@ -890,6 +907,7 @@ func TestRetryDispatch_Exhausted_RecordsFailedOutcomeAndAttempts(t *testing.T) {
 	n := getNotification(t, env, notif.ID)
 	assert.True(t, n.Dispatched, "a given-up notification stays claimed")
 	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Equal(t, store.NotificationReasonExpired, n.DispatchReason)
 	assert.Equal(t, 3, n.DispatchAttempts)
 }
 
@@ -919,6 +937,7 @@ func TestSweepHandler_CountsAttemptsUntilDelivered(t *testing.T) {
 	assert.Empty(t, n.DispatchOutcome, "a failed attempt that will be retried has no outcome")
 	assert.Equal(t, 1, n.DispatchAttempts)
 
+	clearRetryBackoff(t, env, id)
 	env.dispatcher.setReturnErr(nil)
 
 	handler(ctx)
@@ -946,6 +965,7 @@ func TestRetryDispatch_SubscriptionDeleted_RecordsFailedOutcome(t *testing.T) {
 	n := getNotification(t, env, notifs[0].ID)
 	assert.True(t, n.Dispatched, "a notification whose subscription is gone stays claimed")
 	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Equal(t, store.NotificationReasonSubscriptionGone, n.DispatchReason)
 	assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 }
 

@@ -27,6 +27,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { browserPath, loadPage } from '../../client/navigation.js';
 
 import {
   TestHubBannerController,
@@ -225,7 +226,8 @@ export class ScionPageInvite extends LitElement {
 
   private handleLogin(provider: string): void {
     // Redirect to OAuth login, preserving the invite page as returnTo
-    window.location.href = `/auth/login/${provider}?returnTo=${encodeURIComponent('/invite')}`;
+    // returnTo is the browser URL the server redirects to after login.
+    loadPage(`/auth/login/${provider}?returnTo=${encodeURIComponent(browserPath('/invite'))}`);
   }
 
   override render() {
@@ -293,7 +295,7 @@ export class ScionPageInvite extends LitElement {
         variant="primary"
         size="large"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Dashboard
@@ -309,7 +311,7 @@ export class ScionPageInvite extends LitElement {
       <sl-button
         variant="default"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Home
@@ -327,7 +329,7 @@ export class ScionPageInvite extends LitElement {
       <sl-button
         variant="default"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Home

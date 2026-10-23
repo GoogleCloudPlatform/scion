@@ -74,6 +74,12 @@ type TelemetryHandler struct {
 	// handler, so without it a session's counts are lost between events.
 	SessionState SessionStateStore
 
+	// Analytics, if set, receives one agent.usage event per accepted
+	// model-end usage increment (SCION_USAGE_SOURCE=hooks only), appended
+	// to the analytics outbox before the counters are updated. Set by the
+	// hook command only when the GCP exporter is configured.
+	Analytics *telemetry.UsageAnalytics
+
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
 	toolCalls    metric.Int64Counter
@@ -253,6 +259,55 @@ func (h *TelemetryHandler) startSpan(event *hooks.Event, spanName string) {
 	})
 }
 
+// toolOutcome classifies how the call that event ends finished. A call the
+// user interrupted is ToolInterrupted, not a failure. Otherwise the call
+// failed when the harness reported a failure (hooks.EventData.Failed) or
+// sent an error string; a missing error string never turns a reported
+// failure into a success. Success alone is not used: most harnesses send no
+// success field for a call that succeeded.
+func toolOutcome(event *hooks.Event) telemetry.ToolOutcome {
+	switch {
+	case event.Data.Interrupted:
+		return telemetry.ToolInterrupted
+	case event.Data.Failed || event.Data.Error != "":
+		return telemetry.ToolFailed
+	default:
+		return telemetry.ToolSucceeded
+	}
+}
+
+// toolStatusLabel is the status label of the agent.tool.calls metric for
+// outcome.
+func toolStatusLabel(outcome telemetry.ToolOutcome) string {
+	switch outcome {
+	case telemetry.ToolFailed:
+		return "error"
+	case telemetry.ToolInterrupted:
+		return "interrupted"
+	default:
+		return "success"
+	}
+}
+
+// setEndSpanStatus sets the status of the span for an end event: Error for
+// a failed call (described by its error string, or "failed" when it has
+// none), Ok when the harness reported success, and unset otherwise,
+// including for an interrupted call.
+func setEndSpanStatus(span trace.Span, event *hooks.Event) {
+	switch toolOutcome(event) {
+	case telemetry.ToolFailed:
+		desc := event.Data.Error
+		if desc == "" {
+			desc = "failed"
+		}
+		span.SetStatus(codes.Error, desc)
+	case telemetry.ToolSucceeded:
+		if event.Data.Success {
+			span.SetStatus(codes.Ok, "")
+		}
+	}
+}
+
 // endSpan ends an in-progress span.
 func (h *TelemetryHandler) endSpan(event *hooks.Event, spanName, startEventType string) {
 	key := h.spanKey(startEventType, event.Data.ToolName)
@@ -273,12 +328,7 @@ func (h *TelemetryHandler) endSpan(event *hooks.Event, spanName, startEventType 
 	attrs := h.eventToEndAttributes(event, inProgress.startTime)
 	inProgress.span.SetAttributes(attrs...)
 
-	// Set status based on success/error
-	if event.Data.Error != "" {
-		inProgress.span.SetStatus(codes.Error, event.Data.Error)
-	} else if event.Data.Success {
-		inProgress.span.SetStatus(codes.Ok, "")
-	}
+	setEndSpanStatus(inProgress.span, event)
 
 	h.emitLogRecord(inProgress.ctx, event, spanName)
 	inProgress.span.End()
@@ -300,12 +350,7 @@ func (h *TelemetryHandler) singleSpan(event *hooks.Event, spanName string) {
 	ctx, span := h.tracer.Start(ctx, spanName, trace.WithAttributes(attrs...))
 	h.emitLogRecord(ctx, event, spanName)
 
-	// Set status based on success/error
-	if event.Data.Error != "" {
-		span.SetStatus(codes.Error, event.Data.Error)
-	} else if event.Data.Success {
-		span.SetStatus(codes.Ok, "")
-	}
+	setEndSpanStatus(span, event)
 
 	span.End()
 }
@@ -363,6 +408,9 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	}
 	if event.Data.Error != "" {
 		attrs = append(attrs, slog.String("error", event.Data.Error))
+	}
+	if event.Data.Interrupted {
+		attrs = append(attrs, slog.Bool("interrupted", true))
 	}
 	if event.Data.InputTokens > 0 {
 		attrs = append(attrs, slog.Int64("gen_ai.usage.input_tokens", event.Data.InputTokens))
@@ -450,6 +498,9 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 
 	if event.Data.Error != "" {
 		attrs = append(attrs, attribute.String("error", event.Data.Error))
+	}
+	if event.Data.Interrupted {
+		attrs = append(attrs, attribute.Bool("interrupted", true))
 	}
 
 	// Add tool output for end events
@@ -544,13 +595,9 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 	switch startEventType {
 	case hooks.EventToolStart:
 		if h.toolCalls != nil {
-			status := "success"
-			if event.Data.Error != "" {
-				status = "error"
-			}
 			attrs := append(baseAttrs,
 				attribute.String("tool_name", event.Data.ToolName),
-				attribute.String("status", status),
+				attribute.String("status", toolStatusLabel(toolOutcome(event))),
 			)
 			h.toolCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
@@ -563,6 +610,10 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
@@ -596,19 +647,19 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 	switch startEventType {
 	case hooks.EventToolStart:
 		if h.toolCalls != nil {
-			status := "success"
-			if event.Data.Error != "" {
-				status = "error"
-			}
 			attrs := append(baseAttrs,
 				attribute.String("tool_name", event.Data.ToolName),
-				attribute.String("status", status),
+				attribute.String("status", toolStatusLabel(toolOutcome(event))),
 			)
 			h.toolCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
@@ -856,7 +907,7 @@ var aggregatorUpdates = map[string]aggregatorUpdate{
 		return noSummary()
 	},
 	hooks.EventToolEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
-		a.RecordToolEnd(event.Data.ToolName, event.Data.Error)
+		a.RecordToolEnd(event.Data.ToolName, toolOutcome(event))
 		return noSummary()
 	}),
 	// With SCION_USAGE_SOURCE=native, usage reaches the session from the

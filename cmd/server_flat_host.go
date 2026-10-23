@@ -309,7 +309,6 @@ type flatHostParams struct {
 	instances      []config.V1RuntimeBrokerInstanceConfig
 	hubEndpoint    string
 	hubEndpointSrc hubEndpointSource
-	devAuthToken   string
 	settings       *config.Settings
 	globalDir      string
 	autoProvide    bool
@@ -398,7 +397,6 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		cfg:                     cfg,
 		mode:                    mode,
 		hubEndpoint:             hubEndpointForRH,
-		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
@@ -620,7 +618,6 @@ type flatServerShared struct {
 	cfg                     *config.GlobalConfig
 	mode                    brokerhost.Mode
 	hubEndpoint             string
-	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	// workspaceLocks is the one process-wide workspace lock service every
@@ -672,7 +669,6 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubOn,
-		HubToken:             sh.devAuthToken,
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 

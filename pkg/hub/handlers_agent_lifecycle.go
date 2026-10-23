@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -145,8 +146,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		guardAgentPhaseTransition(agent, &status)
 		// Guard 0f applies to the agent's own reports only; a user or
 		// service with update access is not a container of some run.
+		startLaunchGuarded := false
 		if _, isAgent := identity.(AgentIdentity); isAgent {
-			guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
 		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
@@ -169,6 +171,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// transaction.
 		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
+			return
+		}
+		// The same for Guard 0f: a report from a container other than the
+		// one an active start launch is launching, with nothing else to
+		// persist, is answered as not applied (ptone/scion#4669).
+		if startLaunchGuarded && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonStartLaunchOtherRun})
 			return
 		}
 		// Reconcile the max_agents_per_broker reservation against the phase
@@ -207,7 +216,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
-			s.events.PublishAgentStatus(ctx, agent)
+			pubCtx := ctx
+			if statusUpdateIsHeartbeatOnly(status) {
+				// Counted as trigger=heartbeat (ptone/scion#5228); the
+				// publish itself is unchanged.
+				pubCtx = eventstreams.WithHeartbeatTrigger(ctx)
+			}
+			s.events.PublishAgentStatus(pubCtx, agent)
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
@@ -225,6 +240,10 @@ const (
 	// statusUpdateReasonReincarnationInFlight: a reincarnation owns the
 	// agent (Guard 0b).
 	statusUpdateReasonReincarnationInFlight = "reincarnation_in_flight"
+	// statusUpdateReasonStartLaunchOtherRun: an asynchronous start or
+	// restart launch is active and the report's agent token names no run,
+	// or another run than the one being launched (Guard 0f).
+	statusUpdateReasonStartLaunchOtherRun = "start_launch_other_run"
 )
 
 // statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
@@ -282,6 +301,18 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
 		!su.ClearTerminalRemnants
+}
+
+// statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
+// and nothing else statusUpdateIsEmpty counts: the agent's periodic
+// heartbeat report. Its status event counts as trigger=heartbeat on
+// scion.hub.events.published (ptone/scion#5228).
+func statusUpdateIsHeartbeatOnly(su store.AgentStatusUpdate) bool {
+	if !su.Heartbeat {
+		return false
+	}
+	su.Heartbeat = false
+	return statusUpdateIsEmpty(su)
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
@@ -424,21 +455,23 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 // The store already drops any report of another run (the run check in
 // UpdateAgentStatus); this guard adds the run-less token, and keeps the
 // quota reconcile from acting on such a report. Once the launch has ended
-// it no longer applies. No start-kind launch exists until asynchronous
-// start ships, so it never applies yet.
-func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) {
+// it no longer applies. It reports whether it applied (blanked the
+// report's guarded fields), so a report with nothing else is answered as
+// not applied.
+func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) bool {
 	if agent.LaunchState != store.LaunchStateActive ||
 		(agent.LaunchKind != store.LaunchKindStart && agent.LaunchKind != store.LaunchKindRestart) {
-		return
+		return false
 	}
 	if tokenRunID != "" && tokenRunID == agent.RunID {
-		return
+		return false
 	}
 	status.Phase = ""
 	status.Activity = ""
 	status.ExitCode = nil
 	status.ExitReason = ""
 	status.Message = ""
+	return true
 }
 
 // disruptionSettled reports whether agent is stopped or in error with a
@@ -511,7 +544,6 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	dispatcher := s.GetDispatcher()
 	stopRunID := agent.RunID
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -607,9 +639,14 @@ func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent s
 // meaningful when the agent is in phase=error, where it requests a
 // best-effort resume of the interrupted harness session instead of a fresh
 // one. See resumeInPlaceDecision for the equivalent semantics on the
-// create-agent resume path.
+// create-agent resume path. AcceptAsyncLaunch opts in to an asynchronous
+// start (ptone/scion#4669): when the hub.async_agent_start experiment and
+// its other rules allow, the hub answers as soon as the broker accepts the
+// start, with the agent in phase starting and an active launch. The
+// "restart" action reads the same body for AcceptAsyncLaunch only.
 type AgentLifecycleStartRequest struct {
-	ForceResume bool `json:"forceResume,omitempty"`
+	ForceResume       bool `json:"forceResume,omitempty"`
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
@@ -659,7 +696,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
@@ -735,6 +772,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// stopRunID is the run a stop is dispatched for; the stopped status is
 	// recorded only while the row still holds it (ptone/scion#2550).
 	var stopRunID string
+	// launchAccepted: a start or restart's start leg was accepted as an
+	// asynchronous launch (ptone/scion#4669); the launch's end writes the
+	// outcome, so the handler answers with the launching agent and writes
+	// no status of its own.
+	var launchAccepted bool
+	onLaunchAccepted := func(context.Context, *store.Agent) { launchAccepted = true }
 
 	// Collect warnings the start leg raises (hub-side TZ drops and the
 	// broker's hub-only env warnings) so the start and restart responses
@@ -806,7 +849,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// made when the start fails (ptone/scion#1978), and writes the
 			// started status while the claim is held.
 			startFromRest = !isBrokerQuotaCountedPhase(agent.Phase)
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true,
+				AcceptAsyncLaunch: startReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+			if dispatchErr == nil && launchAccepted {
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
+				return
+			}
 			startDispatched = dispatchErr == nil || errors.Is(dispatchErr, errStartedStatusWrite)
 			if dispatchErr == nil {
 				startStatusWritten = true
@@ -827,13 +875,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.clearExposedPortsForAgent(ctx, agent.ID)
 		stopRunID = agent.RunID
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// The response waits on the workspace sync-back, the ephemeral
-			// workspace check and the stop dispatch: extend this request's
+			// The response waits on the ephemeral workspace check and the
+			// stop dispatch: extend this request's
 			// write deadline to cover them (ptone/scion#4178).
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
-			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
-			// This is best-effort: failures are logged but don't block the stop.
-			s.syncWorkspaceOnStop(ctx, agent)
 			// Warn (never block) when an ephemeral workspace holds work
 			// the stop is about to discard (ptone/scion#3819).
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -900,12 +945,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		respAgent := *agent
-		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+		respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
+		// The optional body's AcceptAsyncLaunch opts the start leg in to
+		// an asynchronous start (ptone/scion#4669). A restart never
+		// rejected a body, so one that cannot be decoded is ignored, as
+		// before.
+		var restartReq AgentLifecycleStartRequest
+		if r.ContentLength > 0 {
+			if err := readJSON(r, &restartReq); err != nil {
+				restartReq = AgentLifecycleStartRequest{}
+			}
+		}
 		var restartClaim *startClaimRun
 		if hasBroker {
 			// As for start: from here the restart no longer follows the
@@ -1035,7 +1090,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// by syncDispatch (SyncDispatchBound).
 			existing := restartClaim
 			restartClaim = nil
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true,
+				AcceptAsyncLaunch: restartReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
+			if dispatchErr == nil && launchAccepted {
+				// The start leg was accepted as an asynchronous restart
+				// launch: its end records running or stopped, keeps or
+				// releases the slot and settles the restart's claim.
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
+				return
+			}
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
@@ -1219,7 +1282,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			respAgent := *current
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(current.AppliedConfig, canViewAgentEnv(ctx, s, current))
+			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
 			respAgent.Deletion = deletionViewForCaller(current, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 			return
@@ -1288,7 +1351,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
@@ -1357,7 +1420,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
 }
 
@@ -1737,7 +1800,6 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				// Each agent collects its own warnings, reported on its
 				// result as a single stop reports them on its response.
 				opCtx, agentWarns := withDispatchWarnings(opCtx)
-				s.syncWorkspaceOnStop(opCtx, agent)
 				// As for a single stop: warn about, and record, work in an
 				// ephemeral workspace that the stop discards
 				// (ptone/scion#3819, ptone/scion#4246). The check runs

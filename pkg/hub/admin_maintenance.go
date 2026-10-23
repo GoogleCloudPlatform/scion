@@ -351,6 +351,10 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &TemplateBlobGCExecutor{srv: s}, nil
 	case entadapter.PassthroughTranslationReviewKey:
 		return &PassthroughTranslationReviewExecutor{srv: s}, nil
+	case entadapter.GroupParticipantModeCleanupKey:
+		return &GroupParticipantModeCleanupExecutor{Store: s.store}, nil
+	case entadapter.ProjectStorageMigrateKey:
+		return &ProjectStorageMigrateExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
@@ -391,6 +395,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			GCPProject: s.config.GCPProjectID,
+			ObjectPath: harnessConfigFileObjectPath,
 		}), nil
 	case "update-binary":
 		log.Debug("Resolved update-binary executor",

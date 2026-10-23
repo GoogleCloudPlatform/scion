@@ -111,6 +111,17 @@ export function errorMessageFromBody(data: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Error code of a send refused to a caller that reads the thread but may not post. */
+export const CHAT_POST_DENIED_CODE = 'chat_post_denied';
+
+/** Whether a parsed error response body is a chat_post_denied refusal. */
+export function isChatPostDeniedBody(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const err = (data as { error?: unknown }).error;
+  if (!err || typeof err !== 'object') return false;
+  return (err as { code?: unknown }).code === CHAT_POST_DENIED_CODE;
+}
+
 /** Body text of the wake confirmation dialog. */
 export function wakeConfirmMessage(offer: WakeOffer): string {
   const name = offer.agentSlug ? `@${offer.agentSlug}` : 'This agent';

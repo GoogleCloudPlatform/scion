@@ -118,6 +118,13 @@ type BrokerCapabilities struct {
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
 	// hub checks runtime suitability separately.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates this broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982).
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates this broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890).
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -251,6 +258,11 @@ type CreateAgentRequest struct {
 	// project path ~/.scion/projects/<slug> did not exist when the request
 	// arrived. It is never read from the wire.
 	workspaceAbsentAtAdmission bool
+	// workspaceAdmissionChecked is set by createAgent when it checked the
+	// hub-managed project path at admission (the slug-dispatch case that
+	// sets workspaceAbsentAtAdmission). Without the check, a workspace
+	// bootstrap is never treated as finding an existing workspace.
+	workspaceAdmissionChecked bool
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
@@ -588,6 +600,16 @@ type MessageRequest struct {
 	// MessageID is the hub's persisted message ID, when the hub wants to be
 	// told about a buffered delivery that fails after acceptance (#1820).
 	MessageID string `json:"message_id,omitempty"`
+
+	// Attachments are the files the broker downloads, verifies and writes
+	// into the agent's home before it delivers the text (ptone/scion#4596).
+	// An entry without URL is reported to the agent as not delivered.
+	Attachments []messages.WireAttachment `json:"attachments,omitempty"`
+
+	// AttachmentRetentionDays is how long the agent's inbox keeps delivered
+	// attachments (messaging.attachment_inbox_retention_days); the broker
+	// prunes older ones after a write. 0 means the default.
+	AttachmentRetentionDays int `json:"attachment_retention_days,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support the legacy

@@ -432,6 +432,28 @@ func TestFederationProjectVisitors_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestAgentBadges_RegisteredDefaultOff pins web.agent_badges
+// (ptone/scion#5503): a presentation-only web gate, so it has only the web
+// layer, and it ships off.
+func TestAgentBadges_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentBadges)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentBadges)
+	}
+	if entry.Name != "web.agent_badges" {
+		t.Errorf("Name = %q, want web.agent_badges", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 1 || entry.Layers[0] != LayerWeb {
+		t.Errorf("Layers = %v, want exactly LayerWeb", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#5503" || entry.Owner != "web" || entry.ReviewBy != "2027-01-19" {
+		t.Errorf("agent badges experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
 // (ptone/scion#4595): it gates the hub's attachment upload path and the web
 // surfaces of later phases, so it has both layers, and it ships off.
@@ -495,5 +517,28 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	}
 	if e.Issue != "ptone/scion#4669" || e.Stage != StageAlpha || e.Owner != "async-start" {
 		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestAgentEditHeld_RegisteredDefaultOff pins hub.agent_edit_held
+// (ptone/scion#3976): it changes what the hub does with config edits of a
+// running agent, so it has LayerServer, and the web UI mirrors it, so it has
+// LayerWeb; it ships off, separately from the Edit page experiment.
+func TestAgentEditHeld_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentEditHeld)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentEditHeld)
+	}
+	if entry.Name != "hub.agent_edit_held" {
+		t.Errorf("Name = %q, want hub.agent_edit_held", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#3952" {
+		t.Errorf("held edits experiment metadata mismatch: %+v", entry)
 	}
 }

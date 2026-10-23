@@ -111,6 +111,8 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `conflicted` | The section that conflicted, with its expected and current revision. |
 | `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
 
+When a save hits `409 revision_conflict` after earlier sections were written, the Server Config conflict banner also lists the keys saved before the conflict: `applied_keys` under **Applied now**, `pending_restart` under **Saved; applies after restart**, and `skipped` under **Saved but not applied**.
+
 ### Layer-0 edits by deployment mode
 
 Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config` depends on the deployment mode, not on the database driver. `GET` reports it as `layer0_editable`.
@@ -119,6 +121,8 @@ Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config`
 - **Workstation Hubs** (the default mode): Layer-1 keys are written to the database. Layer-0 keys and keys with no database home are written to `settings.yaml`. `log_level` is applied immediately and the co-located broker reloads its runtime. Every other key that changed in the file is listed in the response's `reload.requires_restart`, and `file_keys` lists every key that changed in the file.
 
 Layer-1 keys written to the database are merged section by section onto the stored row: a key the body leaves out keeps its stored value, an explicit `null` clears it, and a save that races another write to the same section returns a `409 Conflict` error instead of overwriting it.
+
+Federation settings are sent as the top-level `federation` object of the `PUT` body, in database and `settings.yaml` modes alike. On a database-backed Hub, federation sent under `server.federation` is refused with `422` unless it repeats what `GET` returns. `{"federation": null}` is refused in every mode with `422 validation_error` and `details.keys: ["federation"]`; nothing is saved. To return the federation settings to their bootstrap values, use `DELETE /api/v1/admin/server-config/sections/federation` (see [Reset to Bootstrap](#reset-to-bootstrap)). To clear single fields, send them explicitly (`false`, `[]` or `""`). `GET` reports the federation settings in effect in both places it shows them, the top-level `federation` object and `server.federation`. On a database-backed Hub these are the stored values (or the bootstrap values while no row is stored), never a `settings.yaml` value the stored row replaced. One exception: a federation section that is disabled and has no trusted issuers is left out of `GET` in both places, even when it is stored with other fields such as `algorithms` or the intervals.
 
 `server.mode` must be empty (workstation), `workstation`, `hosted` or `production` (the legacy name for hosted). Values are case-sensitive. The server refuses to start with any other value (a typo used to mean workstation), and a workstation save that sets another value is rejected with `400`. To fix a bad value, edit `server.mode` in `settings.yaml` or `SCION_SERVER_MODE`; `--hosted` selects hosted mode but does not make a bad value valid.
 
@@ -345,8 +349,8 @@ The admin UI provides structured feedback on save:
 |----------|-------------|
 | **200** | Success; shows ignored-keys notice if applicable |
 | **400** `validation_failed` | Inline per-section validation errors |
-| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
+| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button, listing any keys saved before the conflict (`applied_keys`, `pending_restart`, and `skipped`) |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
-| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Nothing was saved |
+| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

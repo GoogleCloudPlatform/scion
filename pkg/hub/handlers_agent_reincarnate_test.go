@@ -4804,7 +4804,7 @@ func TestReincarnateAgent_SweepCASRespectsStalenessCutoff(t *testing.T) {
 	cutoff := r.UpdatedAt.Add(-time.Minute) // r is NOT stale relative to this cutoff
 	require.True(t, r.UpdatedAt.After(cutoff))
 
-	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", cutoff)
+	srv.sweepFailStaleRecord(ctx, r, "hub restarted during reincarnation", store.EdgeDeactivationReincarnateStaleSwept, cutoff)
 
 	got, err := s.GetAgentReincarnation(ctx, r.ID)
 	require.NoError(t, err)
@@ -5356,7 +5356,8 @@ func TestReincarnateAgent_AC2b_HubDefaultHarnessConfigStillApplies(t *testing.T)
 // caller computes.
 func TestReincarnateAgent_AC2b_CreateInputsHarnessConfigEmptyWhenNotExplicit(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	srv, s, project, _ := setupReincarnateTestServer(t, disp)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	giveProviderCheckout(t, s, project.ID, broker.ID)
 
 	project.Annotations = map[string]string{"scion.io/default-harness-config": "project-default-hc"}
 	require.NoError(t, s.UpdateProject(context.Background(), project))
@@ -5539,7 +5540,8 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			disp := newReincarnateTestDispatcher()
-			srv, s, project, _ := setupReincarnateTestServer(t, disp)
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			giveProviderCheckout(t, s, project.ID, broker.ID)
 
 			if len(tc.projectAnnotations) > 0 {
 				project.Annotations = tc.projectAnnotations

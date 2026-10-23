@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
@@ -189,6 +190,40 @@ func (_u *NotificationUpdate) SetNillableDispatchOutcome(v *string) *Notificatio
 	return _u
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (_u *NotificationUpdate) SetDispatchReason(v string) *NotificationUpdate {
+	_u.mutation.SetDispatchReason(v)
+	return _u
+}
+
+// SetNillableDispatchReason sets the "dispatch_reason" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableDispatchReason(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetDispatchReason(*v)
+	}
+	return _u
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (_u *NotificationUpdate) SetNextAttemptAt(v time.Time) *NotificationUpdate {
+	_u.mutation.SetNextAttemptAt(v)
+	return _u
+}
+
+// SetNillableNextAttemptAt sets the "next_attempt_at" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableNextAttemptAt(v *time.Time) *NotificationUpdate {
+	if v != nil {
+		_u.SetNextAttemptAt(*v)
+	}
+	return _u
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (_u *NotificationUpdate) ClearNextAttemptAt() *NotificationUpdate {
+	_u.mutation.ClearNextAttemptAt()
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdate) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -298,6 +333,15 @@ func (_u *NotificationUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.DispatchOutcome(); ok {
 		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchReason(); ok {
+		_spec.SetField(notification.FieldDispatchReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NextAttemptAt(); ok {
+		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
+	}
+	if _u.mutation.NextAttemptAtCleared() {
+		_spec.ClearField(notification.FieldNextAttemptAt, field.TypeTime)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -480,6 +524,40 @@ func (_u *NotificationUpdateOne) SetNillableDispatchOutcome(v *string) *Notifica
 	return _u
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (_u *NotificationUpdateOne) SetDispatchReason(v string) *NotificationUpdateOne {
+	_u.mutation.SetDispatchReason(v)
+	return _u
+}
+
+// SetNillableDispatchReason sets the "dispatch_reason" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableDispatchReason(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetDispatchReason(*v)
+	}
+	return _u
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (_u *NotificationUpdateOne) SetNextAttemptAt(v time.Time) *NotificationUpdateOne {
+	_u.mutation.SetNextAttemptAt(v)
+	return _u
+}
+
+// SetNillableNextAttemptAt sets the "next_attempt_at" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableNextAttemptAt(v *time.Time) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetNextAttemptAt(*v)
+	}
+	return _u
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (_u *NotificationUpdateOne) ClearNextAttemptAt() *NotificationUpdateOne {
+	_u.mutation.ClearNextAttemptAt()
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdateOne) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -619,6 +697,15 @@ func (_u *NotificationUpdateOne) sqlSave(ctx context.Context) (_node *Notificati
 	}
 	if value, ok := _u.mutation.DispatchOutcome(); ok {
 		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchReason(); ok {
+		_spec.SetField(notification.FieldDispatchReason, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.NextAttemptAt(); ok {
+		_spec.SetField(notification.FieldNextAttemptAt, field.TypeTime, value)
+	}
+	if _u.mutation.NextAttemptAtCleared() {
+		_spec.ClearField(notification.FieldNextAttemptAt, field.TypeTime)
 	}
 	_node = &Notification{config: _u.config}
 	_spec.Assign = _node.assignValues

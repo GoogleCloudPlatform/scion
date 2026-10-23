@@ -167,12 +167,15 @@ type HTTPAgentDispatcher struct {
 	agentEndpoint     string               // Optional override of hubEndpoint for SCION_HUB_ENDPOINT only
 	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
-	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
 	transportAudience string               // OIDC audience for transport tokens
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
 	debug             bool
 	log               *slog.Logger
+
+	// attachmentIssuer issues the attachment delivery capabilities of a
+	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
+	attachmentIssuer AttachmentIssuer
 
 	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
 	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
@@ -378,12 +381,6 @@ func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 // SetHubID sets the hub instance ID for hub-scoped queries.
 func (d *HTTPAgentDispatcher) SetHubID(id string) {
 	d.hubID = id
-}
-
-// SetDevAuthToken sets the dev auth token to inject into agent containers.
-// When set, agents receive SCION_DEV_TOKEN as a fallback authentication method.
-func (d *HTTPAgentDispatcher) SetDevAuthToken(token string) {
-	d.devAuthToken = token
 }
 
 // SetAuthzService sets the authorization service for progeny secret verification.
@@ -1285,15 +1282,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		)
 	}
 
-	// In dev-auth mode, inject the dev token so agents can use it as fallback auth
-	if d.devAuthToken != "" {
-		if req.ResolvedEnv == nil {
-			req.ResolvedEnv = make(map[string]string)
-		}
-		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
-		classifyEnv(&req.EnvClassifications, "SCION_DEV_TOKEN", api.EnvKindSecretInjected)
-	}
-
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
 	if d.transportMinter != nil && d.transportAudience != "" {
 		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
@@ -1445,6 +1433,17 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// reads agent-info.json from (ptone/scion#5113).
 	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
+}
+
+// dispatchProfile is the profile a start or restart sends: the agent's
+// recorded AppliedConfig.Profile, or "" when it has none. It is never nil,
+// so the broker always receives the hub's value.
+func dispatchProfile(agent *store.Agent) *string {
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return &profile
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -3490,26 +3489,34 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
-// (suspended → resume). It is DispatchAgentStartWithOptions with no options;
-// both call the synchronous dispatchAgentStart directly, so neither is a
-// guarded call site of the other.
+// (suspended → resume). It is DispatchAgentStartWithOptions with no options
+// (always synchronous); both call dispatchAgentStart directly, so neither is
+// a guarded call site of the other.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
-	return d.dispatchAgentStart(ctx, agent, task, resume)
+	_, err := d.dispatchAgentStart(ctx, agent, task, resume, StartDispatchOptions{})
+	return err
 }
 
 // DispatchAgentStartWithOptions is DispatchAgentStart with per-call options
-// (ptone/scion#4669). This release accepts opts but does not act on them:
-// the start is always synchronous and the result is nil. Asynchronous start
-// adds its branch here.
-func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, _ StartDispatchOptions) (*StartDispatchResult, error) {
-	return nil, d.dispatchAgentStart(ctx, agent, task, resume)
+// (ptone/scion#4669). With opts.Async, and when the dispatcher's own rules
+// hold (asyncStartEligible), the start is sent as an asynchronous launch of
+// opts.Kind; a broker that accepts it is returned as the result's Launch,
+// and the launch's end settles the start. Otherwise the start is
+// synchronous and the result is nil.
+func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
+	return d.dispatchAgentStart(ctx, agent, task, resume, opts)
 }
 
-// dispatchAgentStart is the synchronous start dispatch behind
-// DispatchAgentStart and DispatchAgentStartWithOptions.
-func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
+// dispatchAgentStart is the start dispatch behind DispatchAgentStart and
+// DispatchAgentStartWithOptions. The result is non-nil only for a start a
+// broker accepted as an asynchronous launch (here or on the owner node).
+func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
+	// The broker reads the hub's agent ID (api.AgentIDQueryParam) on every
+	// start: its asynchronous branch needs it for the launch reports and
+	// for a stop's agent match. An older broker ignores it.
+	ctx = withDispatchAgentID(ctx, agent.ID)
 	span.SetAttributes(
 		attribute.String("scion.agent.id", agent.ID),
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
@@ -3520,7 +3527,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// caller.
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	// Standing guard (ptone/scion#3433): no broker call for an agent that
@@ -3528,25 +3535,25 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// launch guard below.
 	if err := d.dispatchStandingError(ctx, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	// Start guard: no broker call
 	// while a create launch is in flight, or after one did not complete.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
@@ -3554,7 +3561,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// complete report says is not mapped on the agent's profile.
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	// Capture the phase and launch-error this dispatch found the agent in,
@@ -3583,7 +3590,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", mintSiteStart)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
@@ -3672,6 +3679,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		inlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
 	}
+	// A broker that does not re-render provision-rendered keys at start
+	// (no changedFields capability) starts with their previous files: say
+	// so in the start response (ptone/scion#3982).
+	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
 
 	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
@@ -3704,6 +3715,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
@@ -3714,17 +3726,81 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		// Nothing was sent: the claim releases the start (errStartRunNotBegun).
-		return fmt.Errorf("%w: %w", errStartRunNotBegun, err)
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
 	issued = token != ""
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
-	if isHashMismatchError(err) {
-		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
+	// send is one start send, including the hash-mismatch repair and
+	// resend, so one asynchronous launch spans both attempts (design L7).
+	// A non-nil f adds the launch fields.
+	send := func(ctx context.Context, f *launchFields) (*RemoteAgentResponse, error) {
+		ex := extras
+		if f != nil {
+			ex.AsyncLaunch = true
+			ex.LaunchID = f.LaunchID
+			ex.LaunchTimeoutSeconds = f.TimeoutSeconds
+			ex.LaunchKeepaliveSeconds = f.KeepaliveSeconds
 		}
+		resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+		if isHashMismatchError(err) {
+			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+				if f != nil {
+					// The repair took time: send the budget left now.
+					ex.LaunchTimeoutSeconds = f.remaining()
+				}
+				resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
+			}
+		}
+		return resp, err
+	}
+
+	var resp *RemoteAgentResponse
+	var accepted *LaunchAccepted
+	launchID, settings, began, err := d.beginStartLaunch(ctx, agent, endpoint, opts, revokeEligible && issued)
+	switch {
+	case err != nil:
+		// Nothing was sent (a delete holds the row, or the store failed):
+		// the claim releases the start (errStartRunNotBegun), as for a run
+		// that could not be begun, and the run this call minted is reverted,
+		// as for a hand-off before any send. A delete-held row
+		// (ErrLaunchInvalidPhase wrapping store.ErrDeleteInProgress) is
+		// released for the claim (startOutcomeOf), and startDidNotHappen
+		// never counts it as not happened: the delete engine owns its intent.
+		// The minted run never launched, so it is reverted even under a
+		// delete hold (a compare-and-swap back to the previous run), so the
+		// row does not keep a run the runtime never held; a delete that
+		// already claimed sends its own snapshot's run ID.
+		d.revertRun(ctx, agent, runID, previousRunID)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
+	case launchID != "":
+		resp, _, accepted, err = d.sendLaunching(ctx, agent, launchID, settings, began, "Agent start accepted for async launch",
+			func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				r, e := send(ctx, &f)
+				return r, nil, e
+			})
+		if errors.Is(err, ErrLifecycleDeferred) {
+			// The client deferred although the route check did not
+			// predict it: end this node's launch before handing off, so
+			// an owner that runs the start synchronously leaves no
+			// launch for the reaper to fail.
+			d.endLaunchNotLaunched(ctx, agent, launchID)
+		}
+	default:
+		resp, err = send(ctx, nil)
+	}
+	if accepted != nil {
+		// The broker accepted the start as an asynchronous launch (or its
+		// outcome is unknown and the launch is kept, ptone/scion#4866):
+		// the launch's end reports the start. The revoke decision is the
+		// launch's (launch_revoke_on_fail), so this call's defer is
+		// disarmed; the run is adopted from the launch's succeeded report
+		// (settleLaunchedRun), not here.
+		revokeEligible = false
+		d.applyAcceptedLaunchResponse(ctx, agent, resp)
+		return &StartDispatchResult{Launch: accepted}, nil
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// Cross-node hand-off: the owning node dispatches its own
@@ -3743,10 +3819,18 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		revokeEligible = false
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
-		return d.deferredStart(ctx, agent, &StartDispatchArgs{
+		args := &StartDispatchArgs{
 			Task:   task,
 			Resume: resume,
-		})
+		}
+		if opts.Async {
+			// The owner applies its own dispatcher rules; the requester
+			// checked the experiment, the hub nodes and the phase.
+			args.Async = true
+			args.Kind = opts.launchKind()
+			args.PriorPhase = opts.PriorPhase
+		}
+		return d.deferredStart(ctx, agent, args)
 	}
 	if err != nil && !isConfirmedStartNotActedOnError(err) {
 		// The failure does not fall into one of the known-safe cases (the
@@ -3763,7 +3847,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	if resp != nil {
@@ -3774,7 +3858,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// recorded target is stale all the same.
 		d.forgetRuntimeTarget(ctx, agent)
 	}
-	return nil
+	return nil, nil
 }
 
 // dispatchTemplateIdentity returns the agent's Hub template ID and content
@@ -3906,6 +3990,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ResolvedSecrets:      startEnv.secrets,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	if agent.AppliedConfig != nil {
 		extras.HarnessConfig = agent.AppliedConfig.HarnessConfig
 		extras.HarnessConfigID = agent.AppliedConfig.HarnessConfigID
@@ -4140,6 +4225,18 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 	return nil
 }
 
+// AttachmentIssuer issues the download capabilities of a message's attachment
+// plan for one dispatch attempt to recipient on broker brokerID
+// (ptone/scion#4596). The hub's attachmentDelivery implements it.
+type AttachmentIssuer interface {
+	Issue(ctx context.Context, recipient *store.Agent, brokerID string, plan []messages.AttachmentPlanEntry) []messages.WireAttachment
+}
+
+// SetAttachmentIssuer installs the attachment capability issuer.
+func (d *HTTPAgentDispatcher) SetAttachmentIssuer(i AttachmentIssuer) {
+	d.attachmentIssuer = i
+}
+
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -4151,6 +4248,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
+
+	// Fresh capabilities on every attempt, retries included, from the plan
+	// the render site stored on the message (ptone/scion#4596).
+	// Under the legacy envelope (no rendered text) the plan is applied to
+	// the copy sent, never to the caller's message.
+	structuredMsg = legacyAttachmentCopy(structuredMsg)
+	if d.attachmentIssuer != nil && structuredMsg != nil && len(structuredMsg.AttachmentPlan) > 0 {
+		ctx = withDispatchAttachments(ctx, d.attachmentIssuer.Issue(ctx, agent, agent.RuntimeBrokerID, structuredMsg.AttachmentPlan))
+		if r, ok := d.attachmentIssuer.(interface{ InboxRetentionDays() int }); ok {
+			ctx = withDispatchRetention(ctx, r.InboxRetentionDays())
+		}
+	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -4370,9 +4479,20 @@ func isStopTerminal(phase string) bool {
 // deferredStart handles a cross-node agent start: subscribe → write intent →
 // signal → wait for the terminal phase. Called when client.StartAgent returns
 // ErrLifecycleDeferred (broker not locally connected).
-func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) error {
-	err := d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
-	return d.deferredLaunchGuardError(ctx, agent, "deferredStart", err)
+//
+// When the owner accepted the start as an asynchronous launch, its row's
+// result carries the launch and it is returned (ptone/scion#4669); the
+// wait ended on the row, not on the agent's phase. A wait that ended on
+// the phase, or an owner that ran the start synchronously, returns nil.
+func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) (*StartDispatchResult, error) {
+	res, err := d.deferredLifecycleResult(ctx, agent, "start", args, isStartTerminal)
+	if err := d.deferredLaunchGuardError(ctx, agent, "deferredStart", err); err != nil {
+		return nil, err
+	}
+	if res.Launch != nil {
+		return &StartDispatchResult{Launch: res.Launch}, nil
+	}
+	return nil, nil
 }
 
 // deferredStop handles a cross-node agent stop.
@@ -4564,8 +4684,23 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	args interface{},
 	terminal func(string) bool,
 ) error {
+	_, err := d.deferredLifecycleResult(ctx, agent, op, args, terminal)
+	return err
+}
+
+// deferredLifecycleResult is deferredLifecycle that also returns the done
+// row's decoded result (zero when the wait ended before the row was done,
+// or on error).
+func (d *HTTPAgentDispatcher) deferredLifecycleResult(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+	terminal func(string) bool,
+) (LifecycleDispatchResult, error) {
+	var none LifecycleDispatchResult
 	if d.events == nil || d.commandBus == nil {
-		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+		return none, fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
 	}
 
 	dispatchID := uuid.NewString()
@@ -4577,7 +4712,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	argsJSON, err := MarshalDispatchArgs(args)
 	if err != nil {
 		unsub()
-		return fmt.Errorf("marshal dispatch args: %w", err)
+		return none, fmt.Errorf("marshal dispatch args: %w", err)
 	}
 
 	dispatch := &store.BrokerDispatch{
@@ -4592,7 +4727,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	setBrokerDispatchInitiator(ctx, dispatch)
 	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
 		unsub()
-		return fmt.Errorf("insert dispatch intent: %w", err)
+		return none, fmt.Errorf("insert dispatch intent: %w", err)
 	}
 	if rec := d.dispatchMetrics; rec != nil {
 		rec.IncPublished(ctx, 1, attribute.String("op", op))
@@ -4607,7 +4742,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 
 	// 4. Wait for the outcome.
 	if err := waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal); err != nil {
-		return err
+		return none, err
 	}
 	// 5. Carry the owner's dispatch warnings into this request's collector
 	//    (ptone/scion#3456), so a 409 delete_in_progress reports the outcome
@@ -4615,9 +4750,11 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	//    ended on the success phase before the owner finished the row finds
 	//    no result yet.
 	if row, err := d.store.GetBrokerDispatch(ctx, dispatchID); err == nil && row.State == store.DispatchStateDone {
-		addDispatchWarnings(ctx, decodeLifecycleResult(row.Result).Warnings...)
+		res := decodeLifecycleResult(row.Result)
+		addDispatchWarnings(ctx, res.Warnings...)
+		return res, nil
 	}
-	return nil
+	return none, nil
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

@@ -141,16 +141,69 @@ func chatSendPath(key string) string {
 	return "/api/v1/chat/conversations/" + key + "/messages"
 }
 
+// chatPostAction is the project action a user's account needs to post
+// into the chat threads of a project (ptone/scion#5518). Read access to
+// the project reads its threads; it does not post in them. These chat
+// writes do not check it yet: thread create; thread rename, default-agent
+// change and delete; project attachment upload; message edit and delete;
+// thread posts sent through the agent message endpoint's thread key. They
+// are tracked in ptone/scion#5519.
+const chatPostAction = ActionChatPost
+
+// chatSendPostDenied is the refusal for a sender who may read a thread
+// but may not post in it. It is a 403, not "Thread not found": the
+// sender can already see the thread.
+func chatSendPostDenied() *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
+		"You can read this thread but not post in it", map[string]interface{}{
+			"resource_type": "project",
+			"denied_action": string(chatPostAction),
+		})
+}
+
+// chatPostIdentity is the identity whose account decides chatPostAction:
+// the holder of a user access token, the caller otherwise. A token keeps
+// needing only inbox:write for a send; the post permission is a property
+// of the account the token acts for, so it is checked on that account and
+// never widens what the token may do. The project:chat_post selector does
+// not change this: it only keeps project.chat_post in the token's ceiling,
+// so the token can delegate roles that include it.
+func chatPostIdentity(user UserIdentity) UserIdentity {
+	if scoped, ok := user.(*ScopedUserIdentity); ok && scoped != nil && scoped.UserIdentity != nil {
+		return scoped.UserIdentity
+	}
+	return user
+}
+
+// chatMayPost decides whether user's account may post into the chat
+// threads of project.
+func (s *Server) chatMayPost(ctx context.Context, user UserIdentity, project *store.Project) Decision {
+	return s.authzService.CheckAccess(ctx, chatPostIdentity(user), projectResource(project), chatPostAction)
+}
+
 // authorizeChatSend runs the conversation access checks of a chat send:
 // for a DM, a well-formed key naming the sender as a participant; for a
-// topic, an existing topic whose current project exists and grants the
-// sender read access. It needs no request, so every caller of
-// sendChatMessage runs the same checks.
+// topic, an existing topic whose current project exists, grants the
+// sender read access and lets the sender's account post (chatMayPost).
+// It needs no request, so every caller of sendChatMessage runs the same
+// checks.
 //
 // A sender who may not use the conversation gets the same answer as for a
 // conversation that does not exist ("Thread not found"); the reason is
-// written to the server log only.
+// written to the server log only. A sender who may read a topic but not
+// post in it gets 403 chat_post_denied.
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, true)
+}
+
+// authorizeChatSendRead runs the checks of authorizeChatSend without the
+// post check, for routes that act only on the sender's own rows of a
+// conversation it can read (listing its scheduled messages).
+func (s *Server) authorizeChatSendRead(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, false)
+}
+
+func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentity, key string, requirePost bool) (*chatSendTarget, *chatSendError) {
 	if user == nil {
 		return nil, chatSendForbidden()
 	}
@@ -201,6 +254,13 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		}
 		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
 		return nil, chatSendRefusedAsNotFound("Thread")
+	}
+	if requirePost {
+		if post := s.chatMayPost(ctx, user, project); !post.Allowed {
+			logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+			logAuthzDenial(logReq, user, resource, chatPostAction, post.Reason)
+			return nil, chatSendPostDenied()
+		}
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
@@ -379,13 +439,20 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
-		// Only a caller the artifact service lets read attachments (a
-		// session) may name one; any other caller's id is looked up in the
-		// AttachmentStore only, so an artifact id gets the answer of an
-		// unknown one (user access tokens: ptone/scion#4596).
+		// Only a caller attachmentWriterKind admits may name one; any other
+		// caller's id is looked up in the AttachmentStore only, so an
+		// artifact id gets the answer of an unknown one.
 		var svc *artifacts.Service
-		if s.attachmentArtifactsReady() && s.attachmentCallerIsSession(ctx) {
+		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
 			svc = s.attachmentService()
+		}
+		// A user access token names its uploads only where it may post
+		// (chatTokenMaySend, ptone/scion#4596 section 9); otherwise its ids
+		// get the answer of an unknown one.
+		if token := chatToken(ctx); svc != nil && token != nil {
+			if allowed, err := s.chatTokenMaySend(ctx, token, target.Key, target.ProjectID); err != nil || !allowed {
+				svc = nil
+			}
 		}
 		for _, aid := range in.Attachments {
 			// An attachment stored as an artifact (ptone/scion#4595) is
@@ -411,9 +478,7 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 				}
 				if state == artifacts.AttachmentUsable {
-					attachmentRefs = append(attachmentRefs, AttachmentRef{
-						ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true,
-					})
+					attachmentRefs = append(attachmentRefs, newArtifactAttachmentRef(info))
 					continue
 				}
 			}
@@ -439,6 +504,12 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 				Size:     meta.Size,
 			})
 		}
+	}
+	// Delivery writes the attachments of one message into one directory
+	// under their names, so two attachments may not share a name, artifact
+	// and AttachmentStore ones alike (ptone/scion#4596).
+	if msg := duplicateAttachmentRefusal(attachmentRefs); msg != "" {
+		return "", nil, chatSendValidationError(msg)
 	}
 	return content, attachmentRefs, nil
 }
@@ -607,6 +678,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
+		// The send reaches agents: its attachments stored as artifacts must
+		// fit the delivery budget (ptone/scion#4596).
+		if msg := s.checkAttachmentDeliveryBudget(attachmentRefs); msg != "" {
+			return nil, chatSendValidationError(msg)
+		}
 		// DM registration happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,

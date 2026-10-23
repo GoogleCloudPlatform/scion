@@ -200,6 +200,7 @@ func attachAutoProvideBroker(t *testing.T, f *projectAgentAuthzFixture) {
 		ProjectID:  f.project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	f.project.DefaultRuntimeBrokerID = broker.ID
@@ -1013,17 +1014,40 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
+	// The broker has the hub-managed workspace at a local path (a
+	// co-located broker): since ptone/scion#5813 a remote broker that cannot reach the hub's
+	// workspace storage is refused with 409. Tests of that
+	// refusal, and of the CLI workspace bootstrap, clear it
+	// (clearCreateAgentProviderPath).
+	localPath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
+		LocalPath:  localPath,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 	return project
+}
+
+// clearCreateAgentProviderPath makes the setupCreateAgentServer broker a
+// remote broker without a local path for project: the topology of the CLI
+// workspace bootstrap and of the remote-broker refusal.
+func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	provider.LocalPath = ""
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
+	got, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	require.Empty(t, got.LocalPath, "fixture check: the provider must have no local path")
 }
 
 // postAgentStatusAsAgent POSTs a status update for agent using an agent
@@ -3382,10 +3406,14 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
@@ -3938,6 +3966,15 @@ type projectAgentAuthzFixture struct {
 func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return projectAgentAuthzSetupOn(t, srv, s)
+}
+
+// projectAgentAuthzSetupOn builds the projectAgentAuthzFixture on an existing
+// server and its raw store. Tests that need a store fault wrapper call
+// installStoreFault on srv first, so the wrapper is in place before any
+// audited setup step reads srv.store.
+func projectAgentAuthzSetupOn(t *testing.T, srv *Server, s store.Store) *projectAgentAuthzFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &projectAgentAuthzFixture{srv: srv, store: s}
 
