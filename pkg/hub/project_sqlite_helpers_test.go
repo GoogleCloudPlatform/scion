@@ -827,11 +827,22 @@ server:
 	return hostBase
 }
 
-// useNFSSharedDirStorage gives srv a server.project_storage nfs block on the
-// share setNFSSharedDirStorageGlobalSettings wrote, the way the hub holds it
-// after resolving its server config at startup: the shared-dir browser reads
-// only the in-memory ServerConfig, never the settings file per request.
+// useNFSSharedDirStorage gives srv the storage configuration a hub with
+// only the server.shared_dir_storage nfs block (the one
+// setNFSSharedDirStorageGlobalSettings writes) resolves to at startup: the
+// transitional split, with shared dirs on that export and workspaces on the
+// local backend (config.SynthesizeProjectStorage). The shared-dir browser
+// reads only this in-memory ServerConfig, never the settings file per
+// request.
 func useNFSSharedDirStorage(srv *Server, hostBase string) {
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
+		LegacySharedDirsNFS: nfsSharedDirStorageTestConfig(hostBase).NFS,
+	}
+}
+
+// useNFSProjectStorage gives srv a server.project_storage nfs block on the
+// same share: workspaces and shared dirs both on the export.
+func useNFSProjectStorage(srv *Server, hostBase string) {
 	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS:     nfsSharedDirStorageTestConfig(hostBase).NFS,

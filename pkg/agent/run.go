@@ -1895,7 +1895,7 @@ authDone:
 			}
 			slog.Warn("Start: failed to load global settings; no shared-dir storage key was found in the raw file, proceeding with the local shared-dir layout",
 				"error", gErr)
-		} else if key := config.MentionedSharedDirPlacementKey(config.GlobalSettingsMentions); globalSettings != nil &&
+		} else if key := config.GlobalSettingsStorageKey(config.SharedDirPlacementKeys); globalSettings != nil &&
 			!globalSettings.Server.HasSharedDirPlacementBlock() && config.GlobalSettingsIsLegacyFormat() && key != "" {
 			// Round 4 review finding S-L1: a legacy-format global
 			// settings.yaml (no schema_version) is converted with its

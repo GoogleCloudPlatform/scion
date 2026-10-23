@@ -305,6 +305,14 @@ scion shared-dir info <name>
 scion shared-dir remove <name>
 ```
 
+### Removing a Shared Directory
+
+Removing a shared directory deletes its data:
+
+- **On a shared backend** (`server.project_storage.backend` `nfs`, `cloudrun-volume` or `gke-shared-volume`): removing the declaration through the Hub (Web UI or API) deletes the directory and everything in it from the shared export or volume, which every agent of the project mounts.
+- **On the local backend**: unchanged. The directory on the Hub host or the co-located broker is deleted, as before.
+- **The `scratchpad` directory** cannot be removed while the Hub's project default `default_scratchpad` is on. The request is refused with `409`.
+
 ### When the Backing Directory Is Created
 
 Creating a shared directory and creating its backing directory on disk are separate steps:

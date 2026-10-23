@@ -68,6 +68,7 @@ func (s *Server) workspaceStorageDescriptor() *api.BrokerWorkspaceStorage {
 	desc := BuildWorkspaceStorageDescriptor(s.config.WorkspaceStorageBackend, s.config.NFSConfig, s.nfsShareHealthy)
 	desc.Homes = StorageHomes(s.config.StorageLayout)
 	desc.Volume = StorageVolume(s.config.StorageLayout)
+	desc.SharedDirs = projectfs.SharedDirsPlacement(s.config.StorageLayout)
 	if desc.NFS != nil && desc.NFS.Healthy {
 		if dir, err := exportIDMarkerDir(s.config.NFSConfig); err == nil {
 			desc.NFS.ExportID = s.exportIDs.get(dir, exportIDReadTimeout)

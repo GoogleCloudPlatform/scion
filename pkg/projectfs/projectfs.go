@@ -564,3 +564,16 @@ func LocalConfigDirName(slug, projectID string) string {
 	}
 	return fmt.Sprintf("%s__%s", slug, short)
 }
+
+// Key is a value identity of l, stable across calls and copies: two Layouts
+// with the same fields (and the same transitional SharedDirs split, by
+// value) have the same Key. Use it, not fmt's %v of the struct, as a cache
+// key: SharedDirs is a pointer.
+func (l Layout) Key() string {
+	k := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%d|%s",
+		l.Backend, l.HostBase, l.SubPathRoot, l.Share.ID, l.Share.Server, l.Share.Export, l.Share.PVName, l.UID, l.GID, l.Homes)
+	if l.SharedDirs != nil {
+		k += "|sd{" + l.SharedDirs.Key() + "}"
+	}
+	return k
+}

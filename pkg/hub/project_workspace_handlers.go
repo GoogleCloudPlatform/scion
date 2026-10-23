@@ -1321,12 +1321,10 @@ var errSharedDirNotDeclared = errors.New("shared directory is not declared on th
 // through the layout authority (pkg/projectfs) on the Layout from
 // sharedDirLayout.
 //
-// On a shared (nfs) Layout the shared dir is the one agents mount:
+// On a shared Layout the shared dir is the one agents mount, on every
+// runtime that can mount the shared tree:
 // <subpath_root>/<project UUID>/shared-dirs/<name>, for every project,
-// whether or not it has a co-located broker (design Q1, applied exactly).
-// Known gap until P3 (findings D9): a co-located Docker broker with only
-// server.workspace_storage nfs still keeps its agents' shared dirs on its
-// node's local disk.
+// whether or not it has a co-located broker.
 //
 // On the local Layout the path is today's slug-keyed layout: for a git
 // project with a co-located provider that has a LocalPath, the project's own

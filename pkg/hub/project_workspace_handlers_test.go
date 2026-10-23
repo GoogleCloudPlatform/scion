@@ -1192,10 +1192,8 @@ func TestSharedDirFilesNFS_MissingLeaf_ListReturnsEmptyNotFoundNothingCreated(t 
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.Files)
 
-	// The project's tree exists on the export (one storage backend places
-	// its workspace there too); the shared-dir chain must not.
-	_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs"))
-	assert.True(t, os.IsNotExist(statErr), "listing a missing leaf must not create anything of the shared-dir chain")
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
+	assert.True(t, os.IsNotExist(statErr), "listing a missing leaf must not create anything, not even the projects root")
 }
 
 // TestSharedDirFilesNFS_MissingLeaf_DownloadReturnsNotFoundNothingCreated:
@@ -1212,7 +1210,7 @@ func TestSharedDirFilesNFS_MissingLeaf_DownloadReturnsNotFoundNothingCreated(t *
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs"))
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
 	assert.True(t, os.IsNotExist(statErr), "downloading from a missing leaf must not create anything")
 }
 
@@ -1231,7 +1229,7 @@ func TestSharedDirFilesNFS_MissingLeaf_DeleteReturnsNotFoundNothingCreated(t *te
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files/note.txt", project.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs"))
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
 	assert.True(t, os.IsNotExist(statErr), "deleting from a missing leaf must not create anything")
 }
 
@@ -1250,7 +1248,7 @@ func TestSharedDirFilesNFS_MissingLeaf_ArchiveReturnsNotFoundNothingCreated(t *t
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/archive", project.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	_, statErr := os.Stat(filepath.Join(hostBase, "projects", project.ID, "shared-dirs"))
+	_, statErr := os.Stat(filepath.Join(hostBase, "projects"))
 	assert.True(t, os.IsNotExist(statErr), "archiving a missing leaf must not create anything")
 }
 

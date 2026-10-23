@@ -72,9 +72,11 @@ type SharedDirHostPath struct {
 // the same path checks, in the same order (name and project ID
 // validation, Resolve with ConfineLeaf, ValidateNotExportRoot, host-base
 // stat refusal, EvalSymlinks of the host base, EnsureLeaf, then the
-// resolved-path backstop). A change to either chain must be made to both;
-// TestSharedDirChainsParity in pkg/agent runs one table of refusals
-// through both.
+// resolved-path backstop), except that agent start on Kubernetes may leave
+// an unmounted or permission-refused nfs workspace-export leaf to the node
+// (see resolveSharedDirs); this chain always refuses. A change to either
+// chain must be made to both; TestSharedDirChainsParity in pkg/agent runs
+// one table of refusals through both.
 //
 // Limits, compared with agent start (which this does not replace): plugins
 // run out of process, so they never see the hub settings DB overlay; only
@@ -173,7 +175,7 @@ func LoadSharedDirStorageSettings() (*config.VersionedSettings, error) {
 		return nil, nil
 	}
 	if gs != nil && !gs.Server.HasSharedDirPlacementBlock() && config.GlobalSettingsIsLegacyFormat() {
-		if key := config.MentionedSharedDirPlacementKey(config.GlobalSettingsMentions); key != "" {
+		if key := config.GlobalSettingsStorageKey(config.SharedDirPlacementKeys); key != "" {
 			return nil, fmt.Errorf(
 				"%w: global settings mention server.%s but it was not loaded (missing schema_version: \"1\"?)",
 				ErrSharedDirStorageUnavailable, key)

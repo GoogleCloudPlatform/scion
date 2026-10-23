@@ -77,6 +77,7 @@ func TestSharedDirStorage_DockerAndK8s_SameLayout(t *testing.T) {
 		},
 		SharedDirs: dirs,
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   projectID,
 			Backend:     "nfs",
 			PVClaimName: sdCfg.NFS.Shares[0].PVName,
 			SubPaths: map[string]string{
@@ -135,6 +136,7 @@ func TestCreateSharedDirPVCs_SharedDirStorageNFS_SkipsPVCCreation(t *testing.T) 
 			"scion.project": "myproject",
 		},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "pid",
 			Backend:     "nfs",
 			PVClaimName: "scion-shared",
 			SubPaths:    map[string]string{"build-cache": "projects/pid/shared-dirs/build-cache"},
@@ -164,6 +166,7 @@ func TestBuildPod_SharedDirStorageNFS_EmptyPVClaimName_FailsClosed(t *testing.T)
 		Labels:       map[string]string{"scion.project": "myproject"},
 		SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "pid",
 			Backend:     "nfs",
 			PVClaimName: "", // misconfigured: pv_name missing
 			SubPaths:    map[string]string{"scratchpad": "projects/pid/shared-dirs/scratchpad"},
@@ -215,6 +218,7 @@ func TestBuildPod_SharedDirStorageNFS_PrecedesWorkspaceStorageNFS(t *testing.T) 
 		Labels:               map[string]string{"scion.project": "myproject"},
 		SharedDirs:           []api.SharedDir{{Name: "scratchpad"}},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "pid-999",
 			Backend:     "nfs",
 			PVClaimName: "scion-shared",
 			SubPaths:    map[string]string{"scratchpad": "projects/pid-999/shared-dirs/scratchpad"},
@@ -286,6 +290,7 @@ func TestBuildPod_SharedDirStorageNFS_PerDirDetails(t *testing.T) {
 			{Name: "b", InWorkspace: true},
 		},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "pid-1",
 			Backend:     "nfs",
 			PVClaimName: "scion-shared",
 			SubPaths: map[string]string{
@@ -339,6 +344,7 @@ func TestBuildPod_SharedDirStorageNFS_PerDirDetails(t *testing.T) {
 func TestBuildCommonRunArgs_SharedDirStorageNFS_DoesNotAffectHostUID(t *testing.T) {
 	cfg := minimalRunConfig()
 	cfg.SharedDirStorage = &SharedDirRealization{
+		ProjectID:   "pid-1",
 		Backend:     "nfs",
 		PVClaimName: "scion-shared",
 		SubPaths:    map[string]string{"scratchpad": "projects/pid-1/shared-dirs/scratchpad"},

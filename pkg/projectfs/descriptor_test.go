@@ -33,6 +33,9 @@ func TestLayoutDescriptorDiff(t *testing.T) {
 	homesNFS := hub
 	homesNFS.Homes = BackendNFS
 	gke := Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects", Share: Share{ID: "v", PVName: "claim"}}
+	splitHub := gke
+	splitHub.SharedDirs = &Layout{Backend: BackendLocal}
+	localNFSSplit := Layout{Backend: BackendLocal, SharedDirs: &Layout{Backend: BackendNFS, HostBase: "/mnt/sd/s"}}
 
 	tests := []struct {
 		name     string
@@ -67,6 +70,15 @@ func TestLayoutDescriptorDiff(t *testing.T) {
 			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local", Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "other", SubPathRoot: "team"}}
 		}, "", []string{`subpath_root: hub "projects", broker "team"`, `volume claim: hub "claim", broker "other"`}},
 		{"volume backend differs", gke, func() *api.BrokerWorkspaceStorage { return &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local"} }, "", []string{`backend: hub "gke-shared-volume", broker "nfs"`}},
+		{"shared-dir split differs", splitHub, func() *api.BrokerWorkspaceStorage {
+			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local", Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "claim", SubPathRoot: "projects"}}
+		}, "", []string{`shared dirs: hub "local", broker with the workspace`}},
+		{"shared-dir split agrees", splitHub, func() *api.BrokerWorkspaceStorage {
+			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local", SharedDirs: "local", Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "claim", SubPathRoot: "projects"}}
+		}, "", nil},
+		{"local hub with an nfs shared-dir split compares placement", localNFSSplit, func() *api.BrokerWorkspaceStorage {
+			return &api.BrokerWorkspaceStorage{Backend: "local", Homes: "local"}
+		}, "", []string{`shared dirs: hub "nfs", broker with the workspace`}},
 		{"several", hub, func() *api.BrokerWorkspaceStorage {
 			d := match()
 			d.NFS.Server, d.Homes = "x", "nfs"

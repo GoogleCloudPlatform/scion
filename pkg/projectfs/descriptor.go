@@ -44,7 +44,7 @@ func homesOrLocal(b Backend) Backend {
 // gke-shared-volume, the claim. Share IDs, mount roots and volume names are
 // host-local naming and are not compared; nor is share health.
 func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string) []string {
-	if !l.Backend.Shared() {
+	if !l.Backend.Shared() && l.SharedDirs == nil {
 		return nil
 	}
 	if d == nil {
@@ -86,6 +86,9 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 			}
 		}
 	}
+	if hubSD := SharedDirsPlacement(l); hubSD != d.SharedDirs {
+		diff = append(diff, fmt.Sprintf("shared dirs: hub %s, broker %s", placementLabel(hubSD), placementLabel(d.SharedDirs)))
+	}
 	hubHomes := homesOrLocal(l.Homes)
 	switch {
 	case d.Homes == "":
@@ -96,4 +99,21 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 		diff = append(diff, fmt.Sprintf("homes: hub %q, broker %q", hubHomes, d.Homes))
 	}
 	return diff
+}
+
+// SharedDirsPlacement is the shared-dir placement a broker reports for l
+// (api.BrokerWorkspaceStorage.SharedDirs): the transitional split's backend,
+// or "" when shared dirs are with the workspace.
+func SharedDirsPlacement(l Layout) string {
+	if l.SharedDirs == nil {
+		return ""
+	}
+	return string(l.SharedDirs.Backend)
+}
+
+func placementLabel(p string) string {
+	if p == "" {
+		return "with the workspace"
+	}
+	return fmt.Sprintf("%q", p)
 }

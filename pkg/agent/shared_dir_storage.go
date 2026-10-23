@@ -32,6 +32,28 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
+// sharedDirsNotSharedMessage is the dispatch warning of a start whose
+// runtime cannot mount the shared tree while the project's shared dirs are
+// on a shared backend: the agent gets node-local shared dirs (a runtime
+// capability gap, tracked in ptone/scion#5926), so it does not see what the
+// hub or other agents put there.
+const sharedDirsNotSharedMessage = "Warning: shared directories are not shared on this runtime; files uploaded through the hub or written by other agents are not visible here"
+
+// sharedDirsNotSharedWarning returns sharedDirsNotSharedMessage for a start
+// with shared dirs on a shared backend whose runtime type cannot mount the
+// shared tree (it is neither a local-container nor a Kubernetes runtime),
+// and "" otherwise. The legacy split is refused by resolveSharedDirs
+// instead.
+func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeName string, dirs []api.SharedDir) string {
+	if len(dirs) == 0 || split || !sdLayout.Backend.Shared() {
+		return ""
+	}
+	if isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) {
+		return ""
+	}
+	return sharedDirsNotSharedMessage
+}
+
 // resolveSharedDirs is the single resolution point for a project's shared
 // directories, for every runtime (design fs-cleanup §P2, one backend for workspaces and shared dirs): sdLayout is
 // the broker's shared-dir Layout (config.SharedDirStorageLayout over the
@@ -60,31 +82,15 @@ import (
 // directories: both apply the same path checks, in the same order (name
 // and project ID validation, Resolve with ConfineLeaf,
 // ValidateNotExportRoot, host-base stat refusal, EvalSymlinks of the host
-// base, EnsureLeaf, then the resolved-path backstop). A change to either
-// chain must be made to both; TestSharedDirChainsParity runs one table of
-// refusals through both.
-// sharedDirsNotSharedMessage is the dispatch warning of a start whose
-// runtime cannot mount the shared tree while the project's shared dirs are
-// on a shared backend: the agent gets node-local shared dirs (a runtime
-// capability gap, tracked in ptone/scion#5926), so it does not see what the
-// hub or other agents put there.
-const sharedDirsNotSharedMessage = "Warning: shared directories are not shared on this runtime; files uploaded through the hub or written by other agents are not visible here"
-
-// sharedDirsNotSharedWarning returns sharedDirsNotSharedMessage for a start
-// with shared dirs on a shared backend whose runtime type cannot mount the
-// shared tree (it is neither a local-container nor a Kubernetes runtime),
-// and "" otherwise. The legacy split is refused by resolveSharedDirs
-// instead.
-func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeName string, dirs []api.SharedDir) string {
-	if len(dirs) == 0 || split || !sdLayout.Backend.Shared() {
-		return ""
-	}
-	if isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) {
-		return ""
-	}
-	return sharedDirsNotSharedMessage
-}
-
+// base, EnsureLeaf, then the resolved-path backstop). One deliberate
+// difference: on Kubernetes, when the shared dirs ride the nfs workspace
+// export (no split), a host base this broker has not mounted, or a walk
+// refused with EACCES/EPERM/EROFS, skips EnsureLeaf, the backstop and the
+// leaf-group read for that start (kubeletMayCreateSharedDirs, as
+// ensureNFSWorkspaceLeaf does for the workspace); the pod then mounts only
+// the leaf by the subPath sharedDirClaimSubPath checks. The plugin chain
+// always refuses. A change to either chain must be made to both;
+// TestSharedDirChainsParity runs one table of refusals through both.
 func resolveSharedDirs(
 	sdLayout projectfs.Layout,
 	split bool,

@@ -16,7 +16,10 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -280,9 +283,12 @@ func SynthesizeProjectStorage(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorage
 			return nil, nil, err
 		}
 		warnings = append(warnings, w...)
-	} else if sd == nil && (out.Backend == WorkspaceStorageBackendCloudRunVolume || out.Backend == WorkspaceStorageBackendGKESharedVolume) {
+	} else if (sd == nil || sd.Backend == "" || sd.Backend == WorkspaceStorageBackendLocal) &&
+		(out.Backend == WorkspaceStorageBackendCloudRunVolume || out.Backend == WorkspaceStorageBackendGKESharedVolume) {
+		// No shared_dir_storage, or an explicit local one: the shared dirs
+		// are not on the volume today, so they stay where they are.
 		out.LegacySharedDirsLocal = true
-		warnings = append(warnings, fmt.Sprintf("%s is not set and the workspace is on %s: shared dirs stay where they are today "+
+		warnings = append(warnings, fmt.Sprintf("%s is not set to nfs and the workspace is on %s: shared dirs stay where they are today "+
 			"(per-dir claims on Kubernetes) until %s is written. Writing it moves shared dirs onto the volume; "+
 			"the contents of the existing per-dir claims are NOT moved automatically (copy them first)",
 			sharedDirStorageKey, out.Backend, ProjectStorageKey))
@@ -345,6 +351,17 @@ func placeLegacySharedDirs(ps *V1ProjectStorageConfig, sd *V1SharedDirStorageCon
 			psLayout.Share.ID, psLayout.Share.Server, psLayout.Share.Export, psLayout.SubPathRoot,
 			sdLayout.Share.ID, sdLayout.Share.Server, sdLayout.Share.Export, sdLayout.SubPathRoot,
 			ProjectStorageKey)
+	}
+	if sdLayout.HostBase != psLayout.HostBase {
+		// One tree, named differently on this host: shared dirs are now
+		// reached through the workspace block's mount.
+		w := fmt.Sprintf("%s and %s name the same NFS tree but mount it differently on this host "+
+			"(shared dirs: %q, workspace: %q): shared dirs are now reached at the workspace block's mount, %q",
+			sharedDirStorageKey, workspaceStorageKey, sdLayout.HostBase, psLayout.HostBase, psLayout.HostBase)
+		if !filepath.IsAbs(psLayout.HostBase) {
+			w += fmt.Sprintf("; that path is not absolute (%s.nfs.mount_root is empty or relative), so shared dirs cannot be served from it until it is set", workspaceStorageKey)
+		}
+		return []string{w}, nil
 	}
 	return nil, nil
 }
@@ -551,9 +568,9 @@ func (s *V1ServerConfig) EffectiveHomeStorage() *V1HomeStorageConfig {
 // appear in a settings file.
 var storageSettingKeys = []string{"project_storage", "workspace_storage", "shared_dir_storage", "home_storage"}
 
-// CheckStorageBlocksLoaded fails closed when a legacy-format global
-// settings file (no schema_version "1") holds a storage block that the
-// loader did not carry into gc. Such a file plausibly configures storage,
+// CheckStorageBlocksLoaded fails closed when the global settings file
+// (content data; check false skips the check) holds a storage block that
+// the loader did not carry into gc. Such a file plausibly configures storage,
 // and running on the local backend instead would put project data on the
 // wrong disk. data is the file's content. A schema_version "1" file is
 // authoritative as loaded, so this check never applies to one, and neither
@@ -561,11 +578,11 @@ var storageSettingKeys = []string{"project_storage", "workspace_storage", "share
 // (shared_dir_storage_class) or a comment: keys are matched as parsed
 // mapping keys. A legacy file that does not parse at all is refused when its
 // bytes mention a storage key.
-func CheckStorageBlocksLoaded(gc *GlobalConfig, legacyFormat bool, data []byte) error {
+func CheckStorageBlocksLoaded(gc *GlobalConfig, check bool, data []byte) error {
 	if gc != nil && (gc.ProjectStorage != nil || gc.WorkspaceStorage != nil || gc.SharedDirStorage != nil || gc.HomeStorage != nil) {
 		return nil
 	}
-	if !legacyFormat || len(data) == 0 {
+	if !check || len(data) == 0 {
 		return nil
 	}
 	var doc interface{}
@@ -578,31 +595,60 @@ func CheckStorageBlocksLoaded(gc *GlobalConfig, legacyFormat bool, data []byte) 
 		return nil
 	}
 	if key := findMappingKey(doc, storageSettingKeys); key != "" {
-		return fmt.Errorf("the global settings file (legacy format, no schema_version \"1\") has a %s block that was not loaded; "+
-			"add schema_version: \"1\" and put the block under server:; refusing to fall back to the local backend", key)
+		return fmt.Errorf("the global settings file has a %s block that was not loaded; "+
+			"check that the file has schema_version: \"1\", that the block is under server: and that its fields decode; refusing to fall back to the local backend", key)
 	}
 	return nil
 }
 
 // CheckGlobalStorageBlocksLoaded is CheckStorageBlocksLoaded for the global
-// settings file of this process.
+// settings file of this process, for any file format: a parsed storage
+// block key whose block did not load refuses (for example a schema_version
+// "1" file whose server section failed typed decoding, or a legacy-format
+// file with a misplaced block). Comments and keys that only contain a
+// storage key's name never count.
 func CheckGlobalStorageBlocksLoaded(gc *GlobalConfig) error {
-	if !GlobalSettingsIsLegacyFormat() {
-		return nil
-	}
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return nil
-	}
-	path := GetSettingsPath(globalDir)
-	if path == "" {
-		return nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	data, ok := readGlobalSettingsFile()
+	if !ok {
 		return nil
 	}
 	return CheckStorageBlocksLoaded(gc, true, data)
+}
+
+// readGlobalSettingsFile returns the content of this process's global
+// settings file, or false when there is none or it cannot be read.
+func readGlobalSettingsFile() ([]byte, bool) {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return nil, false
+	}
+	path := GetSettingsPath(globalDir)
+	if path == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+// GlobalSettingsStorageKey returns the first of keys that the global
+// settings file holds as a parsed mapping key (anywhere in the document),
+// or "" when it holds none, cannot be read, or does not parse. Unlike
+// GlobalSettingsMentions it ignores comments and keys that only contain a
+// key's name (shared_dir_storage_class), so a loaded file with no storage
+// block never refuses because of one.
+func GlobalSettingsStorageKey(keys []string) string {
+	data, ok := readGlobalSettingsFile()
+	if !ok {
+		return ""
+	}
+	var doc interface{}
+	if yamlv3.Unmarshal(data, &doc) != nil {
+		return ""
+	}
+	return findMappingKey(doc, keys)
 }
 
 // findMappingKey returns the first of keys that is a mapping key anywhere
@@ -704,6 +750,14 @@ func snapshotLayer0StorageKeys(k *koanf.Koanf) map[string]*koanf.Koanf {
 // non-nil, loses the project attribution of the dropped keys.
 func restoreLayer0StorageKeys(k *koanf.Koanf, snap map[string]*koanf.Koanf, sources map[string]string) error {
 	for _, key := range layer0StorageKeys {
+		if k.Exists(key) {
+			cur := k.Cut(key)
+			saved := snap[key]
+			if saved == nil || !reflect.DeepEqual(cur.Raw(), saved.Raw()) {
+				slog.Warn("a project's settings set a storage block, which is read from the global settings only; the project's value is ignored",
+					"key", key)
+			}
+		}
 		k.Delete(key)
 		for src := range sources {
 			if src == key || strings.HasPrefix(src, key+".") {

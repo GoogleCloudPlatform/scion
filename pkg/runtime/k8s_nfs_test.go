@@ -1352,6 +1352,7 @@ func TestBuildPod_NFSBackend_RejectsTraversalSharedDirName(t *testing.T) {
 					{Name: name},
 				},
 				SharedDirStorage: &SharedDirRealization{
+					ProjectID:   "proj-123",
 					Backend:     "nfs",
 					PVClaimName: "scion-workspaces",
 					SubPaths: map[string]string{
@@ -1386,6 +1387,7 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 			{Name: "scratchpad"},
 		},
 		SharedDirStorage: &SharedDirRealization{
+			ProjectID:   "proj-123",
 			Backend:     "nfs",
 			PVClaimName: "scion-shared-volumes",
 			SubPaths:    map[string]string{"scratchpad": "projects/proj-123/shared-dirs/scratchpad"},
@@ -1416,7 +1418,7 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 // sharedDirsOnClaim is the realization pkg/agent builds for shared dirs on
 // a shared backend: every dir on claim at <projectRoot>/shared-dirs/<name>.
 func sharedDirsOnClaim(backend, claim, projectRoot string, names ...string) *SharedDirRealization {
-	r := &SharedDirRealization{Backend: backend, PVClaimName: claim, SubPaths: map[string]string{}}
+	r := &SharedDirRealization{Backend: backend, PVClaimName: claim, ProjectID: filepath.Base(projectRoot), SubPaths: map[string]string{}}
 	for _, n := range names {
 		r.SubPaths[n] = projectRoot + "/shared-dirs/" + n
 	}
@@ -1472,7 +1474,12 @@ func TestSharedDirClaimSubPath_RejectsTraversal(t *testing.T) {
 	if _, got, err := sharedDirClaimSubPath(own, "notes"); err != nil || got != "projects/proj-123/shared-dirs/notes" {
 		t.Errorf("own project subPath = %q, %v", got, err)
 	}
-	invalid := &SharedDirRealization{Backend: "nfs", PVClaimName: "c",
+	noProject := &SharedDirRealization{Backend: "nfs", PVClaimName: "c",
+		SubPaths: map[string]string{"notes": "projects/proj-123/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(noProject, "notes"); err == nil {
+		t.Error("a realization without its project ID must fail closed")
+	}
+	invalid := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "-bad",
 		SubPaths: map[string]string{"notes": "projects/-bad/shared-dirs/notes"}}
 	if _, _, err := sharedDirClaimSubPath(invalid, "notes"); err == nil {
 		t.Error("an invalid project ID component must be refused")

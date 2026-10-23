@@ -100,6 +100,7 @@ func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.Broke
 	layout, _ := brokerStorageLayout(vs)
 	desc.Homes = runtimebroker.StorageHomes(layout)
 	desc.Volume = runtimebroker.StorageVolume(layout)
+	desc.SharedDirs = projectfs.SharedDirsPlacement(layout)
 	return desc
 }
 
