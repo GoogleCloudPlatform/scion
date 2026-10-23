@@ -43,24 +43,29 @@ func localLayoutWorkspaceRoot(projectRoot string) string {
 }
 
 // sharedLayoutWorkspaceRoot returns the project-level workspace of project
-// projectID on the shared Layout built from settings' storage block (the
-// same server.project_storage struct, resolved by config.ResolveProjectStorage
-// and translated by config.ProjectStorageLayout, that the broker and hub
-// build their Layouts from): Layout.Resolve of the workspace Mount, which is
-// <ProjectRoot(projectID)>/workspace. backendWorkspace is the host path the
-// workspace backend placed the workspace at; it must be that path. Any
-// disagreement, or a Layout that cannot place the project on a shared
-// backend, refuses the start rather than letting git pick a root.
+// projectID on the shared Layout of the workspace storage settings selects
+// (settings.Server.EffectiveWorkspaceStorage: server.project_storage's
+// workspace view, or the deprecated server.workspace_storage), translated by
+// config.NFSLayout, the same translation the nfs workspace backend and the
+// broker's Layout (config.ProjectStorageLayout) use: Layout.Resolve of the
+// workspace Mount, which is <ProjectRoot(projectID)>/workspace.
+// backendWorkspace is the host path the workspace backend placed the
+// workspace at; it must be that path. Any disagreement, or a Layout that
+// cannot place the project, refuses the start rather than letting git pick
+// a root. Only the nfs backend places a workspace on this host.
 func sharedLayoutWorkspaceRoot(settings *config.VersionedSettings, projectID, backendWorkspace string) (string, error) {
-	var srv *config.V1ServerConfig
+	var ws *config.V1WorkspaceStorageConfig
 	if settings != nil {
-		srv = settings.Server
+		ws = settings.Server.EffectiveWorkspaceStorage()
 	}
-	ps, _, err := config.ResolveProjectStorage(srv)
-	if err != nil {
-		return "", fmt.Errorf("cannot place the workspace through the project storage layout: %w; refusing to start", err)
+	if ws == nil || ws.Backend != config.WorkspaceStorageBackendNFS {
+		backend := "local"
+		if ws != nil && ws.Backend != "" {
+			backend = ws.Backend
+		}
+		return "", fmt.Errorf("the workspace backend placed the workspace on shared storage, but the project storage layout is %q; refusing to start", backend)
 	}
-	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	layout, err := config.NFSLayout(ws.NFS)
 	if err != nil {
 		return "", fmt.Errorf("cannot place the workspace through the project storage layout: %w; refusing to start", err)
 	}
@@ -70,12 +75,12 @@ func sharedLayoutWorkspaceRoot(settings *config.VersionedSettings, projectID, ba
 	if _, err := layout.ProjectRoot(projectID); err != nil {
 		return "", fmt.Errorf("cannot place the workspace through the project storage layout: %w; refusing to start", err)
 	}
-	ws, err := layout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
+	resolved, err := layout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 	if err != nil {
 		return "", fmt.Errorf("cannot place the workspace through the project storage layout: %w; refusing to start", err)
 	}
-	if !samePath(ws.HostPath, backendWorkspace) {
-		return "", fmt.Errorf("the workspace backend placed the workspace at %s, but the project storage layout places it at %s; refusing to start", backendWorkspace, ws.HostPath)
+	if !samePath(resolved.HostPath, backendWorkspace) {
+		return "", fmt.Errorf("the workspace backend placed the workspace at %s, but the project storage layout places it at %s; refusing to start", backendWorkspace, resolved.HostPath)
 	}
-	return ws.HostPath, nil
+	return resolved.HostPath, nil
 }

@@ -69,10 +69,8 @@ func TestSharedLayoutWorkspaceRoot_RefusesDisagreement(t *testing.T) {
 	mountRoot := t.TempDir()
 	settings := nfsProjectStorageSettings(mountRoot)
 	ws := filepath.Join(mountRoot, "share-a", "projects", layoutTestProjectID, "workspace")
-	both := &config.VersionedSettings{Server: &config.V1ServerConfig{
-		ProjectStorage:   settings.Server.ProjectStorage,
-		WorkspaceStorage: settings.Server.ProjectStorage.WorkspaceStorage(),
-	}}
+	noShares := nfsProjectStorageSettings(mountRoot)
+	noShares.Server.ProjectStorage.NFS.Shares = nil
 	cases := []struct {
 		name      string
 		settings  *config.VersionedSettings
@@ -86,7 +84,7 @@ func TestSharedLayoutWorkspaceRoot_RefusesDisagreement(t *testing.T) {
 		{"local layout", nil, layoutTestProjectID, ws, `project storage layout is "local"`},
 		{"invalid project id", settings, "../x", ws, "invalid project ID"},
 		{"no project id", settings, "", ws, "invalid project ID"},
-		{"unusable settings", both, layoutTestProjectID, ws, "exactly one storage block"},
+		{"unusable settings", noShares, layoutTestProjectID, ws, "no NFS shares configured"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
