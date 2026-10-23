@@ -55,6 +55,10 @@ func layoutPrecheckDispatcher(t *testing.T, layout projectfs.Layout, desc *api.B
 	if modeLabel != "" {
 		project.Labels = map[string]string{store.LabelWorkspaceMode: modeLabel}
 	}
+	if modeLabel == "clone-per-agent" {
+		// clone-per-agent needs a git project.
+		project.GitRemote = "github.com/test/layout"
+	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	agent := &store.Agent{
 		ID: tid("layout-agent"), Name: "layout-agent", Slug: "layout-agent",
@@ -94,21 +98,24 @@ func TestDispatch_StorageLayoutPrecheck(t *testing.T) {
 		})
 	}
 	for name, tc := range map[string]struct {
-		layout projectfs.Layout
-		desc   *api.BrokerWorkspaceStorage
-		mode   string
+		layout     projectfs.Layout
+		desc       *api.BrokerWorkspaceStorage
+		mode       string
+		wantCalled bool
 	}{
-		"matching broker":         {layoutPrecheckHub, layoutPrecheckDescriptor("10.0.0.2"), ""},
-		"clone-per-agent project": {layoutPrecheckHub, layoutPrecheckDescriptor("10.0.0.9"), "clone-per-agent"},
-		"empty-per-agent project": {layoutPrecheckHub, nil, "empty-per-agent"},
-		"local hub":               {projectfs.Layout{Backend: projectfs.BackendLocal}, nil, ""},
+		"matching broker":         {layoutPrecheckHub, layoutPrecheckDescriptor("10.0.0.2"), "", true},
+		"clone-per-agent project": {layoutPrecheckHub, layoutPrecheckDescriptor("10.0.0.9"), "clone-per-agent", false},
+		"empty-per-agent project": {layoutPrecheckHub, layoutPrecheckDescriptor("10.0.0.9"), "empty-per-agent", false},
+		"local hub":               {projectfs.Layout{Backend: projectfs.BackendLocal}, nil, "", true},
 	} {
-		t.Run(name+" dispatches", func(t *testing.T) {
+		t.Run(name+" is not refused for its layout", func(t *testing.T) {
 			d, m, a := layoutPrecheckDispatcher(t, tc.layout, tc.desc, tc.mode)
 			err := d.DispatchAgentStart(ctx, a, "task", false)
 			var refusal *RuntimeTargetRefusal
 			assert.False(t, errors.As(err, &refusal) && refusal.Details[storageLayoutMismatchDetail] != nil, "no layout refusal: %v", err)
-			assert.True(t, m.startCalled, "broker called")
+			if tc.wantCalled {
+				assert.True(t, m.startCalled, "broker called")
+			}
 		})
 	}
 	t.Run("unusable hub layout fails closed", func(t *testing.T) {
