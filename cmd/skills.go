@@ -250,14 +250,8 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		return newUsageError("--version is required")
 	}
 
-	// Verify SKILL.md exists
-	skillMDPath := filepath.Join(skillDir, "SKILL.md")
-	if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
-		return fmt.Errorf("SKILL.md not found in %s", skillDir)
-	}
-
 	// Collect files
-	files, err := collectPublishFiles(skillDir)
+	files, err := collectPublishFiles(skillDir, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -394,48 +388,57 @@ type publishFile struct {
 	mode string
 }
 
-// collectPublishFiles walks skillDir and returns the files `scion skills
-// publish` uploads, skipping VCS and editor clutter.
+// skillPublishExcludes are skipped in addition to
+// transfer.DefaultExcludePatterns.
+var skillPublishExcludes = []string{"__pycache__", ".gitignore"}
+
+// collectPublishFiles returns the files `scion skills publish` uploads from
+// skillDir. It applies the same rules as template and harness-config uploads
+// (transfer.ManifestBuilder): only regular files inside the skill directory
+// are published, and VCS and editor clutter is excluded. Other entries, such
+// as symlinks, are skipped with a warning written to warn (if non-nil).
 //
-// filepath.Walk reports a symlink with its own (Lstat) info, whose mode is
-// 0777 on Linux, while the upload and hashFile read the file it points to.
-// The size and mode of a symlinked file are therefore taken from its
-// target, so a symlinked data file is not published executable.
-func collectPublishFiles(skillDir string) ([]publishFile, error) {
-	var files []publishFile
-	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+// SKILL.md must be a regular file. The skillDir argument itself may be a
+// symlink to a directory; it is resolved once before walking.
+func collectPublishFiles(skillDir string, warn io.Writer) ([]publishFile, error) {
+	root, err := filepath.EvalSymlinks(skillDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
 		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
+		return nil, fmt.Errorf("failed to resolve skill directory %s: %w", skillDir, err)
+	}
+
+	info, err := os.Lstat(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
 		}
-		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
-			return nil
+		return nil, fmt.Errorf("failed to read SKILL.md in %s: %w", skillDir, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("SKILL.md in %s must be a regular file", skillDir)
+	}
+
+	builder := transfer.NewManifestBuilder(root).WithExcludePatterns(skillPublishExcludes)
+	builder.OnSkip = func(relPath string) {
+		if warn != nil {
+			_, _ = fmt.Fprintf(warn, "Warning: skipped non-regular file %s\n", relPath)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Stat(path)
-			if err != nil {
-				return err
-			}
-			info = target
-		}
-		relPath, _ := filepath.Rel(skillDir, path)
-		relPath = filepath.ToSlash(relPath)
-		files = append(files, publishFile{
-			path:    relPath,
-			absPath: path,
-			size:    info.Size(),
-			mode:    publishFileMode(info.Mode()),
-		})
-		return nil
-	})
+	}
+	collected, err := builder.CollectFiles()
 	if err != nil {
 		return nil, fmt.Errorf("failed to collect files: %w", err)
+	}
+
+	files := make([]publishFile, len(collected))
+	for i, f := range collected {
+		files[i] = publishFile{
+			path:    f.Path,
+			absPath: f.FullPath,
+			size:    f.Size,
+			mode:    publishFileMode(transfer.NormalizeMode(f.Mode)),
+		}
 	}
 	return files, nil
 }
