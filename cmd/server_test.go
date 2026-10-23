@@ -39,7 +39,7 @@ var testStoreSeq atomic.Int64
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	dbName := fmt.Sprintf("%s_%d", strings.ReplaceAll(t.Name(), "/", "_"), testStoreSeq.Add(1))
-	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	s := entadapter.NewCompositeStore(client)

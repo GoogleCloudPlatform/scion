@@ -26,7 +26,31 @@ package permissions
 // for a delegated credential, so every key has an admitting catalog
 // operation (pinned by tests in pkg/hub).
 var AgentDelegableRegistry = map[string][]BoundaryKind{
-	"agent.read": {BoundaryKindProject, BoundaryKindHub},
+	"agent.read":   {BoundaryKindProject, BoundaryKindHub},
+	"project.read": {BoundaryKindProject, BoundaryKindHub},
+}
+
+// AgentDelegationSharedKeyExemption names a catalog operation whose base
+// permission is a key of AgentDelegableRegistry but which is never admitted
+// for an agent delegated credential.
+type AgentDelegationSharedKeyExemption struct {
+	Permission string
+	Operation  string
+	Reason     string
+}
+
+// AgentDelegationSharedKeyExemptions is the reviewed list of operations that
+// share a delegable key and have an effect the policy forbids, but are never
+// admitted for an agent delegated credential. The effect guard in pkg/hub
+// scans every catalog operation and skips only these exact pairs; a test
+// there fails if any of them is ever admitted (.design/agent-delegation.md
+// §13).
+var AgentDelegationSharedKeyExemptions = []AgentDelegationSharedKeyExemption{
+	{
+		Permission: "project.read",
+		Operation:  "project.broadcast",
+		Reason:     "broadcast sends a message to every agent of a project; it shares project.read but is not a delegable use of it",
+	},
 }
 
 // AgentDelegable reports whether permissionID may be delegated to an agent
