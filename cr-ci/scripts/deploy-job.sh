@@ -3,20 +3,32 @@
 # runner execution starts from (permissions-matrix C8), then grant
 # MEDIATOR_SA_NAME roles/run.developer on that job only (C10).
 # Shape: RUNNER_CPU / RUNNER_MEMORY, one task, no retries, TASK_TIMEOUT, an
-# ephemeral-disk volume of RUNNER_DISK_GI at /scratch, identity EXEC_SA_NAME.
+# ephemeral-disk volume of RUNNER_DISK_GI at /scratch, identity EXEC_SA_NAME, and
+# the env RUNNER_BUILD_CACHE_IN_RAM for the entrypoint (the job's only env var:
+# --set-env-vars replaces the template's env on update).
+# --warm-up then runs one no-op execution (RUNNER_WARMUP=1: the entrypoint runs
+# its checks and exits 0 before any claim), so the first real job does not pay
+# the image import (~34 s on first use in the P6 PoC).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-USAGE="Usage: deploy-job.sh [--tag TAG] [--config FILE] [--dry-run | --apply]
+USAGE="Usage: deploy-job.sh [--tag TAG] [--warm-up] [--config FILE] [--dry-run | --apply]
 
   --tag TAG  runner image tag (default: the build-runner-image.sh default)
+  --warm-up  after deploying, run one no-op execution (RUNNER_WARMUP=1) and wait
+             for it, so the image is imported before the first real job
 
 $crci_common_help"
 
 TAG=""
+WARMUP=0
 while (($#)); do
   case $1 in
+    --warm-up)
+      WARMUP=1
+      shift
+      ;;
     --tag)
       crci_need_value --tag "$@"
       TAG=$2
@@ -54,6 +66,7 @@ SHAPE=(
   --cpu="${CFG[RUNNER_CPU]}" --memory="${CFG[RUNNER_MEMORY]}"
   --tasks=1 --parallelism=1 --max-retries=0 --task-timeout="${TIMEOUT_S}s"
   --labels=managed-by=cr-ci
+  --set-env-vars="RUNNER_BUILD_CACHE_IN_RAM=${CFG[RUNNER_BUILD_CACHE_IN_RAM]}"
 )
 VOLUME=(
   --add-volume="name=scratch,type=ephemeral-disk,size=${CFG[RUNNER_DISK_GI]}Gi"
@@ -73,4 +86,13 @@ crci_run gcloud run jobs add-iam-policy-binding "$JOB" --region="$R" --project="
 
 crci_note "check: EXEC_SA_NAME holds no project roles"
 crci_check_exec_sa_has_no_roles
+
+if ((WARMUP)); then
+  # A no-op execution: the entrypoint checks the image, /scratch and the HOME links
+  # and exits 0 before any claim. The mediator ignores it (it has no RUNNER_NAME);
+  # it counts toward MAX_CONCURRENT_RUNNERS for the few seconds it runs.
+  crci_note "F-F: warm-up execution (imports the image before the first real job)"
+  crci_run gcloud run jobs execute "$JOB" --region="$R" --project="$P" \
+    --update-env-vars=RUNNER_WARMUP=1 --wait --format=none
+fi
 crci_note "done; next: deploy-mediator.sh"

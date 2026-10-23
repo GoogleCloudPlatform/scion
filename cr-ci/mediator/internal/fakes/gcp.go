@@ -317,7 +317,7 @@ type Google struct {
 	Kid    string
 
 	mu      sync.Mutex
-	Fetches int
+	fetches int  // JWKS requests served; read with Fetches()
 	Fail    bool // JWKS endpoint answers 500
 	// Gate, if set: each JWKS request sends on Started, then waits for
 	// Release to be closed before answering.
@@ -325,12 +325,20 @@ type Google struct {
 	Release chan struct{}
 }
 
+// Fetches returns how many JWKS requests the server has answered (under the
+// lock, so tests can read it while handlers run).
+func (g *Google) Fetches() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fetches
+}
+
 // NewGoogle starts a JWKS server for key.
 func NewGoogle(key *rsa.PrivateKey) *Google {
 	g := &Google{Key: key, Kid: "fake-kid-1"}
 	g.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
-		g.Fetches++
+		g.fetches++
 		fail, started, release, kid := g.Fail, g.Started, g.Release, g.Kid
 		g.mu.Unlock()
 		if started != nil {
