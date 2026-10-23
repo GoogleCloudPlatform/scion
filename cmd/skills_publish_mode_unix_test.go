@@ -63,7 +63,7 @@ func TestCollectPublishFiles_RegularFiles(t *testing.T) {
 	writeSkillTestFile(t, dir, "scripts/__pycache__/x.pyc", 0o644)
 
 	var warn bytes.Buffer
-	files, err := collectPublishFiles(dir, &warn)
+	_, files, err := collectPublishFiles(dir, &warn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func TestCollectPublishFiles_RegularFiles(t *testing.T) {
 		if f.size != int64(len(p)) {
 			t.Errorf("%s: size %d, want %d", p, f.size, len(p))
 		}
-		if f.absPath == "" {
-			t.Errorf("%s: absPath empty", p)
+		if want := transfer.HashBytes([]byte(p)); f.hash != want {
+			t.Errorf("%s: hash %q, want %q", p, f.hash, want)
 		}
 	}
 	if warn.Len() != 0 {
@@ -116,9 +116,23 @@ func TestCollectPublishFiles_SkipsSymlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The outside links really resolve to the outside file.
+	outsideInfo, err := os.Stat(filepath.Join(outside, "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"outside.txt", "outside-rel"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("%s does not resolve: %v", name, err)
+		}
+		if !os.SameFile(info, outsideInfo) {
+			t.Fatalf("%s does not resolve to the outside file", name)
+		}
+	}
 
 	var warn bytes.Buffer
-	files, err := collectPublishFiles(dir, &warn)
+	_, files, err := collectPublishFiles(dir, &warn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,12 +183,12 @@ func TestCollectPublishFiles_SkillMDMustBeRegular(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "SKILL.md"), filepath.Join(dir, "SKILL.md")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := collectPublishFiles(dir, nil)
+	_, _, err := collectPublishFiles(dir, nil)
 	if err == nil || !strings.Contains(err.Error(), "must be a regular file") {
 		t.Fatalf("err = %v, want a regular-file error", err)
 	}
 
-	if _, err := collectPublishFiles(t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "SKILL.md not found") {
+	if _, _, err := collectPublishFiles(t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "SKILL.md not found") {
 		t.Fatalf("err = %v, want SKILL.md not found", err)
 	}
 }
@@ -190,9 +204,16 @@ func TestCollectPublishFiles_SymlinkedRootArgument(t *testing.T) {
 	if err := os.Symlink(realDir, link); err != nil {
 		t.Fatal(err)
 	}
-	files, err := collectPublishFiles(link, nil)
+	root, files, err := collectPublishFiles(link, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != wantRoot {
+		t.Errorf("root %q, want the resolved directory %q", root, wantRoot)
 	}
 	got := publishFilesByPath(files)
 	if len(got) != 2 || got["scripts/run.sh"].mode != "0755" {
@@ -212,11 +233,31 @@ func TestCollectPublishFiles_WarningQuotesPath(t *testing.T) {
 	}
 
 	var warn bytes.Buffer
-	if _, err := collectPublishFiles(dir, &warn); err != nil {
+	if _, _, err := collectPublishFiles(dir, &warn); err != nil {
 		t.Fatal(err)
 	}
 	want := "Warning: skipped non-regular file " + strconv.Quote(name) + "\n"
 	if warn.String() != want {
 		t.Errorf("warning %q, want %q", warn.String(), want)
+	}
+}
+
+// TestCollectPublishFiles_ExcludesTopLevelDotScion pins that a top-level
+// .scion entry in a skill directory is not published (the shared
+// transfer.DefaultExcludePatterns rule), while a nested .scion directory is
+// ordinary skill content.
+func TestCollectPublishFiles_ExcludesTopLevelDotScion(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillTestFile(t, dir, "SKILL.md", 0o644)
+	writeSkillTestFile(t, dir, ".scion/settings.yaml", 0o644)
+	writeSkillTestFile(t, dir, "docs/.scion/notes.md", 0o644)
+
+	_, files, err := collectPublishFiles(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := publishFilesByPath(files)
+	if len(got) != 2 || got["SKILL.md"].path == "" || got["docs/.scion/notes.md"].path == "" {
+		t.Fatalf("collected %v, want SKILL.md and docs/.scion/notes.md only", got)
 	}
 }
