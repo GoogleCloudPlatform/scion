@@ -200,7 +200,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 				continue // re-derived, not copied raw
 			}
 			if k == store.LabelProjectOrigin {
-				continue // a clone is created on the hub, not linked
+				continue // set below: a clone is created on the hub
 			}
 			if remoteOverridden && isGitSourceLabel(k) {
 				continue // describe the template's repo; re-derived below
@@ -239,6 +239,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 		clone.Labels[store.LabelWorkspaceMode] = mode
 	}
+
+	// A clone is created on the hub: hub-managed origin (server-owned).
+	if clone.Labels == nil {
+		clone.Labels = make(map[string]string, 1)
+	}
+	clone.Labels[store.LabelProjectOrigin] = store.ProjectOriginHub
 
 	// ── asTemplate: mark clone as a project template ─────────────────────
 	if req.AsTemplate {
