@@ -527,6 +527,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The project storage layout authority (pkg/projectfs), not a
 		// user or transport resolver.
 		"projectRecordSharedDirPath localLayout",
+		// The workspace Mount through the same layout authority
+		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
+		// transport resolver.
+		"projectWorkspaceResolved layout",
 		"resolveAsNeededForKeys d.secretBackend",
 		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",

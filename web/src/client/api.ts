@@ -29,6 +29,7 @@
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { recordHubDateHeader } from '../shared/hub-clock.js';
+import { loadPage } from './navigation.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -142,7 +143,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
       // active terminals survive the transition (acceptance criterion 4).
       dispatchAuthExpiredTeardown();
       const returnTo = encodeURIComponent(window.location.pathname);
-      window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
+      loadPage(`/login?error=session_expired&returnTo=${returnTo}`);
     }
     return response;
   }

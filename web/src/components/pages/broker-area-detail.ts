@@ -53,9 +53,6 @@ import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
 
-/** Parallel project reads for the Default-for-project marker. */
-const DEFAULTS_CONCURRENCY = 4;
-
 export type BrokerAreaTab = 'overview' | 'agents' | 'health' | 'configure';
 
 /** Parses ?tab=; anything unknown is "overview". */
@@ -147,6 +144,9 @@ export class ScionPageBrokerAreaDetail extends LitElement {
       if (projectsRes.ok) {
         const data = (await projectsRes.json()) as { projects?: BrokerAreaProject[] };
         this.projects = data.projects || [];
+        // The providers listing marks the projects whose default Runtime
+        // Broker is this broker (ptone/scion#5413).
+        this.defaultFor = new Set(this.projects.filter((p) => p.isDefault).map((p) => p.projectId));
       }
       if (agentsRes.ok) {
         const data = (await agentsRes.json()) as { agents?: Agent[] } | Agent[];
@@ -156,37 +156,12 @@ export class ScionPageBrokerAreaDetail extends LitElement {
         this.settings = (await settingsRes.json()) as BrokerSettingsResponse;
       }
       stateManager.seedBrokers([this.broker]);
-      void this.loadDefaults();
     } catch (err) {
       console.error('Failed to load broker:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load broker';
     } finally {
       this.loading = false;
     }
-  }
-
-  /**
-   * Marks the projects whose default Runtime Broker is this broker: one GET per
-   * project, at most DEFAULTS_CONCURRENCY at a time (the providers listing does not
-   * carry the default; adding it there is ptone/scion#5413).
-   */
-  private async loadDefaults(): Promise<void> {
-    const queue = this.projects.map((p) => p.projectId);
-    const ids = new Set<string>();
-    const worker = async (): Promise<void> => {
-      for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
-        try {
-          const res = await fetch(`/api/v1/projects/${id}`, { credentials: 'include' });
-          if (!res.ok) continue;
-          const project = (await res.json()) as { defaultRuntimeBrokerId?: string };
-          if (project.defaultRuntimeBrokerId === this.brokerId) ids.add(id);
-        } catch {
-          // A project that cannot be read simply gets no marker.
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: DEFAULTS_CONCURRENCY }, () => worker()));
-    this.defaultFor = ids;
   }
 
   /**
