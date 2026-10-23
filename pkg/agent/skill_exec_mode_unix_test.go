@@ -246,3 +246,103 @@ func TestInstallOneSkill_PrefetchedContentKeepsMode(t *testing.T) {
 	assertFileModes(t, filepath.Join(dest, "exec-skill"),
 		map[string]os.FileMode{"SKILL.md": 0o644, "scripts/run.sh": 0o755})
 }
+
+// TestInstallOneSkill_TraversalPathNeverTouchesOutsideFile pins the S3
+// check on the cache-hit path (ptone/scion#5657 review): a resolve
+// response that lists a cached skill's files plus an entry escaping the
+// staging directory must fail without reading or changing the mode of the
+// file it names. With mode "0644" the extra entry leaves the cache key
+// unchanged, so it would reach the cache-hit branch; with "0755" it would
+// reach the download branch.
+func TestInstallOneSkill_TraversalPathNeverTouchesOutsideFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(sentinel string) string
+		mode string
+	}{
+		{"relative 0644 (cache hit)", func(string) string { return "../../../secret" }, "0644"},
+		{"relative 0755 (cache miss)", func(string) string { return "../../../secret" }, "0755"},
+		{"absolute 0644 (cache hit)", func(s string) string { return s }, "0644"},
+		{"absolute 0755 (cache miss)", func(s string) string { return s }, "0755"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newExecSkillFixture(t, map[string]string{"SKILL.md": "0644", "scripts/run.sh": "0644"})
+			skill := fx.resolved(t)
+			cache, err := templatecache.New(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The skill's real files are cached under its key.
+			if _, err := cache.Put(skillCacheKey(skill), fx.files); err != nil {
+				t.Fatal(err)
+			}
+
+			// skillsDest/<staging>/exec-skill/../../../secret is base/secret.
+			base := t.TempDir()
+			skillsDest := filepath.Join(base, "skills")
+			if err := os.Mkdir(skillsDest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(base, "secret")
+			if err := os.WriteFile(sentinel, []byte("private"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(sentinel, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			skill.Files = append(skill.Files, ResolvedFile{Path: tc.path(sentinel), Mode: tc.mode})
+			ctx := ContextWithSkillCache(context.Background(), cache)
+			if _, err := installOneSkill(ctx, skill, "exec-skill", skillsDest); err == nil {
+				t.Fatal("install with an escaping path succeeded; want an unsafe path error")
+			}
+			fi, err := os.Stat(sentinel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fi.Mode().Perm(); got != 0o600 {
+				t.Fatalf("file outside the staging dir changed mode to %04o", got)
+			}
+			if fx.downloads.Load() != 0 {
+				t.Fatal("install downloaded files for a skill with an unsafe path")
+			}
+			if _, err := os.Stat(filepath.Join(skillsDest, "exec-skill")); !os.IsNotExist(err) {
+				t.Fatalf("skill was installed despite the unsafe path (stat err %v)", err)
+			}
+		})
+	}
+}
+
+// TestApplySkillFileModes_ConfinedToDir pins that the chmod itself cannot
+// leave the skill directory, independent of path validation: "..", an
+// absolute path and a symlink pointing outside are all refused.
+func TestApplySkillFileModes_ConfinedToDir(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "skill")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(base, "secret")
+	if err := os.WriteFile(sentinel, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"../secret", sentinel, "link"} {
+		skill := ResolvedSkill{Files: []ResolvedFile{{Path: p, Mode: "0755"}}}
+		if err := applySkillFileModes(dir, skill); err == nil {
+			t.Errorf("applySkillFileModes(%q) succeeded; want it refused", p)
+		}
+		fi, err := os.Stat(sentinel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Fatalf("path %q changed the mode of a file outside the dir to %04o", p, got)
+		}
+	}
+}

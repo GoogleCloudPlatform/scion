@@ -715,6 +715,18 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	}()
 	skillStagingDir := filepath.Join(stagingDir, dest)
 
+	// S3: validate every path from the resolve response before anything
+	// uses it. The cache-hit branch below reads and chmods these paths, so
+	// the check must come before it, not only before the downloads
+	// (ptone/scion#5657).
+	for _, f := range skill.Files {
+		if err := validateFilePath(f.Path); err != nil {
+			// The path comes from the skill bundle, so the text is safe.
+			msg := fmt.Sprintf("unsafe file path in skill %q: %v", skill.URI, err)
+			return nil, newSkillInstallError(msg, errors.New(msg))
+		}
+	}
+
 	// Check cache before downloading
 	cache := SkillCacheFromContext(ctx)
 	if cache != nil && skill.Hash != "" {
@@ -765,13 +777,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	var fileEntries []FileEntry
 
 	for _, f := range skill.Files {
-		// S3: Validate path safety
-		if err := validateFilePath(f.Path); err != nil {
-			// The path comes from the skill bundle, so the text is safe.
-			msg := fmt.Sprintf("unsafe file path in skill %q: %v", skill.URI, err)
-			return nil, newSkillInstallError(msg, errors.New(msg))
-		}
-
+		// f.Path was validated (S3) at the top of the function.
 		destPath := filepath.Join(skillStagingDir, f.Path)
 
 		// Create parent directories for nested files
@@ -935,10 +941,18 @@ func skillCacheKey(skill ResolvedSkill) string {
 }
 
 // applySkillFileModes sets each file of skill under dir to its normalised
-// mode.
+// mode. The chmods go through an os.Root opened on dir, so a path that
+// escapes dir (through "..", an absolute path or a symlink) is refused
+// rather than changing a file outside it; callers validate the paths
+// first as well.
 func applySkillFileModes(dir string, skill ResolvedSkill) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("failed to open skill directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 	for _, f := range skill.Files {
-		if err := os.Chmod(filepath.Join(dir, f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
+		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
 			return fmt.Errorf("failed to set mode of %s: %w", f.Path, err)
 		}
 	}

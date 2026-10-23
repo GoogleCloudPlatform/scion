@@ -257,33 +257,9 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect files
-	var files []publishFile
-	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
-			return nil
-		}
-		relPath, _ := filepath.Rel(skillDir, path)
-		relPath = filepath.ToSlash(relPath)
-		files = append(files, publishFile{
-			path:    relPath,
-			absPath: path,
-			size:    info.Size(),
-			mode:    publishFileMode(info.Mode()),
-		})
-		return nil
-	})
+	files, err := collectPublishFiles(skillDir)
 	if err != nil {
-		return fmt.Errorf("failed to collect files: %w", err)
+		return err
 	}
 
 	// Validate limits
@@ -416,6 +392,52 @@ type publishFile struct {
 	// mode is the normalised mode recorded in the manifest: "0755" for an
 	// executable file, otherwise "0644" (ptone/scion#5657).
 	mode string
+}
+
+// collectPublishFiles walks skillDir and returns the files `scion skills
+// publish` uploads, skipping VCS and editor clutter.
+//
+// filepath.Walk reports a symlink with its own (Lstat) info, whose mode is
+// 0777 on Linux, while the upload and hashFile read the file it points to.
+// The size and mode of a symlinked file are therefore taken from its
+// target, so a symlinked data file is not published executable.
+func collectPublishFiles(skillDir string) ([]publishFile, error) {
+	var files []publishFile
+	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			info = target
+		}
+		relPath, _ := filepath.Rel(skillDir, path)
+		relPath = filepath.ToSlash(relPath)
+		files = append(files, publishFile{
+			path:    relPath,
+			absPath: path,
+			size:    info.Size(),
+			mode:    publishFileMode(info.Mode()),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect files: %w", err)
+	}
+	return files, nil
 }
 
 // publishFileMode is the manifest mode for a local file with mode m. Only
