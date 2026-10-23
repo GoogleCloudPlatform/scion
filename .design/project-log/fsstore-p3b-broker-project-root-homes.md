@@ -96,7 +96,7 @@ the share.
 `projectfs.Layout.AgentHome` and `AgentSecrets` place an agent's home and
 secrets at `<subpath root>/<project>/agents/<slug>/{home-,secrets-}<agent ID>`.
 The Kubernetes NFS home and the Cloud Run agent runtime both resolve through
-them (acceptance A12); Cloud Run moves from `agents/<agent ID>/{home,secrets}`.
+them, so both resolve the same path for the same agent; Cloud Run moves from `agents/<agent ID>/{home,secrets}`.
 Homes on nfs take their share and claim from the project storage Layout.
 The project-storage migration's Cloud Run homes step moves existing
 `agents/<agent ID>/{home,secrets}` to the new paths, only for stopped agents
@@ -112,7 +112,7 @@ only code that builds the legacy path.
   the project root but not their state, refusals for an unmounted share and
   missing or mismatched configuration, and the Kubernetes/Cloud Run home path
   equality.
-- A8 (local backend unchanged): local-backend tests unchanged and passing.
+- Local backend unchanged: local-backend tests unchanged and passing.
 
 ## Follow-ups
 

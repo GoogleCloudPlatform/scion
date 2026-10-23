@@ -244,7 +244,7 @@ func TestSharedProjectLegacyAgentFallback(t *testing.T) {
 	}
 }
 
-// A8: an ordinary git project's .scion keeps split storage unchanged.
+// Local backend unchanged: an ordinary git project's .scion keeps split storage unchanged.
 func TestSharedProjectConfigLeavesGitProjectsAlone(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

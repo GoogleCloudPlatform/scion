@@ -21,7 +21,7 @@ import (
 	"testing"
 )
 
-// A12 (ptone/scion#5825): the GKE (Kubernetes NFS home) and Cloud Run agent
+// ptone/scion#5825: the GKE (Kubernetes NFS home) and Cloud Run agent
 // runtimes resolve an agent's home to the same relative path for the same
 // (project, agent), agents/<slug>/home-<agentUUID>, under every subpath root.
 func TestAgentHomeSameOnKubernetesAndCloudRun(t *testing.T) {

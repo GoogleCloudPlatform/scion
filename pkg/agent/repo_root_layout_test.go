@@ -148,7 +148,7 @@ func TestDetectRepoRootFrom_SharedLayoutWorkspace(t *testing.T) {
 	})
 }
 
-// A8 (T1 regression): on the local layout the candidate root is the project's
+// Local backend unchanged: on the local layout the candidate root is the project's
 // own root, unchanged.
 func TestLocalLayoutWorkspaceRoot_Unchanged(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "proj")
