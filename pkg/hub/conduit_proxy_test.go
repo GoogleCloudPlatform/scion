@@ -30,6 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -312,4 +314,122 @@ func TestConduitProxyKeepsPortsWhenSessionEnds(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 	assert.True(t, strings.HasPrefix(string(body), "hello /again"))
+}
+
+// TestConduitProxyBareURLRedirect (ptone/scion#5566): on the conduit path,
+// GET and HEAD of the bare .../proxy URL are redirected to .../proxy/ with
+// the raw query kept, and a client that follows the redirect gets the
+// app's root.
+func TestConduitProxyBareURLRedirect(t *testing.T) {
+	f := newConduitProxyFixture(t, nil)
+	f.startAgent(t)
+	bare := f.base + "/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy"
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			req, err := http.NewRequest(method, bare+"?x=1&y=a%2Fb", nil)
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+f.userToken)
+			resp, err := noFollow.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			require.Equal(t, http.StatusPermanentRedirect, resp.StatusCode)
+			assert.Equal(t, "proxy/?x=1&y=a%2Fb", resp.Header.Get("Location"))
+		})
+	}
+
+	t.Run("followed", func(t *testing.T) {
+		resp := f.get(t, "?x=1", nil)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+		assert.Equal(t, "hello /?x=1", string(body))
+		assert.Equal(t, bare+"/?x=1", resp.Request.URL.String())
+		assert.Equal(t, untrustedContentSandboxCSP, resp.Header.Get("Content-Security-Policy"))
+	})
+
+	t.Run("caller_without_access_unchanged", func(t *testing.T) {
+		// The fixture's stranger: a signed-in project member without
+		// port access to the owner's agents.
+		stranger, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+			f.stranger.ID(), "stranger@conduit.test", "Stranger", store.UserRoleMember, ClientTypeWeb)
+		require.NoError(t, err)
+		answer := func(suffix string) (int, http.Header, string) {
+			req, err := http.NewRequest(http.MethodGet, bare+suffix+"?x=1", nil)
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+stranger)
+			resp, err := noFollow.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			return resp.StatusCode, resp.Header, string(body)
+		}
+		bareCode, bareHeader, bareBody := answer("")
+		slashCode, _, slashBody := answer("/")
+		assert.Equal(t, http.StatusForbidden, bareCode, bareBody)
+		assert.Equal(t, slashCode, bareCode)
+		assert.Equal(t, slashBody, bareBody)
+		assert.Empty(t, bareHeader.Get("Location"))
+	})
+}
+
+// TestConduitProxyNoCredentialsPlainText (ptone/scion#5566): on the
+// conduit path, a page sub-request with no credential gets the plain-text
+// 401 and is counted, and never reaches the app.
+func TestConduitProxyNoCredentialsPlainText(t *testing.T) {
+	f := newConduitProxyFixture(t, nil)
+	count := portProxyCounterNamed(t, f.srv, "scion.hub.port_proxy.sandboxed_subresource_unauth")
+	f.startAgent(t)
+	base := f.base + "/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy"
+
+	for i, path := range []string{"/app.js", "", "/api/ping?x=1"} {
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", "null")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Cookie", "scion_sess=not-a-session")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.NoError(t, err)
+		requirePortProxyNoCredentials(t, resp.StatusCode, resp.Header, string(body), true)
+		assert.Equal(t, int64(i+1), count(), "path %q", path)
+	}
+	select {
+	case got := <-f.app.got:
+		t.Fatalf("a request without credentials reached the app: %s", got.URL)
+	default:
+	}
+}
+
+// TestConduitProxyBareURLWebSocketNotRedirected (ptone/scion#5566): an
+// admitted WebSocket upgrade to the bare .../proxy URL is not redirected
+// (WebSocket clients do not follow redirects); it is proxied to the app's
+// root as before.
+func TestConduitProxyBareURLWebSocketNotRedirected(t *testing.T) {
+	f := newConduitProxyFixture(t, echoApp())
+	f.startAgent(t)
+	wsURL := "ws" + strings.TrimPrefix(f.base, "http") +
+		"/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy"
+	c, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + f.userToken}})
+	if resp != nil {
+		assert.NotEqual(t, http.StatusPermanentRedirect, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("Location"))
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, []byte("ping")))
+	_, got, err := c.ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, "ping", string(got))
+	select {
+	case req := <-f.app.got:
+		assert.Equal(t, "/", req.URL.Path)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upgrade did not reach the app")
+	}
 }

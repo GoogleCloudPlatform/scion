@@ -396,8 +396,15 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		refuse(http.StatusForbidden, errCodeScopeViolation, "a requested permission is not eligible", nil)
 		return
 	}
+	// Rule 2: the hub policy, narrowed by the hub setting. A setting the
+	// hub cannot read refuses the issuance.
+	narrowing, err := s.agentDelegationPolicyNarrowing()
+	if err != nil {
+		InternalError(w)
+		return
+	}
 	for _, id := range ceiling.PermissionIDs {
-		if !permissions.AgentDelegable(id, permissions.BoundaryKind(boundary.Kind)) {
+		if !agentDelegableUnder(narrowing, id, permissions.BoundaryKind(boundary.Kind)) {
 			refuse(http.StatusForbidden, errCodePermissionNotDelegable, "a requested permission may not be delegated to an agent", nil)
 			return
 		}
@@ -625,11 +632,17 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeReservedIdentity, "the grant issuer is not valid")
 		return
 	}
-	// 10. The policy, which may have narrowed since issuance.
+	// 10. The policy, which may have narrowed since issuance (code table
+	// or hub setting). A setting the hub cannot read refuses the exchange.
+	narrowing, err := s.agentDelegationPolicyNarrowing()
+	if err != nil {
+		InternalError(w)
+		return
+	}
 	boundaryKind := permissions.BoundaryKind(grant.BoundaryKind)
 	var effective []string
 	for _, id := range grant.CeilingPermissionIDs {
-		if permissions.AgentDelegable(id, boundaryKind) {
+		if agentDelegableUnder(narrowing, id, boundaryKind) {
 			effective = append(effective, id)
 		}
 	}
