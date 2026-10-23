@@ -69,6 +69,7 @@ import {
   WAKE_OUTCOME_UNKNOWN_MESSAGE,
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
+  isChatPostDeniedBody,
   WakeOutcomeUnknownError,
   isAnswerAboutThisSend,
   isGatewayDrop,
@@ -618,6 +619,13 @@ export class ScionChatThread extends LitElement {
   @state() private error: string | null = null;
   @state() private sending = false;
   @state() private sendError: string | null = null;
+  /**
+   * Whether the caller may post in this thread: the history's `canPost`
+   * (project.chat_post on the thread's project), or false after a send
+   * refused with chat_post_denied. When false the composer gives way to a
+   * read-only notice. DMs never set it.
+   */
+  @state() private canPost = true;
   /**
    * Conversation whose wake-and-send is in flight, or ''. Its composer is
    * blocked meanwhile (up to the hub's wake budget), so text typed during
@@ -1233,6 +1241,17 @@ export class ScionChatThread extends LitElement {
         border-top: 1px solid var(--scion-border, #e2e8f0);
       }
 
+      /* In place of the composer in a thread the caller may read but not
+         post in. */
+      .read-only-notice {
+        flex-shrink: 0;
+        padding: 0.75rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        text-align: center;
+      }
+
       .send-error {
         padding: 0.375rem 1rem;
         font-size: var(--chat-fs-base);
@@ -1624,6 +1643,7 @@ export class ScionChatThread extends LitElement {
     this.loaded = false;
     this.error = null;
     this.sendError = null;
+    this.canPost = true;
     // A send still in flight belongs to the conversation we just left; its
     // completion will not touch `sending` (fetchId guard), so release the
     // composer here.
@@ -2197,11 +2217,13 @@ export class ScionChatThread extends LitElement {
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
         >;
         replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+        canPost?: boolean;
       };
 
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
       if (currentId !== this.fetchId) return false;
+      if (typeof data?.canPost === 'boolean') this.canPost = data.canPost;
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
@@ -3196,6 +3218,18 @@ export class ScionChatThread extends LitElement {
           wakeOffer = wakeOfferFromErrorBody(data);
           if (!wakeOffer) {
             failSend(errorMessageFromBody(data, 'Failed to send message'));
+          }
+        } else if (!wake && res.status === 403) {
+          // A caller that may read but not post: the composer gives way to
+          // the read-only notice (the draft is handed back first). The hub
+          // refuses such a caller on the first send, before any wake offer,
+          // so a refused wake retry keeps the generic error below.
+          const data: unknown = await res.json().catch(() => null);
+          failSend(errorMessageFromBody(data, 'Failed to send message'));
+          if (isChatPostDeniedBody(data) && !threadMovedOn()) {
+            // The notice says it; no separate send error.
+            this.canPost = false;
+            this.sendError = null;
           }
         } else {
           failSend(
@@ -5711,31 +5745,47 @@ export class ScionChatThread extends LitElement {
           @chat-scheduled-restore=${this.handleScheduledRestore}
         ></scion-chat-scheduled-list>
         ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
-        <scion-chat-composer
-          .agents=${this.agents}
-          .members=${this.members}
-          .defaultAgent=${this.defaultAgent}
-          .conversationMode=${this.isDM ? 'dm' : 'thread'}
-          .peerName=${this.peerName}
-          .projectId=${this.projectId}
-          .currentUserId=${this.currentUserId}
-          .conversationKey=${this.conversationKey}
-          .replyTo=${this.composerReplyTo}
-          .editMessage=${this.composerEditMessage}
-          ?scheduleSendEnabled=${this.scheduleSendAvailable}
-          ?disabled=${this.wakingConversationKey !== '' &&
-          this.wakingConversationKey === this.conversationKey}
-          @chat-cancel-reply=${this.handleComposerCancelReply}
-          @chat-cancel-edit=${this.handleComposerCancelEdit}
-          @chat-send=${this.handleChatSendV2}
-          @chat-schedule=${this.handleChatScheduleV2}
-          @chat-edit=${this.handleChatEditV2}
-          @chat-typing=${() => this.sendTypingEvent()}
-          @default-agent-change=${this.handleDefaultAgentChange}
-          @chat-slash-command=${this.handleSlashCommand}
-        ></scion-chat-composer>
+        ${this.isDM || this.canPost ? this.renderComposerV2() : this.renderReadOnlyNotice()}
         ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
       </div>
+    `;
+  }
+
+  /**
+   * Shown in place of the composer in a thread the caller may read but not
+   * post in (no project.chat_post on its project).
+   */
+  private renderReadOnlyNotice() {
+    return html`<div class="read-only-notice" role="status">
+      You can read this thread, but you don't have permission to post in it.
+    </div>`;
+  }
+
+  private renderComposerV2() {
+    return html`
+      <scion-chat-composer
+        .agents=${this.agents}
+        .members=${this.members}
+        .defaultAgent=${this.defaultAgent}
+        .conversationMode=${this.isDM ? 'dm' : 'thread'}
+        .peerName=${this.peerName}
+        .projectId=${this.projectId}
+        .currentUserId=${this.currentUserId}
+        .conversationKey=${this.conversationKey}
+        .replyTo=${this.composerReplyTo}
+        .editMessage=${this.composerEditMessage}
+        ?scheduleSendEnabled=${this.scheduleSendAvailable}
+        ?disabled=${this.wakingConversationKey !== '' &&
+        this.wakingConversationKey === this.conversationKey}
+        @chat-cancel-reply=${this.handleComposerCancelReply}
+        @chat-cancel-edit=${this.handleComposerCancelEdit}
+        @chat-send=${this.handleChatSendV2}
+        @chat-schedule=${this.handleChatScheduleV2}
+        @chat-edit=${this.handleChatEditV2}
+        @chat-typing=${() => this.sendTypingEvent()}
+        @default-agent-change=${this.handleDefaultAgentChange}
+        @chat-slash-command=${this.handleSlashCommand}
+      ></scion-chat-composer>
     `;
   }
 

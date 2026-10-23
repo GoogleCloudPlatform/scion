@@ -51,7 +51,7 @@ func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
 		},
 		{
 			// Previously the hub silently served local project paths for
-			// this config (hubManagedProjectPath requires shares).
+			// this config (an nfs workspace Layout requires a share).
 			name:    "nfs without shares",
 			storage: "backend: nfs\n    nfs:\n      mount_root: /mnt/nfs",
 			wantErr: "no NFS shares are defined",

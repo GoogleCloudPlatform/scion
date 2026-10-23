@@ -366,6 +366,7 @@ func TestHandleExistingAgent_EnvGatherRecreate_CanceledAfterRowDelete_ReleasesQu
 // reservations.
 func TestCreateAgent_WorkspaceBootstrapNoStorage_CleansUp(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
+	clearCreateAgentProviderPath(t, s, project)
 	require.Nil(t, srv.GetStorage(), "precondition: no storage configured")
 	setAgentQuotaLimits(t, s)
 	ctx := context.Background()

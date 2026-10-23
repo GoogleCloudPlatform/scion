@@ -154,6 +154,146 @@ func TestConstraintHistory_AppendRequiresTransaction(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
+func TestUpdateAccessConstraint_InsideWithTxUsesExistingTransaction(t *testing.T) {
+	ctx := context.Background()
+	composite := NewCompositeStore(enttest.NewClient(t))
+	constraint, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-update-in-tx"))
+	require.NoError(t, err)
+
+	// Committed path: the update runs on the caller's transaction (no
+	// ent.ErrTxStarted "begin tx" failure) and commits with its history row.
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		draft := *constraint
+		draft.MaximumPermissions = []string{"agent.read", "agent.create"}
+		updated, updateErr := tx.UpdateAccessConstraint(ctx, &draft, constraint.Revision)
+		if updateErr != nil {
+			return updateErr
+		}
+		if updated.Revision != constraint.Revision+1 {
+			return fmt.Errorf("revision = %d, want %d", updated.Revision, constraint.Revision+1)
+		}
+		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "update-in-tx", time.Now().UTC()))
+	}))
+	committed, err := composite.GetAccessConstraint(ctx, constraint.ID)
+	require.NoError(t, err)
+	assert.Equal(t, constraint.Revision+1, committed.Revision)
+	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, committed.MaximumPermissions)
+
+	// Rolled-back path: a later failure in the same transaction undoes the
+	// update, which proves it did not commit on a transaction of its own.
+	sentinel := errors.New("injected failure after update")
+	err = composite.WithTx(ctx, func(tx store.Store) error {
+		draft := *committed
+		draft.MaximumPermissions = []string{"agent.read"}
+		if _, updateErr := tx.UpdateAccessConstraint(ctx, &draft, committed.Revision); updateErr != nil {
+			return updateErr
+		}
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	after, err := composite.GetAccessConstraint(ctx, constraint.ID)
+	require.NoError(t, err)
+	assert.Equal(t, committed.Revision, after.Revision)
+	assert.ElementsMatch(t, []string{"agent.read", "agent.create"}, after.MaximumPermissions)
+
+	// Optimistic concurrency still applies inside a caller's transaction.
+	err = composite.WithTx(ctx, func(tx store.Store) error {
+		draft := *after
+		_, updateErr := tx.UpdateAccessConstraint(ctx, &draft, after.Revision+5)
+		return updateErr
+	})
+	require.ErrorIs(t, err, store.ErrRevisionConflict)
+}
+
+// TestConstraintHistory_MixedOperationsPruneOldestFirst covers P6-3: the
+// per-constraint cap evicts oldest-first regardless of the operation that
+// wrote a row. The last three rows are written the way the hub writes UPDATE
+// and recovery rows: each in its own transaction alongside its mutation.
+func TestConstraintHistory_MixedOperationsPruneOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	composite := NewCompositeStore(enttest.NewClient(t))
+	constraint, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-mixed-cap"))
+	require.NoError(t, err)
+
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	operations := []string{"create", "update", "recovery_disable", "recovery_enable"}
+	mixedEntry := func(i int) *store.AccessConstraintHistory {
+		entry := historyTestEntry(constraint.ID, fmt.Sprintf("mixed-%04d", i), base.Add(time.Duration(i)*time.Second))
+		entry.Operation = operations[i%len(operations)]
+		return entry
+	}
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < 1000; i++ {
+			if appendErr := tx.AppendConstraintHistoryTx(ctx, mixedEntry(i)); appendErr != nil {
+				return appendErr
+			}
+		}
+		return nil
+	}))
+	rows, err := composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1000, "the cap is not exceeded at exactly 1000 rows")
+
+	// UPDATE: mutation plus row in one transaction.
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		current, getErr := tx.GetAccessConstraint(ctx, constraint.ID)
+		if getErr != nil {
+			return getErr
+		}
+		current.MaximumPermissions = []string{"agent.read", "agent.create"}
+		if _, updateErr := tx.UpdateAccessConstraint(ctx, current, current.Revision); updateErr != nil {
+			return updateErr
+		}
+		entry := mixedEntry(1000)
+		entry.Operation = "update"
+		return tx.AppendConstraintHistoryTx(ctx, entry)
+	}))
+	// recovery_disable: mutation plus row in one transaction.
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		if disableErr := tx.DisableAccessConstraint(ctx, constraint.ID); disableErr != nil {
+			return disableErr
+		}
+		entry := mixedEntry(1001)
+		entry.Operation = "recovery_disable"
+		return tx.AppendConstraintHistoryTx(ctx, entry)
+	}))
+	// recovery_enable: mutation plus row in one transaction.
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		current, getErr := tx.GetAccessConstraint(ctx, constraint.ID)
+		if getErr != nil {
+			return getErr
+		}
+		current.Disabled = false
+		if _, updateErr := tx.UpdateAccessConstraint(ctx, current, current.Revision); updateErr != nil {
+			return updateErr
+		}
+		entry := mixedEntry(1002)
+		entry.Operation = "recovery_enable"
+		return tx.AppendConstraintHistoryTx(ctx, entry)
+	}))
+
+	rows, err = composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1000)
+	assert.Equal(t, "mixed-1002", rows[0].EventID, "newest row first")
+	assert.Equal(t, "recovery_enable", rows[0].Operation)
+	assert.Equal(t, "recovery_disable", rows[1].Operation)
+	assert.Equal(t, "update", rows[2].Operation)
+	assert.Equal(t, "mixed-0003", rows[len(rows)-1].EventID, "the three oldest rows are evicted")
+	retained := make(map[string]bool, len(rows))
+	seen := make(map[string]int)
+	for _, row := range rows {
+		retained[row.EventID] = true
+		seen[row.Operation]++
+	}
+	for _, evicted := range []string{"mixed-0000", "mixed-0001", "mixed-0002"} {
+		assert.False(t, retained[evicted], "%s must be evicted", evicted)
+	}
+	for _, operation := range operations {
+		assert.Positive(t, seen[operation], "operation %s retained", operation)
+	}
+}
+
 func TestConstraintHistory_PruneDeleteFailureRollsBackCreateAndHistory(t *testing.T) {
 	ctx := context.Background()
 	composite := NewCompositeStore(enttest.NewClient(t))

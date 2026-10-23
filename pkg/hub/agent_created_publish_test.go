@@ -144,7 +144,8 @@ var createPublishSites = []createPublishSite{
 		// Workspace bootstrap: created is published (provisioning, not
 		// dispatched) after the upload URLs are signed.
 		name: "bootstrap",
-		arm: func(_ *testing.T, srv *Server, s store.Store, project *store.Project, _ *createRaceDispatcher, name string, hook func(string)) interface{} {
+		arm: func(t *testing.T, srv *Server, s store.Store, project *store.Project, _ *createRaceDispatcher, name string, hook func(string)) interface{} {
+			clearCreateAgentProviderPath(t, s, project)
 			srv.SetStorage(&hookStorage{mockStorage: newMockStorage("test-bucket"), hook: func() {
 				result, err := s.ListAgents(context.Background(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 				if err == nil && len(result.Items) == 1 {

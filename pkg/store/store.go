@@ -2809,7 +2809,12 @@ type NotificationStore interface {
 	// pending or in flight and the notification is not delivered again.
 	// reverted reports whether the row was released; (false, nil) means it
 	// has an outcome or does not exist.
-	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
+	//
+	// notBefore sets NextAttemptAt, the earliest time the sweep may claim
+	// the row again (retry backoff after a failed delivery). A zero
+	// notBefore clears it, so the row is eligible at once. The
+	// broker-connect drain ignores NextAttemptAt.
+	UnmarkNotificationDispatched(ctx context.Context, id string, notBefore time.Time) (reverted bool, err error)
 
 	// RecordNotificationDispatchAttempt atomically increments a
 	// notification's DispatchAttempts by one. Callers record an attempt just
@@ -2828,20 +2833,41 @@ type NotificationStore interface {
 	// subscriber), and a failed write applies only while no outcome is
 	// recorded. applied reports whether this call recorded it; (false, nil)
 	// means the write was refused and the recorded outcome is kept.
-	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	//
+	// reason (a NotificationReason* value) is stored as DispatchReason with
+	// a failed outcome and may be empty. A delivered outcome takes no
+	// reason and clears any recorded one.
+	// Returns ErrInvalidInput for any other outcome, for an unknown reason,
+	// or for a reason given with delivered, and ErrNotFound if the
 	// notification doesn't exist.
-	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string, reason string) (applied bool, err error)
+
+	// ExpireStaleAgentNotifications records outcome failed with reason
+	// NotificationReasonExpired (and dispatched=true) on every
+	// agent-targeted notification created before cutoff that is still
+	// pending: dispatched=false and no recorded outcome. A claimed (in
+	// flight) row or a row with an outcome is left alone. It applies
+	// whatever the subscriber's state, so a notification whose subscriber
+	// stays suspended or has no runtime broker does not stay pending
+	// forever. Returns how many rows it expired.
+	ExpireStaleAgentNotifications(ctx context.Context, cutoff time.Time) (int, error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
 	//
+	// Notifications whose subscriber agent is suspended are never
+	// returned: they stay pending (parked) and become eligible again when
+	// the agent leaves the suspended phase.
+	//
 	// If brokerID is empty (sweep mode), a 60s grace period is applied so
-	// the sweep does not race with an in-flight primary dispatch. All
-	// undispatched agent notifications older than 60s are returned.
+	// the sweep does not race with an in-flight primary dispatch, only
+	// notifications whose subscriber agent has a RuntimeBrokerID are
+	// returned, and a notification whose NextAttemptAt is in the future
+	// (retry backoff) is left out.
 	//
 	// If brokerID is non-empty (broker-connect fast-path), no grace period
-	// is applied and only notifications whose subscriber agent currently
-	// has RuntimeBrokerID == brokerID are returned.
+	// or backoff is applied and only notifications whose subscriber agent
+	// currently has RuntimeBrokerID == brokerID are returned.
 	//
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)

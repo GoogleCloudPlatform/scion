@@ -48,6 +48,7 @@ import '../shared/status-badge.js';
 import '../shared/detail-header.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface BrokerProjectInfo {
   projectId: string;
@@ -671,7 +672,7 @@ export class ScionPageBrokerDetail extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to unregister broker'));
       }
-      window.location.href = '/brokers';
+      navigateTo('/brokers');
     } catch (err) {
       console.error('Failed to unregister broker:', err);
       showToast(err instanceof Error ? err.message : 'Failed to unregister broker', 'danger');

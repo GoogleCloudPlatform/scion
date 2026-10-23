@@ -81,7 +81,7 @@ func TestBrokerCatalogEntriesSnapshot(t *testing.T) {
 	t.Parallel()
 
 	entries := Catalog()
-	require.Len(t, entries, 7)
+	require.Len(t, entries, catalogEntryCount)
 	base := []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id"}
 	withActors := append(append([]string(nil), base...), "principal", "resource")
 	system := []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}}
@@ -152,7 +152,7 @@ func TestBrokerCatalogEntriesSnapshot(t *testing.T) {
 		RequiredPayloadLeaves:  []PayloadLeafSchema{},
 		OptionalPayloadLeaves:  []PayloadLeafSchema{credentialKind, sourceIP, flag("source_ip_unparsed")},
 		Destinations:           structured,
-	}}, entries[2:])
+	}}, entries[catalogIndex(t, entries, "authorization", "decide")+1:])
 
 	gotCodes := make([]string, 0, len(BrokerFailureCodes()))
 	for _, code := range BrokerFailureCodes() {
