@@ -770,16 +770,16 @@ func TestCompletion_InsideAgentOffersNothing(t *testing.T) {
 	assert.Empty(t, slugs)
 }
 
-// TestDevAuthBanner_NotOnStdout: the dev auth warning goes to stderr, so
-// JSON output on stdout stays parseable.
-func TestDevAuthBanner_NotOnStdout(t *testing.T) {
+// TestDevTokenNote_NotOnStdout: the note that a dev token is not sent to a
+// remote hub goes to stderr, so JSON output on stdout stays parseable.
+func TestDevTokenNote_NotOnStdout(t *testing.T) {
 	setupUseTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
 
 	stdout, stderr, err := runScion(t, "use", "--format", "json")
 	require.NoError(t, err)
-	assert.Contains(t, stderr, "Development authentication enabled")
-	assert.NotContains(t, stdout, "WARNING")
+	assert.Contains(t, stderr, "Note: the dev token is used only for a local hub; it is not sent to "+ctxTestHub+".")
+	assert.NotContains(t, stdout, "dev token")
 	var got map[string]interface{}
 	assert.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
 }
