@@ -1431,10 +1431,7 @@ func isIdentByte(c byte) bool {
 }
 
 func shorten(s string) string {
-	if len(s) > 60 {
-		return s[:57] + "..."
-	}
-	return s
+	return truncateUTF8(s, 60)
 }
 
 // typeNameFindings lists every moved named type: its reflect-visible name

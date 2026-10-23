@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // refOKPrefix starts the comment that accepts one outside reference to a
@@ -415,8 +416,23 @@ func isFileNameByte(c byte) bool {
 
 // shortenRef caps a reported literal or line at 120 bytes.
 func shortenRef(s string) string {
-	if len(s) <= 120 {
+	return truncateUTF8(s, 120)
+}
+
+// truncateUTF8 returns s if it is at most max bytes long, and otherwise its
+// longest prefix that ends on a rune boundary and leaves room for "...",
+// followed by "...". The result is at most max bytes and never splits a
+// multi-byte UTF-8 sequence.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	return s[:117] + "..."
+	cut := max - len("...")
+	if cut < 0 {
+		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

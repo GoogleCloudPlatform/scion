@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files under testdata")
@@ -761,6 +762,43 @@ func TestOutsideRefs(t *testing.T) {
 	}
 	if !strings.Contains(out, "pkg/hub/authzop/catalog.go:7: -strict: outside reference to a moved file: ") {
 		t.Errorf("missing the catalog error:\n%s", out)
+	}
+}
+
+// TestTruncateUTF8 checks that the report truncation (shortenRef, shorten)
+// never splits a multi-byte UTF-8 sequence and keeps its byte limit.
+func TestTruncateUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    func(string) string
+		max  int
+	}{
+		{"shortenRef", shortenRef, 120},
+		{"shorten", shorten, 60},
+	} {
+		for _, s := range []string{
+			strings.Repeat("é", 200),            // 2-byte runes
+			strings.Repeat("a", 116) + "日本語日本語", // a 3-byte rune across the cut
+			strings.Repeat("😀", 50),             // 4-byte runes
+			"x" + strings.Repeat("😀", 50),       // 4-byte runes, offset by one
+		} {
+			got := tc.f(s)
+			if !utf8.ValidString(got) {
+				t.Errorf("%s(%q...) = %q: not valid UTF-8", tc.name, s[:8], got)
+			}
+			if len(got) > tc.max {
+				t.Errorf("%s: result is %d bytes, want at most %d", tc.name, len(got), tc.max)
+			}
+			if !strings.HasSuffix(got, "...") || !strings.HasPrefix(s, strings.TrimSuffix(got, "...")) {
+				t.Errorf("%s(%q...) = %q: want a prefix of the input plus \"...\"", tc.name, s[:8], got)
+			}
+			if len(got) < tc.max-6 {
+				t.Errorf("%s: result is %d bytes, cut more than one rune short of %d", tc.name, len(got), tc.max)
+			}
+		}
+		if short := "日本"; tc.f(short) != short {
+			t.Errorf("%s(%q) = %q, want it unchanged", tc.name, short, tc.f(short))
+		}
 	}
 }
 
