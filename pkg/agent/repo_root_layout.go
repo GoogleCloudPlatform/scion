@@ -16,6 +16,9 @@ package agent
 
 import (
 	"fmt"
+	"log/slog"
+	"path/filepath"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -83,4 +86,35 @@ func sharedLayoutWorkspaceRoot(settings *config.VersionedSettings, projectID, ba
 		return "", fmt.Errorf("the workspace backend placed the workspace at %s, but the project storage layout places it at %s; refusing to start", backendWorkspace, resolved.HostPath)
 	}
 	return resolved.HostPath, nil
+}
+
+// legacyAgentWorkspaces records the agents whose legacy workspace admission
+// was logged (once per agent directory).
+var legacyAgentWorkspaces sync.Map
+
+// legacyAgentWorkspaceRoot returns the extra permitted workspace root of an
+// agent provisioned before its project's configuration moved to the shared
+// project root (ptone/scion#5823): exactly that agent's legacy state
+// directory ~/.scion/projects/<slug>/.scion/agents/<name>, and only when
+// agentDir (its resolved state dir) is that directory, reached through the
+// read-only legacy fallback (config.LegacySharedProjectAgentDir), and the
+// agent's workspace is its own (sharedOrExplicit false). An agent-scoped
+// workspace there (clone-per-agent, for example) may hold unpushed work, so
+// it keeps being admitted until the agent is recreated; a shared or
+// project-scoped workspace is never admitted from the legacy tree, nor is
+// another agent's directory. Temporary: retired with the legacy fallback
+// (ptone/scion#5835).
+func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrExplicit bool) string {
+	if sharedOrExplicit || agentDir == "" {
+		return ""
+	}
+	legacy := config.LegacySharedProjectAgentDir(projectDir, agentName)
+	if legacy == "" || filepath.Clean(agentDir) != filepath.Clean(legacy) {
+		return ""
+	}
+	if _, logged := legacyAgentWorkspaces.LoadOrStore(legacy, struct{}{}); !logged {
+		slog.Warn("legacy agent workspace admitted until this agent is recreated; push its work and recreate it at your convenience",
+			"agent", agentName, "agent_dir", legacy)
+	}
+	return legacy
 }

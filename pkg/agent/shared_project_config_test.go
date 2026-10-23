@@ -199,10 +199,11 @@ func listTree(t *testing.T, dir string) []string {
 
 // An agent started before its project's configuration moved to the shared
 // project root, in a mode whose state stayed in the legacy in-project dir,
-// is found there (read-only look-up), but its persisted workspace lies under
-// the legacy broker-local project dir, so a restart from the shared root is
-// refused by the workspace containment check, cleanly: nothing is
-// provisioned in the external root and the legacy state is left as it was.
+// is found there (read-only look-up). Its workspace is the legacy
+// broker-local project dir (project-scoped), which is never admitted from
+// the legacy tree, so a restart from the shared root is refused by the
+// workspace containment check, cleanly: nothing is provisioned in the
+// external root and the legacy state is left as it was.
 func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
@@ -265,5 +266,124 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	}
 	if after := listTree(t, legacyAgent); strings.Join(after, "\n") != strings.Join(before, "\n") {
 		t.Errorf("the legacy state changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// A pre-move clone-per-agent agent (state and workspace in its legacy agent
+// dir) restarts from the shared project root with that workspace intact:
+// exactly its own legacy agent dir is admitted as a workspace root.
+func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	// Clone-per-agent keeps a node-local workspace in the agent's own dir
+	// (the shared tree holds only the project configuration here).
+	f.writeGlobalSettings(t, "")
+	root := filepath.Join(t.TempDir(), "share-1", "projects", testNFSWorkspaceProjectID)
+	mustMkdirAll(t, filepath.Join(root, "workspace"))
+	scionDir := filepath.Join(root, config.DotScion)
+	mustMkdirAll(t, scionDir)
+	for name, content := range map[string]string{
+		projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+		projectkeys.ProjectSlugFile: "web\n",
+		"settings.yaml":             "schema_version: \"1\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(scionDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyRoot := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectsDir, "web")
+	legacyScion := filepath.Join(legacyRoot, config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, testNFSWorkspaceProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyScion, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var cfg runtime.RunConfig
+	start := func(projectPath string) error {
+		mockRT := &runtime.MockRuntime{
+			NameFunc: func() string { return "docker" },
+			RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+				cfg = rc
+				return "mock-id", nil
+			},
+		}
+		_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+			Name:        "test-agent",
+			ProjectPath: projectPath,
+			NoAuth:      true,
+			GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+			Env: map[string]string{
+				"SCION_AGENT_ID":       "agent-5823",
+				"SCION_PROJECT_ID":     testNFSWorkspaceProjectID,
+				"SCION_WORKSPACE_MODE": "clone-per-agent",
+			},
+		})
+		return err
+	}
+	if err := start(legacyRoot); err != nil {
+		t.Fatalf("pre-move start: %v", err)
+	}
+	legacyAgent := filepath.Join(legacyScion, "agents", "test-agent")
+	if !strings.HasPrefix(cfg.Workspace, legacyAgent+string(filepath.Separator)) {
+		t.Fatalf("fixture: the pre-move workspace %q should be in the agent's dir %q", cfg.Workspace, legacyAgent)
+	}
+	work := filepath.Join(cfg.Workspace, "unpushed.txt")
+	if err := os.WriteFile(work, []byte("work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	preWorkspace := cfg.Workspace
+
+	if err := start(root); err != nil {
+		t.Fatalf("restart from the shared root: %v", err)
+	}
+	if cfg.Workspace != preWorkspace {
+		t.Errorf("restart workspace = %q, want the agent's own legacy workspace %q", cfg.Workspace, preWorkspace)
+	}
+	if data, err := os.ReadFile(work); err != nil || string(data) != "work" {
+		t.Errorf("the legacy workspace content must be intact: %q, %v", data, err)
+	}
+}
+
+// The legacy admission is exactly the agent's own legacy dir, reached through
+// the state fallback, for its own (agent-scoped) workspace.
+func TestLegacyAgentWorkspaceRoot(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, sharedCfgProjectID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, legacy)
+	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ext, err := config.AgentDirForProject(scionDir, "new", false, sharedCfgProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, agent, agentDir string
+		shared                bool
+		want                  string
+	}{
+		{"own legacy dir", "old", legacy, false, legacy},
+		{"shared or explicit workspace", "old", legacy, true, ""},
+		{"another agent naming the legacy dir", "new", legacy, false, ""},
+		{"an agent in the external root", "new", ext, false, ""},
+		{"no agent dir", "old", "", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := legacyAgentWorkspaceRoot(scionDir, tc.agent, tc.agentDir, tc.shared); got != tc.want {
+				t.Errorf("legacyAgentWorkspaceRoot = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// An ordinary (local-backend) project has no legacy admission.
+	if got := legacyAgentWorkspaceRoot(legacyScion, "old", legacy, false); got != "" {
+		t.Errorf("local project: got %q, want \"\"", got)
 	}
 }
