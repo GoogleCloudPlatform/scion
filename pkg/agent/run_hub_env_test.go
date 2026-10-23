@@ -16,7 +16,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +113,8 @@ profiles:
   endpoint: "http://localhost:9810"
 `), 0644)
 
-	// Write a dev-token file so the token resolution finds it
+	// A dev-token file on the host. A start that is not a broker dispatch
+	// bound to the co-located hub must never hand it to the agent.
 	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	// Capture the RunConfig
@@ -157,13 +160,9 @@ profiles:
 		t.Error("expected SCION_AUTH_TOKEN to NOT be in container env (should be in token file)")
 	}
 
-	// Verify the token was written to the agent home token file
-	tokenData, err := os.ReadFile(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token"))
-	if err != nil {
-		t.Fatalf("failed to read token file: %v", err)
-	}
-	if got := strings.TrimSpace(string(tokenData)); got != "scion-dev-test-token-abc" {
-		t.Errorf("token file = %q, want %q", got, "scion-dev-test-token-abc")
+	// The host dev token is not written to the agent's token file.
+	if _, err := os.Stat(filepath.Join(capturedConfig.HomeDir, ".scion", "scion-token")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("agent token file: stat err = %v, want not exist (no host dev token outside a co-located broker dispatch)", err)
 	}
 }
 

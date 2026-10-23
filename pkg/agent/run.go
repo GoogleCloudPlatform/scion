@@ -35,7 +35,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -1463,16 +1462,6 @@ authDone:
 			}
 		}
 	}
-	// If hub endpoint is now set but no auth token, resolve dev auth token
-	// from the host filesystem (env vars or ~/.scion/dev-token file).
-	if _, ok := opts.Env["SCION_HUB_ENDPOINT"]; ok {
-		if _, tokenSet := opts.Env["SCION_AUTH_TOKEN"]; !tokenSet {
-			if token := apiclient.ResolveDevToken(); token != "" {
-				opts.Env["SCION_AUTH_TOKEN"] = token
-			}
-		}
-	}
-
 	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
 	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
 	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
@@ -1524,6 +1513,15 @@ authDone:
 			delete(finalScionCfg.Env, "SCION_HUB_ENDPOINT")
 			delete(finalScionCfg.Env, "SCION_HUB_URL")
 		}
+	}
+
+	// The co-located hub's dev token is the agent's hub token only when the
+	// hub issued none and the endpoint the agent will use is still the
+	// broker's trusted one. Checked here, after every endpoint override
+	// above: an endpoint from the agent config or the config env section
+	// that differs from trustedHubEndpoint drops it.
+	if token := colocatedHubDevTokenForAgent(opts, trustedHubEndpoint); token != "" && opts.Env["SCION_AUTH_TOKEN"] == "" {
+		opts.Env["SCION_AUTH_TOKEN"] = token
 	}
 
 	// Write the agent token to the canonical token file in the agent home
@@ -3552,6 +3550,25 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 // unaffected.
 func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
+}
+
+// colocatedHubDevTokenForAgent returns opts.ColocatedHubDevToken when it may
+// become the agent's hub token: a broker-mode start, a non-empty
+// trustedHubEndpoint, and an agent hub endpoint (SCION_HUB_ENDPOINT and
+// SCION_HUB_URL in opts.Env, after all overrides) equal to it. Otherwise it
+// returns "", so a dev token is never sent to an endpoint other than the
+// co-located hub's.
+func colocatedHubDevTokenForAgent(opts api.StartOptions, trustedHubEndpoint string) string {
+	if !opts.BrokerMode || opts.ColocatedHubDevToken == "" || trustedHubEndpoint == "" {
+		return ""
+	}
+	if opts.Env["SCION_HUB_ENDPOINT"] != trustedHubEndpoint {
+		return ""
+	}
+	if hubURL, ok := opts.Env["SCION_HUB_URL"]; ok && hubURL != trustedHubEndpoint {
+		return ""
+	}
+	return opts.ColocatedHubDevToken
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
