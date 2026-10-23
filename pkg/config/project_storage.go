@@ -570,14 +570,13 @@ var storageSettingKeys = []string{"project_storage", "workspace_storage", "share
 
 // CheckStorageBlocksLoaded fails closed when the global settings file
 // (content data; check false skips the check) holds a storage block that
-// the loader did not carry into gc. Such a file plausibly configures storage,
-// and running on the local backend instead would put project data on the
-// wrong disk. data is the file's content. A schema_version "1" file is
-// authoritative as loaded, so this check never applies to one, and neither
-// does a file in which a storage key appears only inside another key's name
-// (shared_dir_storage_class) or a comment: keys are matched as parsed
-// mapping keys. A legacy file that does not parse at all is refused when its
-// bytes mention a storage key.
+// the loader did not carry into gc, whatever the file's format: for example
+// a block that is not under server:, a missing schema_version, or a server
+// section that fails to decode. Running on the local backend instead would
+// put project data on the wrong disk. Keys are matched as parsed mapping
+// keys, so a comment, or a key that only contains a storage key's name
+// (shared_dir_storage_class), never triggers it. A file that does not parse
+// at all is refused when its bytes mention a storage key.
 func CheckStorageBlocksLoaded(gc *GlobalConfig, check bool, data []byte) error {
 	if gc != nil && (gc.ProjectStorage != nil || gc.WorkspaceStorage != nil || gc.SharedDirStorage != nil || gc.HomeStorage != nil) {
 		return nil

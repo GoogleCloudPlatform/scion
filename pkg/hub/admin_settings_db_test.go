@@ -2347,12 +2347,9 @@ func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), "server.project_storage") {
 		t.Errorf("the refusal should name server.project_storage, got: %s", rr.Body.String())
 	}
-	// Never stored: no settings section carries the block.
-	for _, section := range []string{"server", "project_storage"} {
-		if got, err := fakeStore.GetHubSetting(context.Background(), section); err == nil && got != nil &&
-			strings.Contains(string(got.Value), "project_storage") {
-			t.Errorf("section %q stored the rejected block: %s", section, got.Value)
-		}
+	// Never stored: the refused PUT wrote no settings section at all.
+	if len(fakeStore.settings) != 0 {
+		t.Errorf("a layer0_rejected PUT must store nothing, got sections: %v", fakeStore.settings)
 	}
 }
 

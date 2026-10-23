@@ -840,15 +840,6 @@ func useNFSSharedDirStorage(srv *Server, hostBase string) {
 	}
 }
 
-// useNFSProjectStorage gives srv a server.project_storage nfs block on the
-// same share: workspaces and shared dirs both on the export.
-func useNFSProjectStorage(srv *Server, hostBase string) {
-	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
-		Backend: "nfs",
-		NFS:     nfsSharedDirStorageTestConfig(hostBase).NFS,
-	}
-}
-
 // nfsSharedDirStorageTestConfig is the in-memory form of the block
 // setNFSSharedDirStorageGlobalSettings writes for hostBase.
 func nfsSharedDirStorageTestConfig(hostBase string) *config.V1SharedDirStorageConfig {
