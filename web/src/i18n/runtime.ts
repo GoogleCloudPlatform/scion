@@ -58,7 +58,12 @@ export async function createRuntime(): Promise<LocalizationRuntime> {
   };
   const handleStorage = (event: StorageEvent): void => {
     if (event.key !== LOCALE_STORAGE_KEY && event.key !== null) return;
-    if (event.storageArea && event.storageArea !== localStorage) return;
+    try {
+      if (event.storageArea && event.storageArea !== localStorage) return;
+    } catch {
+      // Storage access may be revoked after initialization; keep the tab's choice.
+      return;
+    }
     preference = readPreference();
     applyLocale();
   };

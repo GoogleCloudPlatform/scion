@@ -43,6 +43,7 @@ export function t(key: MessageKey, values: Record<string, string | number> = {})
   if (runtime) return runtime.translate(key, values);
   const pluralKey = `${key}_${values.count === 1 ? 'one' : 'other'}`;
   const source = en[key as keyof typeof en] ?? en[pluralKey as keyof typeof en];
+  if (source === undefined) return key;
   return source.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => String(values[name] ?? ''));
 }
 

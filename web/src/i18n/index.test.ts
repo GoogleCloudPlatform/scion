@@ -126,6 +126,29 @@ describe('locale resolution and preferences', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: LOCALE_STORAGE_KEY }));
     expect(getLocale()).toBe('en');
   });
+
+  it('ignores storage events when the localStorage getter is blocked', async () => {
+    const storage = localStorage;
+    const getter = vi.spyOn(globalThis, 'localStorage', 'get').mockImplementation(() => {
+      throw new DOMException('Storage blocked', 'SecurityError');
+    });
+    const onError = vi.fn((event: ErrorEvent) => event.preventDefault());
+    window.addEventListener('error', onError);
+    try {
+      await initializeLocalization(true);
+      setLocalePreference('zh-CN');
+      expect(getLocale()).toBe('zh-CN');
+      getter.mockClear();
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: LOCALE_STORAGE_KEY, storageArea: storage })
+      );
+      expect(getter).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+      expect(getLocale()).toBe('zh-CN');
+    } finally {
+      window.removeEventListener('error', onError);
+    }
+  });
 });
 
 describe('message contracts', () => {
