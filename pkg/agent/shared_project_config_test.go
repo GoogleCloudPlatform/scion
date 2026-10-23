@@ -15,12 +15,17 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 const sharedCfgProjectID = "0f9e8d7c-6b5a-4321-8fed-cba987654321"
@@ -109,4 +114,85 @@ func testDeleteSharedProjectLegacyDir(t *testing.T, hubID string) {
 	if got := config.ResolveAgentDir(filepath.Join(root, config.DotScion), "old"); got == legacy {
 		t.Error("a new agent of the same name must not resolve to the removed legacy dir")
 	}
+}
+
+// A hub-managed agent started from a shared project root (the broker's
+// ProjectPath on a shared Layout) mounts the project's workspace on the
+// share, keeps its state and home in the broker-local external root, and
+// writes nothing into the hub-seeded configuration.
+func TestStart_SharedProjectRoot(t *testing.T) {
+	for _, rtName := range []string{"docker", "kubernetes"} {
+		t.Run(rtName, func(t *testing.T) {
+			f := newSharedDirStorageRunFixture(t)
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+			root := filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID)
+			scionDir := filepath.Join(root, config.DotScion)
+			mustMkdirAll(t, filepath.Join(root, "workspace"))
+			mustMkdirAll(t, scionDir)
+			for name, content := range map[string]string{
+				projectkeys.ProjectIDFile:   testNFSWorkspaceProjectID + "\n",
+				projectkeys.ProjectSlugFile: "web\n",
+				"settings.yaml":             "schema_version: \"1\"\n",
+			} {
+				if err := os.WriteFile(filepath.Join(scionDir, name), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := listTree(t, scionDir)
+
+			var cfg runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return rtName },
+				RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					cfg = rc
+					return "mock-id", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+				Name:            "test-agent",
+				ProjectPath:     root,
+				NoAuth:          true,
+				SharedWorkspace: true,
+				Env: map[string]string{
+					"SCION_AGENT_ID":   "agent-5823",
+					"SCION_PROJECT_ID": testNFSWorkspaceProjectID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if rtName == "docker" && cfg.Workspace != filepath.Join(root, "workspace") {
+				t.Errorf("workspace = %q, want the shared workspace %q", cfg.Workspace, filepath.Join(root, "workspace"))
+			}
+			if rtName == "kubernetes" && cfg.NFSSubPath != "projects/"+testNFSWorkspaceProjectID+"/workspace" {
+				t.Errorf("NFS subPath = %q", cfg.NFSSubPath)
+			}
+			ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(testNFSWorkspaceProjectID, "-", "")[:8], config.DotScion, "agents", "test-agent")
+			if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); err != nil {
+				t.Errorf("agent state should be in the broker-local external root %s: %v", ext, err)
+			}
+			if after := listTree(t, scionDir); strings.Join(after, "\n") != strings.Join(before, "\n") {
+				t.Errorf("the agent manager wrote into the shared project configuration:\nbefore %v\nafter  %v", before, after)
+			}
+			if strings.HasPrefix(cfg.HomeDir, mountRoot) {
+				t.Errorf("home %q is on the share; homes: local keeps it on the broker", cfg.HomeDir)
+			}
+		})
+	}
+}
+
+func listTree(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	if err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		out = append(out, fmt.Sprintf("%s %d", strings.TrimPrefix(p, dir), info.Size()))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
