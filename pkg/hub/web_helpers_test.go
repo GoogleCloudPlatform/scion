@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,6 +183,47 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 	ws.store = devStore
 
 	return ws
+}
+
+// devSignIn signs a browser in to a dev-auth web server the way a user does:
+// it mints a code at the launch endpoint with the dev token, opens the
+// sign-in link, and returns the session cookies the link set.
+func devSignIn(t *testing.T, ws *WebServer) []*http.Cookie {
+	t.Helper()
+	h := ws.Handler()
+	mint := httptest.NewRequest(http.MethodPost, devLaunchPath, nil)
+	mint.Header.Set("Authorization", "Bearer "+ws.config.DevAuthToken)
+	mintRec := httptest.NewRecorder()
+	h.ServeHTTP(mintRec, mint)
+	require.Equal(t, http.StatusOK, mintRec.Code, mintRec.Body.String())
+	var launch devLaunchResponse
+	require.NoError(t, json.Unmarshal(mintRec.Body.Bytes(), &launch))
+
+	signIn := httptest.NewRequest(http.MethodGet, launch.SignInPath, nil)
+	signInRec := httptest.NewRecorder()
+	h.ServeHTTP(signInRec, signIn)
+	require.Equal(t, http.StatusSeeOther, signInRec.Code, signInRec.Body.String())
+	cookies := signInRec.Result().Cookies()
+	require.NotEmpty(t, cookies, "the sign-in link must set the session cookie")
+	return cookies
+}
+
+// devSignedIn returns a handler for ws that sends every request with the
+// cookies of one dev sign-in (devSignIn), unless the request already
+// carries a session cookie. For tests of signed-in behaviour on a dev-auth
+// server.
+func devSignedIn(t *testing.T, ws *WebServer) http.Handler {
+	t.Helper()
+	cookies := devSignIn(t, ws)
+	h := ws.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie(webSessionName); err != nil {
+			for _, c := range cookies {
+				r.AddCookie(c)
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // mockOAuthTransport intercepts HTTP requests to Google OAuth endpoints and

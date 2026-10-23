@@ -26,9 +26,11 @@ const redactedValue = "REDACTED"
 // credentialQueryParams are query parameters whose values are bearer
 // credentials and must never be written to logs. "sig" carries the Hub's
 // skill file capability signature: anyone holding it can replay the download
-// until it expires.
+// until it expires. "code" carries one-time sign-in codes: the web's dev
+// sign-in link and OAuth authorization codes on the login callback.
 var credentialQueryParams = map[string]bool{
-	"sig": true,
+	"sig":  true,
+	"code": true,
 }
 
 // RedactQuery returns rawQuery with the values of credential-bearing

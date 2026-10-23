@@ -37,6 +37,15 @@ To use the local Hub together with remote ones, see [Working with Several Hubs](
 
 When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
 
+**Signing in to the Web Dashboard.** The workstation server signs a browser in only from a sign-in link. `scion server start` opens one in your browser and, when its output is a terminal, also prints it (`Sign in: http://127.0.0.1:8080/auth/dev-signin?code=...`); redirected output and logs get only the `scion server open` hint, so they never hold a link. A link works once and only for about two minutes; it sets a session cookie that lasts 24 hours. A browser without that cookie sees the sign-in page instead of the dashboard. To get a new link at any time (another browser, an expired session, a server started with `--foreground` or by your service manager), run:
+
+```bash
+scion server open          # opens a new sign-in link in your browser
+scion server open --print  # prints it instead (also when stdout is not a terminal)
+```
+
+`scion server open` creates the link with the server's development token, so only someone who can read that token can sign in. Open a link directly (the browser `scion server start` opens, or paste it into the address bar): the session cookie is sent only to requests that start on the dashboard itself, so a sign-in link followed from another web page uses up the link but does not sign you in, and a dashboard link followed from another site shows the sign-in page while your session stays valid for the dashboard's own tabs.
+
 **No image registry yet.** The Runtime Broker needs `image_registry` to pull agent images. If it is not set, the Hub and Web Dashboard still start, so the wizard (which sets the registry) is reachable, and the Runtime Broker is skipped with a warning. Set the registry in the wizard or with `scion config set --global image_registry <registry>`, then run `scion server restart` to start the Runtime Broker; a registry saved in the wizard counts at restart. `SCION_MAINTENANCE_IMAGE_REGISTRY` applies only to maintenance builds and does not count. (A hosted server still refuses to start without it.)
 
 **Development token.** The CLI reaches this server with its development token, by design. It sends that token only to a Hub on a loopback address (`localhost`, `127.0.0.1` or `::1`). For any other Hub the token is not sent. When the token was set explicitly with `SCION_DEV_TOKEN` or `SCION_DEV_TOKEN_FILE` and would be the CLI's credential for such a Hub, the CLI prints one note on stderr saying so. The default `~/.scion/dev-token` file, which this server writes, is not sent to such a Hub either, and gives no note.
@@ -71,7 +80,7 @@ If you prefer to run the server interactively, use the `--foreground` flag:
 scion server start --foreground
 ```
 
-You can now navigate to `http://localhost:8080` in your browser to access the Web Dashboard.
+A foreground server does not open a browser: run `scion server open` in another terminal to sign in to the Web Dashboard.
 
 ## Network Configuration and Bridges
 
