@@ -1903,10 +1903,29 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if regErr := provision.RegisterSharer(repoRoot, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
+				// Record, broker-side, that this worktree is the agent's own
+				// checkout (see isAgentOwnWorkspace), but only for a linked
+				// worktree that is neither the main checkout nor holds the
+				// project: the main checkout (e.g. --branch naming the
+				// branch the user has checked out) holds the project
+				// configuration the broker reads, so the agent is attached
+				// without the record and gets that .scion read-only.
+				if validAttachedWorktree(projectDir, resolvedClean(existingPath)) {
+					if err := writeAgentOwnWorkspace(agentDir, existingPath); err != nil {
+						return "", "", nil, fmt.Errorf("record the attached worktree: %w", err)
+					}
+				} else {
+					removeAgentOwnWorkspace(agentDir)
+					slog.Warn("Attached to a worktree that is the main checkout or holds the project; its .scion is mounted read-only",
+						"agent", agentName, "worktree", existingPath)
+				}
 			}
 		}
 
 		if !usedExistingWorktree {
+			// No attached worktree: a record from an earlier attach no
+			// longer applies.
+			removeAgentOwnWorkspace(agentDir)
 			shouldCreateWorktree = true
 			// agentWorkspace remains set to agents/<name>/workspace
 		}
@@ -3133,6 +3152,46 @@ func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
 		return err
 	}
 	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+}
+
+// agentOwnWorkspaceFile records, in agentDir, a workspace outside
+// <agentDir>/workspace that provisioning gave the agent as its own checkout
+// (an existing worktree of its branch it attached to). agentDir is
+// broker-owned state, never inside an agent's writable mounts.
+const agentOwnWorkspaceFile = "own-workspace.json"
+
+type agentOwnWorkspaceState struct {
+	Workspace string `json:"workspace"`
+}
+
+// writeAgentOwnWorkspace records workspace as the agent's own checkout.
+func writeAgentOwnWorkspace(agentDir, workspace string) error {
+	data, err := json.Marshal(agentOwnWorkspaceState{Workspace: workspace})
+	if err != nil {
+		return err
+	}
+	return writeAgentInfoFile(filepath.Join(agentDir, agentOwnWorkspaceFile), data, 0o644)
+}
+
+// removeAgentOwnWorkspace removes the record, if any.
+func removeAgentOwnWorkspace(agentDir string) {
+	if err := os.Remove(filepath.Join(agentDir, agentOwnWorkspaceFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("Could not remove the attached-worktree record", "agent_dir", agentDir, "error", err)
+	}
+}
+
+// readAgentOwnWorkspace returns the workspace writeAgentOwnWorkspace
+// recorded, or "" when there is none or it does not parse.
+func readAgentOwnWorkspace(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, agentOwnWorkspaceFile))
+	if err != nil {
+		return ""
+	}
+	var state agentOwnWorkspaceState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ""
+	}
+	return state.Workspace
 }
 
 // readProvisionedWorktreeRepoRoot reads the value written by

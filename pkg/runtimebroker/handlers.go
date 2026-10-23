@@ -983,10 +983,37 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Record the hub project ID for a broker copy of a hub workspace
 		// before any project settings are read, under the process-wide
 		// workspace lock on the project.
+		// The workspace's .scion entry is checked against the broker's
+		// record first, and an identity the alignment rewrites is
+		// recorded in the same locked section
+		// (alignHubManagedProjectIdentityChecked).
+		var checkErr error
 		if lockErr := s.withWorkspaceLock(ctx, func() {
-			s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+			checkErr = s.alignHubManagedProjectIdentityChecked(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
 		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	} else if req.ProjectPath != "" {
+		// A request that names the path of a hub-managed workspace
+		// directly gets the same check before its settings are read.
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(req.ProjectPath, req.ProjectID) }, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
 			return
 		}
 	}
@@ -5939,7 +5966,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if len(hydratedHarnessConfigPath) > 0 {
 			hydratedHCPath = hydratedHarnessConfigPath[0]
 		}
-		if hcProjectDir := harnessConfigProjectDir(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
+		if hcProjectDir := harnessConfigProjectTier(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
 			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
@@ -6610,7 +6637,7 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	if cliFlag == "" && req.Config != nil && req.Config.Template != "" {
 		tpl := req.Config.Template
 		if req.ProjectPath != "" {
-			if _, err := config.FindHarnessConfigDir(tpl, req.ProjectPath); err == nil {
+			if _, err := config.FindHarnessConfigDir(tpl, harnessConfigProjectTier(req.ProjectPath)); err == nil {
 				cliFlag = tpl
 			}
 		}
@@ -7427,15 +7454,31 @@ func (s *Server) findAuxiliaryRuntimeByType(runtimeType string) (auxiliaryRuntim
 
 // resolveProjectSettingsDir returns the directory containing settings.yaml for a project.
 // For linked projects, projectPath already points to the .scion directory.
-// For hub-managed projects, projectPath is the workspace parent, so settings
-// live in the .scion subdirectory.
+// For hub-managed projects, projectPath is the workspace root, so settings
+// live in its .scion subdirectory (or the external directory a .scion
+// marker file names). A workspace root's own settings file is workspace
+// content, never project settings, so it is not read when the root has a
+// .scion entry (hubEndpointFromProjectSettings reports one it ignores).
 func resolveProjectSettingsDir(projectPath string) string {
-	if config.GetSettingsPath(projectPath) != "" {
+	if filepath.Base(projectPath) == config.DotScion {
 		return projectPath
 	}
-	candidate := filepath.Join(projectPath, ".scion")
-	if config.GetSettingsPath(candidate) != "" {
+	candidate := filepath.Join(projectPath, config.DotScion)
+	if info, err := os.Lstat(candidate); err == nil {
+		if !info.IsDir() {
+			if resolved, err := config.ResolveProjectMarker(candidate); err == nil {
+				return resolved
+			}
+		}
 		return candidate
+	}
+	if isHubManagedProjectPath(projectPath) {
+		// A hub-managed workspace root without a .scion entry has no
+		// project settings; its own settings file is workspace content.
+		return candidate
+	}
+	if config.GetSettingsPath(projectPath) != "" {
+		return projectPath
 	}
 	return projectPath // fallback to original
 }

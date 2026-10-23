@@ -33,9 +33,9 @@ import (
 
 // Each upload handler that parses a multipart form gets two tests: a
 // successful upload and a malformed query string (x=%zz), which makes
-// ParseMultipartForm fail after it has spooled the part. Both send a part
-// larger than the handler's in-memory limit, so the part is written to a
-// temporary file, and both check that no such file remains afterwards.
+// ParseMultipartForm fail after it has spooled the part. Both send a part over
+// the in-memory limit, so it spools, and check no temporary file remains. The
+// bulk invite route is the exception: its body cap equals that limit.
 
 // malformedUploadQuery is a query string that url.ParseQuery refuses.
 const malformedUploadQuery = "?x=%zz"
@@ -115,12 +115,21 @@ func TestAdminAllowListImportUpload_SpoolRemoved_MalformedQuery(t *testing.T) {
 
 // --- Admin bulk user invite (2 MiB) ---
 
+// This route's body cap equals the in-memory limit (both
+// inviteBulkMaxMultipartBytes), so no part can spool here: this CSV is kept
+// under the cap, and TestAdminUserInviteUpload_SpoolRemoved_MalformedQuery is
+// rejected by the cap (400) before any part spools; both still check that no
+// temporary file remains. Spooled-part removal is covered by
+// TestAdminAllowListImportUpload_SpoolRemoved_Success (same 2 MiB call, other
+// route), TestParseMultipartUpload_FormReadableUntilCleanup and
+// TestParseMultipartUpload_ParseErrorStillCleansUp (the helper), and
+// TestMultipartFormSourcePin (decodeInviteBatchMultipart defers the cleanup).
 func TestAdminUserInviteUpload_SpoolRemoved_Success(t *testing.T) {
 	srv, s := testServer(t)
 	dir := redirectMultipartTemp(t)
 
 	rec := serveUpload(srv, adminCSVUploadRequest(t, "/api/v1/admin/users/invite/bulk",
-		adminSpoolingCSV("spool-invite@example.com")))
+		[]byte("email,note\nspool-invite@example.com,spool\n")))
 	requireUploadStatus(t, rec, http.StatusOK)
 
 	var resp UserInviteBulkResponse

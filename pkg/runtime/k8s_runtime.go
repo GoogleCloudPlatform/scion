@@ -2578,7 +2578,21 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	agentsExcluded := false
 	if !nfsAgentDir && !nfsWorktree {
 		var maskTarget string
-		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "")
+		nfsShared := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
+		agentsExcluded, maskTarget = k8sWorkspaceAgentsExcluded(config, nfsShared)
+		// An NFS-shared workspace is mounted directly, so its project
+		// configuration directory is mounted read-only over it, as on the
+		// local runtimes. The local backend's per-pod copy is private to
+		// the pod and is never synced back to the broker.
+		if nfsShared {
+			m, ok, err := k8sProjectConfigVolumeMount(config)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				agentVolumeMounts = append(agentVolumeMounts, m)
+			}
+		}
 		if maskTarget != "" {
 			podVolumes = append(podVolumes, k8sAgentsMaskPodVolume())
 			agentVolumeMounts = append(agentVolumeMounts, corev1.VolumeMount{Name: k8sAgentsMaskVolume, MountPath: maskTarget})
@@ -4936,6 +4950,38 @@ func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool)
 		out[k8sWorkspaceAgentsAnnotation] = "true"
 	}
 	return out
+}
+
+// k8sProjectConfigVolumeMount returns the read-only mount of the project
+// configuration directory (or .scion marker file) of an NFS-shared
+// workspace, whose broker-side view is config.Workspace, over the pod's
+// /workspace mount of the same export. ok is false when the workspace has
+// no .scion entry. A workspace the broker cannot see (including a symlink
+// whose target is unreachable), or a .scion entry it cannot check, is an
+// error: the pod is refused rather than built without the read-only mount.
+func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, error) {
+	// The NFS-shared pod mounts the project's shared workspace
+	// (config.Workspace, the export subPath) at /workspace, whatever repo
+	// root git metadata reports for it.
+	if config.Workspace == "" || config.AgentOwnWorkspace {
+		return corev1.VolumeMount{}, false, nil
+	}
+	// The broker must see the shared workspace to decide; a workspace it
+	// cannot check refuses the pod rather than omit the read-only mount.
+	if _, err := os.Stat(config.Workspace); err != nil {
+		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
+	}
+	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)
+	if err != nil || !ok {
+		return corev1.VolumeMount{}, false, err
+	}
+	rel := strings.TrimPrefix(target, "/workspace/")
+	return corev1.VolumeMount{
+		Name:      "workspace",
+		MountPath: target,
+		SubPath:   path.Join(config.NFSSubPath, rel),
+		ReadOnly:  true,
+	}, true, nil
 }
 
 // k8sWorkspaceSyncExcludes returns the workspace paths a tar sync to a

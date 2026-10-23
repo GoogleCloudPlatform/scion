@@ -124,12 +124,26 @@ func TestLoadOrgScope(t *testing.T) {
 	}
 }
 
+// GITHUB_APP_INSTALLATION_SCOPE defaults to repo, the common case (and the
+// only one for a personal account).
+func TestLoadInstallScopeDefault(t *testing.T) {
+	env := validEnv()
+	delete(env, EnvGitHubInstallScope)
+	c, err := Load(getenvFrom(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InstallScope != ScopeRepo {
+		t.Errorf("InstallScope = %q, want %q by default", c.InstallScope, ScopeRepo)
+	}
+}
+
 func TestLoadRequired(t *testing.T) {
 	_, err := Load(getenvFrom(nil))
 	if err == nil {
 		t.Fatal("Load with empty env succeeded")
 	}
-	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGitHubInstallScope, EnvGCPProject, EnvRegion} {
+	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGCPProject, EnvRegion} {
 		if !strings.Contains(err.Error(), k+": required") {
 			t.Errorf("error does not report %s as required: %v", k, err)
 		}
@@ -176,8 +190,9 @@ var invalidCases = []struct {
 	{EnvRunnerMemory, "99999999999999999999Mi"},
 	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 	{EnvRunnerDiskGi, "0"},
-	{EnvRunnerDiskGi, "11"},
-	{EnvRunnerDiskGi, "20"}, // the old default; above the 10 GiB Cloud Run accepted in P6
+	{EnvRunnerDiskGi, "101"}, // above Cloud Run's 100 GiB per volume
+	{EnvRunnerBuildCacheInRAM, "yes"},
+	{EnvRunnerBuildCacheInRAM, "TRUE"},
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -311,6 +326,22 @@ var validCases = []map[string]string{
 	{EnvGitHubAppID: "+0042", EnvRunnerGroupID: "007"},
 	{EnvReconcileSchedule: "0 */2 * * 1-5"},
 	{EnvBuildStagingBucket: "my-org_cr-ci-staging"},
+	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
+	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
+	{EnvRunnerBuildCacheInRAM: "true"},
+	{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "32768Mi"},
+	{EnvGitHubInstallScope: ""}, // defaults to repo
+}
+
+// invalidComboCases are multi-key changes to validEnv that Load must reject,
+// naming key.
+var invalidComboCases = []struct {
+	env map[string]string
+	key string
+}{
+	// The RAM build cache needs the 32 GiB shape.
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "30Gi"}, EnvRunnerBuildCacheInRAM},
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerCPU: "6", EnvRunnerMemory: "24Gi"}, EnvRunnerBuildCacheInRAM},
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation
@@ -364,6 +395,15 @@ func TestScriptValidatorMatchesLoad(t *testing.T) {
 			t.Errorf("%s=%q accepted by check-config.sh", tt.key, tt.value)
 		} else if !strings.Contains(out, tt.key) {
 			t.Errorf("%s=%q: check-config.sh does not name the key:\n%s", tt.key, tt.value, out)
+		}
+	}
+	for _, tt := range invalidComboCases {
+		env := merge(tt.env)
+		if _, err := Load(getenvFrom(env)); err == nil || !strings.Contains(err.Error(), tt.key) {
+			t.Fatalf("%v: Load err = %v, want a %s error", tt.env, err, tt.key)
+		}
+		if ok, out := check(env); ok || !strings.Contains(out, tt.key) {
+			t.Errorf("%v: check-config.sh ok=%v, want a %s error:\n%s", tt.env, ok, tt.key, out)
 		}
 	}
 	// Required keys.
