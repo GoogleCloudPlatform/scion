@@ -100,9 +100,6 @@ allowed_paths=(
   # its storage path. The literal is the point of the negative tests.
   "^pkg/hub/harness_config_scope_validation_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
-  # Asserts the project cache/sync-status responses no longer emit a groveId
-  # key alongside projectId. The literal is the point of the negative tests.
-  "^pkg/hub/project_cache_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.
@@ -213,6 +210,11 @@ allowed_paths=(
   # already allowlisted above) so the read-only admin-dir mount narrowing
   # applies to both current and pre-migration hub-native project layouts.
   "^pkg/runtime/common.go$"
+  # The retired object-storage workspace copy's directory name and the
+  # pre-rename project identity markers, read only by the one-shot project
+  # storage migration (M3 deletion; identity check of slug-keyed legacy
+  # trees, ptone/scion#5819); removed with it in phase 6 (ptone/scion#5839).
+  "^pkg/projectkeys/legacy_storage.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
   # here so the receiver still strips them from user-supplied attributes,
