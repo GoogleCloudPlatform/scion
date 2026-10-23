@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Hub-managed projects on a shared storage backend (ptone/scion#5823).
@@ -271,3 +272,87 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 	})
 	return skipped, err
 }
+
+// localContainerRuntime reports whether runtimeName runs agents as local
+// containers on the broker host (Docker, Podman, Apple container), whose
+// workspace bind mount the broker itself prepares.
+func localContainerRuntime(runtimeName string) bool {
+	switch runtimeName {
+	case "docker", "podman", "container":
+		return true
+	}
+	return false
+}
+
+// provisionSharedPlainWorkspace is the shared-plain provisioning backstop
+// for a git project on the broker's shared Layout dispatched to a local
+// container runtime (ptone/scion#5823): before the agent starts, the broker
+// runs provision.ProvisionShared for the project's workspace on the share,
+// exactly as the Kubernetes provisioning init container lays it out (the
+// sentinel and lock in the project state directory, the workspace root as
+// the legacy sentinel location, ownership from the Layout, a failed chown
+// not fatal). An already provisioned workspace (sentinel present, as after
+// the hub's provisioning at project create) takes the reuse path; a lost
+// sentinel or a project from before that provisioning gets the clone, under
+// the provisioning lock. The clone gets the agent's git token only for the
+// clone URL's own host. It reports whether it provisioned (the caller then
+// suppresses the in-container clone); false with no error when the request
+// is not such a dispatch.
+func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
+	layout := s.config.StorageLayout
+	if !layout.Backend.Shared() || !isSharedHubProjectRoot(in.ProjectPath) || in.Config == nil || in.Config.GitClone == nil {
+		return false, nil
+	}
+	gc := *in.Config.GitClone
+	if err := provision.CheckHostCloneURL(gc.URL); err != nil {
+		return false, err
+	}
+	r, err := layout.Resolve(projectfs.Project{ID: in.ProjectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
+	if err != nil {
+		return false, err
+	}
+	base, err := filepath.EvalSymlinks(layout.HostBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve host base: %w", err)
+	}
+	stateRel := filepath.Join(filepath.Dir(r.RelPath), provision.ProvisionStateDirName)
+	for _, leaf := range []string{r.RelPath, stateRel} {
+		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
+		if err != nil {
+			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
+		}
+		if err := shareddirs.CloseFd(fd); err != nil {
+			return false, err
+		}
+	}
+	ws := filepath.Join(base, r.RelPath)
+	stateDir := provision.ProjectStateDir(ws)
+	uid, gid := provision.DefaultOwnerID(layout.UID), provision.DefaultOwnerID(layout.GID)
+	if err := provision.PrepareStateDir(stateDir, uid, gid, false); err != nil {
+		return false, err
+	}
+	err = provisionSharedFn(provision.ProvisionInput{
+		Ctx:                 ctx,
+		Resolved:            provision.ResolvedWorkspace{HostPath: ws, ServerRelativePath: r.RelPath, HostBase: base, Backend: string(layout.Backend)},
+		ProjectID:           in.ProjectID,
+		AgentID:             in.AgentID,
+		Mode:                store.SharingModeSharedPlain,
+		GitClone:            &gc,
+		CloneToken:          env[provision.GitTokenEnv],
+		CloneTokenRemote:    gc.URL,
+		HostGitHardened:     true,
+		NFSUID:              uid,
+		NFSGID:              gid,
+		SentinelDir:         stateDir,
+		LegacyDir:           ws,
+		RequireChownSuccess: false,
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// provisionSharedFn is provision.ProvisionShared; a variable so tests can
+// observe the input without cloning.
+var provisionSharedFn = provision.ProvisionShared

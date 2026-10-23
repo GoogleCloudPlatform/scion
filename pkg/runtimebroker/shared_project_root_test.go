@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,7 +33,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const sharedRootProjectID = "0f9e8d7c-6b5a-4321-8fed-cba987654321"
@@ -499,4 +502,99 @@ func TestApplySharedBootstrap(t *testing.T) {
 	if err != nil || !skipped || applied != 1 {
 		t.Fatalf("second apply = (skipped %v, err %v, applied %d), want skipped", skipped, err, applied)
 	}
+}
+
+// createSharedGitAgent creates an agent of the shared-layout fixture's git
+// project in shared-plain mode on a local container runtime, with a git
+// token in its resolved env.
+func createSharedGitAgent(t *testing.T, f *sharedRootFixture) *httptest.ResponseRecorder {
+	t.Helper()
+	body := fmt.Sprintf(`{
+		"name": "a1", "id": "agent-uuid-a1", "slug": "a1",
+		"projectId": %q, "projectSlug": "web",
+		"resolvedEnv": {"GITHUB_TOKEN": "tok-123"},
+		"config": {"template": "claude", "sharedWorkspace": true,
+			"gitClone": {"url": "https://github.example/org/repo.git", "branch": "main"}}
+	}`, sharedRootProjectID)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// The shared-plain backstop provisions the git project's shared workspace on
+// the share with the init container's layout before the container starts,
+// and the in-container clone is then not requested.
+func TestCreateAgent_SharedPlainBackstopInput(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	var got []provision.ProvisionInput
+	old := provisionSharedFn
+	provisionSharedFn = func(in provision.ProvisionInput) error { got = append(got, in); return nil }
+	t.Cleanup(func() { provisionSharedFn = old })
+
+	if w := createSharedGitAgent(t, f); w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("ProvisionShared calls = %d, want 1", len(got))
+	}
+	in := got[0]
+	base, _ := filepath.EvalSymlinks(f.layout.HostBase)
+	ws := filepath.Join(base, "projects", sharedRootProjectID, "workspace")
+	if in.Resolved.HostPath != ws || in.LegacyDir != ws || in.SentinelDir != filepath.Join(base, "projects", sharedRootProjectID, "provision") {
+		t.Errorf("layout: HostPath %q LegacyDir %q SentinelDir %q", in.Resolved.HostPath, in.LegacyDir, in.SentinelDir)
+	}
+	if in.Mode != store.SharingModeSharedPlain || in.ProjectID != sharedRootProjectID || in.GitClone == nil || in.GitClone.URL != "https://github.example/org/repo.git" {
+		t.Errorf("input: %+v", in)
+	}
+	if in.CloneToken != "tok-123" || in.CloneTokenRemote != in.GitClone.URL || !in.HostGitHardened || in.RequireChownSuccess {
+		t.Errorf("token/hardening: token %q remote %q hardened %v requireChown %v", in.CloneToken, in.CloneTokenRemote, in.HostGitHardened, in.RequireChownSuccess)
+	}
+	if v, ok := f.mgr.lastOpts.Env["SCION_GIT_CLONE_URL"]; ok {
+		t.Errorf("the in-container clone must not be requested (SCION_GIT_CLONE_URL=%q)", v)
+	}
+}
+
+// With the real provisioner: a provisioned checkout (sentinel and .git)
+// means no clone (the start succeeds offline); a missing sentinel attempts
+// the clone, whose failure fails the create.
+func TestCreateAgent_SharedPlainBackstopSentinel(t *testing.T) {
+	t.Run("sentinel present: reuse", func(t *testing.T) {
+		f := newSharedRootFixture(t, true)
+		for _, dir := range []string{filepath.Join(f.root, "workspace"), filepath.Join(f.root, "provision")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(f.root, "provision", ".scion-provisioned"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "init", "-q", filepath.Join(f.root, "workspace")).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v %s", err, out)
+		}
+		if w := createSharedGitAgent(t, f); w.Code >= 300 {
+			t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+		}
+		if !f.mgr.startCalled {
+			t.Fatal("expected the agent to start")
+		}
+	})
+	t.Run("sentinel missing: clone attempted", func(t *testing.T) {
+		f := newSharedRootFixture(t, true)
+		t.Setenv("GIT_ALLOW_PROTOCOL", "none")
+		w := createSharedGitAgent(t, f)
+		if w.Code < 500 {
+			t.Fatalf("create = %d %s, want the provisioning failure", w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "tok-123") {
+			t.Fatal("the token must never appear in a response")
+		}
+		if f.mgr.startCalled {
+			t.Error("the agent must not start without its workspace")
+		}
+		if _, err := os.Stat(filepath.Join(f.root, "provision", ".scion-provisioned")); !os.IsNotExist(err) {
+			t.Errorf("no sentinel after a failed clone (err %v)", err)
+		}
+	})
 }

@@ -1110,8 +1110,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Shared-plain provisioning backstop (shared storage) ---
+	// A git project's shared workspace on the broker's shared Layout is
+	// provisioned by the broker before a local container starts (reuse when
+	// already provisioned, clone otherwise), and the in-container clone is
+	// then not requested (provisionSharedPlainWorkspace).
+	sharedPlainProvisioned := false
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil &&
+		(in.Config.SharedWorkspace || in.WorkspaceMode == store.WorkspaceModeShared) && localContainerRuntime(dispatchRuntimeType) {
+		provisioned, err := s.provisionSharedPlainWorkspace(ctx, in, env)
+		if err != nil {
+			s.agentLifecycleLog.Error("Shared workspace provisioning failed", "agent_id", in.AgentID, "project_id", in.ProjectID,
+				"error", sanitizeCloneErrorText(err.Error(), in.Config.GitClone.URL))
+			span.SetStatus(codes.Error, "shared workspace provisioning failed")
+			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "the project's shared workspace could not be provisioned"}
+		}
+		sharedPlainProvisioned = provisioned
+	}
+
 	// --- Git clone mode ---
-	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && !sharedPlainProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
