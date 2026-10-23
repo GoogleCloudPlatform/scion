@@ -184,7 +184,9 @@ func (ws *WebServer) handleDevSignIn(w http.ResponseWriter, r *http.Request) {
 	session.Values = make(map[interface{}]interface{})
 	session.IsNew = true
 	ws.populateDevSession(r.Context(), session)
-	if _, present := ws.readTestIdentityMarker(r); present {
+	// A test identity marker cookie, if any, goes with the old session (its
+	// presence only; the classifier is the one reader of its contents).
+	if c, err := r.Cookie(testIdentitySessionCookie); err == nil && c.Value != "" {
 		ws.expireTestIdentityMarker(w)
 	}
 	if err := session.Save(r, w); err != nil {
