@@ -166,9 +166,11 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		RunnerOIDC:    &oidc.Verifier{CertsURL: h.google.Server.URL, Audience: o.mediator, Email: execEmail, Now: h.clock.Now},
 		Logger:        logging.New(h.logs, slog.LevelDebug),
 		Now:           h.clock.Now,
+		BackfillDelay: -1, // completed-webhook backfills run at once; waitBackfills waits for them
 	})
 	h.http = httptest.NewServer(h.srv.Handler())
 	t.Cleanup(h.http.Close)
+	t.Cleanup(h.srv.backfills.Wait) // runs before the server closes (cleanups are LIFO)
 	return h
 }
 
@@ -1026,5 +1028,71 @@ func TestNoSecretsInLogs(t *testing.T) {
 		if strings.Contains(logs, s) {
 			t.Errorf("%s appears in the logs", name)
 		}
+	}
+}
+
+// TestBackfillOnCompleted: with capacity full, a job left queued is served
+// as soon as a cr-ci runner's job completes (the completed webhook schedules
+// a backfill), not only at the next /reconcile.
+func TestBackfillOnCompleted(t *testing.T) {
+	h := newHarness(t, harnessOpts{max: 1})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	if _, out := h.queued(110, 11); !strings.Contains(out, string(outQueued)) {
+		t.Fatalf("second job: %q, want left queued (capacity 1)", out)
+	}
+	// Job 100 runs on its runner and finishes; its execution ends.
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.cr.Complete("100")
+	if code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "success", "cr-job-100")); code != http.StatusOK {
+		t.Fatalf("completed webhook: %d", code)
+	}
+	h.srv.backfills.Wait()
+	if n := h.activeFor("cr-job-110"); n != 1 {
+		t.Errorf("job 110 has %d runners after the backfill, want 1: %+v", n, h.executions())
+	}
+	h.wantLog(logging.EventBackfill)
+}
+
+// TestNoBackfillWithoutQueue: when no job was left queued for capacity, a
+// completed webhook schedules nothing (no extra GitHub calls).
+func TestNoBackfillWithoutQueue(t *testing.T) {
+	h := newHarness(t, harnessOpts{max: 2})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.cr.Complete("100")
+	before := h.cr.ListCalls
+	if code, _ := h.webhook(jobEvent("completed", 100, 10, testRepo, "success", "cr-job-100")); code != http.StatusOK {
+		t.Fatalf("completed webhook: %d", code)
+	}
+	h.srv.backfills.Wait()
+	if strings.Contains(h.logs.String(), `"event":"`+logging.EventBackfill+`"`) {
+		t.Error("a backfill ran although no job was left queued")
+	}
+	if got := h.cr.ListCalls - before; got != 0 {
+		t.Errorf("executions listed %d times after the completed webhook, want 0", got)
+	}
+}
+
+// TestBackfillClearsAfterReconcile: once a reconcile served the queue, the
+// capacity-full mark is cleared, so the next completed webhook adds nothing.
+func TestBackfillClearsAfterReconcile(t *testing.T) {
+	h := newHarness(t, harnessOpts{max: 1})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 110, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	h.queued(110, 11) // capacity full
+	h.gh.SetJob(10, fakes.GitHubJob{ID: 100, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.cr.Complete("100")
+	if res := h.reconcile(); res.Backfilled != 1 {
+		t.Fatalf("reconcile backfilled %d, want 1", res.Backfilled)
+	}
+	h.srv.dispatchMu.Lock()
+	full := h.srv.capacityFull
+	h.srv.dispatchMu.Unlock()
+	if full {
+		t.Error("capacityFull still set after a reconcile served the queue")
 	}
 }

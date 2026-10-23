@@ -207,6 +207,12 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
 
+   The same pass also runs, outside the schedule, about 20 s after a cr-ci
+   runner's job completes while jobs are left queued for capacity
+   (`backfill`), so a freed slot is refilled at once instead of at the next
+   scheduled run. It is single-flight, and it never runs when nothing was left
+   queued.
+
    It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
    one repo, run or job only skips that item, `reconcile_skip`, unless every
    repo was skipped, `reconcile_all_skipped`, which is a 500) and logs

@@ -132,6 +132,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 	}
 	if used := len(live) + unlisted; used >= s.o.MaxConcurrent {
 		s.log().Info("capacity full; job left queued", append(attrs, "event", logging.EventCapacityFull, "active", used, "max", s.o.MaxConcurrent)...)
+		s.capacityFull = true
 		return outQueued, nil
 	}
 	// A redelivered or replayed event for a finished job must not mint an

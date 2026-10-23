@@ -95,8 +95,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := s.checkRunnerJob(ctx, p.Repository.FullName, job.ID, job.RunID, job.RunnerName, nil, "webhook")
 		if p.Action == "completed" {
-			// The ephemeral runner is gone with the job.
+			// The ephemeral runner is gone with the job, which frees a slot.
 			s.forgetRunner(job.RunnerName)
+			s.scheduleBackfill()
 		}
 		if err != nil {
 			plain(w, http.StatusServiceUnavailable, "runner check failed")

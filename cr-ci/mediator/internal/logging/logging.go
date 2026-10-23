@@ -34,6 +34,7 @@ const (
 	EventClaimConsumed       = "claim_consumed"
 	EventClaimRejected       = "claim_rejected"
 	EventReconcile           = "reconcile"
+	EventBackfill            = "backfill"
 	EventReconcileDenied     = "reconcile_denied"
 	EventReconcileSkip       = "reconcile_skip"
 	EventReconcileAllSkipped = "reconcile_all_skipped"
