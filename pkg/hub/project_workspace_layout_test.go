@@ -558,8 +558,8 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 		Name: "Bad Clone NFS", GitRemote: "github.com/test/bad-clone-nfs", WorkspaceMode: store.WorkspaceModeShared,
 		Labels: map[string]string{store.LabelCloneURL: missing},
 	})
-	require.Contains(t, []int{http.StatusUnprocessableEntity, http.StatusInternalServerError}, rec.Code,
-		"a clone failure answers 422 (auth/not found) or 500, body: %s", rec.Body.String())
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+		"a missing clone source is a not-found git error (422), body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "clone_failed")
 	assert.NotContains(t, rec.Body.String(), f.shareBase, "no host path in the error")
 	assert.NotContains(t, rec.Body.String(), missing, "no clone source path in the error")
@@ -568,11 +568,15 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 	for _, p := range result.Items {
 		assert.NotEqual(t, "Bad Clone NFS", p.Name, "the project row is rolled back")
 	}
+	// Provisioning created projects/<id> before the clone ran; the rollback
+	// removes exactly that tree and leaves projects/ itself in place.
 	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
-	if !os.IsNotExist(err) {
-		require.NoError(t, err)
-		assert.Empty(t, entries, "the failed create leaves no project tree (projects/<id> removed)")
+	require.NoError(t, err, "projects/ was created by provisioning")
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
 	}
+	assert.Empty(t, names, "the failed create leaves no projects/<id> tree")
 }
 
 // TestImportFromWorkspace_SymlinksAreNotFollowed (rev-1 security finding):
