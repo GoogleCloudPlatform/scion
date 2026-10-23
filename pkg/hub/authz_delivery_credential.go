@@ -291,16 +291,16 @@ func (a *AuthzService) hubDeliveryAdmission(
 	return true, "delivery ceiling passed", nil
 }
 
-// delegatorLiveness is one hop's delegator state, as seen by
+// hdDelegatorLiveness is one hop's delegator state, as seen by
 // hubDeliveryDelegatorLiveness.
-type delegatorLiveness int
+type hdDelegatorLiveness int
 
 const (
-	delegatorLive        delegatorLiveness = iota
-	delegatorNotFound                      // no record
-	delegatorDeleted                       // agent with DeletedAt set
-	delegatorInactive                      // user whose status is not active
-	delegatorUnsupported                   // delegator type is neither user nor agent
+	hdDelegatorLive        hdDelegatorLiveness = iota
+	hdDelegatorNotFound                        // no record
+	hdDelegatorDeleted                         // agent with DeletedAt set
+	hdDelegatorInactive                        // user whose status is not active
+	hdDelegatorUnsupported                     // delegator type is neither user nor agent
 )
 
 // hubDeliveryDelegatorLiveness reports one hop's delegator liveness for
@@ -308,35 +308,35 @@ const (
 // status (a suspended super-admin is inactive like any other user), and it
 // never reads or writes the request-scoped delegator-authority cache. A
 // stopped agent is live. The returned string is the user's status for
-// delegatorInactive. Any lookup error other than not-found is returned.
-func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegatorType, delegatorID string) (delegatorLiveness, string, error) {
+// hdDelegatorInactive. Any lookup error other than not-found is returned.
+func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegatorType, delegatorID string) (hdDelegatorLiveness, string, error) {
 	switch delegatorType {
 	case store.DelegationPrincipalUser:
 		u, err := a.store.GetUser(ctx, delegatorID)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && u == nil) {
-			return delegatorNotFound, "", nil
+			return hdDelegatorNotFound, "", nil
 		}
 		if err != nil {
-			return delegatorLive, "", err
+			return hdDelegatorLive, "", err
 		}
 		if u.Status != store.UserStatusActive {
-			return delegatorInactive, u.Status, nil
+			return hdDelegatorInactive, u.Status, nil
 		}
-		return delegatorLive, "", nil
+		return hdDelegatorLive, "", nil
 	case store.DelegationPrincipalAgent:
 		ag, err := a.store.GetAgent(ctx, delegatorID)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && ag == nil) {
-			return delegatorNotFound, "", nil
+			return hdDelegatorNotFound, "", nil
 		}
 		if err != nil {
-			return delegatorLive, "", err
+			return hdDelegatorLive, "", err
 		}
 		if !ag.DeletedAt.IsZero() {
-			return delegatorDeleted, "", nil
+			return hdDelegatorDeleted, "", nil
 		}
-		return delegatorLive, "", nil
+		return hdDelegatorLive, "", nil
 	default:
-		return delegatorUnsupported, "", nil
+		return hdDelegatorUnsupported, "", nil
 	}
 }
 
@@ -450,13 +450,13 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 			return failClosed(err)
 		}
 		switch live {
-		case delegatorLive:
-		case delegatorNotFound, delegatorDeleted:
+		case hdDelegatorLive:
+		case hdDelegatorNotFound, hdDelegatorDeleted:
 			if edge.DelegatorType == store.DelegationPrincipalAgent {
 				return deny(fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
 			}
 			return deny(fmt.Sprintf("delegator %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
-		case delegatorInactive:
+		case hdDelegatorInactive:
 			return deny(fmt.Sprintf("delegator %s is %s", edge.DelegatorID, status), DenyCauseCeilingDelegatorLacksPermission)
 		default:
 			return deny("unsupported delegator type", "")
