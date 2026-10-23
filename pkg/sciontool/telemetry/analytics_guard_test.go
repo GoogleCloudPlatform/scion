@@ -321,6 +321,7 @@ func TestGuardT8UnverifiedHoldsButFinalLinesDrain(t *testing.T) {
 // written provisional or refused, never stamped.
 func TestGuardT9TwoDrainersAndConcurrentAppends(t *testing.T) {
 	o := testOutbox(t)
+	o.lockWait = contentionLockWait // about contention, not lock timeouts
 	_, _ = o.PinHubID("hub-A")
 	ca, cb := &capture{}, &capture{}
 	dA := NewAnalyticsDrainer(o, ca.send, trustedHub("hub-A"))
@@ -333,6 +334,7 @@ func TestGuardT9TwoDrainersAndConcurrentAppends(t *testing.T) {
 	outcomes := make(chan AppendOutcome, 40)
 	for i := 0; i < 4; i++ {
 		h := reopen(t, o)
+		h.lockWait = contentionLockWait
 		wg.Add(1)
 		go func(i int, h *AnalyticsOutbox) {
 			defer wg.Done()
@@ -346,7 +348,9 @@ func TestGuardT9TwoDrainersAndConcurrentAppends(t *testing.T) {
 			}
 		}(i, h)
 	}
-	dB := NewAnalyticsDrainer(reopen(t, o), cb.send, trustedHub("hub-B"))
+	hB := reopen(t, o)
+	hB.lockWait = contentionLockWait
+	dB := NewAnalyticsDrainer(hB, cb.send, trustedHub("hub-B"))
 	runConfirmed(dB)
 	wg.Wait()
 	close(outcomes)
@@ -362,6 +366,9 @@ func TestGuardT9TwoDrainersAndConcurrentAppends(t *testing.T) {
 		}
 	}
 	l := ledger(t, o)
+	if l.AppendFailedTotal != 0 {
+		t.Errorf("append_failed = %d, want 0", l.AppendFailedTotal)
+	}
 	if int64(refused) != l.RelocatedRefusedTotal || l.LastSeq != 40 || written != len(stagingLines(t, o)) {
 		t.Errorf("accounting: written %d (staged %d), refused %d (ledger %d), last seq %d (want 40)",
 			written, len(stagingLines(t, o)), refused, l.RelocatedRefusedTotal, l.LastSeq)
