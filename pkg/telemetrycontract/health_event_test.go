@@ -254,3 +254,74 @@ func TestHealthDrainedFinalIsValid(t *testing.T) {
 		t.Fatalf("baseline drained final rejected: %v", err)
 	}
 }
+
+// withOutboxSubject sets a complete outbox-subject group on a valid event.
+func withOutboxSubject(e *HealthEvent, pinned string, relocated *bool) {
+	e.SetAnalyticsCounters(HealthAnalyticsCounters{ProducerEpoch: "e", ProducerSeqLast: 2, Outbox: &HealthOutboxSubject{
+		PinnedHubID: pinned, Relocated: relocated, HubMismatchTotal: 1, RelocatedRefusedTotal: 0,
+	}})
+}
+
+// The outbox-subject group (WP3 hub-origin plan v5): complete or absent,
+// only with a successful ledger read; relocated=false requires hub_id ==
+// the pin; relocated=true with hub_id == the pin (return to origin) is
+// valid, and so is an unknown relocated.
+func TestHealthOutboxSubjectValidate(t *testing.T) {
+	valid := map[string]func(*HealthEvent){
+		"absent":                  func(*HealthEvent) {},
+		"same origin false":       func(e *HealthEvent) { withOutboxSubject(e, "hub-1", boolp(false)) },
+		"relocated true, new hub": func(e *HealthEvent) { withOutboxSubject(e, "hub-0", boolp(true)) },
+		"return to origin true":   func(e *HealthEvent) { withOutboxSubject(e, "hub-1", boolp(true)) },
+		"relocated unknown":       func(e *HealthEvent) { withOutboxSubject(e, "hub-0", nil) },
+	}
+	for name, mutate := range valid {
+		ev := validHealth()
+		mutate(ev)
+		if _, err := Marshal(ev); err != nil {
+			t.Errorf("%s: rejected: %v", name, err)
+		}
+	}
+	invalid := map[string]struct {
+		mutate func(*HealthEvent)
+		want   string
+	}{
+		"false with another hub":  {func(e *HealthEvent) { withOutboxSubject(e, "hub-0", boolp(false)) }, "outbox_relocated=false requires"},
+		"relocated without group": {func(e *HealthEvent) { e.OutboxRelocated = boolp(true) }, "outbox_relocated is reported only with"},
+		"incomplete group": {func(e *HealthEvent) {
+			withOutboxSubject(e, "hub-1", nil)
+			e.OutboxRelocatedRefusedTotal = nil
+		}, "complete group"},
+		"with stats failed": {func(e *HealthEvent) {
+			withOutboxSubject(e, "hub-1", nil)
+			failed := true
+			e.AnalyticsStatsFailed = &failed
+		}, "successful ledger read"},
+		"negative counter": {func(e *HealthEvent) {
+			withOutboxSubject(e, "hub-1", nil)
+			*e.OutboxHubMismatchTotal = -1
+		}, "outbox_hub_mismatch_total"},
+	}
+	for name, c := range invalid {
+		ev := validHealth()
+		c.mutate(ev)
+		err := ev.Validate()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want containing %q", name, err, c.want)
+		}
+		if _, merr := Marshal(ev); merr == nil {
+			t.Errorf("%s: Marshal accepted an invalid event", name)
+		}
+	}
+}
+
+// SetAnalyticsCounters drops the outbox subject when the ledger read failed.
+func TestHealthOutboxSubjectOmittedOnStatsFailure(t *testing.T) {
+	ev := validHealth()
+	ev.SetAnalyticsCounters(HealthAnalyticsCounters{StatsFailed: true, Outbox: &HealthOutboxSubject{PinnedHubID: "hub-1", Relocated: boolp(true)}})
+	if ev.OutboxPinnedHubID != "" || ev.OutboxRelocated != nil || ev.OutboxHubMismatchTotal != nil || ev.OutboxRelocatedRefusedTotal != nil {
+		t.Fatalf("stats failure must omit the outbox subject: %+v", ev)
+	}
+	if _, err := Marshal(ev); err != nil {
+		t.Fatal(err)
+	}
+}

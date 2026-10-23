@@ -134,12 +134,29 @@ type HealthAnalyticsCounters struct {
 	RetryBackoffMs         int64
 	ProducerEpoch          string
 	ProducerSeqLast        int64
+	// Outbox is the outbox-subject group (WP3 hub-origin plan v5, section
+	// 1a), nil when it is not reported: this process had not resolved its
+	// hub before the ledger read, or the read failed. SetAnalyticsCounters
+	// ignores it when StatsFailed.
+	Outbox *HealthOutboxSubject
 	// StatsFailed means some on-disk read failed (pending, retained,
 	// epoch, seq, the held intent or a persisted total):
 	// SetAnalyticsCounters then omits PendingBytes, RetainedBytes, the
 	// *Total counters, ProducerEpoch, ProducerSeqLast, Held and the pending
 	// age (unknown, never placeholders).
 	StatsFailed bool
+}
+
+// HealthOutboxSubject describes the usage OUTBOX (its origin), not this
+// process: the pin as read, the persisted sticky relocation marker and the
+// persisted guard counters, all scoped to the outbox directory (= its
+// producer_epoch). Relocated is nil when unknown (neither the marker nor a
+// verified same-origin comparison).
+type HealthOutboxSubject struct {
+	PinnedHubID           string
+	Relocated             *bool
+	HubMismatchTotal      int64
+	RelocatedRefusedTotal int64
 }
 
 // HealthEvent is one telemetry.health analytics event.
@@ -255,6 +272,21 @@ type HealthEvent struct {
 	// total): the disk-derived fields are then omitted (unknown) and a final
 	// event is not_drained. Present only with analytics.
 	AnalyticsStatsFailed *bool `json:"analytics_stats_failed,omitempty"`
+	// The outbox-subject group (names frozen by token-analyst-2; WP3
+	// hub-origin plan v5, section 1a) describes the outbox's origin, never
+	// this process's (that is hub_id). OutboxPinnedHubID is the outbox pin
+	// as read, never rewritten and never used as hub_id. OutboxRelocated is
+	// PERSISTED, STICKY evidence that a relocation was detected, not a
+	// current comparison: after a return to origin, hub_id may equal the pin
+	// with relocated=true. false means a verified same origin with no
+	// marker. The two *_total counters are persisted, monotonic, scoped to
+	// the outbox directory (= producer_epoch). All four are omitted
+	// (unknown) on analytics_stats_failed, without an outbox, or when this
+	// process had not resolved its hub before the ledger read.
+	OutboxPinnedHubID           string `json:"outbox_pinned_hub_id,omitempty"`
+	OutboxRelocated             *bool  `json:"outbox_relocated,omitempty"`
+	OutboxHubMismatchTotal      *int64 `json:"outbox_hub_mismatch_total,omitempty"`
+	OutboxRelocatedRefusedTotal *int64 `json:"outbox_relocated_refused_total,omitempty"`
 
 	MetricPointsAccepted    int64 `json:"metric_points_accepted"`
 	MetricPointsRejected    int64 `json:"metric_points_rejected"`
@@ -455,6 +487,7 @@ func (e *HealthEvent) Validate() error {
 	if e.AnalyticsState == AnalyticsStateEnabled && !e.hasAnalyticsCounters() {
 		errs = append(errs, errors.New("enabled analytics requires the analytics_* counters"))
 	}
+	errs = append(errs, e.outboxSubjectErrors()...)
 	if err := e.checkNonNegative(); err != nil {
 		errs = append(errs, err)
 	}
@@ -462,6 +495,36 @@ func (e *HealthEvent) Validate() error {
 		return fmt.Errorf("telemetrycontract: invalid health event %s: %w", e.EventID, errors.Join(errs...))
 	}
 	return nil
+}
+
+// outboxSubjectErrors checks the outbox-subject group: complete or absent,
+// only with a successful ledger read, and relocated=false only when hub_id
+// equals the pin. There is deliberately no rule that true requires a
+// different hub (the sticky return-to-origin case is valid).
+func (e *HealthEvent) outboxSubjectErrors() []error {
+	set := 0
+	for _, present := range []bool{e.OutboxPinnedHubID != "", e.OutboxHubMismatchTotal != nil, e.OutboxRelocatedRefusedTotal != nil} {
+		if present {
+			set++
+		}
+	}
+	if set == 0 {
+		if e.OutboxRelocated != nil {
+			return []error{errors.New("outbox_relocated is reported only with outbox_pinned_hub_id and the outbox_*_total counters")}
+		}
+		return nil
+	}
+	var errs []error
+	if set != 3 {
+		errs = append(errs, errors.New("outbox_pinned_hub_id and the outbox_*_total counters are reported as a complete group or not at all"))
+	}
+	if e.AnalyticsStatsFailed == nil || *e.AnalyticsStatsFailed {
+		errs = append(errs, errors.New("the outbox-subject fields require a successful ledger read (analytics_stats_failed false)"))
+	}
+	if e.OutboxRelocated != nil && !*e.OutboxRelocated && e.HubID != e.OutboxPinnedHubID {
+		errs = append(errs, fmt.Errorf("outbox_relocated=false requires hub_id %q to equal outbox_pinned_hub_id %q", e.HubID, e.OutboxPinnedHubID))
+	}
+	return errs
 }
 
 func (e *HealthEvent) checkNonNegative() error {
@@ -542,6 +605,8 @@ func (e *HealthEvent) optionalCounters() map[string]*int64 {
 		}
 	}
 	out["analytics_oldest_pending_file_age_ms"] = e.AnalyticsOldestPendingFileAgeMs
+	out["outbox_hub_mismatch_total"] = e.OutboxHubMismatchTotal
+	out["outbox_relocated_refused_total"] = e.OutboxRelocatedRefusedTotal
 	return out
 }
 
@@ -562,7 +627,8 @@ func (e *HealthEvent) hasAnalyticsCounters() bool {
 			}
 		}
 	}
-	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil || e.AnalyticsHeld != nil
+	return e.AnalyticsOldestPendingFileAgeMs != nil || e.ProducerEpoch != "" || e.AnalyticsStatsFailed != nil || e.AnalyticsHeld != nil ||
+		e.OutboxPinnedHubID != "" || e.OutboxRelocated != nil || e.OutboxHubMismatchTotal != nil || e.OutboxRelocatedRefusedTotal != nil
 }
 
 // groupComplete reports whether a counter group is all set or all unset.
@@ -609,8 +675,17 @@ func (e *HealthEvent) SetAnalyticsCounters(c HealthAnalyticsCounters) {
 	e.AnalyticsRetainedBytes, e.AnalyticsPendingBytes, e.ProducerSeqLast = nil, nil, nil
 	e.AnalyticsOldestPendingFileAgeMs, e.ProducerEpoch = nil, ""
 	e.AnalyticsSyncUncertainTotal, e.AnalyticsCommitDeferredTotal, e.AnalyticsHeld = nil, nil, nil
+	e.OutboxPinnedHubID, e.OutboxRelocated, e.OutboxHubMismatchTotal, e.OutboxRelocatedRefusedTotal = "", nil, nil, nil
 	if failed {
 		return
+	}
+	if o := c.Outbox; o != nil {
+		e.OutboxPinnedHubID = o.PinnedHubID
+		e.OutboxHubMismatchTotal, e.OutboxRelocatedRefusedTotal = i64(o.HubMismatchTotal), i64(o.RelocatedRefusedTotal)
+		if o.Relocated != nil {
+			relocated := *o.Relocated
+			e.OutboxRelocated = &relocated
+		}
 	}
 	e.AnalyticsOverflowTotal, e.AnalyticsOversizeTotal = i64(c.OverflowTotal), i64(c.OversizeTotal)
 	e.AnalyticsAppendFailedTotal, e.AnalyticsDeadLettersTotal = i64(c.AppendFailedTotal), i64(c.DeadLettersTotal)

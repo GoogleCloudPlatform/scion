@@ -15,7 +15,7 @@ package telemetry
 // is superseded by the next one, the final snapshot is taken after the
 // outbox drainer stopped, and a health event must never consume a
 // producer_seq. Delivery is best effort: an in-memory queue of frozen
-// bytes, retried byte for byte, and held until the hub ID is pinned.
+// bytes, retried byte for byte, and held until this process has resolved its hub ID.
 
 import (
 	"context"
@@ -437,6 +437,11 @@ func (h analyticsHandles) counters(now time.Time) telemetrycontract.HealthAnalyt
 		return telemetrycontract.HealthAnalyticsCounters{StatsFailed: true, DroppedNoIdentity: h.native.DroppedNoIdentity(), Invalid: h.native.Invalid()}
 	}
 	s := outbox.MemoryStats()
+	// Read this process's resolution state BEFORE the ledger: the drainer
+	// publishes it only after the pin comparison and any relocation write
+	// completed under the outbox lock, so a snapshot taken after a
+	// non-empty read sees the relocation marker if one was written.
+	observed, verifiedBefore := h.drainer.ObservedHubID(), h.drainer.VerifiedHubID()
 	ledger, err := outbox.LedgerSnapshot()
 	c := telemetrycontract.HealthAnalyticsCounters{
 		Appended:          s.Appended,
@@ -473,6 +478,7 @@ func (h analyticsHandles) counters(now time.Time) telemetrycontract.HealthAnalyt
 	c.Held = ledger.Held
 	c.PendingBytes, c.RetainedBytes = ledger.PendingBytes, ledger.RetainedBytes
 	c.ProducerEpoch, c.ProducerSeqLast = ledger.Epoch, ledger.LastSeq
+	c.Outbox = outboxSubject(ledger, observed, verifiedBefore, h.drainer.VerifiedHubID())
 	if ledger.PendingBytes > 0 && !ledger.OldestPending.IsZero() {
 		age := now.Sub(ledger.OldestPending).Milliseconds()
 		if age < 0 {
@@ -481,6 +487,33 @@ func (h analyticsHandles) counters(now time.Time) telemetrycontract.HealthAnalyt
 		c.OldestPendingFileAgeMs = &age
 	}
 	return c
+}
+
+// outboxSubject builds the outbox-subject group from one locked ledger read
+// (WP3 hub-origin plan v5). It is reported only when this process had
+// resolved its hub before the read (observed) and the outbox is pinned.
+// Relocated is true when the persisted sticky marker is set (it wins over
+// any cached verification, including one by another process's drainer);
+// false only when this process verified the same origin before AND after
+// the read and no marker is set; otherwise unknown (nil).
+func outboxSubject(ledger OutboxLedger, observed, verifiedBefore, verifiedAfter string) *telemetrycontract.HealthOutboxSubject {
+	if observed == "" || ledger.PinnedHubID == "" {
+		return nil
+	}
+	o := &telemetrycontract.HealthOutboxSubject{
+		PinnedHubID:           ledger.PinnedHubID,
+		HubMismatchTotal:      ledger.HubMismatchTotal,
+		RelocatedRefusedTotal: ledger.RelocatedRefusedTotal,
+	}
+	switch {
+	case ledger.RelocatedHubID != "":
+		relocated := true
+		o.Relocated = &relocated
+	case verifiedBefore != "" && verifiedBefore == verifiedAfter && verifiedBefore == ledger.PinnedHubID:
+		relocated := false
+		o.Relocated = &relocated
+	}
+	return o
 }
 
 // SettleUsageSource records the usage-source decision once init has loaded
@@ -538,11 +571,16 @@ func (p *Pipeline) startHealth(ctx context.Context, gcp *GCPExporter, handles an
 	if h.sendOverride != nil {
 		h.send = h.sendOverride
 	}
-	if outbox := handles.native.Outbox(); outbox != nil {
-		h.hubID = func(context.Context) string { return outbox.PinnedHubID() }
+	if drainer := handles.drainer; handles.native.Outbox() != nil && drainer != nil {
+		// Process origin (WP3 hub-origin plan v5): this process's own
+		// resolution, process-fixed, "" until it succeeds (events stay
+		// held). Never the outbox pin, which describes the outbox (the
+		// outbox_pinned_hub_id field), not this process.
+		h.hubID = func(context.Context) string { return drainer.ObservedHubID() }
 	} else {
-		// No outbox (analytics disabled): resolve the hub ID the same
-		// way the drainer does, cached in memory.
+		// No outbox or no drainer (analytics disabled): resolve the hub
+		// ID the same way the drainer does, cached in memory (also this
+		// process's own resolution: the first success is kept).
 		h.hubID = cachedHubID(NewHealthzHubIDResolver(analyticsHubEndpoint(), nil))
 	}
 	if h.hubIDOverride != nil {
@@ -785,7 +823,7 @@ func (p *Pipeline) emitHealth(trigger string) {
 
 // flushHealth sends queued events in order, freezing each event's bytes
 // (hub_id stamped) on its first send attempt. It stops at the first
-// failure, or when the hub ID is not yet pinned.
+// failure, or while this process has not resolved its hub ID yet.
 func (p *Pipeline) flushHealth(ctx context.Context) {
 	h := &p.health
 	for {
