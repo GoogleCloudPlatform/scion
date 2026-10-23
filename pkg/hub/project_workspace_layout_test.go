@@ -287,6 +287,8 @@ func TestInitHubManagedProject_SharedBackend_SeedsProjectRoot(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "no .scion is created inside the workspace agents mount")
 	_, err = os.Stat(filepath.Join(f.home, ".scion", "projects", project.Slug))
 	assert.True(t, os.IsNotExist(err), "nothing is seeded on the hub's local disk")
+	_, err = os.Stat(filepath.Join(f.home, ".scion", config.ProjectConfigsDir))
+	assert.True(t, os.IsNotExist(err), "the hub connection settings are not redirected to an external project config directory on the hub's disk")
 
 	dir, err := f.srv.projectConfigDir(project)
 	require.NoError(t, err)
