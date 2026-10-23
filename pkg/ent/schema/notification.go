@@ -70,6 +70,17 @@ func (Notification) Fields() []ent.Field {
 		// dispatched flag keeps its old meaning.
 		field.String("dispatch_outcome").
 			Default(""),
+		// dispatch_reason says why a "failed" outcome was recorded (see
+		// the store.NotificationReason* constants). Empty for any other
+		// outcome and for rows that predate the column.
+		field.String("dispatch_reason").
+			Default(""),
+		// next_attempt_at is the earliest time the dispatch sweep may
+		// claim the notification again after a failed delivery (capped
+		// exponential backoff). NULL means at once.
+		field.Time("next_attempt_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

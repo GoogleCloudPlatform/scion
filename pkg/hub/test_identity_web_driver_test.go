@@ -524,8 +524,15 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The project storage layout authority (pkg/projectfs), not a
+		// user or transport resolver.
+		"projectRecordSharedDirPath localLayout",
+		// The workspace Mount through the same layout authority
+		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
+		// transport resolver.
+		"projectWorkspaceResolved layout",
 		"resolveAsNeededForKeys d.secretBackend",
-		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
+		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")

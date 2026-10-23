@@ -988,6 +988,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		req.workspaceAdmissionChecked = true
 		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
 			req.workspaceAbsentAtAdmission = true
 		}
@@ -1976,6 +1977,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
 		Created: true,
 	}
+	if bootstrapSkipsExistingWorkspace(req) && resp.Agent != nil {
+		resp.Agent.Warnings = append(resp.Agent.Warnings, bootstrapSkippedWarning)
+	}
 	if attempt != nil {
 		s.dispatchAttemptsMu.Lock()
 		s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusCreated, &resp, nil, "")
@@ -2122,6 +2126,18 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	defer unlockWorkspace()
 
+	// A project-level workspace that already existed when the create was
+	// admitted is in use (by earlier agents of the project): it is never
+	// overwritten from a laptop's upload. The agent uses it as it is and
+	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
+	// re-marked.
+	if bootstrapSkipsExistingWorkspace(req) {
+		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",
+			"agent_id", req.ID, "project_id", req.ProjectID)
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
 		return opts, attemptMsg, httpMessage, err
@@ -2155,14 +2171,27 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	// A workspace a hub keeps as its own on this host keeps the hub's
-	// identity entry.
-	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
+	if req.ProjectID != "" && req.ProjectSlug != "" {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
 	return opts, "", "", nil
+}
+
+// bootstrapSkippedWarning is the create warning for a workspace bootstrap
+// whose upload was not applied because the project workspace already
+// existed on the broker (bootstrapSkipsExistingWorkspace).
+const bootstrapSkippedWarning = "The project workspace already exists on the runtime broker, so the uploaded files were not applied; use `scion sync to <agent>` to push changes"
+
+// bootstrapSkipsExistingWorkspace reports whether a create's workspace
+// bootstrap must leave the workspace alone: a project-level (slug)
+// bootstrap whose workspace directory createAgent found existing when it
+// admitted the create. Per-agent bootstrap directories, and a request
+// whose project path was not checked at admission (one that names its
+// project path, such as the global project), are always applied.
+func bootstrapSkipsExistingWorkspace(req CreateAgentRequest) bool {
+	return req.WorkspaceStoragePath != "" && req.ProjectSlug != "" && req.workspaceAdmissionChecked && !req.workspaceAbsentAtAdmission
 }
 
 // resolveGCSWorkspaceDir computes the directory a GCS workspace bootstrap
@@ -8924,7 +8953,9 @@ func hubManagedProjectHasAgent(scionDir, agentName string) bool {
 // loopback address (localhost, 127.0.0.1, [::1], etc.). This is used to
 // decide whether the ContainerHubEndpoint bridge address should be
 // substituted — containers can reach external hosts directly but need a
-// bridge address to reach services on the host's loopback interface.
+// bridge address to reach services on the host's loopback interface. It is
+// also the rule for whether the broker's own hub connection may send the dev
+// token (DevAuthHubOptions); it matches the CLI's rule, hubsync.IsLocalhostEndpoint.
 func isLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {

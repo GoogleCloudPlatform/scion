@@ -213,7 +213,7 @@ func TestDeleteHubAgentFiles_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 			wt := p.add(t, "dev-a", "uuid-a", "shared")
 
 			restore := removeWorktree
-			setSeam(t, &removeWorktree, func(base, path string, deleteBranch bool) (bool, error) {
+			setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
 				if tc.removeDirToo {
 					if err := os.RemoveAll(path); err != nil {
 						t.Fatal(err)
@@ -243,7 +243,7 @@ func TestDeleteHubAgentFiles_WorktreeRemovalFails_RegistryKept(t *testing.T) {
 func TestDeleteHubAgentFiles_WorktreeStillPresent_RegistryKept(t *testing.T) {
 	p := newSharerKeyProject(t)
 	p.add(t, "dev-a", "uuid-a", "shared")
-	setSeam(t, &removeWorktree, func(string, string, bool) (bool, error) { return false, nil })
+	setSeam(t, &removeWorktree, func(string, string, string, string) (bool, error) { return false, nil })
 
 	if _, err := DeleteHubAgentFiles("dev-a", "uuid-a", p.projectPath, "", true); err == nil {
 		t.Fatal("expected the delete to fail")

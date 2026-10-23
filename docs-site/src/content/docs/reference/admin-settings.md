@@ -111,6 +111,8 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `conflicted` | The section that conflicted, with its expected and current revision. |
 | `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
 
+When a save hits `409 revision_conflict` after earlier sections were written, the Server Config conflict banner also lists the keys saved before the conflict: `applied_keys` under **Applied now**, `pending_restart` under **Saved; applies after restart**, and `skipped` under **Saved but not applied**.
+
 ### Layer-0 edits by deployment mode
 
 Whether Layer-0 settings can be edited through `PUT /api/v1/admin/server-config` depends on the deployment mode, not on the database driver. `GET` reports it as `layer0_editable`.
@@ -347,7 +349,7 @@ The admin UI provides structured feedback on save:
 |----------|-------------|
 | **200** | Success; shows ignored-keys notice if applicable |
 | **400** `validation_failed` | Inline per-section validation errors |
-| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
+| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button, listing any keys saved before the conflict (`applied_keys`, `pending_restart`, and `skipped`) |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
 | **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
