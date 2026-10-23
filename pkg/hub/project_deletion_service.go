@@ -401,7 +401,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 // DB settings overlay, if installed) so this can never be influenced by a
 // project's own settings.yaml.
 func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, projectID string) {
-	// Mirrors resolveNFSSharedDirPath's fail-closed rule. Deletion is
+	// Mirrors the shared-dir browser's fail-closed rule. Deletion is
 	// best-effort by design (it never blocks or rolls back the DB deletion),
 	// so "fail closed" here means logging an ERROR instead of silently
 	// skipping cleanup, rather than refusing the request outright.

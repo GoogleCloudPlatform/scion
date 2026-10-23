@@ -1628,7 +1628,8 @@ available inside agent containers.
 **Sections:**
 
 - **General**: Git and tmux on this machine.
-- **Hub Health**: Hub reachability (`/healthz`), authentication, unmapped GCP service accounts of
+- **Hub Health**: Hub reachability (`/healthz`), authentication, where the Hub credential came
+  from (`hub-credential`, see the credential sources below), unmapped GCP service accounts of
   the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
   the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
   images, broker credentials).
@@ -1659,29 +1660,143 @@ fails; read the results from the text output or from `status` in the JSON output
 non-zero only when the command itself fails, for example on an invalid flag or when it cannot
 write its output.
 
-**JSON output:** `--format json` prints a single object for every runtime:
+**JSON output:** `--format json` prints a single object, and nothing else, on stdout, for every
+runtime. This is format version 2 (see "Changes from the earlier format" below):
 
 ```json
 {
+  "formatVersion": 2,
+  "generatedAt": "2026-10-22T10:15:04Z",
   "status": "warn",
-  "general": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}],
-  "hubChecks": [{"name": "hub-connectivity", "status": "pass", "message": "..."}],
-  "platformHealth": [{"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"}],
-  "healthSummary": {"status": "degraded", "attention": [], "...": "..."},
-  "runtime": "docker",
-  "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]
+  "hub": {
+    "endpoint": "https://hub.example.com",
+    "source": "healthSummary",
+    "version": "1.4.0",
+    "instanceId": "7f3c9a2e-1b4d-4e8a-9c1f-0a2b3c4d5e6f",
+    "summaryGeneratedAt": "2026-10-22T10:15:03.512Z",
+    "auth": {"source": "env_hub_token"}
+  },
+  "platformHealth": {
+    "state": "ok",
+    "status": "warn",
+    "checks": [
+      {"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"},
+      {"name": "attention", "status": "warn", "message": "Runtime broker \"gpu-1\" is offline"}
+    ]
+  },
+  "general": {"checks": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}]},
+  "hubHealth": {"checks": [{"name": "hub-connectivity", "status": "pass", "message": "Hub at https://hub.example.com is healthy"}]},
+  "runtime": {"name": "docker", "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]},
+  "healthSummary": {"status": "degraded", "generated_at": "2026-10-22T10:15:03.512Z", "...": "..."}
 }
 ```
 
-`status` is `fail` when any check failed, `warn` when any check warned, and `pass` otherwise. It
-does not affect the exit status. `healthSummary` is the Hub's summary response unchanged, and is
-omitted when it could not be read. `runtime` is omitted when no project was found.
+When the summary cannot be read, for example without `hub.health.read`:
+
+```json
+{
+  "hub": {"endpoint": "https://hub.example.com", "source": "healthz", "version": "1.4.0", "auth": {"source": "env_hub_token"}},
+  "platformHealth": {
+    "state": "skipped",
+    "reason": "permission_denied",
+    "httpStatus": 403,
+    "message": "requires hub.health.read",
+    "checks": [{"name": "health-summary", "status": "skip", "message": "requires hub.health.read", "remediation": "..."}]
+  }
+}
+```
+
+Doctor's own keys are camelCase. Each check has `name`, `status` (`pass`, `warn`, `fail`, `skip`
+or `info`), `message` and, when there is one, `remediation`; messages and remediations are always
+on one line. Every `checks` value is an array, empty when there is nothing to report. A value
+doctor did not learn is omitted, never filled in with a guess.
+
+| Key | Meaning |
+|---|---|
+| `formatVersion` | `2`. Raised when the shape changes in a way that breaks consumers. |
+| `generatedAt` | When doctor wrote the report, from this machine's clock, UTC (RFC 3339). |
+| `status` | `fail` when any check in any section failed, `warn` when any warned, `pass` otherwise. It includes the local checks (for example a missing Docker), and does not affect the exit status. |
+| `hub` | The Hub that answered. Omitted when no Hub endpoint is configured. |
+| `hub.endpoint` | The configured endpoint's scheme, host, port and path, or `(endpoint not shown: it contains @)` (see "Hub endpoint credentials" below). Its query and fragment are never shown. |
+| `hub.source` | `healthSummary` when `version`, `instanceId` and `summaryGeneratedAt` come from the health summary; `healthz` when the summary could not be read and `version` comes from `/healthz`. Omitted when the Hub gave neither. |
+| `hub.version` | From the summary: the version every live Hub instance reports, or `mixed` when they differ. From `/healthz`: the version of the Hub process that answered. |
+| `hub.instanceId` | The Hub instance that served the summary. Only from the summary: `/healthz` does not report an instance. |
+| `hub.summaryGeneratedAt` | When the Hub generated the summary, from the Hub's clock. |
+| `hub.auth.source` | Where doctor's Hub credential came from (table below). Never the credential, a file path or an identity. Omitted when doctor could not set up a Hub client, since no request was sent. |
+| `platformHealth.state` | `ok` when the summary was read; `skipped` when doctor did not get it and knows of nothing wrong with the Hub's ability to produce it; `unavailable` when the Hub was asked and could not produce it. Any state other than `ok` means the platform was **not checked**, never that it is healthy. |
+| `platformHealth.status` | Only when `state` is `ok`: the summary's verdict as a check status, `pass` (healthy), `warn` (degraded) or `fail` (unhealthy). Unlike the top-level `status`, it ignores this machine's checks. |
+| `platformHealth.reason` | Only when `state` is not `ok`: a reason code (table below). |
+| `platformHealth.message` | Only when `state` is not `ok`: the reason in one human-readable line. |
+| `platformHealth.httpStatus` | Only when the Hub answered the summary request with an HTTP error. |
+| `general`, `hubHealth`, `runtime` | The checks of the General, Hub Health and Runtime sections. `runtime.name` is the active runtime, omitted when no project was found. |
+| `healthSummary` | The Hub's summary response body, byte for byte (the Hub's own snake_case keys); omitted when it was not read. |
+
+Platform Health reason codes. They are stable; a new code may be added, so treat an unknown code
+like `error`:
+
+| `state` | `reason` | When |
+|---|---|---|
+| `skipped` | `no_hub_endpoint` | No Hub endpoint is configured. |
+| `skipped` | `hub_unreachable` | The Hub did not answer `/healthz` (connection refused, DNS, TLS or timeout), or answered it with an HTTP error. |
+| `skipped` | `client_unavailable` | Reserved: doctor could not set up a Hub client. Not normally expected. |
+| `skipped` | `permission_denied` | HTTP 403: the caller lacks `hub.health.read`, or is not a user identity (an agent token). |
+| `skipped` | `not_supported` | HTTP 404: the Hub predates the health summary. |
+| `unavailable` | `hub_unavailable` | HTTP 503: the Hub instance cannot read its database. |
+| `unavailable` | `error` | Anything else: another HTTP status, a timeout, or a response that is not a summary. |
+
+Hub credential sources (`hub.auth.source`), in the order doctor, like every Hub command, picks
+them:
+
+| Source | Credential |
+|---|---|
+| `stored_login` | The login stored by `scion hub auth login` for this Hub. |
+| `agent_token_file` | The agent token file of an agent container, whatever kind of token it holds. It **takes precedence over `SCION_HUB_TOKEN`**: inside an agent container doctor uses the agent's identity even when `SCION_HUB_TOKEN` is set. |
+| `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
+| `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
+| `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). Reported only when that credential is sent; otherwise the source is `transport` or `none`. For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
+| `transport` | No Hub credential was found; only the transport (proxy) credential configured in the environment, for example for IAP, is attached, when its token can be obtained. If fetching that token fails at request time, the request is sent without it. |
+| `none` | No credential was found; requests are sent without one. |
+
+The text output shows the same source as the `hub-credential` line of Hub Health.
+
+**Hub endpoint credentials.** The Hub endpoint (from `--hub` or `SCION_HUB_ENDPOINT`) can carry a
+credential, for example in user info or a query parameter. Doctor does not try to recognise one;
+it applies a fixed rule, in the text and the JSON output alike:
+
+- An endpoint that contains `@` anywhere is never shown, not even in part. Every mention of it,
+  including `hub.endpoint`, reads `(endpoint not shown: it contains @)`. This also applies to an
+  `@` that is not user info, such as one in the path.
+- For an endpoint that contains `@`, `?` or `#`, no error text from the Hub client or the network
+  (which can quote the request URL) appears in any check message or in `platformHealth.message`.
+  The message ends with "error details not shown because the Hub endpoint contains @, ? or #"
+  instead.
+- For any other endpoint, no user info, query or fragment is shown either: the endpoint is shown
+  as scheme, host, port and path, and error text is shown with the shared URL redaction applied
+  (credential parameters of any URL in it are masked).
+
+**Changes from the earlier format.** The JSON output before format version 2 had no
+`formatVersion`. Version 2 breaks it, with no compatibility keys:
+
+| Before | Version 2 |
+|---|---|
+| `general` (array) | `general.checks` |
+| `hubChecks` (array) | `hubHealth.checks` |
+| `platformHealth` (array of checks) | `platformHealth.checks`, plus `state`, `status`, `reason`, `message` and `httpStatus` |
+| `runtime` (runtime name) | `runtime.name` |
+| `checks` (runtime checks) | `runtime.checks` |
+| `healthSummary` re-indented | `healthSummary` exactly as the Hub sent it |
+| - | new: `formatVersion`, `generatedAt`, `hub` |
+| - | new `hubHealth` check `hub-credential` (also in the text output) |
+
+`status` and the exit status are unchanged. The text output and the check names are unchanged
+except for the new `hub-credential` line in Hub Health and the endpoint rules above.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an
 agent container (agent containers do not offer the command, and the Hub accepts the health
 summary only from user credentials). A hub admin mints a hub-boundary token and the environment
-uses it with no stored login:
+uses it with no stored login and no agent token file (either one takes precedence over
+`SCION_HUB_TOKEN`; check `hub.auth.source` in the output):
 
 ```bash
 scion hub token create --boundary hub --name health-check \

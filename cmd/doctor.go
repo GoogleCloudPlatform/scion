@@ -15,12 +15,15 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	goruntime "runtime"
@@ -89,10 +92,15 @@ diagnostic check fails; read the results from the output. It exits
 non-zero only when the command itself fails, for example on an invalid
 flag or when it cannot write its output.
 
---format json prints one JSON object and nothing else on stdout. Its
-"status" is fail when any check failed, warn when any check warned, and
-pass otherwise. The raw health summary is under "healthSummary" when it
-was readable.`,
+--format json prints one JSON object and nothing else on stdout
+("formatVersion": 2). Its "status" is fail when any check failed, warn
+when any check warned, and pass otherwise. "generatedAt" is when doctor
+ran; "hub" names the Hub's endpoint, version, serving instance and where
+doctor's credential came from ("hub.auth.source"). "platformHealth.state"
+is ok, skipped or unavailable, with a "reason" code when not ok: anything
+but ok means the platform was not checked. The Hub's health summary is
+under "healthSummary", byte for byte, when it was readable. The full
+shape and the reason codes are in the CLI reference ("scion doctor").`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor()
 	},
@@ -114,6 +122,8 @@ type doctorReport struct {
 	// json selects JSON output.
 	json    bool
 	verbose bool
+	// now is the clock for generatedAt; nil means time.Now.
+	now func() time.Time
 
 	General        []scionruntime.CheckResult
 	HubChecks      []scionruntime.CheckResult
@@ -124,19 +134,105 @@ type doctorReport struct {
 	Runtime string
 	// Checks are the runtime checks.
 	Checks []scionruntime.CheckResult
+
+	// hub is the generation context for the JSON "hub" object; nil when
+	// no Hub endpoint is configured.
+	hub *doctorJSONHub
+	// platformState is the JSON "platformHealth" state, reason, message,
+	// status and HTTP status (everything but the checks).
+	platformState doctorJSONPlatformHealth
+	// authSource names where the Hub credential came from (a
+	// hubAuthSource value); empty when no Hub client was set up.
+	authSource string
 }
 
-// doctorJSON is the --format json document.
+// doctorJSONFormatVersion is the version of the --format json document.
+// The shape before ptone/scion#5593 had no version and counts as 1.
+const doctorJSONFormatVersion = 2
+
+// doctorJSON is the --format json document (see the "scion doctor" JSON
+// section of docs-site reference/cli.md). Keys are camelCase; the raw
+// health summary is not a field here: finish splices the Hub's bytes in
+// unchanged as "healthSummary", the last key.
 type doctorJSON struct {
+	FormatVersion int `json:"formatVersion"`
+	// GeneratedAt is doctor's own clock when the report was written, UTC.
+	GeneratedAt string `json:"generatedAt"`
 	// Status is fail when any check failed, else warn when any check
 	// warned, else pass. It does not affect the exit status.
-	Status         string                     `json:"status"`
-	General        []scionruntime.CheckResult `json:"general"`
-	HubChecks      []scionruntime.CheckResult `json:"hubChecks"`
-	PlatformHealth []scionruntime.CheckResult `json:"platformHealth"`
-	HealthSummary  json.RawMessage            `json:"healthSummary,omitempty"`
-	Runtime        string                     `json:"runtime,omitempty"`
-	Checks         []scionruntime.CheckResult `json:"checks"`
+	Status         string                   `json:"status"`
+	Hub            *doctorJSONHub           `json:"hub,omitempty"`
+	PlatformHealth doctorJSONPlatformHealth `json:"platformHealth"`
+	General        doctorJSONSection        `json:"general"`
+	HubHealth      doctorJSONSection        `json:"hubHealth"`
+	Runtime        doctorJSONRuntime        `json:"runtime"`
+}
+
+// doctorJSONHub is the generation context: which Hub answered, its
+// version and serving instance, and when its summary was generated.
+// Values doctor did not learn are omitted.
+type doctorJSONHub struct {
+	// Endpoint is the configured endpoint's scheme, host, port and path.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Source is where Version, InstanceID and SummaryGeneratedAt came
+	// from: healthSummary, or healthz (version only) when the summary was
+	// not readable. Omitted when the Hub gave neither.
+	Source string `json:"source,omitempty"`
+	// Version is the summary's fleet version (may be "mixed"), or the
+	// serving process's scionVersion from /healthz.
+	Version string `json:"version,omitempty"`
+	// InstanceID is the Hub instance that served the summary.
+	InstanceID string `json:"instanceId,omitempty"`
+	// SummaryGeneratedAt is the summary's generated_at (the Hub's clock).
+	SummaryGeneratedAt string `json:"summaryGeneratedAt,omitempty"`
+	// Auth names where doctor's Hub credential came from.
+	Auth *doctorJSONHubAuth `json:"auth,omitempty"`
+}
+
+// doctorJSONHubAuth describes the Hub credential without revealing it.
+type doctorJSONHubAuth struct {
+	// Source is a hubAuthSource value: hub_profile, stored_login,
+	// agent_token_file, env_auth_token, env_hub_token, dev, transport or
+	// none.
+	// Doctor is refused with a hub profile selected, so it does not
+	// report hub_profile today.
+	Source string `json:"source"`
+}
+
+// Generation context sources (doctorJSONHub.Source).
+const (
+	doctorHubSourceHealthSummary = "healthSummary"
+	doctorHubSourceHealthz       = "healthz"
+)
+
+// doctorJSONPlatformHealth is the Platform Health section: its state, and
+// when the summary was not read, the reason code, a one-line message and
+// the Hub's HTTP status.
+type doctorJSONPlatformHealth struct {
+	// State is ok, skipped or unavailable (doctorPHState values).
+	State string `json:"state"`
+	// Status is the summary headline's check status (pass, warn or fail);
+	// set only when State is ok.
+	Status string `json:"status,omitempty"`
+	// Reason is a doctorPHReason code; set only when State is not ok.
+	Reason string `json:"reason,omitempty"`
+	// Message explains Reason in one line.
+	Message string `json:"message,omitempty"`
+	// HTTPStatus is the Hub's HTTP status when it answered with an error.
+	HTTPStatus int                        `json:"httpStatus,omitempty"`
+	Checks     []scionruntime.CheckResult `json:"checks"`
+}
+
+// doctorJSONSection is a section of checks.
+type doctorJSONSection struct {
+	Checks []scionruntime.CheckResult `json:"checks"`
+}
+
+// doctorJSONRuntime is the Runtime section; Name is omitted when no
+// project resolved.
+type doctorJSONRuntime struct {
+	Name   string                     `json:"name,omitempty"`
+	Checks []scionruntime.CheckResult `json:"checks"`
 }
 
 func newDoctorReport() *doctorReport {
@@ -198,16 +294,31 @@ func (r *doctorReport) finish() error {
 	if !r.json {
 		return nil
 	}
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	ph := r.platformState
+	if ph.State == "" {
+		// A report that never reached the Platform Health section.
+		ph = doctorJSONPlatformHealth{State: doctorPHStateUnavailable, Reason: doctorPHReasonError, Message: "Platform Health was not checked"}
+	}
+	ph.Checks = jsonChecks(r.PlatformHealth)
 	doc := doctorJSON{
+		FormatVersion:  doctorJSONFormatVersion,
+		GeneratedAt:    now().UTC().Format(time.RFC3339),
 		Status:         r.overallStatus(),
-		General:        nonNilChecks(r.General),
-		HubChecks:      nonNilChecks(r.HubChecks),
-		PlatformHealth: nonNilChecks(r.PlatformHealth),
-		HealthSummary:  r.HealthSummary,
-		Runtime:        r.Runtime,
-		Checks:         nonNilChecks(r.Checks),
+		Hub:            r.hub,
+		PlatformHealth: ph,
+		General:        doctorJSONSection{Checks: jsonChecks(r.General)},
+		HubHealth:      doctorJSONSection{Checks: jsonChecks(r.HubChecks)},
+		Runtime:        doctorJSONRuntime{Name: r.Runtime, Checks: jsonChecks(r.Checks)},
 	}
 	data, mErr := json.MarshalIndent(doc, "", "  ")
+	if mErr != nil {
+		return mErr
+	}
+	data, mErr = spliceHealthSummary(data, r.HealthSummary)
 	if mErr != nil {
 		return mErr
 	}
@@ -215,6 +326,47 @@ func (r *doctorReport) finish() error {
 		return wErr
 	}
 	return nil
+}
+
+// spliceHealthSummary adds raw, unchanged, as the last key
+// "healthSummary" of the indented JSON object doc. Encoding raw as a
+// json.RawMessage would compact and re-indent it; consumers get the
+// Hub's bytes instead. Surrounding whitespace is not part of the value
+// and is dropped. doc is returned as is when raw is empty.
+func spliceHealthSummary(doc, raw json.RawMessage) ([]byte, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return doc, nil
+	}
+	if !json.Valid(raw) {
+		return nil, errors.New("health summary is not valid JSON")
+	}
+	body := bytes.TrimSuffix(bytes.TrimRight(doc, "\n"), []byte("}"))
+	body = bytes.TrimRight(body, "\n")
+	if !bytes.HasPrefix(doc, []byte("{")) || len(body) == len(bytes.TrimRight(doc, "\n")) {
+		return nil, errors.New("doctor report is not a JSON object")
+	}
+	var out bytes.Buffer
+	out.Write(body)
+	if len(bytes.TrimSpace(body)) > 1 {
+		out.WriteString(",")
+	}
+	out.WriteString("\n  \"healthSummary\": ")
+	out.Write(raw)
+	out.WriteString("\n}")
+	return out.Bytes(), nil
+}
+
+// jsonChecks returns c for the JSON document: never nil, and with every
+// message and remediation on one line.
+func jsonChecks(c []scionruntime.CheckResult) []scionruntime.CheckResult {
+	out := make([]scionruntime.CheckResult, 0, len(c))
+	for _, check := range c {
+		check.Message = singleLine(check.Message)
+		check.Remediation = singleLine(check.Remediation)
+		out = append(out, check)
+	}
+	return out
 }
 
 // overallStatus is fail when any check failed, warn when any check warned,
@@ -234,11 +386,61 @@ func (r *doctorReport) overallStatus() string {
 	return status
 }
 
-func nonNilChecks(c []scionruntime.CheckResult) []scionruntime.CheckResult {
-	if c == nil {
-		return []scionruntime.CheckResult{}
+// The Hub endpoint comes from --hub or SCION_HUB_ENDPOINT, unvalidated, and
+// can carry a credential. Rather than recognise credentials in it, doctor
+// applies a fixed rule (see the "scion doctor" JSON section of
+// docs-site reference/cli.md):
+//   - (A) an endpoint containing "@" anywhere is never shown, not even in
+//     part: doctorDisplayEndpoint returns doctorEndpointRedacted;
+//   - (B) for an endpoint containing "@", "?" or "#", no error text from
+//     the Hub client or the HTTP transport (which can quote the request
+//     URL) reaches any message: doctorHubError returns
+//     doctorHubErrorHidden instead;
+//   - (C) for any other endpoint, no user info, query or fragment is
+//     shown either: it is shown as scheme, host, port and path, and error
+//     text is shown with the shared URL redaction applied
+//     (config.RedactURL, and config.RedactURLsIn in add).
+
+// doctorEndpointRedacted is shown in place of an endpoint containing "@".
+const doctorEndpointRedacted = "(endpoint not shown: it contains @)"
+
+// doctorHubErrorHidden replaces Hub client and transport error text for an
+// endpoint containing "@", "?" or "#".
+const doctorHubErrorHidden = "error details not shown because the Hub endpoint contains @, ? or #"
+
+// doctorDisplayEndpoint is hubEP as doctor shows it, in text and JSON:
+// doctorEndpointRedacted when it contains "@" (rule A); otherwise its
+// scheme, host, port and path when it parses as an absolute URL, or the
+// endpoint cut at its first "?" or "#" when it does not.
+func doctorDisplayEndpoint(hubEP string) string {
+	if strings.Contains(hubEP, "@") {
+		return doctorEndpointRedacted
 	}
-	return c
+	s := cutDoctorQueryFragment(hubEP)
+	if u, err := url.Parse(s); err == nil && u.Scheme != "" && u.Host != "" {
+		clean := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
+		// Path parameters (";jsessionid=...") can carry credentials too.
+		return config.RedactURL(clean.String())
+	}
+	return config.RedactURL(s)
+}
+
+// doctorHubError is the text of err, an error from the Hub client or the
+// HTTP transport for a request to hubEP, as a check message may show it:
+// doctorHubErrorHidden when hubEP contains "@", "?" or "#" (rule B).
+func doctorHubError(hubEP string, err error) string {
+	if strings.ContainsAny(hubEP, "@?#") {
+		return doctorHubErrorHidden
+	}
+	return err.Error()
+}
+
+// cutDoctorQueryFragment returns s up to its first "?" or "#".
+func cutDoctorQueryFragment(s string) string {
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func runDoctor() error {
@@ -270,8 +472,11 @@ func runDoctor() error {
 	// is configured.
 	var hubClient hubclient.Client
 	if hubEP != "" {
-		if c, err := getHubClient(settings); err == nil {
+		// The credential source is reported only for a client that was
+		// built: no request is sent otherwise.
+		if c, source, err := getHubClientWithAuthSource(settings); err == nil {
 			hubClient = c
+			r.authSource = source
 		}
 	}
 	var linkedProjectID string
@@ -317,12 +522,16 @@ func runDoctor() error {
 // those run as a fallback.
 func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedProjectID string) doctorPlatformHealth {
 	// D1: Hub Connectivity
-	d1, hubAnswered := probeDoctorHubConnectivity(hubEP, client)
+	d1, healthz := probeDoctorHubConnectivity(hubEP, client)
 	r.add(&r.HubChecks, d1)
 	hubConnected := d1.Status == "pass" || d1.Status == "warn"
+	hubAnswered := healthz.answered
 
 	// D2: Hub Authentication
 	r.add(&r.HubChecks, checkDoctorHubAuth(hubEP, hubConnected, client))
+	if hubEP != "" && r.authSource != "" {
+		r.add(&r.HubChecks, doctorHubCredentialCheck(r.authSource))
+	}
 
 	// The summary is read whenever the Hub answered, even if its /healthz
 	// reports unhealthy: the summary says why, and a Hub that cannot read
@@ -341,7 +550,64 @@ func (r *doctorReport) hubChecks(hubEP string, client hubclient.Client, linkedPr
 	// D9: GCP service account mappings (warning only): registered GSAs of
 	// the linked project that no Kubernetes broker profile maps.
 	r.add(&r.HubChecks, checkDoctorSAMappings(hubEP, hubConnected, client, linkedProjectID))
+
+	r.hub = doctorHubContext(hubEP, r.authSource, healthz, ph.summary)
 	return ph
+}
+
+// doctorHubContext is the JSON generation context: nil without a Hub
+// endpoint. The version, instance and summary time come from the summary
+// when it was read; otherwise only the version, from /healthz. Values the
+// Hub did not give are left empty (and omitted).
+func doctorHubContext(hubEP, authSource string, healthz doctorHealthzProbe, summary *hubclient.HealthSummary) *doctorJSONHub {
+	if hubEP == "" {
+		return nil
+	}
+	h := &doctorJSONHub{Endpoint: singleLine(doctorDisplayEndpoint(hubEP))}
+	if authSource != "" {
+		h.Auth = &doctorJSONHubAuth{Source: authSource}
+	}
+	switch {
+	case summary != nil:
+		h.Source = doctorHubSourceHealthSummary
+		h.Version = singleLine(summary.Hub.Version)
+		h.InstanceID = singleLine(summary.Hub.InstanceID)
+		if !summary.GeneratedAt.IsZero() {
+			h.SummaryGeneratedAt = summary.GeneratedAt.UTC().Format(time.RFC3339Nano)
+		}
+	case healthz.version != "":
+		h.Source = doctorHubSourceHealthz
+		h.Version = singleLine(healthz.version)
+	}
+	return h
+}
+
+// doctorHubCredentialCheck is the Hub Health line naming where the Hub
+// credential came from. It never shows the credential, a file path or an
+// identity.
+func doctorHubCredentialCheck(source string) scionruntime.CheckResult {
+	var msg string
+	switch source {
+	case hubAuthSourceHubProfile:
+		msg = "Using the selected hub profile"
+	case hubAuthSourceStoredLogin:
+		msg = "Using the stored login (scion hub auth login)"
+	case hubAuthSourceAgentTokenFile:
+		msg = "Using the agent token file; it takes precedence over SCION_HUB_TOKEN"
+	case hubAuthSourceEnvAuthToken:
+		msg = "Using SCION_AUTH_TOKEN (agent token)"
+	case hubAuthSourceEnvHubToken:
+		msg = "Using SCION_HUB_TOKEN"
+	case hubAuthSourceDev:
+		msg = "Using a development token"
+	case hubAuthSourceTransport:
+		msg = "Using the transport (proxy) credential only; no Hub credential found"
+	case hubAuthSourceNone:
+		msg = "No credential found; requests are sent without one"
+	default:
+		msg = "Credential source: " + source
+	}
+	return scionruntime.CheckResult{Name: "hub-credential", Status: "info", Message: msg}
 }
 
 // platformHealthSection reports the Platform Health lines and keeps the
@@ -358,6 +624,15 @@ func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 	if ph.summary != nil {
 		r.HealthSummary = ph.summary.Raw
 	}
+
+	state := doctorJSONPlatformHealth{State: ph.state, Reason: ph.reason, HTTPStatus: ph.httpStatus}
+	if ph.summary != nil {
+		// The summary's verdict, as the headline line shows it.
+		state = doctorJSONPlatformHealth{State: doctorPHStateOK, Status: healthSummaryHeadline(ph.summary).Status}
+	} else if len(r.PlatformHealth) > 0 {
+		state.Message = singleLine(r.PlatformHealth[0].Message)
+	}
+	r.platformState = state
 }
 
 // localSettingsChecks runs the checks that read only this machine: D5
@@ -566,18 +841,27 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 	return res
 }
 
+// doctorHealthzProbe is what D1 learned besides its check result.
+type doctorHealthzProbe struct {
+	// answered is true when the Hub answered at all. A Hub can answer and
+	// still fail D1 (its /healthz reports unhealthy, or returns a non-200
+	// status); it is then reachable for other requests.
+	answered bool
+	// version is the serving process's scionVersion from a parseable
+	// /healthz body; empty when the body did not carry one.
+	version string
+}
+
 // probeDoctorHubConnectivity is checkDoctorHubConnectivity that also
-// reports whether the Hub answered at all. A Hub can answer and still fail
-// D1 (its /healthz reports unhealthy, or returns a non-200 status); it is
-// then reachable for other requests.
-func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scionruntime.CheckResult, answered bool) {
+// reports whether the Hub answered and the version /healthz reported.
+func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scionruntime.CheckResult, probe doctorHealthzProbe) {
 	if hubEP == "" {
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "skip",
 			Message:     "No Hub endpoint configured",
 			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
-		}, false
+		}, doctorHealthzProbe{}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -590,24 +874,24 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 			return scionruntime.CheckResult{
 				Name:        "hub-connectivity",
 				Status:      "fail",
-				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", config.RedactURL(hubEP), hubclient.HintProxyError(err)),
+				Message:     fmt.Sprintf("Cannot reach Hub at %s: %s", doctorDisplayEndpoint(hubEP), doctorHubError(hubEP, hubclient.HintProxyError(err))),
 				Remediation: "Verify the Hub is running and the endpoint is correct",
-			}, false
+			}, doctorHealthzProbe{}
 		}
-		probe := healthProbeResponse{Status: healthResp.Status, Checks: healthResp.Checks}
+		parsed := healthProbeResponse{Status: healthResp.Status, Checks: healthResp.Checks}
 		if len(healthResp.Hub) > 0 {
 			var hub healthProbeComponent
 			if json.Unmarshal(healthResp.Hub, &hub) == nil {
-				probe.Hub = &hub
+				parsed.Hub = &hub
 			}
 		}
 		if len(healthResp.Broker) > 0 {
 			var broker healthProbeComponent
 			if json.Unmarshal(healthResp.Broker, &broker) == nil {
-				probe.Broker = &broker
+				parsed.Broker = &broker
 			}
 		}
-		return doctorHubHealthResult(hubEP, probe), true
+		return doctorHubHealthResult(hubEP, parsed), doctorHealthzProbe{answered: true, version: healthResp.ScionVersion}
 	}
 
 	cleanEP := strings.TrimRight(hubEP, "/")
@@ -616,9 +900,9 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Invalid Hub endpoint: %v", err),
+			Message:     fmt.Sprintf("Invalid Hub endpoint: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check the Hub endpoint URL",
-		}, false
+		}, doctorHealthzProbe{}
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -626,9 +910,9 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", config.RedactURL(hubEP), err),
+			Message:     fmt.Sprintf("Cannot reach Hub at %s: %s", doctorDisplayEndpoint(hubEP), doctorHubError(hubEP, err)),
 			Remediation: "Verify the Hub is running and the endpoint is correct",
-		}, false
+		}, doctorHealthzProbe{}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -638,19 +922,22 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 			Status:      "fail",
 			Message:     fmt.Sprintf("Hub returned HTTP %d", resp.StatusCode),
 			Remediation: "Check Hub server logs",
-		}, true
+		}, doctorHealthzProbe{answered: true}
 	}
 
-	var healthResp healthProbeResponse
+	var healthResp struct {
+		healthProbeResponse
+		ScionVersion string `json:"scionVersion"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
 		return scionruntime.CheckResult{
 			Name:    "hub-connectivity",
 			Status:  "warn",
 			Message: "Hub reachable but health response could not be parsed",
-		}, true
+		}, doctorHealthzProbe{answered: true}
 	}
 
-	return doctorHubHealthResult(hubEP, healthResp), true
+	return doctorHubHealthResult(hubEP, healthResp.healthProbeResponse), doctorHealthzProbe{answered: true, version: healthResp.ScionVersion}
 }
 
 // doctorHubHealthResult maps a parsed /healthz response to the D1 check
@@ -660,7 +947,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 // warns with the status verbatim. Non-healthy checks are named in the message.
 func doctorHubHealthResult(hubEP string, health healthProbeResponse) scionruntime.CheckResult {
 	res := scionruntime.CheckResult{Name: "hub-connectivity"}
-	hubEP = config.RedactURL(hubEP)
+	hubEP = doctorDisplayEndpoint(hubEP)
 	checks := ""
 	if names := nonHealthyChecks(health); len(names) > 0 {
 		checks = " (" + strings.Join(names, "; ") + ")"
@@ -718,7 +1005,7 @@ func checkDoctorHubAuth(hubEP string, hubConnected bool, client hubclient.Client
 		return scionruntime.CheckResult{
 			Name:        "hub-auth",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Authentication failed: %v", err),
+			Message:     fmt.Sprintf("Authentication failed: %s", doctorHubError(hubEP, err)),
 			Remediation: "Run 'scion hub auth login' to authenticate",
 		}
 	}
@@ -763,7 +1050,7 @@ func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubcl
 		return scionruntime.CheckResult{
 			Name:        "broker-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Failed to query brokers: %v", err),
+			Message:     fmt.Sprintf("Failed to query brokers: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check Hub server logs",
 		}
 	}
@@ -827,7 +1114,7 @@ func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Cli
 		return scionruntime.CheckResult{
 			Name:    name,
 			Status:  "warn",
-			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %v", err),
+			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %s", doctorHubError(hubEP, err)),
 		}
 	}
 	if len(warnings) > 0 {
@@ -908,7 +1195,7 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		return scionruntime.CheckResult{
 			Name:        "agent-health",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Failed to query agents: %v", err),
+			Message:     fmt.Sprintf("Failed to query agents: %s", doctorHubError(hubEP, err)),
 			Remediation: "Check Hub server logs",
 		}
 	}

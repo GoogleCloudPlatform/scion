@@ -493,6 +493,18 @@ type ServerConfig struct {
 	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 
+	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
+	// once at startup from the global settings file through the same
+	// env-free loader the brokers use (config.LoadHubSharedDirStorage);
+	// never re-read per request, never from the DB or project settings.
+	// With WorkspaceStorageConfig it decides where the hub's shared-dir
+	// browser resolves shared dirs (sharedDirLayout).
+	SharedDirStorageConfig *config.V1SharedDirStorageConfig
+	// SharedDirStorageError is set when the settings file plausibly
+	// configures server.shared_dir_storage but could not be loaded; shared-dir
+	// resolution then fails closed rather than using the local layout.
+	SharedDirStorageError error
+
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
 	// the chat interface. Nil means enabled — chat shipped default-on, so an
@@ -2473,6 +2485,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
+	}
+	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
+		slog.Warn(warning)
 	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
