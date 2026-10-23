@@ -543,7 +543,9 @@ func TestDeleteUser_GuardOrder(t *testing.T) {
 				srv, s := testServerNoDevAuth(t)
 				ctx := context.Background()
 				target := newActiveMember(t, s, "user-last-super", "lastsuper@test.com")
-				grantSystemRole(t, s, target.ID, store.SystemRoleSuperAdmin)
+				// The store admits a super-admin binding only from the
+				// system reconciler (ensureSuperAdminBinding writes it so).
+				ensureSuperAdminBinding(t, s, target.ID)
 				// Make the target the only super-admin.
 				superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 				require.NoError(t, err)
