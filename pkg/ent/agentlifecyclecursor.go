@@ -52,6 +52,8 @@ type AgentLifecycleCursor struct {
 	CreatorPrincipalType string `json:"creator_principal_type,omitempty"`
 	// CreatorPrincipalID holds the value of the "creator_principal_id" field.
 	CreatorPrincipalID string `json:"creator_principal_id,omitempty"`
+	// RequestedTemplate holds the value of the "requested_template" field.
+	RequestedTemplate string `json:"requested_template,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
 	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 	selectValues sql.SelectValues
@@ -66,7 +68,7 @@ func (*AgentLifecycleCursor) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agentlifecyclecursor.FieldTransitionRevision, agentlifecyclecursor.FieldMetadataRevision, agentlifecyclecursor.FieldOpenRunMetadataRevision:
 			values[i] = new(sql.NullInt64)
-		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldPendingAdoptedTo, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID:
+		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldPendingAdoptedTo, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID, agentlifecyclecursor.FieldRequestedTemplate:
 			values[i] = new(sql.NullString)
 		case agentlifecyclecursor.FieldPendingRunChangeAt, agentlifecyclecursor.FieldPendingAdoptedAt, agentlifecyclecursor.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -197,6 +199,12 @@ func (_m *AgentLifecycleCursor) assignValues(columns []string, values []any) err
 			} else if value.Valid {
 				_m.CreatorPrincipalID = value.String
 			}
+		case agentlifecyclecursor.FieldRequestedTemplate:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field requested_template", values[i])
+			} else if value.Valid {
+				_m.RequestedTemplate = value.String
+			}
 		case agentlifecyclecursor.FieldUpdatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
@@ -293,6 +301,9 @@ func (_m *AgentLifecycleCursor) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("creator_principal_id=")
 	builder.WriteString(_m.CreatorPrincipalID)
+	builder.WriteString(", ")
+	builder.WriteString("requested_template=")
+	builder.WriteString(_m.RequestedTemplate)
 	builder.WriteString(", ")
 	builder.WriteString("updated_at=")
 	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))

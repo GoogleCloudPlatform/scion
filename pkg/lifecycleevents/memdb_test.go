@@ -121,7 +121,7 @@ func (t *memTx) BumpLifecycleCursor(ctx context.Context, agentID string, n int, 
 	case !upd.Create && !ok:
 		return nil, fmt.Errorf("cursor %s missing", agentID)
 	case upd.Create:
-		c = store.LifecycleCursor{AgentID: agentID, CreatorPrincipalType: upd.CreatorPrincipalType, CreatorPrincipalID: upd.CreatorPrincipalID}
+		c = store.LifecycleCursor{AgentID: agentID, CreatorPrincipalType: upd.CreatorPrincipalType, CreatorPrincipalID: upd.CreatorPrincipalID, RequestedTemplate: upd.RequestedTemplate}
 	}
 	c.TransitionRevision += int64(n)
 	c.ProjectID = upd.ProjectID

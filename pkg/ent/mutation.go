@@ -17488,6 +17488,7 @@ type AgentLifecycleCursorMutation struct {
 	pending_adopted_to            *string
 	creator_principal_type        *string
 	creator_principal_id          *string
+	requested_template            *string
 	updated_at                    *time.Time
 	clearedFields                 map[string]struct{}
 	done                          bool
@@ -18297,6 +18298,42 @@ func (m *AgentLifecycleCursorMutation) ResetCreatorPrincipalID() {
 	m.creator_principal_id = nil
 }
 
+// SetRequestedTemplate sets the "requested_template" field.
+func (m *AgentLifecycleCursorMutation) SetRequestedTemplate(s string) {
+	m.requested_template = &s
+}
+
+// RequestedTemplate returns the value of the "requested_template" field in the mutation.
+func (m *AgentLifecycleCursorMutation) RequestedTemplate() (r string, exists bool) {
+	v := m.requested_template
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestedTemplate returns the old "requested_template" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldRequestedTemplate(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestedTemplate is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestedTemplate requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestedTemplate: %w", err)
+	}
+	return oldValue.RequestedTemplate, nil
+}
+
+// ResetRequestedTemplate resets all changes to the "requested_template" field.
+func (m *AgentLifecycleCursorMutation) ResetRequestedTemplate() {
+	m.requested_template = nil
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (m *AgentLifecycleCursorMutation) SetUpdatedAt(t time.Time) {
 	m.updated_at = &t
@@ -18367,7 +18404,7 @@ func (m *AgentLifecycleCursorMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentLifecycleCursorMutation) Fields() []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 19)
 	if m.project_id != nil {
 		fields = append(fields, agentlifecyclecursor.FieldProjectID)
 	}
@@ -18419,6 +18456,9 @@ func (m *AgentLifecycleCursorMutation) Fields() []string {
 	if m.creator_principal_id != nil {
 		fields = append(fields, agentlifecyclecursor.FieldCreatorPrincipalID)
 	}
+	if m.requested_template != nil {
+		fields = append(fields, agentlifecyclecursor.FieldRequestedTemplate)
+	}
 	if m.updated_at != nil {
 		fields = append(fields, agentlifecyclecursor.FieldUpdatedAt)
 	}
@@ -18464,6 +18504,8 @@ func (m *AgentLifecycleCursorMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatorPrincipalType()
 	case agentlifecyclecursor.FieldCreatorPrincipalID:
 		return m.CreatorPrincipalID()
+	case agentlifecyclecursor.FieldRequestedTemplate:
+		return m.RequestedTemplate()
 	case agentlifecyclecursor.FieldUpdatedAt:
 		return m.UpdatedAt()
 	}
@@ -18509,6 +18551,8 @@ func (m *AgentLifecycleCursorMutation) OldField(ctx context.Context, name string
 		return m.OldCreatorPrincipalType(ctx)
 	case agentlifecyclecursor.FieldCreatorPrincipalID:
 		return m.OldCreatorPrincipalID(ctx)
+	case agentlifecyclecursor.FieldRequestedTemplate:
+		return m.OldRequestedTemplate(ctx)
 	case agentlifecyclecursor.FieldUpdatedAt:
 		return m.OldUpdatedAt(ctx)
 	}
@@ -18638,6 +18682,13 @@ func (m *AgentLifecycleCursorMutation) SetField(name string, value ent.Value) er
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCreatorPrincipalID(v)
+		return nil
+	case agentlifecyclecursor.FieldRequestedTemplate:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestedTemplate(v)
 		return nil
 	case agentlifecyclecursor.FieldUpdatedAt:
 		v, ok := value.(time.Time)
@@ -18799,6 +18850,9 @@ func (m *AgentLifecycleCursorMutation) ResetField(name string) error {
 		return nil
 	case agentlifecyclecursor.FieldCreatorPrincipalID:
 		m.ResetCreatorPrincipalID()
+		return nil
+	case agentlifecyclecursor.FieldRequestedTemplate:
+		m.ResetRequestedTemplate()
 		return nil
 	case agentlifecyclecursor.FieldUpdatedAt:
 		m.ResetUpdatedAt()

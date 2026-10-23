@@ -24,7 +24,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // TestBeginLaunchBindsDispatchedRun pins the launch_run_id binding (WP1
@@ -393,4 +395,79 @@ func TestSetAgentEffectiveConfig_RaceReclassifies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// effOfEvent renders an event's effective fields ("-" when omitted,
+// "nometa" for a non-snapshot event).
+func effOfEvent(e *tc.LifecycleEvent) string {
+	m := e.Metadata
+	if m == nil {
+		return "nometa"
+	}
+	if m.EffectiveTemplate == "" && m.EffectiveTemplateHash == "" && m.EffectiveModel == "" &&
+		m.EffectiveHarness == "" && m.HarnessConfigRevision == "" && m.EffectiveBrokerBuild == "" {
+		return "-"
+	}
+	return m.EffectiveModel
+}
+
+// TestLifecycleStore3_EchoEmitsConfigured: through the real store, a
+// matching echo emits configured with effective_* and launch_id = the run;
+// an identical retry emits nothing.
+func TestLifecycleStore3_EchoEmitsConfigured(t *testing.T) {
+	ctx := context.Background()
+	f := newLifecycleFixture(t)
+	a := f.create("s3-echo", func(a *store.Agent) { a.Phase, a.Generation, a.RuntimeBrokerID = "created", 1, "broker-1" })
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	res, err := f.cs.SetAgentEffectiveConfig(ctx, a.ID, "R1", effectiveEcho("R1", "broker-1"))
+	require.NoError(t, err)
+	require.True(t, res.Written)
+	_, err = f.cs.SetAgentEffectiveConfig(ctx, a.ID, "R1", effectiveEcho("R1", "broker-1"))
+	require.NoError(t, err)
+	evs := f.events(a.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] configured@3[R1/1]", lcFull(evs))
+	assert.Equal(t, "opus", effOfEvent(evs[2]))
+	assert.Equal(t, "claude", evs[2].Metadata.EffectiveHarness)
+}
+
+// TestLifecycleStore3_ReincarnationEchoPair is review r2 R2 (the B3
+// fixture pair): the reincarnation step's base-run configured (N+1, no
+// launch_id) has no effective_*, although R1's echo is stored; R2's echo,
+// while the reincarnation is in flight, closes R1 and gives configured
+// tagged N+1 with launch_id R2 and R2's effective_*.
+func TestLifecycleStore3_ReincarnationEchoPair(t *testing.T) {
+	ctx := context.Background()
+	f := newLifecycleFixture(t)
+	a := f.create("s3-reinc", func(a *store.Agent) { a.Phase, a.Generation, a.RuntimeBrokerID = "created", 1, "broker-1" })
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	_, err := f.cs.SetAgentEffectiveConfig(ctx, a.ID, "R1", effectiveEcho("R1", "broker-1"))
+	require.NoError(t, err)
+	cur, err := f.cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	_, err = f.cs.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, time.Now())
+	require.NoError(t, err)
+	f.update(ctx, a.ID, func(a *store.Agent) { a.Phase = "stopping"; a.ReincarnationState = store.ReincarnationStatePending })
+	f.update(lifecycleevents.WithConfigResolution(ctx), a.ID, func(a *store.Agent) {
+		a.Phase = "starting"
+		a.AppliedConfig = &store.AgentAppliedConfig{Model: "next"}
+	})
+	f.mint(a.ID, "R2")
+	r2 := effectiveEcho("R2", "broker-1")
+	r2.Model = "opus-next"
+	res, err := f.cs.SetAgentEffectiveConfig(ctx, a.ID, "R2", r2)
+	require.NoError(t, err)
+	require.True(t, res.Written)
+	f.update(ctx, a.ID, func(a *store.Agent) { a.Generation = 2 })
+	f.update(ctx, a.ID, func(a *store.Agent) { a.ReincarnationState = store.ReincarnationStateNone })
+	f.heartbeat(a.ID, "running", "R2")
+
+	evs := f.events(a.ID)
+	require.Equal(t, "created@1[/1] started@2[R1/1] configured@3[R1/1] configured@4[/2] stopped@5(superseded)[R1/1] configured@6[R2/2] reincarnated@7[R2/2] started@8[R2/2]",
+		lcFull(evs))
+	assert.Equal(t, "opus", effOfEvent(evs[2]), "R1's echo configured")
+	assert.Equal(t, "-", effOfEvent(evs[3]), "the base-run configured (N+1, no launch_id) has no effective_*")
+	assert.Equal(t, "opus-next", effOfEvent(evs[5]), "R2's echo configured keeps R2's effective_*")
+	assert.Equal(t, "opus-next", effOfEvent(evs[6]), "a later R2 snapshot carries R2's echo")
 }

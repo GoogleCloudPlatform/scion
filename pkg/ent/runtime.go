@@ -583,8 +583,12 @@ func init() {
 	agentlifecyclecursorDescCreatorPrincipalID := agentlifecyclecursorFields[17].Descriptor()
 	// agentlifecyclecursor.DefaultCreatorPrincipalID holds the default value on creation for the creator_principal_id field.
 	agentlifecyclecursor.DefaultCreatorPrincipalID = agentlifecyclecursorDescCreatorPrincipalID.Default.(string)
+	// agentlifecyclecursorDescRequestedTemplate is the schema descriptor for requested_template field.
+	agentlifecyclecursorDescRequestedTemplate := agentlifecyclecursorFields[18].Descriptor()
+	// agentlifecyclecursor.DefaultRequestedTemplate holds the default value on creation for the requested_template field.
+	agentlifecyclecursor.DefaultRequestedTemplate = agentlifecyclecursorDescRequestedTemplate.Default.(string)
 	// agentlifecyclecursorDescUpdatedAt is the schema descriptor for updated_at field.
-	agentlifecyclecursorDescUpdatedAt := agentlifecyclecursorFields[18].Descriptor()
+	agentlifecyclecursorDescUpdatedAt := agentlifecyclecursorFields[19].Descriptor()
 	// agentlifecyclecursor.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	agentlifecyclecursor.DefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.Default.(func() time.Time)
 	// agentlifecyclecursor.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

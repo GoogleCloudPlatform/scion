@@ -559,6 +559,7 @@ var (
 		{Name: "pending_adopted_to", Type: field.TypeString, Default: ""},
 		{Name: "creator_principal_type", Type: field.TypeString, Default: ""},
 		{Name: "creator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "requested_template", Type: field.TypeString, Default: ""},
 		{Name: "updated_at", Type: field.TypeTime},
 	}
 	// AgentLifecycleCursorsTable holds the schema information for the "agent_lifecycle_cursors" table.

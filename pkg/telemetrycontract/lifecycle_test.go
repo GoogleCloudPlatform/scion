@@ -345,11 +345,17 @@ func TestLifecycleWorstCaseEventFitsBudget(t *testing.T) {
 	ev.Metadata = &LifecycleMetadata{
 		Name: f, Slug: f, RequestedTemplate: f, RequestedTemplateID: f, RequestedTemplateHash: f,
 		RequestedModel: f, RequestedModelAlias: f, Harness: f, HarnessConfig: f, Profile: f, Runtime: f,
-		CreatorPrincipalType: f, CreatorPrincipalID: f, ParentAgentID: f, EffectiveTemplate: f,
-		EffectiveTemplateHash: f, EffectiveModel: f, EffectiveHarness: f, HarnessConfigRevision: f,
-		HarnessConfigSource: f, EffectiveBrokerBuild: f,
-		Labels: LabelsFromMap(m),
+		CreatorPrincipalType: f, CreatorPrincipalID: f, ParentAgentID: f,
+		HarnessConfigSource: f,
+		Labels:              LabelsFromMap(m),
 	}
+	// The six broker-echoed effective fields (WP1 slice 3 addendum v12
+	// section 4): the hub accepts up to 256 bytes of printable UTF-8 each,
+	// so the worst case is 256 quotes and backslashes, every one escaped.
+	esc := long(256, "")
+	md := ev.Metadata
+	md.EffectiveTemplate, md.EffectiveTemplateHash, md.EffectiveModel = esc, esc, esc
+	md.EffectiveHarness, md.HarnessConfigRevision, md.EffectiveBrokerBuild = esc, esc, esc
 	data, err := Marshal(ev)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)

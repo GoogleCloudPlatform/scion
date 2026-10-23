@@ -604,7 +604,8 @@ func Spec() []TableFixture {
 				"reincarnation_base_run_id": "", "pending_adopted_from": "",
 				"pending_adopted_at": nil, "pending_adoption_source": "", "pending_adopted_to": "",
 				"creator_principal_type": "user", "creator_principal_id": userID,
-				"updated_at": baseTime,
+				"requested_template": "claude",
+				"updated_at":         baseTime,
 			},
 		}},
 		{Table: "agent_lifecycle_outbox", Rows: []row{

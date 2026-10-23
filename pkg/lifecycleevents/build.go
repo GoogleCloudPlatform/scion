@@ -30,20 +30,28 @@ import (
 // ProducerNamespacePrefix prefixes the hub ID in producer_namespace.
 const ProducerNamespacePrefix = "scion-hub/"
 
-// Creator is the principal recorded as an agent's creator.
+// Creator is the create-time provenance the cursor records at created and
+// later snapshots copy: the creating principal and the requested template
+// name.
 type Creator struct {
 	Type string
 	ID   string
+	// RequestedTemplate is the requested template name, known only from
+	// the create itself or the cursor it created; "" (omitted) otherwise,
+	// never agents.template, which a broker echo rewrites (WP1 slice 3
+	// addendum v12 section 4a).
+	RequestedTemplate string
 }
 
-// Snapshot returns the metadata snapshot of a (design 3.2). Effective
-// values stay unknown (omitted) until the broker echoes them; requested
-// values never substitute for them.
+// Snapshot returns the metadata snapshot of a (design 3.2). The effective
+// values come from the stored broker echo (a.EffectiveConfig, whatever its
+// run; buildEvent keeps them only on events of that run) and stay unknown
+// (omitted) without one; requested values never substitute for them.
 func Snapshot(a *store.Agent, creator Creator) telemetrycontract.LifecycleMetadata {
 	m := telemetrycontract.LifecycleMetadata{
 		Name:                 a.Name,
 		Slug:                 a.Slug,
-		RequestedTemplate:    a.Template,
+		RequestedTemplate:    creator.RequestedTemplate,
 		Runtime:              a.Runtime,
 		CreatorPrincipalType: creator.Type,
 		CreatorPrincipalID:   creator.ID,
@@ -60,6 +68,14 @@ func Snapshot(a *store.Agent, creator Creator) telemetrycontract.LifecycleMetada
 		m.HarnessConfig = c.HarnessConfig
 		m.HarnessConfigSource = c.HarnessConfigSource
 		m.Profile = c.Profile
+	}
+	if e := a.EffectiveConfig; e != nil {
+		m.EffectiveTemplate = e.Template
+		m.EffectiveTemplateHash = e.TemplateHash
+		m.EffectiveModel = e.Model
+		m.EffectiveHarness = e.Harness
+		m.HarnessConfigRevision = e.HarnessConfigRevision
+		m.EffectiveBrokerBuild = e.BrokerBuild
 	}
 	// The last ancestor is the parent agent when the chain is longer than
 	// the root principal alone.
@@ -97,6 +113,37 @@ func ConfigDigest(m telemetrycontract.LifecycleMetadata) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// withEchoRun folds the stored echo's run into a digest (addendum v12
+// section 4): a new run's first echo moves the digest even when its values
+// equal the previous run's. With no echo (runID "") the digest is
+// returned unchanged, so agents without one keep their digests.
+func withEchoRun(digest, runID string) string {
+	if runID == "" {
+		return digest
+	}
+	sum := sha256.Sum256([]byte(digest + "\x00effective-run\x00" + runID))
+	return hex.EncodeToString(sum[:])
+}
+
+// echoRunID is the run of a's stored echo, "" without one.
+func echoRunID(a *store.Agent) string {
+	if a.EffectiveConfig == nil {
+		return ""
+	}
+	return a.EffectiveConfig.RunID
+}
+
+// keepEffectiveFor clears the effective fields of m unless the stored echo
+// belongs to launchID, the event's final launch_id (addendum v12 section
+// 4): an event of another run, or with no launch_id, never carries them.
+func keepEffectiveFor(m *telemetrycontract.LifecycleMetadata, a *store.Agent, launchID string) {
+	if launchID != "" && echoRunID(a) == launchID {
+		return
+	}
+	m.EffectiveTemplate, m.EffectiveTemplateHash, m.EffectiveModel = "", "", ""
+	m.EffectiveHarness, m.HarnessConfigRevision, m.EffectiveBrokerBuild = "", "", ""
+}
+
 // Fingerprint is the SHA-256 over the derive-relevant fields of a row
 // (design section 4, B3): phase, launch state, the async launch ID column,
 // generation, deleted_at and the metadata digest. The run ID is excluded
@@ -118,18 +165,26 @@ func Fingerprint(a *store.Agent, digest string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// creatorOf returns the creator to record for a row: the create context on
-// a create, the cursor's on later writes, and for an agent with no cursor
-// (pre-rollout) its created_by with the type unknown (design 3.2).
-func creatorOf(a *store.Agent, cursor *store.LifecycleCursor, create *CreateContext) Creator {
+// creatorOf returns the provenance to record for a row: the create context
+// on a create, the cursor's on later writes, and for an agent with no
+// cursor (pre-rollout) its created_by with the type unknown (design 3.2).
+// atCreate marks the create write itself, whose committed row's template
+// is the requested template (addendum v12 section 4a); otherwise it comes
+// only from the cursor.
+func creatorOf(a *store.Agent, cursor *store.LifecycleCursor, create *CreateContext, atCreate bool) Creator {
+	var c Creator
 	switch {
 	case create != nil:
-		return Creator{Type: create.CreatorType, ID: create.CreatorID}
+		c = Creator{Type: create.CreatorType, ID: create.CreatorID}
 	case cursor != nil:
-		return Creator{Type: cursor.CreatorPrincipalType, ID: cursor.CreatorPrincipalID}
+		c = Creator{Type: cursor.CreatorPrincipalType, ID: cursor.CreatorPrincipalID, RequestedTemplate: cursor.RequestedTemplate}
 	default:
-		return Creator{ID: a.CreatedBy}
+		c = Creator{ID: a.CreatedBy}
 	}
+	if atCreate {
+		c.RequestedTemplate = a.Template
+	}
+	return c
 }
 
 // eventInput is everything needed to build one event.
@@ -195,6 +250,7 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 		md := *in.Metadata
 		ev.Metadata = &md
 	}
+
 	// A closure of an open segment carries that segment's frozen run
 	// identity and metadata revision, taken from the cursor (review r6 N6:
 	// presence is enforced here, where the cursor is known).
@@ -221,6 +277,11 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 		ev.AdoptedFromLaunchID = c.PendingAdoptedFrom
 		ev.AdoptedAt = telemetrycontract.FormatTS(*c.PendingAdoptedAt)
 		ev.AdoptionSource = c.PendingAdoptionSource
+	}
+	// After the closure override: the filter reads the final launch_id.
+	// The reduced block is this event's copy and is never digested.
+	if ev.Metadata != nil {
+		keepEffectiveFor(ev.Metadata, a, ev.LaunchID)
 	}
 	if err := ev.Validate(); err != nil {
 		return nil, err

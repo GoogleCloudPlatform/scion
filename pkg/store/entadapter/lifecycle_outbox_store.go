@@ -162,6 +162,7 @@ func entCursorToStore(c *ent.AgentLifecycleCursor) *store.LifecycleCursor {
 		PendingAdoptedTo:        c.PendingAdoptedTo,
 		CreatorPrincipalType:    c.CreatorPrincipalType,
 		CreatorPrincipalID:      c.CreatorPrincipalID,
+		RequestedTemplate:       c.RequestedTemplate,
 		UpdatedAt:               c.UpdatedAt,
 	}
 }
@@ -216,6 +217,7 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 			SetLastDeleted(upd.LastDeleted).
 			SetCreatorPrincipalType(upd.CreatorPrincipalType).
 			SetCreatorPrincipalID(upd.CreatorPrincipalID).
+			SetRequestedTemplate(upd.RequestedTemplate).
 			SetUpdatedAt(now).
 			SetOpenRun(upd.Run.OpenRun).
 			SetOpenRunGeneration(upd.Run.OpenRunGeneration).

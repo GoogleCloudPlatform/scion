@@ -230,6 +230,9 @@ type LifecycleCursor struct {
 	// Creator principal captured at created, copied into later snapshots.
 	CreatorPrincipalType string
 	CreatorPrincipalID   string
+	// RequestedTemplate is the requested template name captured at
+	// created ("" when the cursor was created later).
+	RequestedTemplate string
 
 	UpdatedAt time.Time
 }
@@ -244,9 +247,10 @@ type LifecycleCursorUpdate struct {
 	MetadataDigest   string
 	LastFingerprint  string
 	LastDeleted      bool
-	// Creator fields are written only with Create.
+	// Creator fields and RequestedTemplate are written only with Create.
 	CreatorPrincipalType string
 	CreatorPrincipalID   string
+	RequestedTemplate    string
 	Now                  time.Time
 	// Run is the run-segment state after this write; every bump writes it
 	// whole (design 2.4a cursor run state).

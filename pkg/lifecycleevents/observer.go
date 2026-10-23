@@ -111,7 +111,7 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 
 	var before, after *rowState
 	if w.Before != nil {
-		before, err = newRowState(w.Before, creatorOf(w.Before, cursor, nil))
+		before, err = newRowState(w.Before, creatorOf(w.Before, cursor, nil, false))
 		if err != nil {
 			o.buildFailed(tx, w, err)
 			return nil
@@ -122,7 +122,7 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		if w.Op == store.AgentWriteCreate {
 			c = nil // a create's creator comes from the create context
 		}
-		after, err = newRowState(w.After, creatorOf(w.After, c, createCtx))
+		after, err = newRowState(w.After, creatorOf(w.After, c, createCtx, w.Op == store.AgentWriteCreate))
 		if err != nil {
 			o.buildFailed(tx, w, err)
 			return nil
@@ -283,8 +283,9 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 			}
 			if cursor == nil {
 				upd.Create = true
-				cr := creatorOf(after.row, nil, createCtx)
+				cr := creatorOf(after.row, nil, createCtx, w.Op == store.AgentWriteCreate)
 				upd.CreatorPrincipalType, upd.CreatorPrincipalID = cr.Type, cr.ID
+				upd.RequestedTemplate = cr.RequestedTemplate
 			}
 			got, err := tx.BumpLifecycleCursor(ctx, agentID, n, upd)
 			if err != nil {
@@ -358,7 +359,10 @@ func newRowState(a *store.Agent, creator Creator) (*rowState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rowState{row: a, meta: m, digest: d, configDigest: cd}, nil
+	// The stored echo's run is a separate digest component (addendum v12
+	// section 4), in both digests.
+	run := echoRunID(a)
+	return &rowState{row: a, meta: m, digest: withEchoRun(d, run), configDigest: withEchoRun(cd, run)}, nil
 }
 
 // buildFailed logs a derivation or serialization failure and counts it

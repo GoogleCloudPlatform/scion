@@ -140,6 +140,11 @@ func CreatorPrincipalID(v string) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldCreatorPrincipalID, v))
 }
 
+// RequestedTemplate applies equality check predicate on the "requested_template" field. It's identical to RequestedTemplateEQ.
+func RequestedTemplate(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldRequestedTemplate, v))
+}
+
 // UpdatedAt applies equality check predicate on the "updated_at" field. It's identical to UpdatedAtEQ.
 func UpdatedAt(v time.Time) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUpdatedAt, v))
@@ -1063,6 +1068,71 @@ func CreatorPrincipalIDEqualFold(v string) predicate.AgentLifecycleCursor {
 // CreatorPrincipalIDContainsFold applies the ContainsFold predicate on the "creator_principal_id" field.
 func CreatorPrincipalIDContainsFold(v string) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldCreatorPrincipalID, v))
+}
+
+// RequestedTemplateEQ applies the EQ predicate on the "requested_template" field.
+func RequestedTemplateEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateNEQ applies the NEQ predicate on the "requested_template" field.
+func RequestedTemplateNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateIn applies the In predicate on the "requested_template" field.
+func RequestedTemplateIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldRequestedTemplate, vs...))
+}
+
+// RequestedTemplateNotIn applies the NotIn predicate on the "requested_template" field.
+func RequestedTemplateNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldRequestedTemplate, vs...))
+}
+
+// RequestedTemplateGT applies the GT predicate on the "requested_template" field.
+func RequestedTemplateGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateGTE applies the GTE predicate on the "requested_template" field.
+func RequestedTemplateGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateLT applies the LT predicate on the "requested_template" field.
+func RequestedTemplateLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateLTE applies the LTE predicate on the "requested_template" field.
+func RequestedTemplateLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateContains applies the Contains predicate on the "requested_template" field.
+func RequestedTemplateContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateHasPrefix applies the HasPrefix predicate on the "requested_template" field.
+func RequestedTemplateHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateHasSuffix applies the HasSuffix predicate on the "requested_template" field.
+func RequestedTemplateHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateEqualFold applies the EqualFold predicate on the "requested_template" field.
+func RequestedTemplateEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldRequestedTemplate, v))
+}
+
+// RequestedTemplateContainsFold applies the ContainsFold predicate on the "requested_template" field.
+func RequestedTemplateContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldRequestedTemplate, v))
 }
 
 // UpdatedAtEQ applies the EQ predicate on the "updated_at" field.

@@ -47,6 +47,8 @@ const (
 	FieldCreatorPrincipalType = "creator_principal_type"
 	// FieldCreatorPrincipalID holds the string denoting the creator_principal_id field in the database.
 	FieldCreatorPrincipalID = "creator_principal_id"
+	// FieldRequestedTemplate holds the string denoting the requested_template field in the database.
+	FieldRequestedTemplate = "requested_template"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
 	FieldUpdatedAt = "updated_at"
 	// Table holds the table name of the agentlifecyclecursor in the database.
@@ -73,6 +75,7 @@ var Columns = []string{
 	FieldPendingAdoptedTo,
 	FieldCreatorPrincipalType,
 	FieldCreatorPrincipalID,
+	FieldRequestedTemplate,
 	FieldUpdatedAt,
 }
 
@@ -115,6 +118,8 @@ var (
 	DefaultCreatorPrincipalType string
 	// DefaultCreatorPrincipalID holds the default value on creation for the "creator_principal_id" field.
 	DefaultCreatorPrincipalID string
+	// DefaultRequestedTemplate holds the default value on creation for the "requested_template" field.
+	DefaultRequestedTemplate string
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
 	DefaultUpdatedAt func() time.Time
 	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
@@ -212,6 +217,11 @@ func ByCreatorPrincipalType(opts ...sql.OrderTermOption) OrderOption {
 // ByCreatorPrincipalID orders the results by the creator_principal_id field.
 func ByCreatorPrincipalID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreatorPrincipalID, opts...).ToFunc()
+}
+
+// ByRequestedTemplate orders the results by the requested_template field.
+func ByRequestedTemplate(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRequestedTemplate, opts...).ToFunc()
 }
 
 // ByUpdatedAt orders the results by the updated_at field.

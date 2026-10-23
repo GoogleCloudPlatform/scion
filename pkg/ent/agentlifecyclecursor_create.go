@@ -254,6 +254,20 @@ func (_c *AgentLifecycleCursorCreate) SetNillableCreatorPrincipalID(v *string) *
 	return _c
 }
 
+// SetRequestedTemplate sets the "requested_template" field.
+func (_c *AgentLifecycleCursorCreate) SetRequestedTemplate(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetRequestedTemplate(v)
+	return _c
+}
+
+// SetNillableRequestedTemplate sets the "requested_template" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableRequestedTemplate(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetRequestedTemplate(*v)
+	}
+	return _c
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_c *AgentLifecycleCursorCreate) SetUpdatedAt(v time.Time) *AgentLifecycleCursorCreate {
 	_c.mutation.SetUpdatedAt(v)
@@ -365,6 +379,10 @@ func (_c *AgentLifecycleCursorCreate) defaults() {
 		v := agentlifecyclecursor.DefaultCreatorPrincipalID
 		_c.mutation.SetCreatorPrincipalID(v)
 	}
+	if _, ok := _c.mutation.RequestedTemplate(); !ok {
+		v := agentlifecyclecursor.DefaultRequestedTemplate
+		_c.mutation.SetRequestedTemplate(v)
+	}
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
 		v := agentlifecyclecursor.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
@@ -417,6 +435,9 @@ func (_c *AgentLifecycleCursorCreate) check() error {
 	}
 	if _, ok := _c.mutation.CreatorPrincipalID(); !ok {
 		return &ValidationError{Name: "creator_principal_id", err: errors.New(`ent: missing required field "AgentLifecycleCursor.creator_principal_id"`)}
+	}
+	if _, ok := _c.mutation.RequestedTemplate(); !ok {
+		return &ValidationError{Name: "requested_template", err: errors.New(`ent: missing required field "AgentLifecycleCursor.requested_template"`)}
 	}
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
 		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "AgentLifecycleCursor.updated_at"`)}
@@ -524,6 +545,10 @@ func (_c *AgentLifecycleCursorCreate) createSpec() (*AgentLifecycleCursor, *sqlg
 	if value, ok := _c.mutation.CreatorPrincipalID(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalID, field.TypeString, value)
 		_node.CreatorPrincipalID = value
+	}
+	if value, ok := _c.mutation.RequestedTemplate(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldRequestedTemplate, field.TypeString, value)
+		_node.RequestedTemplate = value
 	}
 	if value, ok := _c.mutation.UpdatedAt(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldUpdatedAt, field.TypeTime, value)
@@ -812,6 +837,18 @@ func (u *AgentLifecycleCursorUpsert) SetCreatorPrincipalID(v string) *AgentLifec
 // UpdateCreatorPrincipalID sets the "creator_principal_id" field to the value that was provided on create.
 func (u *AgentLifecycleCursorUpsert) UpdateCreatorPrincipalID() *AgentLifecycleCursorUpsert {
 	u.SetExcluded(agentlifecyclecursor.FieldCreatorPrincipalID)
+	return u
+}
+
+// SetRequestedTemplate sets the "requested_template" field.
+func (u *AgentLifecycleCursorUpsert) SetRequestedTemplate(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldRequestedTemplate, v)
+	return u
+}
+
+// UpdateRequestedTemplate sets the "requested_template" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateRequestedTemplate() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldRequestedTemplate)
 	return u
 }
 
@@ -1145,6 +1182,20 @@ func (u *AgentLifecycleCursorUpsertOne) SetCreatorPrincipalID(v string) *AgentLi
 func (u *AgentLifecycleCursorUpsertOne) UpdateCreatorPrincipalID() *AgentLifecycleCursorUpsertOne {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdateCreatorPrincipalID()
+	})
+}
+
+// SetRequestedTemplate sets the "requested_template" field.
+func (u *AgentLifecycleCursorUpsertOne) SetRequestedTemplate(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetRequestedTemplate(v)
+	})
+}
+
+// UpdateRequestedTemplate sets the "requested_template" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateRequestedTemplate() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateRequestedTemplate()
 	})
 }
 
@@ -1647,6 +1698,20 @@ func (u *AgentLifecycleCursorUpsertBulk) SetCreatorPrincipalID(v string) *AgentL
 func (u *AgentLifecycleCursorUpsertBulk) UpdateCreatorPrincipalID() *AgentLifecycleCursorUpsertBulk {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdateCreatorPrincipalID()
+	})
+}
+
+// SetRequestedTemplate sets the "requested_template" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetRequestedTemplate(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetRequestedTemplate(v)
+	})
+}
+
+// UpdateRequestedTemplate sets the "requested_template" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateRequestedTemplate() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateRequestedTemplate()
 	})
 }
 

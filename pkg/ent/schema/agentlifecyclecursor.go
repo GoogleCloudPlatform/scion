@@ -86,6 +86,13 @@ func (AgentLifecycleCursor) Fields() []ent.Field {
 			Default(""),
 		field.String("creator_principal_id").
 			Default(""),
+		// requested_template is the agent's requested template name,
+		// recorded at created from the committed row (WP1 slice 3
+		// addendum v12 section 4a), before any broker echo can rewrite
+		// agents.template. "" for a cursor created later (legacy rows):
+		// requested_template is then omitted.
+		field.String("requested_template").
+			Default(""),
 		field.Time("updated_at").
 			Default(time.Now).
 			UpdateDefault(time.Now),

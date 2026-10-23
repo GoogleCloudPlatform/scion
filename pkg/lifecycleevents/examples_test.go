@@ -26,7 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-var updateExamples = flag.Bool("update-examples", false, "rewrite testdata/lifecycle-examples-slice2.jsonl")
+var updateExamples = flag.Bool("update-examples", false, "rewrite testdata/lifecycle-examples-slice2.jsonl and -slice3.jsonl")
 
 const examplesPath = "testdata/lifecycle-examples-slice2.jsonl"
 

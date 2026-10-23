@@ -300,6 +300,20 @@ func (_u *AgentLifecycleCursorUpdate) SetNillableCreatorPrincipalID(v *string) *
 	return _u
 }
 
+// SetRequestedTemplate sets the "requested_template" field.
+func (_u *AgentLifecycleCursorUpdate) SetRequestedTemplate(v string) *AgentLifecycleCursorUpdate {
+	_u.mutation.SetRequestedTemplate(v)
+	return _u
+}
+
+// SetNillableRequestedTemplate sets the "requested_template" field if the given value is not nil.
+func (_u *AgentLifecycleCursorUpdate) SetNillableRequestedTemplate(v *string) *AgentLifecycleCursorUpdate {
+	if v != nil {
+		_u.SetRequestedTemplate(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *AgentLifecycleCursorUpdate) SetUpdatedAt(v time.Time) *AgentLifecycleCursorUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -421,6 +435,9 @@ func (_u *AgentLifecycleCursorUpdate) sqlSave(ctx context.Context) (_node int, e
 	}
 	if value, ok := _u.mutation.CreatorPrincipalID(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RequestedTemplate(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldRequestedTemplate, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldUpdatedAt, field.TypeTime, value)
@@ -716,6 +733,20 @@ func (_u *AgentLifecycleCursorUpdateOne) SetNillableCreatorPrincipalID(v *string
 	return _u
 }
 
+// SetRequestedTemplate sets the "requested_template" field.
+func (_u *AgentLifecycleCursorUpdateOne) SetRequestedTemplate(v string) *AgentLifecycleCursorUpdateOne {
+	_u.mutation.SetRequestedTemplate(v)
+	return _u
+}
+
+// SetNillableRequestedTemplate sets the "requested_template" field if the given value is not nil.
+func (_u *AgentLifecycleCursorUpdateOne) SetNillableRequestedTemplate(v *string) *AgentLifecycleCursorUpdateOne {
+	if v != nil {
+		_u.SetRequestedTemplate(*v)
+	}
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *AgentLifecycleCursorUpdateOne) SetUpdatedAt(v time.Time) *AgentLifecycleCursorUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -867,6 +898,9 @@ func (_u *AgentLifecycleCursorUpdateOne) sqlSave(ctx context.Context) (_node *Ag
 	}
 	if value, ok := _u.mutation.CreatorPrincipalID(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldCreatorPrincipalID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RequestedTemplate(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldRequestedTemplate, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldUpdatedAt, field.TypeTime, value)

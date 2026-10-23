@@ -103,6 +103,10 @@ func clone(a *store.Agent) *store.Agent {
 		ac := *a.AppliedConfig
 		c.AppliedConfig = &ac
 	}
+	if a.EffectiveConfig != nil {
+		ec := *a.EffectiveConfig
+		c.EffectiveConfig = &ec
+	}
 	return &c
 }
 
@@ -646,7 +650,8 @@ func TestObserverSoftDeleteOfRunningAgent(t *testing.T) {
 	if c.TransitionRevision != 2 {
 		t.Fatalf("zero-transition write allocated a revision: %+v", c)
 	}
-	rs, err := newRowState(d2, Creator{Type: "user", ID: "u1"})
+	// The cursor carries the requested template recorded at created.
+	rs, err := newRowState(d2, Creator{Type: "user", ID: "u1", RequestedTemplate: a.Template})
 	if err != nil {
 		t.Fatal(err)
 	}
