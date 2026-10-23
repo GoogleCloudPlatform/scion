@@ -5,7 +5,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates; non-root `runner` user (uid 1001, `HOME=/home/runner`) |
+| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, shellcheck 0.9.0); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
 | [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
@@ -122,6 +122,7 @@ this, in order:
    | `~/work` | `/scratch/_work` | the runner work folder (`work_folder` = `/home/runner/work`) |
    | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
    | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
+   | `~/.npm` | `/scratch/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
 
    **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
    `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a

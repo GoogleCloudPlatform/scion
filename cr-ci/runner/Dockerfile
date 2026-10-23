@@ -71,9 +71,17 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # Base tools from the Ubuntu archive (apt verifies the archive signatures). zstd: with
 # it on PATH, actions/cache compresses with zstd as on ubuntu-latest, so cache versions
 # (which include the compression method) match across the two runner types.
+# The second line is what the routed ci.yml jobs (phase B of the primary-runner work)
+# call as if preinstalled, as they are on ubuntu-latest: make (build-and-test,
+# ent-generate-check, sqlite-nonhub-tests), procps (the build-and-test watchdog's ps,
+# pgrep, pkill; the lint sampler's free), python3 + python3-yaml (harness and cloud-init
+# checks, single-node tests), ripgrep, tmux (SCION_TEST_REQUIRE_TMUX) and shellcheck
+# (24.04's 0.9.0, the version upstream CI's shellcheck job gets from apt). No gcc, no
+# Docker, no sudo: no routed job needs them, and they would widen what a job can do.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq tar gzip unzip zstd \
+      make procps python3 python3-yaml ripgrep tmux shellcheck \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root runner user. The runner, its work dir and all caches belong to it. uid 1001
