@@ -1675,6 +1675,10 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		// signed-in user, who can read the same value from GET
 		// /api/v1/profiling. Otherwise it is omitted.
 		ReadinessMarks bool `json:"readinessMarks,omitempty"`
+		// Experiments is the "experiments" map of GET /api/v1/experiments,
+		// as that endpoint answered the session user in-process. Omitted for
+		// an anonymous shell or when the endpoint did not answer 200.
+		Experiments map[string]bool `json:"experiments,omitempty"`
 	}
 
 	envelope := pageDataEnvelope{
@@ -1703,45 +1707,37 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		}
 	}
 
-	// Prefetch API data if Hub is mounted and the route maps to an API path.
-	apiPath := resolveAPIPath(r.URL.Path)
-	if apiPath != "" && ws.hubHandler != nil {
-		// Read access token from session for the synthetic request.
-		var accessToken string
-		session, err := ws.sessionStore.Get(r, webSessionName)
-		if err == nil {
+	// Read access token from session for the synthetic requests below.
+	var accessToken string
+	if ws.hubHandler != nil {
+		if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
 			accessToken, _ = session.Values[sessKeyHubAccessToken].(string)
 		}
+	}
 
-		// Create a synthetic request with a 2-second deadline.
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		apiReq, err := http.NewRequestWithContext(ctx, "GET", apiPath, nil)
-		if err == nil {
-			if accessToken != "" {
-				apiReq.Header.Set("Authorization", "Bearer "+accessToken)
+	// Prefetch API data if Hub is mounted and the route maps to an API path.
+	if apiPath := resolveAPIPath(r.URL.Path); apiPath != "" && ws.hubHandler != nil {
+		if body, ok := ws.prefetchHubGET(r.Context(), apiPath, accessToken); ok {
+			var apiData interface{}
+			if err := json.Unmarshal(body, &apiData); err == nil {
+				envelope.Data = apiData
 			}
-			rec := httptest.NewRecorder()
-			// The shell head is already sent when this runs (spaHandler),
-			// so a panic here must not cut the document short: it degrades
-			// to no page data, like a timeout or an error status.
-			panicked := func() (panicked bool) {
-				defer func() {
-					if p := recover(); p != nil {
-						panicked = true
-						ws.logger().Error("SPA shell page data prefetch panicked; rendering the shell without page data", "panic", p)
-					}
-				}()
-				ws.hubHandler.ServeHTTP(rec, apiReq)
-				return false
-			}()
+		}
+	}
 
-			if !panicked && rec.Code == http.StatusOK {
-				var apiData interface{}
-				if err := json.Unmarshal(rec.Body.Bytes(), &apiData); err == nil {
-					envelope.Data = apiData
-				}
+	// Embed the resolved experiment map (ptone/scion#2489), so the client
+	// can skip its boot request for GET /api/v1/experiments. Only for a
+	// signed-in shell with a session hub token, and only through that
+	// endpoint itself, called in-process as the session user: the hub's own
+	// route authorization decides, exactly as for the client's request. An
+	// anonymous shell (login, invite, a visitor without a session) never
+	// carries it; any non-200 answer leaves it out and the client falls
+	// back to its own request.
+	if envelope.User != nil && accessToken != "" && ws.hubHandler != nil {
+		if body, ok := ws.prefetchHubGET(r.Context(), "/api/v1/experiments", accessToken); ok {
+			var exp experimentsResponse
+			if err := json.Unmarshal(body, &exp); err == nil && exp.Experiments != nil {
+				envelope.Experiments = exp.Experiments
 			}
 		}
 	}
@@ -1753,6 +1749,42 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	}
 
 	return template.JS(safeJSONForHTML(string(raw)))
+}
+
+// prefetchHubGET serves a synthetic GET for apiPath through the mounted Hub
+// API in-process, with accessToken (if any) as the bearer token, and
+// returns the body of a 200 answer. It has a 2-second deadline. The shell
+// head is already sent when this runs (spaHandler), so a panic here must
+// not cut the document short: it degrades to no data, like a timeout or an
+// error status. parent is used for cancellation only: the request's
+// identity comes from the Authorization header alone (the web session user
+// lives under a context key the hub does not read), so the token decides.
+func (ws *WebServer) prefetchHubGET(parent context.Context, apiPath, accessToken string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+
+	apiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, false
+	}
+	if accessToken != "" {
+		apiReq.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	rec := httptest.NewRecorder()
+	panicked := func() (panicked bool) {
+		defer func() {
+			if p := recover(); p != nil {
+				panicked = true
+				ws.logger().Error("SPA shell page data prefetch panicked; rendering the shell without it", "path", apiPath, "panic", p)
+			}
+		}()
+		ws.hubHandler.ServeHTTP(rec, apiReq)
+		return false
+	}()
+	if panicked || rec.Code != http.StatusOK {
+		return nil, false
+	}
+	return rec.Body.Bytes(), true
 }
 
 // hasWebAssets reports whether the server has web assets available to serve.

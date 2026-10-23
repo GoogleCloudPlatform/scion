@@ -202,6 +202,10 @@ const (
 	// Either way the effective caller is a dev-auth identity, not an agent
 	// token.
 	CredentialKindDevAuto CredentialKind = "dev_auto"
+	// CredentialKindNone means no credential is sent: none is configured
+	// for the hub, and it is not a loopback hub, the only kind a dev token
+	// is sent to.
+	CredentialKindNone CredentialKind = "none"
 )
 
 // EnsureHubReadyOptions configures the behavior of EnsureHubReady.
@@ -1960,7 +1964,8 @@ func ReadAgentTokenFile() string {
 // observational — it never changes auth priority or behavior.
 //
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
+// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+// auto dev auth, which applies to a loopback hub only (IsLocalhostEndpoint).
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 // to avoid stale scion-token files from previous remote hub connections. This exception
 // is suppressed for hub-managed agents (config.IsHubManagedAgent(), i.e. SCION_AGENT_ID
@@ -1980,13 +1985,18 @@ func ReadAgentTokenFile() string {
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	authOpt, kind := selectHubCredential(endpoint)
-	client, err := hubclient.New(endpoint, authOpt, hubclient.WithTimeout(30*time.Second))
+	opts := []hubclient.Option{hubclient.WithTimeout(30 * time.Second)}
+	if authOpt != nil {
+		opts = append(opts, authOpt)
+	}
+	client, err := hubclient.New(endpoint, opts...)
 	return client, kind, err
 }
 
 // selectHubCredential picks the authentication option createHubClient uses
 // for endpoint, in the priority order documented on createHubClient, and
-// reports which kind of credential it is. It makes no network calls.
+// reports which kind of credential it is. It makes no network calls. The
+// option is nil when no credential is sent (CredentialKindNone).
 func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
@@ -1995,7 +2005,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if token := ReadAgentTokenFile(); token != "" {
-		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
+		if !apiclient.IsDevToken(token) && IsLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
 			}
@@ -2010,7 +2020,11 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 		return hubclient.WithBearerToken(token), CredentialKindHubToken
 	}
 
-	// 4. Fallback to auto dev auth
+	// 4. Fallback to auto dev auth, for a loopback hub only: a dev token
+	// is valid only on the local workstation server that wrote it.
+	if !IsLocalhostEndpoint(endpoint) {
+		return nil, CredentialKindNone
+	}
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
 }
 
@@ -2039,7 +2053,7 @@ func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
 // credential (OAuth login, agent token, SCION_HUB_TOKEN) is not one.
 // It makes no network calls.
 func IsLocalWorkstationEndpoint(endpoint string) bool {
-	if !isLocalhostEndpoint(endpoint) {
+	if !IsLocalhostEndpoint(endpoint) {
 		return false
 	}
 	if _, kind := selectHubCredential(endpoint); kind != CredentialKindDevAuto {
@@ -2078,7 +2092,10 @@ func ScopedTokenProjectNotFoundError(projectID string) error {
 		ErrScopedTokenProjectNotFound, projectID)
 }
 
-func isLocalhostEndpoint(endpoint string) bool {
+// IsLocalhostEndpoint reports whether endpoint is a loopback hub: its host is
+// localhost, 127.0.0.1 or ::1. It is the one rule for where a dev credential
+// may go: the CLI reports one only for such a hub and sends one only to it.
+func IsLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return false

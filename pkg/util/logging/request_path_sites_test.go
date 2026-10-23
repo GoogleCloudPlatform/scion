@@ -546,7 +546,7 @@ func goFiles(t *testing.T, dirs ...string) []string {
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../artifacts")
+	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}

@@ -188,6 +188,26 @@ func decodeStrictJSONObject(body []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
+// decodeStrictArray decodes raw as exactly one JSON array and returns its
+// elements undecoded, for the caller to decode strictly one by one.
+// Anything other than an array (including null) and trailing data after
+// the array are errors.
+func decodeStrictArray(raw json.RawMessage) ([]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, errors.New("a JSON array is required")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var out []json.RawMessage
+	if err := dec.Decode(&out); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after the JSON array")
+	}
+	return out, nil
+}
+
 // hasControlChar reports whether s contains a control character other
 // than the allowed ones. With allowNewline, line breaks are allowed: '\n'
 // and '\r' (so CRLF text is accepted).
