@@ -808,7 +808,7 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 	for _, dir := range dirs {
 		fullDir := filepath.Join(repoRoot(t), dir)
 		// pkgmove:scan-covers guardScanSubdirs
-		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub only; pkg/store/entadapter is read alone).
+		// scanned through guardScanSubdirs; guards DeleteProject call sites (pkg/hub and its guardScanSubdirs entries; pkg/store/entadapter is read alone).
 		read := os.ReadDir
 		if dir == "pkg/hub/" {
 			read = readGuardScanDirs
