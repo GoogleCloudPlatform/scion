@@ -332,12 +332,17 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 |-----------|---------|
 | 🔒 *Managed via deployment configuration* | Layer-0 field on a hosted Hub — not editable |
 | 🔒 *Set via environment variable* | Field pinned by `SCION_SERVER_*` on a workstation Hub |
-| ⚠ *Overridden by environment on this node* | Badge on a field, or on the section for the `runtimes` and `profiles` maps: a `SCION_SERVER_*` variable sets this key on the node that served the page (listed in `env_overrides`). On a Layer-1 key the variable only changes the bootstrap seed and fallback, not a saved database value. |
+| ⚠ *Overridden by environment on this node* | Badge on a field, or on the section for the `runtimes` and `profiles` maps: a `SCION_SERVER_*` variable sets this key on the node that served the page (listed in `env_overrides`), and the Hub runs with that value. The field shows **In effect on this node** with the environment value; the value in the input (or the read-only *Saved, not in effect* line) is the stored one, which does not apply on this node. |
+| ⚠ *Environment value superseded by the saved setting* | A `SCION_SERVER_*` variable sets this key on this node, but a saved database value wins over it: on a Layer-1 key the variable only changes the bootstrap seed and fallback. The field shows the environment value on a secondary *not in effect* line. |
 | ⚠ *Some settings are overridden by environment variables on this node* | Banner listing every key in `env_overrides` |
 | 🔒 *Set by workstation startup defaults / server flags* | Workstation field that `scion server start` overrides at every start |
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |
 | Deprecation banner | `SCION_SERVER_*` used for Layer-1 settings |
+
+The environment values come from `env_values` in `GET /api/v1/admin/server-config` (see [Environment Override Warnings](/scion/reference/server-config/#environment-override-warnings)). Secret values are masked there as in the rest of the response, and the page never shows them.
+
+`server.auth.authorized_domains` is a special case on database-backed Hubs: the Hub does not apply a saved value (it runs with the startup value from `settings.yaml` and the environment until [ptone/scion#6000](https://github.com/ptone/scion/issues/6000) is fixed). So the environment value is shown as in effect, and the key is not reported as superseded.
 
 The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
 

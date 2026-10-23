@@ -113,6 +113,12 @@ type ServerConfigResponse struct {
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
+
+	// EnvValues maps each key in EnvOverrides to the value the environment
+	// gives it on this node (masked like the rest of the body; withheld when
+	// it cannot be shown safely) and whether the hub runs with that value.
+	// Additive: EnvOverrides is unchanged.
+	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -415,6 +421,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
+			resp.EnvValues = fileTierEnvValues(envK)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -426,66 +433,21 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	}
 
 	// Mask sensitive fields before sending to the client
-	resp := ServerConfigResponse{
-		ScionVersion:         version.Short(),
-		ScionCommit:          version.GetCommit(),
-		ScionBuildTime:       version.GetBuildTime(),
-		SettingsTier:         "file",
-		SchemaVersion:        vs.SchemaVersion,
-		ActiveProfile:        vs.ActiveProfile,
-		DefaultTemplate:      vs.DefaultTemplate,
-		DefaultHarnessConfig: vs.DefaultHarnessConfig,
-		ImageRegistry:        vs.ImageRegistry,
-		WorkspacePath:        vs.WorkspacePath,
-		Server:               vs.Server,
-		Telemetry:            vs.Telemetry,
-		Runtimes:             vs.Runtimes,
-		HarnessConfigs:       vs.HarnessConfigs,
-		Profiles:             vs.Profiles,
-		DefaultMaxTurns:      vs.DefaultMaxTurns,
-		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
-		DefaultMaxDuration:   vs.DefaultMaxDuration,
-		DefaultResources:     vs.DefaultResources,
-		DefaultModel:         vs.DefaultModel,
-		DefaultThinkingLevel: vs.DefaultThinkingLevel,
-		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
-		DefaultAgentRole:     vs.DefaultAgentRole,
-		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
-		DefaultTimezone:      vs.DefaultTimezone,
-		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
-		AutoExposePorts:      vs.AutoExposePorts,
-		Quotas:               vs.Quotas,
-		AgentSecrets:         vs.AgentSecrets,
-
-		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
-		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
-	}
-
-	// Populate top-level federation field from the server config.
-	if vs.Server != nil && vs.Server.Federation != nil {
-		resp.Federation = vs.Server.Federation
-	}
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	if resp.Server != nil && resp.Server.Hub != nil {
-		resp.Server.Hub.HubClass = ""
-		resp.Server.Hub.TestIdentities = nil
-		// Nor is the relay-peer secret, which is never returned.
-		if c := resp.Server.Hub.Conduit; c != nil {
-			c.PeerSecret = ""
-		}
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
+	resp := serverConfigResponseFromSettings(&vs)
+	resp.ScionVersion = version.Short()
+	resp.ScionCommit = version.GetCommit()
+	resp.ScionBuildTime = version.GetBuildTime()
+	resp.SettingsTier = "file"
+	hideNeverShownServerKeys(resp.Server)
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
-	// show env-pinned fields in file mode too (H1).
+	// show env-pinned fields in file mode too (H1), with their values.
 	envK := config.LoadEnvKoanf()
 	if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
+	resp.EnvValues = fileTierEnvValues(envK)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil

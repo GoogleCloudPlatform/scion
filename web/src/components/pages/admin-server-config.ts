@@ -65,6 +65,12 @@ import {
   profileImageRegistryEnvLine,
   profileInheritedHint,
 } from './image-registry-provenance.js';
+import {
+  type EnvKeyValue,
+  envValueFor,
+  envValuesUnder,
+  formatEnvValue,
+} from './admin-server-config-env-values.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
@@ -440,6 +446,8 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  /** Per env_overrides key: the environment value (masked) and whether it is in effect. */
+  env_values?: Record<string, EnvKeyValue>;
   public_url_status?: PublicURLStatus;
   observability_export?: HubObservabilityExport;
   /** Where the image_registry in effect comes from (read-only, ptone/scion#3916). */
@@ -989,6 +997,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private envValues: Record<string, EnvKeyValue> = {};
   @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private imageRegistryProvenance: ImageRegistryProvenance | null = null;
   @state() private observabilityExport: HubObservabilityExport | null = null;
@@ -1496,6 +1505,25 @@ export class ScionPageAdminServerConfig extends LitElement {
       padding: 0.125rem 0.5rem;
       border-radius: 9999px;
       white-space: nowrap;
+    }
+
+    .env-value-in-effect {
+      display: block;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      margin: 0.25rem 0;
+    }
+
+    .env-value-saved-label,
+    .env-value-saved,
+    .env-value-not-in-effect {
+      display: block;
+    }
+
+    .env-values-under {
+      margin: 0.25rem 0;
+      padding-left: 1.25rem;
+      font-size: 0.75rem;
     }
 
     .env-badge sl-icon {
@@ -2096,6 +2124,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.envValues = data.env_values || {};
     this.publicUrlStatus = data.public_url_status || null;
     this.imageRegistryProvenance = data.image_registry_provenance || null;
     this.observabilityExport = data.observability_export || null;
@@ -2293,12 +2322,24 @@ export class ScionPageAdminServerConfig extends LitElement {
     editableTemplate: ReturnType<typeof html>
   ): ReturnType<typeof html> {
     const reason = this.readOnlyReason(koanfKey);
+    const env = reason === 'env' ? envValueFor(this.envValues, [koanfKey]) : null;
+    if (env && env.ev.in_effect) {
+      // Env-pinned and read-only: the value in effect is the environment
+      // value; the stored one is shown only as a secondary line.
+      return html`${this.renderReadOnlyBadge('env')}<span
+          class="read-only-value env-value-primary"
+          >${formatEnvValue(env.ev) || '—'}</span
+        >${this.renderSavedNotInEffect(displayValue)}${this.renderFieldErrors(koanfKey)}`;
+    }
     if (reason) {
       return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
           >${displayValue || '—'}</span
         >${this.renderFieldErrors(koanfKey)}`;
     }
-    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+    // A key whose environment value is in effect is not superseded by the
+    // saved value, whatever superseded_keys says.
+    const envInEffect = envValueFor(this.envValues, [koanfKey])?.ev.in_effect === true;
+    return html`${envInEffect ? nothing : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
       koanfKey
     )}`;
   }
@@ -3248,7 +3289,37 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    return overridden ? this.envBadgeTemplate() : nothing;
+    if (!overridden) return nothing;
+    const env = envValueFor(this.envValues, koanfKeys);
+    if (!env) return this.envBadgeTemplate();
+    return html`${this.envBadgeTemplate(env.ev.in_effect)}${this.renderEnvValueLine(env.ev)}`;
+  }
+
+  /**
+   * The environment value of an editable field. In effect: the primary
+   * "In effect on this node" line, and the control below holds the saved
+   * value, which is not in effect here. Not in effect: a secondary line, the
+   * saved value winning.
+   */
+  private renderEnvValueLine(ev: EnvKeyValue): ReturnType<typeof html> {
+    const text = formatEnvValue(ev) || '—';
+    if (ev.in_effect) {
+      return html`<span class="env-value-in-effect"
+          >In effect on this node: <code>${text}</code> (environment variable)</span
+        ><span class="hint env-value-saved-label">Saved value below, not in effect on this node:</span>`;
+    }
+    return html`<span class="hint env-value-not-in-effect"
+      >Environment value on this node, not in effect: <code>${text}</code> (the saved value
+      wins)</span
+    >`;
+  }
+
+  /** The stored value of an env-pinned read-only field, labelled as not in effect. */
+  private renderSavedNotInEffect(displayValue: string): typeof nothing | ReturnType<typeof html> {
+    if (!displayValue || displayValue === '—') return nothing;
+    return html`<span class="hint env-value-saved"
+      >Saved, not in effect on this node: <code>${displayValue}</code></span
+    >`;
   }
 
   /**
@@ -3307,12 +3378,18 @@ export class ScionPageAdminServerConfig extends LitElement {
     return hint ? html`<span class="hint image-registry-inherited">${hint}</span>` : nothing;
   }
 
-  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
-  private envBadgeTemplate(): ReturnType<typeof html> {
+  /**
+   * The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder.
+   * inEffect false (the server reports that a saved value wins over the
+   * environment value) says so instead of claiming an override.
+   */
+  private envBadgeTemplate(inEffect = true): ReturnType<typeof html> {
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
-        Overridden by environment on this node
+        ${inEffect
+          ? 'Overridden by environment on this node'
+          : 'Environment value superseded by the saved setting'}
       </span>
     `;
   }
@@ -3324,7 +3401,19 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
     const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
-    return overridden ? this.envBadgeTemplate() : nothing;
+    if (!overridden) return nothing;
+    const entries = envValuesUnder(this.envValues, prefix);
+    if (entries.length === 0) return this.envBadgeTemplate();
+    return html`${this.envBadgeTemplate(entries.some((e) => e.ev.in_effect))}
+      <ul class="env-values-under">
+        ${entries.map(
+          (e) =>
+            html`<li>
+              <code>${e.key}</code> = <code>${formatEnvValue(e.ev) || '—'}</code>
+              (${e.ev.in_effect ? 'in effect on this node' : 'not in effect: the saved value wins'})
+            </li>`
+        )}
+      </ul>`;
   }
 
   /**

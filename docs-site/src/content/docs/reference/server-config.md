@@ -1460,8 +1460,14 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
 
 - `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node.
+- The same response includes `env_values`, a map from each `env_overrides` key to `{ "value": ..., "masked": true|false, "in_effect": true|false }`:
+  - `value` is the environment value as the Hub parsed it (string, number, boolean or list).
+  - `masked` is `true` when `value` is the placeholder `********`: the key is a secret (masked as in the rest of the response), it sits under `profiles`, `runtimes` or `harness_configs`, or its value cannot be shown safely.
+  - `in_effect` is `true` when the Hub on the serving node runs with the environment value. In `settings.yaml` mode it is always `true`, because the environment layer wins over the file. On database-backed Hubs a Layer-1 key is in effect only when the environment value equals the value the Hub applies (a saved database value wins); Layer-0 keys are read at startup with the environment on top and are in effect.
+
+  `env_values` is additive; `env_overrides` is unchanged.
 - A startup `WARN` log lists any overridden Layer-1 keys.
-- The admin UI renders a visible warning banner when env overrides are detected, and an "Overridden by environment on this node" badge on each affected field, or on the section for the `runtimes` and `profiles` maps.
+- The admin UI renders a visible warning banner when env overrides are detected, and a badge on each affected field, or on the section for the `runtimes` and `profiles` maps: "Overridden by environment on this node" with the value in effect, or "Environment value superseded by the saved setting" when a saved value wins.
 
 ### Admin API Behavior Notes
 

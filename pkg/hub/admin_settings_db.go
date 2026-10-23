@@ -264,6 +264,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
 	}
 
+	// The environment values of the overridden keys and whether each is in
+	// effect, compared with the unmasked view built above.
+	if ops.envKoanf != nil {
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, &resp.ServerConfigResponse)
+	}
+
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
@@ -520,6 +526,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
+				// The hub does not apply the saved value of this key, so it
+				// supersedes nothing: the startup value stays in effect
+				// (ptone/scion#6000).
+				continue
+			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
 				// An operator setting pins the endpoint on this node, so
 				// the database value does not supersede it; the field's

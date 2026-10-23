@@ -5694,3 +5694,130 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
     });
   });
 });
+
+describe('env values in effect (env_values)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  function fieldByLabel(el: HTMLElement, text: string): Element {
+    const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === text);
+    expect(label, `label ${text}`).toBeDefined();
+    return label!.closest('.form-field')!;
+  }
+
+  function dbConfig(extra: Record<string, unknown>) {
+    const cfg = makeBaseConfig({ settings_tier: 'db', ...extra }) as any;
+    cfg.server.auth.authorized_domains = ['saved.example'];
+    cfg.server.hub.admin_emails = ['db@example.com'];
+    return cfg;
+  }
+
+  it('shows the environment value in effect as the primary value, the saved one as not in effect', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            'server.auth.authorized_domains': {
+              value: ['env-a.example', 'env-b.example'],
+              in_effect: true,
+            },
+          },
+          // Even if listed, a key whose env value is in effect is not superseded.
+          superseded_keys: {
+            access: [{ key: 'server.auth.authorized_domains', source: 'server_env' }],
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-value-in-effect')?.textContent).toContain(
+      'env-a.example, env-b.example'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-saved-label')?.textContent).toContain(
+      'not in effect on this node'
+    );
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('saved.example');
+    expect(field.querySelector('.superseded-badge')).toBeNull();
+  });
+
+  it('says when the saved value wins over the environment value', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-not-in-effect')?.textContent).toContain(
+      'env@example.com'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    const badge = field.querySelector('.env-badge')?.textContent ?? '';
+    expect(badge).toContain('superseded by the saved setting');
+    expect(badge).not.toContain('Overridden by environment');
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('db@example.com');
+  });
+
+  it('shows a masked environment value only as the placeholder', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            'server.auth.authorized_domains': {
+              value: 'not-the-placeholder',
+              masked: true,
+              in_effect: true,
+            },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-value-in-effect')?.textContent).toContain('********');
+    expect(shadowText(element)).not.toContain('not-the-placeholder');
+  });
+
+  it('a read-only env-pinned field shows the value in effect, the stored value as secondary', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain('8080');
+  });
+
+  it('without env_values the field renders as before', async () => {
+    element = await createComponent(
+      createFetchHandler(dbConfig({ env_overrides: ['server.auth.authorized_domains'] }))
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+  });
+});
