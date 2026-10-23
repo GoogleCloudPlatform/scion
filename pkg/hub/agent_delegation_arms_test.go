@@ -425,12 +425,8 @@ func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) 
 // or canViewAgentEnv, so the delegated arm in those two helpers covers
 // every site.
 func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()

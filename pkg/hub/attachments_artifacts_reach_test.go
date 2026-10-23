@@ -38,12 +38,8 @@ import (
 // of it; nor may any other package of the module reference the opener. A
 // new caller fails this test and needs a security review.
 func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
+	// pkgmove:scan-covers guardScanSubdirs
+	// callersInPackage and valueUsesInPackage read pkg/hub and every guardScanSubdirs entry through readGuardScanDirs (nonTestGoFiles); guards the OpenBoundAttachment call chain.
 	callers := callersInPackage(t, ".")
 	want := map[string][]string{
 		"OpenBoundAttachment":     {"stageArtifactAttachment"},

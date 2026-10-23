@@ -341,12 +341,8 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 	// In production code the gate field is assigned exactly once, in New.
 	assignments := 0
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs; guards testAdminGate assignments.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards testAdminGate assignments.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards testAdminGate assignments.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {

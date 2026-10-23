@@ -410,7 +410,7 @@ severity:
 | INFO | moved external tests, and moved files with build constraints |
 | INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
-| INFO | source-scanning test declares coverage of the target: a source-scanning test file that carries a `pkgmove:scan-covers` marker covering the target. The line names the marker's file:line and echoes its reason line, so the reviewer can verify each one |
+| INFO | source-scanning test declares coverage of the target: a source-scanning test file that carries a `pkgmove:scan-covers` marker covering the target (a directory, a `/...` parent, or a `guardScanSubdirs` list entry). The line names the marker's file:line (and the list entry) and echoes its reason line, so the reviewer can verify each one |
 | INFO | test-only move: the target's `TestMain` is equivalent to the source's |
 
 `-rewrite-aliases` reports: WARN for files excluded by build tags that name
@@ -488,14 +488,41 @@ marker, a whole comment line followed by a comment line that gives the reason:
   enumeration it describes. A file may carry several markers (one per line),
   for example one per move it has been checked for.
 
+**List form (`guardScanSubdirs`).** A test that reads the source package
+through shared helpers driven by a list of subdirectories (in `pkg/hub`:
+`guardScanSubdirs` in `ast_test_helpers_test.go`, read by `guardScanDirs`,
+`readGuardScanDirs` and `globGuardScanDirs`) carries one marker that claims
+the whole list:
+
+```go
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	files, err := globGuardScanDirs(".", "*.go")
+```
+
+The word `guardScanSubdirs` is exact. pkgmove resolves it against the
+package-level `var guardScanSubdirs = []string{...}` declared in a test file
+of the source package: the marker covers the target if, and only if, the
+target, relative to `-from`, is an entry of that list (`pkg/hub/maintenance`
+needs the entry `maintenance`). So the per-area prep for these scans is one
+list entry; the helpers skip an entry whose directory does not exist yet, so
+the entry can land before the move. If the target is not in the list, the
+HIGH stays and says `add "<dir>" to guardScanSubdirs`. The list must be a
+`[]string` literal of string literals, each a relative subdirectory, declared
+once; otherwise the HIGH says why the marker covers nothing.
+
 For each source-scanning test file, the HIGH is cleared only if one of its
-markers names the move's target directory, or a parent of it with `/...`,
-and has a reason line.
+markers names the move's target directory, or a parent of it with `/...`, or
+is a list marker whose list holds the target, and has a reason line, **and**
+no list marker in the file misses the target (a list marker marks a site
+that reads only the listed directories, so a `pkg/hub/...` claim elsewhere
+in the same file does not cover it).
 The report then lists the file as INFO "source-scanning test declares
-coverage of <target> (marker at file:line; reason: ...)". Otherwise the HIGH
-stays (and fails `-strict`); when the file has markers for other
-directories, malformed markers or markers without a reason line, the HIGH
-lists them.
+coverage of <target> (marker at file:line; reason: ...)"; for a list marker,
+the INFO also names the list entry and where the list is declared. Otherwise
+the HIGH stays (and fails `-strict`); when the file has markers for other
+directories, malformed markers, markers without a reason line or list
+markers that miss the target, the HIGH lists them.
 
 ### What counts as a pure initialiser call
 
@@ -653,7 +680,7 @@ Each is phrased as a check for the reviewer of a generated PR.
   x_test`) use the source package beyond plain selectors, run them; they are
   rewritten syntactically.
 - **Source-scanning guard tests:** if the report lists "source-scanning test does not cover the target", extend each listed test to scan the target directory as well. For example, use the package directory from `go list`, or walk both directories. Then check that it still fails on a planted violation in a moved file. pkg/hub has dozens of these, such as the `*_resource_literal_guard_test.go`, `*_enumeration_test.go` and `*_callsite*_test.go` files.
-- **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target.
+- **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target. For a `guardScanSubdirs` marker, verify the site reads through the guardScanSubdirs helpers (the tool trusts the list literal).
 - **Working-directory paths in moved tests:** if moved tests build paths from the working directory (`..`, `../`, `os.Getwd`, a `find...Dir` helper walking up to the module root), check that each path still resolves from the target directory, which is one level deeper. A test that skips when a file is missing passes silently.
 - **Assets read at run time:** if moved code reads files relative to the
   working directory or the package directory (beyond `testdata/` and `./`

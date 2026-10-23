@@ -505,6 +505,90 @@ func TestStrictAcceptsScanCovers(t *testing.T) {
 	}
 }
 
+// TestScanCoversGuardScanSubdirs checks the "pkgmove:scan-covers
+// guardScanSubdirs" marker: it covers the target exactly when the source
+// package's guardScanSubdirs list names the target (relative to -from), and
+// otherwise the HIGH stays (an error under -strict) and says why.
+func TestScanCoversGuardScanSubdirs(t *testing.T) {
+	requireGo(t)
+	const guard = "package hub\n\nimport (\n\t\"go/parser\"\n\t\"go/token\"\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+		"func TestGuard(t *testing.T) {\n" +
+		"\t// pkgmove:scan-covers guardScanSubdirs\n" +
+		"\t// reads the package directory and every guardScanSubdirs entry.\n" +
+		"\tfor _, dir := range []string{\".\", \"sub\"} {\n" +
+		"\t\tentries, _ := os.ReadDir(dir)\n" +
+		"\t\tfor _, e := range entries {\n" +
+		"\t\t\t_, _ = parser.ParseFile(token.NewFileSet(), e.Name(), nil, 0)\n" +
+		"\t\t}\n\t}\n}\n"
+	const list = "package hub\n\nvar guardScanSubdirs = []string{\n\t\"apierr\",\n\t\"sub/\",\n}\n"
+	// mixed adds a recursive walk claiming hub/... to the same file: it
+	// must not clear the file while the guardScanSubdirs site misses the
+	// target.
+	const walk = "\nfunc TestWalk(t *testing.T) {\n" +
+		"\t// pkgmove:scan-covers hub/...\n" +
+		"\t// walks the package directory recursively.\n" +
+		"\t_ = filepath.WalkDir(\".\", nil)\n}\n"
+	mixed := strings.Replace(guard, "\t\"os\"\n", "\t\"os\"\n\t\"path/filepath\"\n", 1) + walk
+	for _, tc := range []struct {
+		name    string
+		helpers string // hub/helpers_test.go
+		dst     string // relative to hub
+		mixed   bool
+		wantErr bool
+		want    string
+	}{
+		{"listed", list, "sub", false, false,
+			`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:11, through the guardScanSubdirs entry "sub" declared at hub/helpers_test.go:3; reason: "reads the package directory and every guardScanSubdirs entry.")`},
+		{"nested", "package hub\n\nvar guardScanSubdirs = []string{\"internal/sub\"}\n", "internal/sub", false, false,
+			`through the guardScanSubdirs entry "internal/sub" declared at hub/helpers_test.go:3`},
+		{"unlisted", list, "other", false, true,
+			`marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but the list (declared at hub/helpers_test.go:3) does not include other: add "other" to guardScanSubdirs`},
+		{"nolist", "package hub\n\nvar scanDirs = []string{\"sub\"}\n", "sub", false, true,
+			"marker at hub/guard_test.go:11 claims the guardScanSubdirs entries, but no test file of hub declares guardScanSubdirs"},
+		{"notliteral", "package hub\n\nvar guardScanSubdirs = append([]string{}, \"sub\")\n", "sub", false, true,
+			"but guardScanSubdirs at hub/helpers_test.go:3 is not a []string literal"},
+		{"badentry", "package hub\n\nvar guardScanSubdirs = []string{\"sub\", \"../x\"}\n", "sub", false, true,
+			"but guardScanSubdirs entry at hub/helpers_test.go:3 is not a string literal naming a subdirectory"},
+		{"mixedlisted", list, "sub", true, false,
+			`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:12, through the guardScanSubdirs entry "sub"`},
+		{"mixedunlisted", list, "other", true, true,
+			`marker at hub/guard_test.go:12 claims the guardScanSubdirs entries, but the list (declared at hub/helpers_test.go:3) does not include other: add "other" to guardScanSubdirs; the marker at hub/guard_test.go:23 does not clear the file while the guardScanSubdirs marker at hub/guard_test.go:12 misses the target`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := guard
+			if tc.mixed {
+				g = mixed
+			}
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{
+				"go.mod":              "module example.com/fx\n\ngo 1.26\n",
+				"hub/move.go":         "package hub\n\nfunc Handler() {}\n",
+				"hub/stay.go":         "package hub\n\nconst version = 1\n",
+				"hub/helpers_test.go": tc.helpers,
+				"hub/guard_test.go":   g,
+			})
+			var buf bytes.Buffer
+			err := run(&Config{
+				SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", filepath.FromSlash(tc.dst)),
+				Files: []string{"move.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+			})
+			out := buf.String()
+			switch {
+			case tc.wantErr && !errors.Is(err, errPlan):
+				t.Fatalf("want errPlan, got %v\n%s", err, out)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("want success under -strict, got %v\n%s", err, out)
+			}
+			if tc.wantErr && !strings.Contains(out, "hub/guard_test.go: -strict: source-scanning test does not cover the target") {
+				t.Errorf("missing the -strict error:\n%s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestScanCoversMarker(t *testing.T) {
 	for _, tc := range []struct {
 		comment string
@@ -531,6 +615,9 @@ func TestScanCoversMarker(t *testing.T) {
 		{"// pkgmove:scan-covers pkg/../pkg/hub/sub", "pkg/hub/sub", false},
 		{"// pkgmove:scan-covers pkg/hub/*", "pkg/hub/sub", false},
 		{"// pkgmove:scan-covers pkg/.../sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers guardScanSubdirs", "pkg/hub/sub", false}, // list marker: resolved against the list, not as a directory
+		{"// pkgmove:scan-covers guardscansubdirs", "pkg/hub/guardscansubdirs", false},
+		{"// pkgmove:scan-covers guardscansubdirs", "guardscansubdirs", true}, // any other word is a directory
 	} {
 		src := "package p\n\n" + tc.comment + "\n"
 		fset := token.NewFileSet()
@@ -544,6 +631,9 @@ func TestScanCoversMarker(t *testing.T) {
 		}
 		if got := ms[0].covers(tc.target); got != tc.want {
 			t.Errorf("%q covers %q = %v, want %v", tc.comment, tc.target, got, tc.want)
+		}
+		if got, want := ms[0].list, strings.HasSuffix(tc.comment, " guardScanSubdirs"); got != want {
+			t.Errorf("%q list = %v, want %v", tc.comment, got, want)
 		}
 	}
 	// Not markers: block comments and other words.
