@@ -3825,18 +3825,19 @@ func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
 	entries, err := os.ReadDir(expectedHostBase)
 	require.NoError(t, err, "shared dir host path should exist")
 	require.Len(t, entries, 1)
-	assert.Contains(t, entries[0].Name(), "shared-report.pdf")
+	// One directory per download: .attachments/_telegram/tg_<ts>/<name>.
+	require.True(t, entries[0].IsDir())
+	assert.True(t, strings.HasPrefix(entries[0].Name(), "tg_"), entries[0].Name())
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_telegram/"+entries[0].Name()+"/shared-report.pdf", agentPath)
+	assert.FileExists(t, filepath.Join(expectedHostBase, entries[0].Name(), "shared-report.pdf"))
 }
 
-func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
-	// When projectID is empty and downloadsPath is empty, the function should
-	// fall back to the legacy /workspace/downloads/ agent path.
-
-	// Redirect the legacy fallback path to a writable temp dir so this test
-	// works on CI runners where /home/scion does not exist.
-	origRoot := legacyProjectsRoot
-	legacyProjectsRoot = filepath.Join(t.TempDir(), ".scion/projects")
-	t.Cleanup(func() { legacyProjectsRoot = origRoot })
+func TestV2_DownloadTelegramFile_EmptyProjectID_Refused(t *testing.T) {
+	// With no downloadsPath and no project ID there is no scratchpad to store
+	// the file in; the legacy ~/.scion/projects/<slug>/downloads fallback is
+	// gone (ptone/scion#5827), so the download is refused.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
@@ -3855,13 +3856,12 @@ func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no project")
+	entries, err := os.ReadDir(fakeHome)
 	require.NoError(t, err)
-
-	// Legacy agent path should be /workspace/downloads/<name>.
-	assert.True(t, strings.HasPrefix(agentPath, "/workspace/downloads/"),
-		"agentPath %q should start with legacy prefix", agentPath)
-	assert.Contains(t, agentPath, "legacy.txt")
+	assert.Empty(t, entries, "nothing is written anywhere")
 }
 
 func TestV2_DownloadTelegramFile_DownloadsPathOverridesSharedDir(t *testing.T) {
