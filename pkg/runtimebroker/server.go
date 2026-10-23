@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -602,7 +603,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),

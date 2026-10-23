@@ -261,7 +261,9 @@ func defaultListingDeadline(interval time.Duration) time.Duration {
 
 // SetVersion sets the broker version reported in heartbeats.
 func (s *HeartbeatService) SetVersion(version string) {
+	s.mu.Lock()
 	s.version = version
+	s.mu.Unlock()
 }
 
 // Start begins sending heartbeats in the background.
@@ -445,10 +447,14 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 	s.mu.Lock()
 	defaultRuntime := s.defaultRuntime
+	brokerVersion := s.version
 	s.mu.Unlock()
 
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
+		// The build token refreshes the stored broker version on the Hub
+		// (ptone/scion#5972).
+		Version: brokerVersion,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is

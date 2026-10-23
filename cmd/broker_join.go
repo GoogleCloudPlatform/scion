@@ -351,7 +351,7 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 		BrokerID:         p.BrokerID,
 		JoinToken:        p.JoinToken,
 		Hostname:         p.Hostname,
-		Version:          version.Version,
+		Version:          version.Short(),
 		Capabilities:     brokerRegistrationCapabilities(),
 		Profiles:         buildBrokerProfiles(p.Settings),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),

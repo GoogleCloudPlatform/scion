@@ -175,7 +175,10 @@ func dropImageRegistryProvenance(rawBody []byte) []byte {
 // brokerForDisplay returns b with the reported node image registry redacted
 // for display (config.RedactImageRegistry). The capabilities are copied, so
 // the stored broker and the value dispatch resolves with are unchanged.
+// The version is bounded (brokerVersionToken), which also covers rows
+// stored before the bound existed.
 func brokerForDisplay(b store.RuntimeBroker) store.RuntimeBroker {
+	b.Version = brokerVersionToken(b.Version)
 	if b.Capabilities == nil || b.Capabilities.NodeImageRegistry == "" {
 		return b
 	}

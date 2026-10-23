@@ -48,6 +48,8 @@ type RuntimeBrokerWithProvider struct {
 	store.RuntimeBroker
 	LocalPath string        `json:"localPath,omitempty"` // Filesystem path to the project on this broker
 	Cap       *Capabilities `json:"_capabilities,omitempty"`
+	// VersionStatus is as in RuntimeBrokerWithCapabilities.
+	VersionStatus string `json:"versionStatus,omitempty"`
 }
 
 // ListRuntimeBrokersWithProviderResponse is returned when filtering by projectId.
@@ -55,6 +57,9 @@ type ListRuntimeBrokersWithProviderResponse struct {
 	Brokers    []RuntimeBrokerWithProvider `json:"brokers"`
 	NextCursor string                      `json:"nextCursor,omitempty"`
 	TotalCount int                         `json:"totalCount"`
+	// HubVersion is the fleet hub version the brokers' versionStatus is
+	// compared with: a build token, "mixed", or "" when unknown.
+	HubVersion string `json:"hubVersion"`
 }
 
 // ListRuntimeBrokersWithCapsResponse is the standard broker list response with capabilities.
@@ -62,6 +67,8 @@ type ListRuntimeBrokersWithCapsResponse struct {
 	Brokers    []RuntimeBrokerWithCapabilities `json:"brokers"`
 	NextCursor string                          `json:"nextCursor,omitempty"`
 	TotalCount int                             `json:"totalCount"`
+	// HubVersion is as in ListRuntimeBrokersWithProviderResponse.
+	HubVersion string `json:"hubVersion"`
 }
 
 func (s *Server) handleRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +143,8 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			project = p
 		}
 
+		hubVersion := s.hubFleetVersion(ctx)
+
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
 		for i, broker := range result.Items {
@@ -145,6 +154,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
+				VersionStatus: runtimeBrokerVersionStatus(&result.Items[i], hubVersion),
 			}
 			eb.RuntimeBroker = withHostIdentity(eb.RuntimeBroker, false)
 			if caps != nil && i < len(caps) {
@@ -164,6 +174,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			Brokers:    extendedBrokers,
 			NextCursor: result.NextCursor,
 			TotalCount: totalCount,
+			HubVersion: hubVersion,
 		})
 		return
 	}
@@ -176,6 +187,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	// One non-blocking snapshot of this process's embedded brokers for the
 	// whole page (hostedByThisServer).
 	embedded := s.embeddedBrokerSnapshot()
+	hubVersion := s.hubFleetVersion(ctx)
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
 	for i, broker := range result.Items {
@@ -184,6 +196,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		}
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
+		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
 		if caps != nil && i < len(caps) {
 			resp.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 			resp.Cap = caps[i]
@@ -207,6 +220,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		Brokers:    brokersWithCaps,
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
+		HubVersion: hubVersion,
 	})
 }
 
@@ -403,6 +417,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	// Compute capabilities for the requesting user
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
+	resp.VersionStatus = runtimeBrokerVersionStatus(broker, s.hubFleetVersion(ctx))
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
 		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
@@ -827,6 +842,11 @@ func subtractProjectIDs(all, exclude []string) []string {
 type brokerHeartbeatRequest struct {
 	Status   string                   `json:"status"`
 	Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
+	// Version is the broker's build token (version.Short()), refreshing the
+	// stored version when the heartbeat comes from the broker itself.
+	// Omitted by an older broker, in which case the stored version is left
+	// unchanged (see hubclient.BrokerHeartbeat.Version).
+	Version string `json:"version,omitempty"`
 	// Capabilities refreshes the broker's stored capabilities on every
 	// heartbeat (design §3.4 Amendment A2.2(b); see
 	// hubclient.BrokerHeartbeat.Capabilities). Omitted by an old broker, in
@@ -1237,7 +1257,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ProfileSAMappings likewise. Health (the broker's self-reported
 	// health) follows the same rule; it is stored next to Status and never
 	// changes it, so a degraded broker stays online and keeps reconciling.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 {
+	// Version follows the same rule, but only from the broker itself: a
+	// user heartbeat never sets it, and an omitted or empty version keeps
+	// the stored one (ptone/scion#5972).
+	heartbeatVersion := ""
+	if brokerSelf {
+		heartbeatVersion = brokerVersionToken(heartbeat.Version)
+	}
+	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -1270,6 +1297,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			refresh := func(b *store.RuntimeBroker) bool {
 				healthChanged, saRequested = false, false
 				changed := false
+				if heartbeatVersion != "" && b.Version != heartbeatVersion {
+					b.Version = heartbeatVersion
+					changed = true
+				}
 				if heartbeat.Capabilities != nil && !reflect.DeepEqual(b.Capabilities, heartbeat.Capabilities) {
 					b.Capabilities = heartbeat.Capabilities
 					changed = true

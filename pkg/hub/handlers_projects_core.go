@@ -2239,7 +2239,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// Update existing broker. The name and slug are set at
 			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Version = req.Broker.Version
+			// An empty version (hubsync sends none) keeps the stored one;
+			// see brokerVersionToken.
+			if req.Broker.Version != "" {
+				broker.Version = brokerVersionToken(req.Broker.Version)
+			}
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
 			broker.Capabilities = req.Broker.Capabilities
@@ -2259,7 +2263,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				ID:              brokerID,
 				Name:            req.Broker.Name,
 				Slug:            api.Slugify(req.Broker.Name),
-				Version:         req.Broker.Version,
+				Version:         brokerVersionToken(req.Broker.Version),
 				Status:          store.BrokerStatusOnline,
 				ConnectionState: "connected",
 				Capabilities:    req.Broker.Capabilities,

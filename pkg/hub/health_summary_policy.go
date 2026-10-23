@@ -63,6 +63,11 @@ const (
 // or is missing on, the host.
 const HealthAttentionBrokerHostIdentity = "broker_host_identity"
 
+// HealthAttentionBrokerVersionMismatch is the attention item kind for an
+// online runtime broker whose version differs from the hub's
+// (ptone/scion#5972). Mirrored as hubclient.HealthAttentionBrokerVersionMismatch.
+const HealthAttentionBrokerVersionMismatch = "broker_version_mismatch"
+
 // Attention subject types.
 const (
 	HealthSubjectHub         = "hub"
@@ -81,7 +86,8 @@ type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
-	// broker_nfs, broker_host_identity, integration, dispatch, agents or schedule.
+	// broker_nfs, broker_host_identity, broker_version_mismatch,
+	// integration, dispatch, agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -123,7 +129,9 @@ type HealthAttentionSubject struct {
 // agents below the ratio, add warning items only. Failing and hub-paused
 // schedules add warning items only (scheduleAttention): the schedules
 // section holds only what the caller may read, so it must not change the
-// status.
+// status. An online runtime broker whose version differs from the hub's
+// adds a broker_version_mismatch warning, last among that broker's items,
+// and does not change the status.
 //
 // Hub check items, one per non-healthy check per live hub instance, are
 // critical only when the fleet status is unhealthy, otherwise warnings.
@@ -199,6 +207,15 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 			}
 			items = append(items, HealthAttentionItem{
 				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerHostIdentity, Subject: subject, Message: msg,
+			})
+		}
+		// Last for this broker: an online broker whose version differs
+		// from the hub's. A warning only; it never changes the status.
+		// Both versions are bounded (brokerVersionToken, hubBuildToken).
+		if healthSummaryBrokerVersionIsProblem(b) {
+			items = append(items, HealthAttentionItem{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionMismatch, Subject: subject,
+				Message: "Runtime broker " + label + " runs " + b.Version + "; the hub runs " + resp.Hub.Version,
 			})
 		}
 	}

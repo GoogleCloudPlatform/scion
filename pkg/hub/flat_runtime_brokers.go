@@ -447,9 +447,9 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			b.Endpoint = o.Endpoint
 			b.AutoProvide = o.AutoProvide
 			b.LastHeartbeat = time.Now()
-			if created {
-				b.Version = "0.1.0"
-			}
+			// The embedded broker runs in the hub binary, so its version is
+			// the hub's build token, written on every registration.
+			b.Version = hubBuildToken()
 			if o.Capabilities != nil {
 				caps := *o.Capabilities
 				b.Capabilities = &caps
