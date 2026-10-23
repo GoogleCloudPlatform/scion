@@ -3262,13 +3262,35 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 // AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
 // settling swap, refused while a delete holds the row or when run_id
 // changed after unchangedSince (run_id_updated_at is checked in the same
-// statement as the write).
+// statement as the write). Its adoption_source is the context's
+// (store.RunAdoptionSourceFrom): cas for the launch-report settle,
+// heartbeat_adopt for the heartbeat adoption.
 func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
 	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
-		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceHeartbeat},
+		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.RunAdoptionSourceFrom(ctx)},
 		runIDWritable(time.Now()),
 		agent.RunIDUpdatedAtNotNil(),
 		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
+}
+
+// SettleLaunchedRun implements store.AgentStore.SettleLaunchedRun:
+// AdoptAgentRunID's swap with the launch, launch run, broker and
+// generation also checked in the same statement (WP1 slice 3b), so a
+// newer run, launch, broker or generation that landed after the caller's
+// read refuses it. An empty launch, run or broker never settles.
+func (s *AgentStore) SettleLaunchedRun(ctx context.Context, agentID string, f store.LaunchSettleFence) (bool, error) {
+	if f.LaunchID == "" || f.FromRunID == "" || f.ToRunID == "" || f.BrokerID == "" {
+		return false, nil
+	}
+	return s.swapAgentRunID(ctx, agentID, f.FromRunID, f.ToRunID, true,
+		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceCAS},
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(f.UnchangedSince.UTC()),
+		agent.LaunchIDEQ(f.LaunchID),
+		agent.LaunchRunIDEQ(f.FromRunID),
+		agent.RuntimeBrokerIDEQ(f.BrokerID),
+		agent.GenerationEQ(f.Generation))
 }
 
 // swapAgentRunID swaps run_id from expectedRunID to newRunID, under any

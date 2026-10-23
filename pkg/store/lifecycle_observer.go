@@ -82,7 +82,8 @@ const (
 	WriteKindRunMint AgentWriteKind = "run_mint"
 	// WriteKindRunRevert: RevertAgentRunID.
 	WriteKindRunRevert AgentWriteKind = "run_revert"
-	// WriteKindRunAdopt: CompareAndSwapAgentRunID or AdoptAgentRunID.
+	// WriteKindRunAdopt: CompareAndSwapAgentRunID, AdoptAgentRunID or
+	// SettleLaunchedRun.
 	WriteKindRunAdopt AgentWriteKind = "run_adopt"
 	// WriteKindDeletion: UpdateAgentDeletion.
 	WriteKindDeletion AgentWriteKind = "deletion_write"

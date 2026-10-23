@@ -710,8 +710,9 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661) and for the settle of a
-	// succeeded launch report (ptone/scion#2965). It swaps only while
+	// of a stranded run (ptone/scion#3661) and for the settle of an applied
+	// succeeded launch report (ptone/scion#2965). The adoption is observed
+	// with the adoption_source RunAdoptionSourceFrom(ctx) returns. It swaps only while
 	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
 	// that changed and changed back after the caller's read is not
 	// adopted. Like SetAgentRunID, it writes nothing while the row is
@@ -723,6 +724,19 @@ type AgentStore interface {
 	// also sets RunIDUpdatedAt in the same write; a write that leaves the
 	// value unchanged does not.
 	AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error)
+
+	// SettleLaunchedRun settles the run of an async launch whose succeeded
+	// report was answered Completed (the launch had already ended, for
+	// example RunningObserved, or the report is a resend after a settle that
+	// failed or never ran): one conditional swap from f.FromRunID to
+	// f.ToRunID, clearing PreviousRunIDs, applied only while the row still
+	// holds f.FromRunID as both run_id and launch_run_id, run_id_updated_at
+	// is set and no later than f.UnchangedSince, launch_id, runtime_broker_id
+	// and generation equal the fence's, and the row is not soft-deleted and
+	// held by no delete (WP1 slice 3b, ptone/scion#5927). It is observed as a
+	// run_adopt with adoption_source cas. It reports whether it swapped; a
+	// missing agent reports false with no error.
+	SettleLaunchedRun(ctx context.Context, agentID string, f LaunchSettleFence) (bool, error)
 
 	// RecordBrokerReportedRuns records that brokerID, which is not the
 	// agent's assigned broker, reported a runtime entry of each listed
