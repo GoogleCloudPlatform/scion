@@ -405,27 +405,12 @@ type TransferOpts struct {
 // reservation is unchanged.
 func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker string, o TransferOpts) (res store.BrokerReservationTransferResult, limited bool, err error) {
 	const limitName = store.LimitMaxAgentsPerBroker
-	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return res, false, nil
-		}
-		return res, false, fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
-	}
-	if limitDef == nil {
-		return res, false, nil
-	}
-	req := store.BrokerReservationTransfer{
-		LimitDefinitionID: limitDef.ID,
-		AgentID:           agentID,
-		ToBrokerID:        toBroker,
-		CreateIfAbsent:    o.CreateIfAbsent,
-		RequireAgentOnTo:  o.RequireAgentOnTo,
-		FromReservationID: o.FromReservationID,
-		Cond:              o.Cond,
+	req, limited, err := brokerTransferRequest(ctx, qs.store, agentID, toBroker, o)
+	if err != nil || !limited {
+		return res, false, err
 	}
 
-	effectiveLimit, err := qs.effectiveLimitForReserve(ctx, limitName, limitDef.ID, toBroker, store.QuotaScopeBroker, toBroker)
+	effectiveLimit, err := qs.effectiveLimitForReserve(ctx, limitName, req.LimitDefinitionID, toBroker, store.QuotaScopeBroker, toBroker)
 	if err != nil {
 		return res, true, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
 	}
@@ -465,6 +450,33 @@ func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker st
 		return res, true, fmt.Errorf("quota: transfer reservation for %q: %w", limitName, err)
 	}
 	return res, true, nil
+}
+
+// brokerTransferRequest looks up the max_agents_per_broker limit definition
+// in st and builds the TransferBrokerReservation request moving agentID's
+// reservation onto toBroker with o's flags (Cap 0). limited is false, with
+// no error, when no limit definition exists.
+func brokerTransferRequest(ctx context.Context, st store.Store, agentID, toBroker string, o TransferOpts) (req store.BrokerReservationTransfer, limited bool, err error) {
+	const limitName = store.LimitMaxAgentsPerBroker
+	def, err := st.GetLimitDefinitionByName(ctx, limitName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return req, false, nil
+		}
+		return req, false, fmt.Errorf("quota: lookup limit definition %q: %w", limitName, err)
+	}
+	if def == nil {
+		return req, false, nil
+	}
+	return store.BrokerReservationTransfer{
+		LimitDefinitionID: def.ID,
+		AgentID:           agentID,
+		ToBrokerID:        toBroker,
+		CreateIfAbsent:    o.CreateIfAbsent,
+		RequireAgentOnTo:  o.RequireAgentOnTo,
+		FromReservationID: o.FromReservationID,
+		Cond:              o.Cond,
+	}, true, nil
 }
 
 // maxBrokerReservationInserts bounds insertBrokerReservation: the first

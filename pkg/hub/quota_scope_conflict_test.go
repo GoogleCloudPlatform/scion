@@ -761,7 +761,7 @@ func (p lockingPassthroughStore) TryAdvisoryLockObject(ctx context.Context, clas
 // insert on the target) fails the move and rolls the release back: the
 // agent keeps exactly its source row, unchanged, and nothing is on the
 // target.
-func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
+func TestMoveBrokerQuota_FailedTransferKeepsSource(t *testing.T) {
 	srv, s := testServer(t)
 	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "move-a")
 	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "move-b")

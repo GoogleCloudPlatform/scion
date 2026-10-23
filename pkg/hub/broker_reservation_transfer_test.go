@@ -26,7 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // Atomic broker reservation transfer (ptone/scion#5951): QuotaService.
@@ -112,6 +114,24 @@ func contendLocks(srv *Server) *atomic.Int32 {
 	return &attempts
 }
 
+// releaseTrackingLockStore forwards the advisory locks of the wrapped store
+// and records when a quota advisory lock's release runs.
+type releaseTrackingLockStore struct {
+	lockingPassthroughStore
+	released *atomic.Bool
+}
+
+func (r releaseTrackingLockStore) TryAdvisoryLockObject(ctx context.Context, class store.AdvisoryLockKey, obj int32) (bool, func() error, error) {
+	acquired, release, err := r.lockingPassthroughStore.TryAdvisoryLockObject(ctx, class, obj)
+	if err != nil {
+		return acquired, release, err
+	}
+	return acquired, func() error {
+		r.released.Store(true)
+		return release()
+	}, nil
+}
+
 // withScopeLockHeld holds the QuotaService's in-process mutex for broker's
 // scope while fn runs, and fails the test if fn does not return within 10s
 // (it would block on the mutex if it tried to take it).
@@ -144,12 +164,11 @@ func TestMoveBrokerQuota_SourceAtCapTargetFull_ConcurrentReserveRefused(t *testi
 
 	ran := false
 	var reserveErr error
-	moveBrokerQuotaTestHook = func(ctx context.Context) {
+	t.Cleanup(setMoveBrokerQuotaTestHook(func(ctx context.Context) {
 		ran = true
 		_, reserveErr = srv.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker,
 			f.src.ID, store.QuotaScopeBroker, f.src.ID, tid("xfer-intruder"))
-	}
-	t.Cleanup(func() { moveBrokerQuotaTestHook = nil })
+	}))
 
 	err := srv.moveBrokerQuota(context.Background(), f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
 	var exceeded *QuotaExceededError
@@ -179,6 +198,46 @@ func TestTransferBroker_TargetAtCapRefused(t *testing.T) {
 	assert.Equal(t, f.dst.ID, exceeded.ScopeID)
 	assert.EqualValues(t, 2, brokerReservationCount(t, s, f.dst.ID), "nothing written on the target")
 	f.requireOnSource(t)
+}
+
+// Both target scope locks are held while the store transaction runs, and
+// released only after TransferBroker's store call returns: at the store
+// hook's "locked" step the target's scope mutex cannot be taken and the
+// advisory lock's release has not run; after the call both are free. (On
+// SQLite the mutex is what serializes the transfer against an in-process
+// Reserve.)
+func TestTransferBroker_TargetLocksHeldAcrossTransaction(t *testing.T) {
+	srv, s := testServer(t)
+	f := newTransferTestFixture(t, srv, s, 5)
+	var released atomic.Bool
+	srv.quotaService.store = releaseTrackingLockStore{lockingPassthroughStore{srv.quotaService.store}, &released}
+	dstMutex := srv.quotaService.lockForScope(store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, f.dst.ID)
+
+	ran, mutexFree, releasedInTx := false, false, false
+	t.Cleanup(entadapter.SetTransferBrokerReservationTestHook(func(_ context.Context, _ *ent.Tx, step string, req store.BrokerReservationTransfer) error {
+		if req.AgentID != f.agent.ID || step != "locked" {
+			return nil
+		}
+		ran = true
+		if dstMutex.TryLock() {
+			dstMutex.Unlock()
+			mutexFree = true
+		}
+		releasedInTx = released.Load()
+		return nil
+	}))
+
+	res, limited, err := srv.quotaService.TransferBroker(context.Background(), f.agent.ID, f.dst.ID, TransferOpts{})
+	require.NoError(t, err)
+	assert.True(t, limited)
+	assert.Equal(t, store.TransferMoved, res.Outcome)
+	require.True(t, ran, "the hook ran")
+	assert.False(t, mutexFree, "the target scope mutex is held during the store transaction")
+	assert.False(t, releasedInTx, "the target advisory lock is held during the store transaction")
+	assert.True(t, released.Load(), "the target advisory lock is released after the call")
+	require.True(t, dstMutex.TryLock(), "the target scope mutex is released after the call")
+	dstMutex.Unlock()
+	f.requireOnTarget(t)
 }
 
 // Below the cap, the checked transfer moves the row.

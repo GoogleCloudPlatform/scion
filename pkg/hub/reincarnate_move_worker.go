@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -156,10 +157,24 @@ func withBroker(a *store.Agent, brokerID string) *store.Agent {
 	return &c
 }
 
-// moveBrokerQuotaTestHook, when non-nil, is called by moveBrokerQuota once,
+// moveBrokerQuotaTestHook, when set, is called by moveBrokerQuota once,
 // immediately after its first quota write returns, outside any transaction.
-// Tests only; nil in production.
-var moveBrokerQuotaTestHook func(ctx context.Context)
+// Tests only; nil in production. An atomic pointer, so a move worker left
+// over from an earlier test that reads it while a test sets it is not a
+// data race.
+var moveBrokerQuotaTestHook atomic.Pointer[func(ctx context.Context)]
+
+// setMoveBrokerQuotaTestHook installs fn as moveBrokerQuotaTestHook and
+// returns a func that restores the previous value. For tests only; a test
+// that sets it must not call t.Parallel.
+func setMoveBrokerQuotaTestHook(fn func(ctx context.Context)) (restore func()) {
+	var p *func(ctx context.Context)
+	if fn != nil {
+		p = &fn
+	}
+	prev := moveBrokerQuotaTestHook.Swap(p)
+	return func() { moveBrokerQuotaTestHook.Store(prev) }
+}
 
 // moveBrokerQuota moves the agent's broker reservation from the source to
 // the target in one store transaction, with the cap check on the target
@@ -175,8 +190,8 @@ func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reinca
 		return nil
 	}
 	res, limited, err := s.quotaService.TransferBroker(ctx, a.ID, mv.TargetBrokerID, TransferOpts{})
-	if h := moveBrokerQuotaTestHook; h != nil {
-		h(ctx)
+	if h := moveBrokerQuotaTestHook.Load(); h != nil {
+		(*h)(ctx)
 	}
 	switch {
 	case err != nil:

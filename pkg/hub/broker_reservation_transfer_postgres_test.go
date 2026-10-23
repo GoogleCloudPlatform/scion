@@ -148,11 +148,10 @@ func TestMoveBrokerQuota_SourceAtCapTargetFull_Postgres(t *testing.T) {
 
 	ran := false
 	var reserveErr error
-	moveBrokerQuotaTestHook = func(ctx context.Context) {
+	t.Cleanup(setMoveBrokerQuotaTestHook(func(ctx context.Context) {
 		ran = true
 		_, reserveErr = pgReserve(ctx, r.srv.quotaService, src.ID, tid("pgx-ac1-intruder"))
-	}
-	t.Cleanup(func() { moveBrokerQuotaTestHook = nil })
+	}))
 
 	err = r.srv.moveBrokerQuota(ctx, agent, &reincarnationMove{SourceBrokerID: src.ID, TargetBrokerID: dst.ID})
 	var exceeded *QuotaExceededError

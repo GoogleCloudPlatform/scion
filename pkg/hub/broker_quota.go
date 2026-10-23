@@ -343,25 +343,11 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 // exists.
 func (s *Server) transferBrokerReservationUnchecked(ctx context.Context, agentID, toBroker string, o TransferOpts) (store.BrokerReservationTransferResult, bool, error) {
 	var res store.BrokerReservationTransferResult
-	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return res, false, nil
-		}
-		return res, false, fmt.Errorf("quota: lookup limit definition %q: %w", store.LimitMaxAgentsPerBroker, err)
+	req, limited, err := brokerTransferRequest(ctx, s.store, agentID, toBroker, o)
+	if err != nil || !limited {
+		return res, false, err
 	}
-	if def == nil {
-		return res, false, nil
-	}
-	res, err = s.store.TransferBrokerReservation(ctx, store.BrokerReservationTransfer{
-		LimitDefinitionID: def.ID,
-		AgentID:           agentID,
-		ToBrokerID:        toBroker,
-		CreateIfAbsent:    o.CreateIfAbsent,
-		RequireAgentOnTo:  o.RequireAgentOnTo,
-		FromReservationID: o.FromReservationID,
-		Cond:              o.Cond,
-	})
+	res, err = s.store.TransferBrokerReservation(ctx, req)
 	if err != nil {
 		return res, true, fmt.Errorf("quota: transfer reservation for %q: %w", store.LimitMaxAgentsPerBroker, err)
 	}
