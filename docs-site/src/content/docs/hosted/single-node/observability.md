@@ -280,7 +280,7 @@ The server admits at most 16 active HTTP and gRPC processing requests together. 
 
 Configure agents with an `https` hub endpoint. sciontool reads the hub's identity from that endpoint to attribute usage analytics, and it holds usage records until the hub's identity is confirmed.
 
-Each agent home keeps its usage records in `.scion/analytics-outbox/`, tied to the hub that agent first reported to (the `hub_id` file). If a later reading of the hub's identity differs, and a second reading at least five minutes later agrees, sciontool records the home as moved to another hub (the `relocated` file). From then on it stops recording new usage for that home and holds the records it has not yet sent. Records that were already final are still delivered unchanged.
+Each agent home keeps its usage records in `.scion/analytics-outbox/`, tied to the hub that agent first reported to (the `hub_id` file). If a later reading of the hub's identity differs, and a second reading at least five minutes later agrees, sciontool records the home as moved to another hub (the `relocated` file). From then on it stops recording new usage for that home and holds the records that are not yet final. Records that were already final are still delivered unchanged.
 
 #### Recovering from a mistaken hub move
 
@@ -294,8 +294,8 @@ Use this only when the agent never left its hub and the hub ID was read wrong, f
 6. Check that the files recorded in step 4 are unchanged. If anything differs, stop and leave `relocated` in place.
 7. Remove only the `relocated` file, then flush the directory (`sync .`). Do not change `hub_id`, `epoch`, `seq`, the counter files, or any `ready-*`, `finalizing-*` or staging file.
 8. Leave the locked shell, start the agent, then verify the result:
-   - the agent log shows no relocation warning;
-   - held records are delivered under the original hub;
+   - held records are delivered under the original hub (the decisive check);
+   - after at least five minutes, the agent log shows no relocation warning (a hub ID that still reads wrong is recorded again only after a second reading five minutes later);
    - the `ready-*` files from before the recovery still have the SHA-256 values recorded in step 4;
    - the counters have not changed.
 
@@ -303,7 +303,7 @@ If a recovery is interrupted before step 7, `relocated` is still present and usa
 
 `relocated` is the current hold, and `relocation_history.jsonl` keeps the record of earlier holds. After a recovery, the history still shows that the home was once marked as moved.
 
-If the hub really is different, sciontool records the move again and delivers nothing under the old hub.
+If the hub really is different, sciontool records the move again and finalizes nothing new under the old hub.
 
 ### What's Collected
 

@@ -133,9 +133,12 @@ type AnalyticsDrainer struct {
 	// agrees; a resolution equal to the pin in between clears it.
 	candidate      string
 	candidateSince time.Time
-	hubMu          sync.Mutex
-	verifiedHub    string
-	observedHub    string
+	// lastFinalizeWarn rate-limits the unexpected-finalize-failure warning
+	// (drainer goroutine only).
+	lastFinalizeWarn time.Time
+	hubMu            sync.Mutex
+	verifiedHub      string
+	observedHub      string
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -267,19 +270,15 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 				d.candidate, d.candidateSince = id, d.now()
 				d.resolveAfter = d.candidateSince.Add(analyticsRelocationConfirm)
 				log.Debug("Analytics drainer: hub %q differs from the pinned hub %q; confirming", id, pinned)
-				id = ""
 			case d.now().Before(d.candidateSince.Add(analyticsRelocationConfirm)):
 				d.resolveAfter = d.candidateSince.Add(analyticsRelocationConfirm)
-				id = ""
 			default:
 				err = d.outbox.recordRelocation(id)
 				confirmed = err == nil
 			}
 		}
-		if err == nil && !confirmed {
-			// Unconfirmed mismatch: nothing published, finalize held; the
-			// next resolution is scheduled above.
-		} else if err != nil {
+		switch {
+		case err != nil:
 			// Back off like sends do (1 s .. 5 min), so an agent whose hub
 			// never reports hub_id does not poll /healthz every interval.
 			if d.resolveBackoff == 0 {
@@ -289,7 +288,10 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			}
 			d.resolveAfter = d.now().Add(d.resolveBackoff)
 			log.Debug("Analytics drainer: hub ID not resolved yet (retry in %s): %v", d.resolveBackoff, err)
-		} else {
+		case !confirmed:
+			// Unconfirmed mismatch: nothing published, finalize held; the
+			// next resolution is scheduled above.
+		default:
 			d.resolveBackoff, d.resolveAfter = 0, time.Time{}
 			d.candidate, d.candidateSince = "", time.Time{}
 			d.resolved = true
@@ -308,7 +310,18 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		// Re-checked under the outbox lock (another process may have
 		// recorded a relocation since this one verified).
 		if _, err := d.outbox.finalize(ctx, verified); err != nil {
-			log.Debug("Analytics drainer: finalize: %v", err)
+			switch {
+			case errors.Is(err, ErrAnalyticsOutboxRelocated), errors.Is(err, ErrAnalyticsHubNotVerified), ctx.Err() != nil:
+				log.Debug("Analytics drainer: finalize: %v", err)
+			default:
+				// Unexpected: ready commits are stalling (counted in
+				// FinalizeFailures); warn at most every analyticsBackoffMax.
+				d.outbox.finalizeFailures.Add(1)
+				if now := d.now(); d.lastFinalizeWarn.IsZero() || now.Sub(d.lastFinalizeWarn) >= analyticsBackoffMax {
+					d.lastFinalizeWarn = now
+					log.Warn("Analytics drainer: finalize failed; provisional usage stays held: %v", err)
+				}
+			}
 		}
 	}
 

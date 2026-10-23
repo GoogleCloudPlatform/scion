@@ -61,6 +61,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -87,6 +88,10 @@ const (
 	// /healthz value stamped into every event).
 	analyticsMaxHubIDBytes = 128
 )
+
+// analyticsTmpSweepAge: leftover .ready.tmp-* files older than this are
+// removed at finalize (a commit never takes this long).
+const analyticsTmpSweepAge = time.Hour
 
 // AnalyticsOutboxDirName is the outbox directory under the agent home's
 // .scion directory.
@@ -159,10 +164,15 @@ type AnalyticsOutboxStats struct {
 	// (dead-lettered); Torn counts only fragments without a newline.
 	InvalidLines                                       int64
 	HubIDMismatch, Conflicts, Quarantined, DeadLetters int64
-	RelocatedRefused                                   int64
-	SyncUncertain, CorruptIntents, Unresolved          int64
-	CommitDeferred                                     int64
-	PersistedSyncUncertain, PersistedCommitDeferred    int64
+	// RelocatedRefused counts this process's appends refused because
+	// relocated; CommitLinkFallbacks counts ready commits that used the
+	// locked rename fallback because hard links failed; FinalizeFailures
+	// counts drainer finalize attempts that failed unexpectedly (not "not
+	// verified" or "relocated").
+	RelocatedRefused, CommitLinkFallbacks, FinalizeFailures int64
+	SyncUncertain, CorruptIntents, Unresolved               int64
+	CommitDeferred                                          int64
+	PersistedSyncUncertain, PersistedCommitDeferred         int64
 	// HeldIntent is true while an unresolved append holds the outbox.
 	HeldIntent                                  bool
 	PersistedOverflow, PersistedOversize        int64
@@ -190,6 +200,13 @@ type AnalyticsOutbox struct {
 	finalized, delivered, sendFailures, torn     atomic.Int64
 	hubIDMismatch, conflicts, quarantined        atomic.Int64
 	relocatedRefused                             atomic.Int64
+	commitLinkFallbacks, finalizeFailures        atomic.Int64
+
+	// link creates a ready file from its synced temp file without
+	// replacing (os.Link; a test seam). sweepAge is how old a leftover
+	// .ready.tmp-* must be before finalize removes it.
+	link     func(oldname, newname string) error
+	sweepAge time.Duration
 
 	// owner, when set and the process runs as root, receives ownership of
 	// every created file and directory.
@@ -288,6 +305,8 @@ func newOutboxHandle(dir string, owner *OutboxOwner) *AnalyticsOutbox {
 		indexTTL:   analyticsIndexTTL,
 		indexMax:   analyticsIndexMaxEntries,
 		now:        time.Now,
+		link:       os.Link,
+		sweepAge:   analyticsTmpSweepAge,
 		owner:      owner,
 		geteuid:    outboxGeteuid,
 		chown:      outboxChown,
@@ -1105,8 +1124,9 @@ func (o *AnalyticsOutbox) appendLineAt(name string, line []byte) (int64, error) 
 
 // PinHubID records hubID as the outbox's hub on first call; later calls
 // with a different value keep the pinned one (never restamping anything)
-// and only count the mismatch in memory. A confirmed relocation is
-// recorded separately (recordRelocation, by the drainer).
+// and record nothing: a confirmed relocation is recorded separately
+// (recordRelocation, by the drainer), which is also what HubIDMismatch
+// counts.
 func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 	if o == nil {
 		return "", errNilOutbox
@@ -1124,9 +1144,6 @@ func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 		return "", err
 	}
 	if current != "" {
-		if current != hubID {
-			o.hubIDMismatch.Add(1)
-		}
 		return current, nil
 	}
 	if err := o.writeFileAtomic("hub_id", []byte(hubID)); err != nil {
@@ -1137,11 +1154,12 @@ func (o *AnalyticsOutbox) PinHubID(hubID string) (pinned string, err error) {
 
 // recordRelocation persists a confirmed hub ID mismatch under the lock:
 // after it, AppendUsage refuses new observations and finalize refuses to
-// run (provisional lines are held; final lines still drain). It is a no-op
-// error when observed equals the pin.
+// run (provisional lines are held; final lines still drain). It returns an
+// error when no hub is pinned or observed equals the pin.
 //
-// Recovery from a wrongly recorded relocation is a separate reviewed
-// action (tracked with the cross-hub design); nothing here clears it.
+// Nothing in this package clears the marker; recovery from a mistaken
+// relocation is the documented operator procedure ("Recovering from a
+// mistaken hub move" in the observability docs).
 func (o *AnalyticsOutbox) recordRelocation(observed string) error {
 	if err := validHubID(observed); err != nil {
 		return err
@@ -1158,7 +1176,11 @@ func (o *AnalyticsOutbox) recordRelocation(observed string) error {
 	if pinned == "" || pinned == observed {
 		return fmt.Errorf("analytics outbox: no relocation: pinned %q, observed %q", pinned, observed)
 	}
-	return o.recordRelocationLocked(observed)
+	if err := o.recordRelocationLocked(observed); err != nil {
+		return err
+	}
+	o.hubIDMismatch.Add(1)
+	return nil
 }
 
 // recordRelocationLocked writes observed to relocated (if not yet set),
@@ -1240,7 +1262,9 @@ func (o *AnalyticsOutbox) finalize(ctx context.Context, verifiedHub string) (int
 	// Under the lock, only recover an intent and rotate staging to a
 	// finalizing file (cheap renames), so appenders never wait for the
 	// copy. The finalizing files are then streamed into ready files
-	// without the lock: only this goroutine touches them.
+	// without the lock. One drainer per home is expected; a second one
+	// sharing the home can only produce byte-identical duplicate lines
+	// (each ready file is committed under the lock with a fresh number).
 	hubID, rotErr := o.rotateStaging(verifiedHub)
 	if errors.Is(rotErr, ErrAnalyticsOutboxRelocated) || errors.Is(rotErr, ErrAnalyticsHubNotVerified) {
 		return 0, rotErr
@@ -1282,6 +1306,7 @@ func (o *AnalyticsOutbox) rotateStaging(verifiedHub string) (string, error) {
 	if err := o.authorizedLocked(verifiedHub); err != nil {
 		return "", err
 	}
+	o.sweepTempLocked()
 	hubID := verifiedHub
 	if err := o.recoverIntentLocked(); err != nil {
 		return hubID, err
@@ -1318,6 +1343,22 @@ func (o *AnalyticsOutbox) rotateStaging(verifiedHub string) (string, error) {
 		return hubID, fmt.Errorf("analytics outbox: rotating staging: %w", err)
 	}
 	return hubID, o.fsyncDir(o.dir)
+}
+
+// sweepTempLocked removes leftover .ready.tmp-* files older than sweepAge
+// (a crash between linking a ready file and removing its temp name, or
+// mid-fill). Younger ones may belong to a commit in progress in another
+// process and are kept. Best effort; the caller holds the lock.
+func (o *AnalyticsOutbox) sweepTempLocked() {
+	tmps, err := filepath.Glob(o.path(".ready.tmp-*"))
+	if err != nil {
+		return
+	}
+	for _, t := range tmps {
+		if info, err := os.Lstat(t); err == nil && o.now().Sub(info.ModTime()) >= o.sweepAge {
+			_ = os.Remove(t)
+		}
+	}
 }
 
 // authorizedLocked reports whether a finalize authorized by verifiedHub
@@ -1853,7 +1894,7 @@ type OutboxLedger struct {
 	Epoch       string // never "" for an opened outbox
 	LastSeq     int64  // last allocated producer_seq
 	PinnedHubID string // "" until pinned
-	// RelocatedHubID is the first hub ID observed to differ from the pin
+	// RelocatedHubID is the first CONFIRMED hub ID differing from the pin
 	// ("" unless relocated); sticky: while set, new appends and finalize
 	// are refused.
 	RelocatedHubID string
@@ -1967,7 +2008,7 @@ func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
 	if o == nil {
 		return AnalyticsOutboxStats{}
 	}
-	return AnalyticsOutboxStats{
+	s := AnalyticsOutboxStats{
 		Appended:          o.appended.Load(),
 		CertainDuplicates: o.certainDup.Load(),
 		Overflow:          o.overflow.Load(),
@@ -1987,6 +2028,9 @@ func (o *AnalyticsOutbox) MemoryStats() AnalyticsOutboxStats {
 		CommitDeferred:    o.commitDeferred.Load(),
 		InvalidLines:      o.invalidLines.Load(),
 	}
+	s.CommitLinkFallbacks = o.commitLinkFallbacks.Load()
+	s.FinalizeFailures = o.finalizeFailures.Load()
+	return s
 }
 
 // Stats returns MemoryStats plus the disk-derived fields from one
@@ -2159,10 +2203,29 @@ func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) e
 	return o.writeFileFromCommit(dir, name, fill, nil)
 }
 
+// linkNoReplace hard-links tmp to dst, failing if dst exists. If hard
+// links are unsupported (any error other than EEXIST), it falls back to a
+// rename after checking that dst does not exist. That fallback is
+// no-replace only because every creator of ready-* files does this under
+// the outbox lock (finalizeFile's commit guard is the only one; Drain only
+// removes or quarantines ready files), so nothing can create dst between
+// the check and the rename.
+func (o *AnalyticsOutbox) linkNoReplace(tmp, dst string) error {
+	err := o.link(tmp, dst)
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if _, serr := os.Lstat(dst); !errors.Is(serr, fs.ErrNotExist) {
+		return fmt.Errorf("analytics outbox: link %s: %w (rename fallback refused: %v)", dst, err, serr)
+	}
+	o.commitLinkFallbacks.Add(1)
+	return os.Rename(tmp, dst)
+}
+
 // writeFileFromCommit is writeFileFrom whose final step runs inside guard
 // (when non-nil): guard decides the destination and calls link, which
-// hard-links the synced temp file there without replacing an existing
-// file (EEXIST fails). guard may refuse; the temp file is always removed.
+// places the synced temp file there without replacing an existing file
+// (linkNoReplace); guard must hold the outbox lock. guard may refuse; the temp file is always removed.
 func (o *AnalyticsOutbox) writeFileFromCommit(dir, name string, fill func(io.Writer) error, guard func(link func(dst string) error) error) error {
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
@@ -2182,7 +2245,7 @@ func (o *AnalyticsOutbox) writeFileFromCommit(dir, name string, fill func(io.Wri
 	}
 	if err == nil {
 		if guard != nil {
-			err = guard(func(dst string) error { return os.Link(tmpName, dst) })
+			err = guard(func(dst string) error { return o.linkNoReplace(tmpName, dst) })
 		} else {
 			err = os.Rename(tmpName, filepath.Join(dir, name))
 		}

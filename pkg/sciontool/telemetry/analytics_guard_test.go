@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -832,5 +833,106 @@ func TestGuardCandidateDoesNotSurviveExit(t *testing.T) {
 	}
 	if len(stagingLines(t, r)) != 1 {
 		t.Error("provisional line must stay held while unconfirmed")
+	}
+}
+
+// r2 O1: the inner "too early" check refuses an early agreeing reading
+// even when the outer resolveAfter gate is bypassed.
+func TestGuardInnerTooEarlyGuard(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	d := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-B"))
+	clock := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	d.RunOnce(context.Background()) // candidate
+	clock = clock.Add(analyticsRelocationConfirm - time.Second)
+	d.resolveAfter = time.Time{} // bypass the outer gate
+	d.RunOnce(context.Background())
+	if l := ledger(t, o); l.RelocatedHubID != "" || d.ObservedHubID() != "" || d.VerifiedHubID() != "" {
+		t.Fatalf("early agreement recorded or published: relocated %q observed %q", l.RelocatedHubID, d.ObservedHubID())
+	}
+	if want := clock.Add(time.Second); !d.resolveAfter.Equal(want) {
+		t.Errorf("resolveAfter = %v, want the candidate's window end %v", d.resolveAfter, want)
+	}
+}
+
+// r2 O2: the in-memory HubIDMismatch counts confirmed relocations only,
+// like the persisted hub_mismatch.
+func TestGuardInMemoryMismatchCountsConfirmedOnly(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	d := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-B"))
+	clock := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return clock }
+	d.RunOnce(context.Background())
+	if got := o.MemoryStats().HubIDMismatch; got != 0 {
+		t.Fatalf("candidate counted: HubIDMismatch = %d", got)
+	}
+	clock = clock.Add(analyticsRelocationConfirm)
+	d.RunOnce(context.Background())
+	if got, l := o.MemoryStats().HubIDMismatch, ledger(t, o); got != 1 || l.HubMismatchTotal != 1 {
+		t.Errorf("after confirmation: memory %d, persisted %d; want 1, 1", got, l.HubMismatchTotal)
+	}
+}
+
+// r2 O3: without hard links the commit falls back to a rename (no-replace
+// under the lock, counted); if the destination already exists the
+// fallback refuses, finalize fails, and the drainer counts it.
+func TestGuardCommitLinkFallback(t *testing.T) {
+	noLink := func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+
+	o := testOutbox(t)
+	o.link = noLink
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("a", "rid1:x", outboxTestTS), AppendWritten)
+	c := &capture{}
+	NewAnalyticsDrainer(o, c.send, trustedHub("hub-A")).RunOnce(context.Background())
+	if len(c.lines) != 1 || o.MemoryStats().CommitLinkFallbacks != 1 {
+		t.Fatalf("fallback: sent %d, fallbacks %d", len(c.lines), o.MemoryStats().CommitLinkFallbacks)
+	}
+
+	o2 := testOutbox(t)
+	o2.link = func(_, dst string) error {
+		_ = os.WriteFile(dst, []byte("someone else\n"), 0o644) // dst appears, then link fails
+		return &os.LinkError{Op: "link", Err: syscall.EPERM}
+	}
+	_, _ = o2.PinHubID("hub-A")
+	mustAppend(t, o2, draftFor("a", "rid1:y", outboxTestTS), AppendWritten)
+	c2 := &capture{}
+	d2 := NewAnalyticsDrainer(o2, c2.send, trustedHub("hub-A"))
+	d2.RunOnce(context.Background())
+	if o2.MemoryStats().FinalizeFailures != 1 || o2.MemoryStats().CommitLinkFallbacks != 0 {
+		t.Errorf("refused fallback: failures %d, fallbacks %d", o2.MemoryStats().FinalizeFailures, o2.MemoryStats().CommitLinkFallbacks)
+	}
+	files, _ := o2.finalizingFiles()
+	if len(files) != 1 {
+		t.Errorf("finalizing file must stay held; got %v", files)
+	}
+}
+
+// r2 O4: leftover .ready.tmp-* files older than the sweep age are removed
+// at finalize; younger ones (a commit in progress elsewhere) are kept.
+func TestGuardSweepsOldTempFiles(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	old := filepath.Join(o.Dir(), ".ready.tmp-old")
+	young := filepath.Join(o.Dir(), ".ready.tmp-young")
+	for _, p := range []string{old, young} {
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-2 * analyticsTmpSweepAge)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.finalize(context.Background(), "hub-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("old temp file not swept: %v", err)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("young temp file removed: %v", err)
 	}
 }
