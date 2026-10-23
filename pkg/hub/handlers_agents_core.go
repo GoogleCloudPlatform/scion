@@ -536,7 +536,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -3993,6 +3993,15 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	access := s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap)
 	access.HeldEdits = s.heldEditsEnabled()
 	resp.Editability = buildAgentEditability(agent, access)
+
+	// The resolved container TZ, as on the PATCH response, for a caller who
+	// may view the agent's env: the zone can come from a user, project, hub
+	// or broker TZ env var (ptone/scion#2767). Others get neither field.
+	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
+		tz := s.agentTZ(ctx, agent)
+		resp.ResolvedTimezone = &tz.TZ
+		resp.TimezoneSource = &tz.Source
+	}
 
 	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	if r.URL.Query().Get("view") == agentViewEdit {

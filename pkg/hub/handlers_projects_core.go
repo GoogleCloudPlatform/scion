@@ -253,7 +253,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -2910,7 +2910,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}

@@ -34,6 +34,12 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrInvalidCursor is returned for every pagination cursor a list call
+	// cannot use: malformed, bound to another list, or naming no row. It
+	// wraps ErrInvalidInput, so checks for that still match; the hub maps it
+	// to 400 invalid_cursor (ptone/scion#3062).
+	ErrInvalidCursor = fmt.Errorf("%w: invalid cursor", ErrInvalidInput)
+
 	// ErrActiveReservationExists is returned by CreateUsageReservation when
 	// the resource already holds an active (released_at IS NULL)
 	// reservation for the same limit definition: the unique active
