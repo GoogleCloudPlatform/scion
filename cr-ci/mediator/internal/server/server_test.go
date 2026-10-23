@@ -437,6 +437,14 @@ func TestForkGuard(t *testing.T) {
 		{"pull_request_target", testRepo, "pull_request_target"},
 		{"workflow_run", testRepo, "workflow_run"},
 		{"head repository missing", "", "pull_request"},
+		// Allowlist: every event but push and pull_request is refused.
+		{"issue_comment", testRepo, "issue_comment"},
+		{"repository_dispatch", testRepo, "repository_dispatch"},
+		{"workflow_dispatch", testRepo, "workflow_dispatch"},
+		{"schedule", testRepo, "schedule"},
+		{"merge_group", testRepo, "merge_group"},
+		{"unknown event", testRepo, "some_future_event"},
+		{"empty event", testRepo, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1027,4 +1035,60 @@ func TestNoSecretsInLogs(t *testing.T) {
 			t.Errorf("%s appears in the logs", name)
 		}
 	}
+}
+
+// TestForkReasonAllowlist: only push and same-repo pull_request runs may get a
+// runner; any other event, named or unknown, is refused fail-closed.
+func TestForkReasonAllowlist(t *testing.T) {
+	repo := githubapp.Repo{Owner: "example-owner", Name: "example-repo"}
+	same := &githubapp.RepoRef{FullName: "example-owner/example-repo"}
+	fork := &githubapp.RepoRef{FullName: "contributor/example-repo"}
+	run := func(event string, head *githubapp.RepoRef) *githubapp.Run {
+		return &githubapp.Run{Event: event, Repository: same, HeadRepository: head}
+	}
+	for _, tc := range []struct {
+		name string
+		run  *githubapp.Run
+		want string
+	}{
+		{"push", run("push", same), ""},
+		{"same-repo pull_request", run("pull_request", same), ""},
+		{"fork pull_request", run("pull_request", fork), "head_repository_differs"},
+		{"pull_request without head", run("pull_request", nil), "head_repository_missing"},
+		{"other repository", &githubapp.Run{Event: "push", Repository: fork, HeadRepository: fork}, "repository_mismatch"},
+		{"pull_request_target", run("pull_request_target", same), "event_not_allowed:pull_request_target"},
+		{"workflow_run", run("workflow_run", same), "event_not_allowed:workflow_run"},
+		{"issue_comment", run("issue_comment", same), "event_not_allowed:issue_comment"},
+		{"repository_dispatch", run("repository_dispatch", same), "event_not_allowed:repository_dispatch"},
+		{"workflow_dispatch", run("workflow_dispatch", same), "event_not_allowed:workflow_dispatch"},
+		{"schedule", run("schedule", same), "event_not_allowed:schedule"},
+		{"merge_group", run("merge_group", same), "event_not_allowed:merge_group"},
+		{"unknown", run("some_future_event", same), "event_not_allowed:some_future_event"},
+		{"empty", run("", same), "event_not_allowed:"},
+		{"case matters", run("Push", same), "event_not_allowed:Push"},
+	} {
+		if got := forkReason(tc.run, repo); got != tc.want {
+			t.Errorf("%s: forkReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestReconcileRefusesDisallowedEvents: reconcile backfill applies the same
+// allowlist: queued jobs of schedule/workflow_dispatch/issue_comment runs get
+// no runner.
+func TestReconcileRefusesDisallowedEvents(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	for i, ev := range []string{"schedule", "workflow_dispatch", "issue_comment"} {
+		id := int64(20 + i)
+		h.gh.AddRun(fakes.GitHubRun{ID: id, Repo: testRepo, HeadRepo: testRepo, Event: ev, Status: "queued",
+			Jobs: []fakes.GitHubJob{{ID: id * 10, Status: "queued", Labels: []string{testLabel}}}})
+	}
+	res := h.reconcile()
+	if res.Backfilled != 0 || h.jitCount() != 0 {
+		t.Errorf("reconcile %+v launched %d runners, want 0 for disallowed events", res, h.jitCount())
+	}
+	if res.ForkRunsRejected != 3 {
+		t.Errorf("ForkRunsRejected = %d, want 3", res.ForkRunsRejected)
+	}
+	h.wantLog(logging.EventRejectFork)
 }

@@ -313,13 +313,20 @@ func headRepo(run *githubapp.Run) string {
 	return run.HeadRepository.FullName
 }
 
-// forkReason returns why run must not get a runner, or "" if it may.
-// pull_request_target and workflow_run runs execute with the base repo's
-// privileges, typically on behalf of fork PRs, so both are refused.
+// allowedEvents are the only workflow-run events whose jobs may get a cr-ci
+// runner: the same two the workflows' routing expression routes (same-repo
+// push and pull_request). It is an allowlist, so any other event, named or
+// not yet known (pull_request_target, workflow_run, issue_comment,
+// repository_dispatch, workflow_dispatch, schedule, merge_group, ...), is
+// refused (fail closed), even if a workflow edit routes it.
+var allowedEvents = map[string]bool{"push": true, "pull_request": true}
+
+// forkReason returns why run must not get a runner, or "" if it may. It
+// guards dispatch (webhook and reconcile backfill) and the hijack guard.
 func forkReason(run *githubapp.Run, repo githubapp.Repo) string {
 	switch {
-	case run.Event == "pull_request_target" || run.Event == "workflow_run":
-		return run.Event
+	case !allowedEvents[run.Event]:
+		return "event_not_allowed:" + run.Event
 	case run.Repository == nil || !strings.EqualFold(run.Repository.FullName, repo.String()):
 		return "repository_mismatch"
 	case run.HeadRepository == nil:
