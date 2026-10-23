@@ -121,7 +121,7 @@ func TestProjectStorageMigrate_SeededRerunnable(t *testing.T) {
 	assert.IsType(t, &ProjectStorageMigrateExecutor{}, exec)
 }
 
-// T1: on the local backend (workstation server) the migration is a no-op.
+// Local backend: on the local backend (workstation server) the migration is a no-op.
 func TestProjectStorageMigrate_LocalBackendNoOp(t *testing.T) {
 	f := newStorageMigrateFixture(t)
 	g := f.globalDir(t)

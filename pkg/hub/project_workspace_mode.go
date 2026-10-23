@@ -306,8 +306,8 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 // project workspace (mountsHubProjectWorkspace). The broker can when it has
 // a linked local path for the project, or when the hub's workspace storage
 // is a shared backend and the broker reports the same backend in its
-// heartbeat descriptor. Otherwise it returns the 409 message (topology T6:
-// remote broker, no shared storage; design-v4 OQ3).
+// heartbeat descriptor. Otherwise it returns the 409 message (a remote
+// broker without the shared storage).
 func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *store.Project, brokerID string) (string, bool) {
 	if provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID); err == nil && provider.LocalPath != "" {
 		return "", false
@@ -315,7 +315,7 @@ func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *stor
 	const tail = "; use a co-located runtime broker, configure shared workspace storage (nfs) on the hub and the broker, " +
 		"or use a per-agent workspace mode (clone-per-agent)"
 	if !s.workspaceBackendShared() {
-		// Carve-out (fs-cleanup-arch Q4/T6 boundary): a LINKED non-git
+		// Carve-out: a LINKED non-git
 		// project (registered from an existing checkout) on a local-backend
 		// hub keeps its workspace on the remote broker, which populates it
 		// from the CLI workspace bootstrap and `scion sync to`; the broker

@@ -135,7 +135,7 @@ func TestLegacyHubProjectsRoot(t *testing.T) {
 	}
 }
 
-// T1: on a local workspace backend the operation touches nothing.
+// Local backend: on a local workspace backend the operation touches nothing.
 func TestRun_LocalBackendIsNoOp(t *testing.T) {
 	global := t.TempDir()
 	writeTree(t, global, map[string]string{"projects/p1/a.txt": "A", "project-configs/p1__0f8fad5b/shared-dirs/s/x": "x"})

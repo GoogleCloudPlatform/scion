@@ -381,7 +381,7 @@ func (s *Server) startClonedProjectIdentityAlignment(ctx context.Context) {
 // identity of every hub-cloned (shared-workspace git) project on this hub,
 // and logs one summary line of counts. It runs only on the local workspace
 // backend: on a shared backend the project's identity lives in its project
-// configuration at the project root (design-v4 §P1a), and a .scion entry in
+// configuration at the project root, and a .scion entry in
 // the workspace is repository content that never supplies identity. Each project that is skipped or
 // fails is logged by project ID; a skipped or failed project is handled
 // again on the next hub start.

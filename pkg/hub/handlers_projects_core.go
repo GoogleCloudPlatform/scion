@@ -1095,8 +1095,8 @@ func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 //
 // On the local workspace backend this is ~/.scion/projects/<slug>/.scion,
 // inside the workspace directory it also creates (unchanged). On a shared
-// backend it is <ProjectRoot(uuid)>/.scion beside workspace/ (design-v4
-// §P1a), which no agent mounts; the workspace itself is created by the
+// backend it is <ProjectRoot(uuid)>/.scion beside workspace/, which no
+// agent mounts; the workspace itself is created by the
 // first agent or the first Files-tab write. Unlike linked projects,
 // hub-managed projects keep their settings directly in that directory (no
 // split storage or marker files).
@@ -1365,8 +1365,8 @@ func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug str
 // (provisionSharedWorkspace: the provisioning lock, the clone and the
 // sentinel, exactly as the Kubernetes init container does, so every broker
 // and pod then takes the reuse path) and seeds the project configuration
-// at <ProjectRoot(uuid)>/.scion (design-v7 §P1a). Nothing is seeded into
-// the workspace. fs-cleanup-arch ruling on ptone/scion#5813 rev-1 #1.
+// at <ProjectRoot(uuid)>/.scion. Nothing is seeded into
+// the workspace.
 func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store.Project) error {
 	if s.workspaceBackendShared() {
 		if err := s.provisionSharedWorkspace(ctx, project); err != nil {

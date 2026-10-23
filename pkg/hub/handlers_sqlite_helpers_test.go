@@ -1016,7 +1016,7 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	// The broker has the hub-managed workspace at a local path (a
 	// co-located broker): since project storage phase 2
 	// (ptone/scion#5813) a remote broker that cannot reach the hub's
-	// workspace storage is refused with 409 (topology T6). Tests of that
+	// workspace storage is refused with 409. Tests of that
 	// refusal, and of the CLI workspace bootstrap, clear it
 	// (clearCreateAgentProviderPath).
 	localPath, err := localProjectPath(project.Slug)
@@ -1037,7 +1037,7 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 
 // clearCreateAgentProviderPath makes the setupCreateAgentServer broker a
 // remote broker without a local path for project: the topology of the CLI
-// workspace bootstrap and of the phase 2 T6 refusal.
+// workspace bootstrap and of the remote-broker refusal.
 func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Project) {
 	t.Helper()
 	ctx := context.Background()

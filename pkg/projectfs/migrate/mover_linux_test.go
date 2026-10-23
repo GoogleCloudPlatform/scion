@@ -325,7 +325,7 @@ func TestMove_NoAtomicRenameFileLinks(t *testing.T) {
 	assertAbsent(t, filepath.Join(base, "src/settings.yaml"))
 }
 
-// A10: the target is never overwritten; conflicts are reported; missing
+// The target is never overwritten; conflicts are reported; missing
 // files are copied; the source is kept as <name>.migrated-<ts>.
 func TestMove_MergeNeverOverwrites(t *testing.T) {
 	base := t.TempDir()
@@ -376,7 +376,7 @@ func TestMove_MergeNeverOverwrites(t *testing.T) {
 	}
 }
 
-// A10: a second run reports 0 moves and changes nothing.
+// A second run reports 0 moves and changes nothing.
 func TestMove_SecondRunMovesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

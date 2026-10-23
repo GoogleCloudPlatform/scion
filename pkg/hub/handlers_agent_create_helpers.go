@@ -340,7 +340,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				// workspace backend places the agent on the project's
 				// leaf); for a non-git project on a local-backend hub in
 				// its own project directory, populated by the CLI
-				// workspace bootstrap (the T6 carve-out). The hub's path
+				// workspace bootstrap (the linked non-git exception). The hub's path
 				// need not exist on that broker, so it is not recorded;
 				// later dispatches are built from this row.
 			default:

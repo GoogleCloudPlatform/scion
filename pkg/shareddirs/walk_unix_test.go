@@ -285,7 +285,7 @@ func assertRecordHasAttr(t *testing.T, rec slog.Record, key, want string) {
 // default ACL); intermediates are created as EnsureLeaf creates them; an
 // existing directory is accepted untouched; a symlinked intermediate or
 // leaf is refused and nothing is created through it; a chmod failure
-// removes the leaf it created (ptone/scion#5813 review rev-1 #5).
+// removes the leaf it created.
 func TestEnsurePrivateDir(t *testing.T) {
 	rel := filepath.Join("projects", "pid-1", ".scion")
 	t.Run("new leaf", func(t *testing.T) {

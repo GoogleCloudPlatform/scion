@@ -367,7 +367,7 @@ const ProjectConfigDirName = ".scion"
 
 // ProjectConfig resolves a project's configuration directory on a shared
 // backend: <SubPathRoot>/<projectID>/.scion, beside workspace/ and inside
-// no Mount (design-v4 §P1a rule 1). Hub-seeded: project settings, the hub
+// no Mount. Hub-seeded: project settings, the hub
 // connection and project identity. A .scion inside the workspace is
 // repository content and never supplies those.
 func (l Layout) ProjectConfig(projectID string) (Resolved, error) {

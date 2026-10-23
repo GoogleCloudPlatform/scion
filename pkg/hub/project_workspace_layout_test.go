@@ -41,7 +41,7 @@ import (
 // projects/<uuid>/workspace tree agents mount (no legacy slug-keyed
 // copy, no content probe); on the local backend (workstation server) the
 // path is unchanged, ~/.scion/projects/<slug>. Project configuration is
-// seeded at ProjectRoot(uuid)/.scion on shared backends (design-v7 §P1a).
+// seeded at ProjectRoot(uuid)/.scion on shared backends.
 
 // workspaceLayoutFixture is a hub with a fresh HOME and an NFS mount root
 // whose share directory exists (the share is "mounted").
@@ -87,7 +87,7 @@ func listWorkspaceFiles(t *testing.T, srv *Server, projectID string) []string {
 	return names
 }
 
-// TestProjectWorkspaceFiles_NFS_UUIDTree pins the T4 fix for the workspace:
+// TestProjectWorkspaceFiles_NFS_UUIDTree pins the Cloud Run/GKE fix for the workspace:
 // with server.workspace_storage: nfs, a web upload lands in
 // <mount_root>/<share>/projects/<uuid>/workspace (where agents mount it),
 // a file an agent writes there is listed, and nothing is written under a
@@ -119,7 +119,7 @@ func TestProjectWorkspaceFiles_NFS_UUIDTree(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "nothing is written to the hub's local slug path")
 }
 
-// TestProjectWorkspaceFiles_Local_SlugPathUnchanged is the T1 regression
+// TestProjectWorkspaceFiles_Local_SlugPathUnchanged is the workstation regression
 // check: with no workspace storage configured the Files tab serves
 // ~/.scion/projects/<slug>, exactly as before.
 func TestProjectWorkspaceFiles_Local_SlugPathUnchanged(t *testing.T) {
@@ -218,8 +218,7 @@ func TestProjectWorkspaceFiles_EmptyPerAgent_Conflict(t *testing.T) {
 
 // TestProjectWorkspaceFiles_RemoteLinkedProject_ConflictNoCache: a linked
 // project served only by a remote broker has no workspace the hub can
-// reach; the Files tab answers 409 and the hub keeps no cached copy
-// (design-v7 OQ-R1, ptone/scion#5816).
+// reach; the Files tab answers 409 and the hub keeps no cached copy.
 func TestProjectWorkspaceFiles_RemoteLinkedProject_ConflictNoCache(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	project := createTestGitProject(t, f.srv, "Remote Linked WS", "github.com/test/remote-linked-ws")
@@ -263,8 +262,8 @@ func TestProjectWorkspaceFiles_EmbeddedLinkedProject_ProviderPath(t *testing.T) 
 	assert.Equal(t, []string{"main.go"}, listWorkspaceFiles(t, f.srv, project.ID))
 }
 
-// TestInitHubManagedProject_SharedBackend_SeedsProjectRoot pins design-v7
-// §P1a on the hub: on a shared backend the hub seeds the project
+// TestInitHubManagedProject_SharedBackend_SeedsProjectRoot pins the hub
+// side of the project configuration: on a shared backend the hub seeds the project
 // configuration (settings with the hub connection and project ID) at
 // projects/<uuid>/.scion beside workspace/, inside no Mount, and writes no
 // .scion into the workspace agents mount.
@@ -291,8 +290,8 @@ func TestInitHubManagedProject_SharedBackend_SeedsProjectRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cfgDir, dir)
 
-	// The identity files beside settings.yaml: project-id and project-slug
-	// (fs-cleanup-arch P3b Q7), one line each, mode 0644.
+	// The identity files beside settings.yaml: project-id and project-slug,
+	// one line each, mode 0644.
 	for name, want := range map[string]string{projectkeys.ProjectIDFile: project.ID, projectkeys.ProjectSlugFile: project.Slug} {
 		data, err := os.ReadFile(filepath.Join(cfgDir, name))
 		require.NoError(t, err, name)
@@ -362,8 +361,8 @@ func TestCreateProject_SharedBackendUnmounted_RollsBack(t *testing.T) {
 }
 
 // TestAlignClonedProjectIdentities_SharedBackendLeavesWorkspaceScion: on a
-// shared backend a .scion in the workspace is repository content (design-v7
-// §P1a rule 2); the hub's cloned-identity alignment does not run there and
+// shared backend a .scion in the workspace is repository content;
+// the hub's cloned-identity alignment does not run there and
 // never rewrites it.
 func TestAlignClonedProjectIdentities_SharedBackendLeavesWorkspaceScion(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
@@ -395,8 +394,8 @@ func TestProjectWorkspaceFiles_MigrationNoticeAbsentByDefault(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "migrationNotice")
 }
 
-// TestEnsureProjectConfigIdentities_StartupPass pins the hub-start pass
-// (fs-cleanup-arch P3b Q8): for an existing shared-backend project with no
+// TestEnsureProjectConfigIdentities_StartupPass pins the hub-start pass:
+// for an existing shared-backend project with no
 // <ProjectRoot>/.scion it creates project-id and project-slug; a second
 // pass changes nothing; a stale project-slug is rewritten to the current
 // slug.
@@ -501,7 +500,7 @@ func newSourceRepo(t *testing.T) string {
 }
 
 // TestCreateSharedWorkspaceProject_SharedBackend_HubProvisionsUUIDWorkspace
-// pins the fs-cleanup-arch ruling on rev-1 #1: on a shared backend the hub
+// pins hub-side provisioning: on a shared backend the hub
 // provisions the uuid workspace at project create through
 // provision.ProvisionShared with the init container's layout (sentinel in
 // <ProjectRoot>/provision), so a Docker or co-located broker's first agent
@@ -579,7 +578,7 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 	assert.Empty(t, names, "the failed create leaves no projects/<id> tree")
 }
 
-// TestImportFromWorkspace_SymlinksAreNotFollowed (rev-1 security finding):
+// TestImportFromWorkspace_SymlinksAreNotFollowed:
 // resource import reads the workspace through a confined root: a templates
 // directory that is a symlink leading out of the workspace is refused, and a
 // symlinked file inside a template is not followed (here the template's only
@@ -609,7 +608,7 @@ func TestImportFromWorkspace_SymlinksAreNotFollowed(t *testing.T) {
 	assert.Contains(t, err.Error(), "no scion templates found")
 }
 
-// TestProjectWorkspacePull_ConfinedAndNoHostPaths (rev-1 security finding):
+// TestProjectWorkspacePull_ConfinedAndNoHostPaths:
 // pull confirms the workspace through the confined open before git runs (a
 // workspace replaced by a symlink is refused), and a failing pull answers
 // fixed text without host paths.
@@ -653,9 +652,8 @@ func unusableWorkspaceStorage() *config.V1WorkspaceStorageConfig {
 	return &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
 }
 
-// TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch (review rev-1
-// #4): an agent create that cannot resolve the project workspace answers
-// 503 (no host path), creates no row and dispatches nothing.
+// TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch: an agent
+// create that cannot resolve the project workspace answers 503 (no host path), creates no row and dispatches nothing.
 func TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	ctx := context.Background()
@@ -736,7 +734,7 @@ func TestCreateProject_UnusableSharedStorage_ReleasesProjectQuota(t *testing.T) 
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 }
 
-// TestSafetyGate_WorkspaceAbsent_NothingCreated (review rev-1 #6): on a
+// TestSafetyGate_WorkspaceAbsent_NothingCreated: on a
 // Cloud Run Service with local workspace storage, refused writes to an
 // absent workspace create nothing.
 func TestSafetyGate_WorkspaceAbsent_NothingCreated(t *testing.T) {
@@ -754,7 +752,7 @@ func TestSafetyGate_WorkspaceAbsent_NothingCreated(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "a refused write creates nothing")
 }
 
-// TestProjectWorkspaceFiles_ShareRootMissing_503 (review rev-1 #9): on a
+// TestProjectWorkspaceFiles_ShareRootMissing_503: on a
 // shared backend whose share root is missing (not mounted), the Files tab
 // answers 503, not an empty listing.
 func TestProjectWorkspaceFiles_ShareRootMissing_503(t *testing.T) {

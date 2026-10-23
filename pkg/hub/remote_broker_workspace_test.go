@@ -39,7 +39,7 @@ import (
 // hub-managed or shared-workspace project mount the workspace the hub
 // serves; a remote broker reaches it only through the hub's shared
 // workspace storage. A remote broker without it is refused with 409 before
-// anything is dispatched (topology T6); a broker with a local path for the
+// anything is dispatched; a broker with a local path for the
 // project, and per-agent workspace modes, are unaffected.
 
 // setupRemoteBrokerWorkspaceServer is setupCreateAgentServer with its broker
@@ -190,7 +190,7 @@ func TestCreateAgent_RemoteBroker_ClonePerAgentGit_Dispatches(t *testing.T) {
 // TestWorkspaceFinalize_RelaysBrokerBootstrapSkippedWarning: when the broker
 // skips a workspace bootstrap because the project workspace already exists
 // (its create answer carries the warning), the hub relays the warning into
-// the finalize response the CLI prints (Q4 condition 2; review rev-1 #7).
+// the finalize response the CLI prints.
 func TestWorkspaceFinalize_RelaysBrokerBootstrapSkippedWarning(t *testing.T) {
 	const skipped = "The project workspace already exists on the runtime broker, so the uploaded files were not applied; use `scion sync to <agent>` to push changes"
 	srv, f, c := newLandingCompletionServer(t)
@@ -220,7 +220,7 @@ func markLinkedOrigin(t *testing.T, s store.Store, project *store.Project) {
 
 // TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409: a HUB-MANAGED
 // non-git project on a local-backend hub sent to a remote broker without a
-// local path is refused (T6): the hub holds its workspace.
+// local path is refused: the hub holds its workspace.
 func TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409(t *testing.T) {
 	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
 	require.False(t, project.IsLinkedOrigin(), "fixture check: hub-managed project")
@@ -232,8 +232,8 @@ func TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409(t *testing.T) {
 		"lives on the hub's local disk, which a remote runtime broker cannot reach")
 }
 
-// TestCreateAgent_RemoteBroker_LinkedNonGitLocalHub_CarveOut pins the T6
-// carve-out (fs-cleanup-arch Q4/T6 boundary; review rev-1 #2, rev-2 #1): a
+// TestCreateAgent_RemoteBroker_LinkedNonGitLocalHub_CarveOut pins the
+// linked non-git exception: a
 // LINKED non-git project on a local-backend hub dispatched to a remote
 // broker without a local path is NOT refused, also without a task or
 // workspace files (scion start/create, an empty directory); the broker uses
@@ -257,7 +257,7 @@ func TestCreateAgent_RemoteBroker_LinkedNonGitLocalHub_CarveOut(t *testing.T) {
 
 // TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_Conflict: the Files tab
 // for the carve-out case answers 409 and never creates a hub copy; with an
-// embedded provider it is served as before (T1 unchanged).
+// embedded provider it is served as before (workstation unchanged).
 func TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_Conflict(t *testing.T) {
 	srv, s, project, _ := setupRemoteBrokerWorkspaceServer(t)
 	markLinkedOrigin(t, s, project)

@@ -141,7 +141,7 @@ func (g writeGate) refuse(w http.ResponseWriter) bool {
 }
 
 // workspaceWriteGate gates writes to a project workspace on the backend the
-// workspace actually resolved to (design-v4 §P3 write gate): on a Cloud Run
+// workspace actually resolved to: on a Cloud Run
 // Service a workspace on instance-local disk is refused, including a linked
 // project's co-located broker path.
 func (s *Server) workspaceWriteGate(resolved projectfs.Resolved) writeGate {
@@ -185,7 +185,7 @@ type ProjectWorkspaceListResponse struct {
 	TotalCount int                    `json:"totalCount"`
 	HasMore    bool                   `json:"hasMore,omitempty"`
 	// MigrationNotice is the Files-tab banner while legacy workspace trees
-	// await the M2 migration (ptone/scion#5819); nil when there is none.
+	// await the project storage migration (ptone/scion#5819); nil when there is none.
 	MigrationNotice *WorkspaceMigrationNotice `json:"migrationNotice,omitempty"`
 }
 
@@ -400,13 +400,13 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 //   - Linked projects resolve to the co-located (embedded) broker's local
 //     path when there is one. A linked project served only by remote brokers
 //     has no workspace the hub can reach and gets a conflict error; there is
-//     no hub-side copy (design-v4 OQ-R1).
+//     no hub-side copy.
 //
 // Errors are safe to show to clients (no filesystem paths). A storage
 // misconfiguration wraps errWorkspaceStorageUnavailable (503).
 func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Project) (projectfs.Resolved, error) {
 	// A linked project without a git remote whose workspace lives only on
-	// remote brokers (the T6 carve-out) has no workspace the hub can
+	// remote brokers (the linked non-git exception) has no workspace the hub can
 	// reach: 409, and the hub never creates its own copy.
 	if project != nil && project.GitRemote == "" && project.IsLinkedOrigin() {
 		embedded, err := s.hasEmbeddedProvider(ctx, project)
@@ -545,7 +545,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		if sharedBaseMissing(resolved) {
 			// The share is not mounted: storage unavailable, not an empty
-			// workspace (review rev-1 #9).
+			// workspace.
 			writeWorkspaceStorageUnavailable(w, errWorkspaceStorageUnavailable)
 			return
 		}

@@ -341,8 +341,8 @@ func TestCreateAgent_NoBrokerRecordWhenDownloadFails(t *testing.T) {
 	assert.NoFileExists(t, brokerRecordPath(t))
 }
 
-// TestCreateAgent_ExistingWorkspaceIsNotBootstrapped pins Q4 condition 2
-// (design-v4, ptone/scion#5815): a project workspace that already exists
+// TestCreateAgent_ExistingWorkspaceIsNotBootstrapped (ptone/scion#5815):
+// a project workspace that already exists
 // on the broker when the create arrives is never overwritten from the
 // uploaded files. Nothing is downloaded, its identity entry is kept, no
 // broker record is written, and the create answers with
@@ -479,7 +479,7 @@ func TestRecordHubProjectIdentity_UnreadableIdentityIsFailure(t *testing.T) {
 // bootstrap whose project path createAgent checked at admission and found
 // existing is skipped; a per-agent bootstrap (no slug) and a request that
 // names its project path (the global project: path and slug, never
-// checked at admission) are always applied (review rev-1 #7).
+// checked at admission) are always applied.
 func TestBootstrapSkipsExistingWorkspace(t *testing.T) {
 	base := CreateAgentRequest{WorkspaceStoragePath: "workspaces/p/a"}
 	for _, tc := range []struct {

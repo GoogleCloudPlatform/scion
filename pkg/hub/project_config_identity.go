@@ -31,8 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Project configuration identity on shared backends (design-v7 §P1a;
-// fs-cleanup-arch P3b Q7/Q8): the hub itself ensures that every project's
+// Project configuration identity on shared backends: the hub itself ensures that every project's
 // <ProjectRoot>/.scion holds project-id and project-slug, at project create,
 // on slug rename and in a bounded background pass at hub start, so a broker
 // is never presented with an identity-less project configuration, whether

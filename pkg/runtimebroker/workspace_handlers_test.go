@@ -1229,7 +1229,7 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 // TestProjectWorkspaceUpload_RoutesRemoved verifies that the retired
 // project-level upload routes no longer resolve: /api/v1/workspace/grove-upload
 // and /api/v1/workspace/project-upload, which fed the hub's linked-project
-// workspace cache (removed, design-v4 OQ-R1, ptone/scion#5816).
+// workspace cache (removed, ptone/scion#5816).
 func TestProjectWorkspaceUpload_RoutesRemoved(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

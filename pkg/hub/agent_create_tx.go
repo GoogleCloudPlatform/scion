@@ -212,7 +212,7 @@ const (
 	createStageStorage   = "storage"
 	createStageUploadURL = "upload_url"
 	// createStageWorkspaceStorage: the project's workspace is on storage the
-	// target broker cannot reach (the T6 refusal, 409).
+	// target broker cannot reach (the remote-broker refusal, 409).
 	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"

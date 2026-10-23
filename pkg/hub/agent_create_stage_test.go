@@ -83,7 +83,7 @@ func createRollbackSites() []createRollbackSite {
 		},
 		{
 			// A hub-managed project on a remote broker that does not
-			// report the hub's shared workspace storage: the T6 refusal.
+			// report the hub's shared workspace storage: the remote-broker refusal.
 			name: "workspace storage",
 			disp: &createAgentDispatcher{},
 			setup: func(t *testing.T, srv *Server) {

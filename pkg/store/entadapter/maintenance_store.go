@@ -61,7 +61,7 @@ const PassthroughTranslationReviewKey = "passthrough-translation-review"
 const GroupParticipantModeCleanupKey = "group-participant-mode-cleanup"
 
 // ProjectStorageMigrateKey is the maintenance operation key of the one-shot
-// project storage migration (design-v4 M2/M3, ptone/scion#5819).
+// project storage migration.
 const ProjectStorageMigrateKey = "project-storage-migrate"
 
 // defaultSeedOperations are the built-in maintenance operations and migrations.

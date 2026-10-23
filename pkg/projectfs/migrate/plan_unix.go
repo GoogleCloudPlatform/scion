@@ -33,9 +33,8 @@ import (
 )
 
 // legacyHubProjectsDir is the retired hub-managed project tree on a shared
-// workspace backend (the tree no longer exists in the project layout). This constant is the only place the name survives (ptone/scion#5819,
-// acceptance criterion A2 exception); the migration that reads it is
-// deleted in phase 6 (ptone/scion#5839).
+// workspace backend (the tree no longer exists in the project layout). This constant is the only place the name survives (ptone/scion#5819);
+// the migration that reads it is deleted with ptone/scion#5839.
 const legacyHubProjectsDir = "hub-projects"
 
 // Step names one migration step. Steps run in the order
@@ -206,7 +205,7 @@ func (p ProjectReport) Failed() bool {
 // seedEntries are the project-configuration entries step 4 moves from a
 // legacy .scion to <ProjectRoot>/.scion: the
 // hub-written identity and settings, and the project-level template and
-// harness-config tiers (P3b reads the tier from ProjectRoot/.scion). Broker
+// harness-config tiers (brokers read the tier from ProjectRoot/.scion). Broker
 // records (agents/, markers) and anything else are never moved there.
 var seedEntries = []string{"settings.yaml", projectkeys.ProjectIDFile, projectkeys.ProjectSlugFile, "templates", "harness-configs"}
 

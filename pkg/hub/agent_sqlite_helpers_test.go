@@ -419,7 +419,7 @@ type createRollbackSite struct {
 	req   CreateAgentRequest
 	// remoteBroker clears the fixture broker's local path for the project
 	// (clearCreateAgentProviderPath): the CLI workspace bootstrap and the
-	// T6 refusal need a remote broker without one.
+	// remote-broker refusal need a remote broker without one.
 	remoteBroker bool
 	wantStage    string
 }

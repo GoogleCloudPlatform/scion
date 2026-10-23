@@ -2118,8 +2118,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// A project-level workspace that already existed when the create was
 	// admitted is in use (by earlier agents of the project): it is never
 	// overwritten from a laptop's upload. The agent uses it as it is and
-	// the create answers with bootstrapSkippedWarning (design-v4 Q4
-	// condition 2, ptone/scion#5815). Nothing is downloaded, recorded or
+	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
 	// re-marked.
 	if bootstrapSkipsExistingWorkspace(req) {
 		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",

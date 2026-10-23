@@ -18,8 +18,8 @@ package projectkeys
 // project's retired object-storage workspace copy,
 // [hubs/<hub id>/]workspaces/<project id>/<this>/, written by the GCS
 // workspace sync that phase 2 of ptone/scion#5805 removes. Its only reader
-// is the one-shot project storage migration (M3, ptone/scion#5819), which
-// deletes those objects; both go in phase 6 (ptone/scion#5839).
+// is the one-shot project storage migration (ptone/scion#5819), which
+// deletes those objects; both go with ptone/scion#5839.
 const LegacyProjectWorkspaceObjectDir = "grove-workspace"
 
 // Legacy project identity markers a hub-managed project tree seeded by an

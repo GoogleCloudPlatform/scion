@@ -39,7 +39,7 @@ var errNotHubWorkspace = errors.New("project workspace is not hub-managed")
 
 // workspaceLayout builds the hub's workspace Layout from the in-memory
 // ServerConfig.WorkspaceStorageConfig (never from the file-only global
-// settings loader; design-v4 §P2):
+// settings loader):
 //
 //   - nfs: config.NFSLayout (HostBase <mount_root>/<share id>);
 //   - cloudrun-volume / gke-shared-volume: the same UUID-keyed tree under
@@ -141,7 +141,7 @@ func (s *Server) projectWorkspaceResolved(project *store.Project) (projectfs.Res
 }
 
 // projectConfigDir returns the directory holding a hub-managed project's
-// configuration (.scion) as the hub seeds it (design-v4 §P1a rule 1): on a
+// configuration (.scion) as the hub seeds it: on a
 // shared backend <ProjectRoot(uuid)>/.scion, beside workspace/ and inside
 // no Mount; on the local backend ~/.scion/projects/<slug>/.scion, which is
 // both the project root and the workspace root (unchanged).

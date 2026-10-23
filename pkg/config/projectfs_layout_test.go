@@ -105,7 +105,7 @@ func TestLoadHubSharedDirStorage(t *testing.T) {
 		assert.Equal(t, "nfs", got.Backend)
 		assert.Error(t, got.Validate())
 	})
-	// P1 security review L1 (sec-review-3, ptone/scion#5847): a legacy
+	// ptone/scion#5881: a legacy
 	// (pre-schema_version) file that mentions shared_dir_storage but from
 	// which no block loads fails closed: an error, never a nil block that
 	// the hub would read as "local".

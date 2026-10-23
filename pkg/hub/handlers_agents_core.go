@@ -2521,10 +2521,9 @@ func (s *Server) createAgentInProject(
 
 	// Hub-managed and shared-workspace projects: agents mount the project
 	// workspace the hub serves, which lives on the hub's workspace storage.
-	// A remote broker can reach it only through the same shared storage
-	// (design-v4 OQ3: the GCS upload-on-create and sync-back are gone).
-	// A remote broker without it is refused with 409 before dispatch
-	// (topology T6); clone-per-agent and empty-per-agent are unaffected.
+	// A remote broker can reach it only through the same shared storage.
+	// A remote broker without it is refused with 409 before dispatch;
+	// clone-per-agent and empty-per-agent are unaffected.
 	if mountsHubProjectWorkspace(project) && runtimeBrokerID != "" && !s.isEmbeddedBroker(runtimeBrokerID) {
 		if msg, refused := s.remoteBrokerWorkspaceRefusal(ctx, project, runtimeBrokerID); refused {
 			s.agentLifecycleLog.Warn("Remote runtime broker cannot reach the project workspace; failing agent create",

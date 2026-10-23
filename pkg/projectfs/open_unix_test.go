@@ -275,7 +275,7 @@ func TestOpenUnknownBackend(t *testing.T) {
 // TestEnsureProjectConfigDir: <ProjectRoot>/.scion on a shared backend is
 // created 02755 through the confined walk, an existing one is accepted, a
 // symlinked project root is refused, and invalid IDs and the local backend
-// are refused (ptone/scion#5813 review rev-1 #5).
+// are refused.
 func TestEnsureProjectConfigDir(t *testing.T) {
 	base := t.TempDir()
 	l := Layout{Backend: BackendNFS, HostBase: base, SubPathRoot: "projects"}

@@ -6608,7 +6608,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Ensure project-id and project-slug in every shared-backend project's
 	// configuration (<ProjectRoot>/.scion), in the background (never
-	// blocks start or readiness; design-v7 §P1a, P3b Q8).
+	// blocks start or readiness).
 	s.startProjectConfigIdentityEnsure(ctx)
 
 	// Plan the project storage migration in the background so the Files

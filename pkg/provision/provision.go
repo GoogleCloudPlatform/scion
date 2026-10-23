@@ -255,8 +255,8 @@ type ProvisionInput struct {
 	// plus the same credential helper CloneWithToken uses, and clone errors
 	// are redacted with it. The calling process's environment is not read
 	// or changed. The hub sets it when it provisions a project's shared
-	// workspace at create (design-v7, fs-cleanup-arch ruling on
-	// ptone/scion#5813 rev-1 #1); it takes precedence over CloneWithToken.
+	// workspace at create (ptone/scion#5813); it takes precedence over
+	// CloneWithToken.
 	CloneToken string
 
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).

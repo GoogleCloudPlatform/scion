@@ -115,8 +115,8 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 }
 
 // EnsureProjectConfigDir creates (or verifies) a project's configuration
-// directory on a shared backend, <ProjectRoot(projectID)>/.scion (design-v4
-// §P1a: beside workspace/, inside no Mount), through pkg/shareddirs'
+// directory on a shared backend, <ProjectRoot(projectID)>/.scion (beside
+// workspace/, inside no Mount), through pkg/shareddirs'
 // O_NOFOLLOW component walk, and returns its host path. A newly created
 // directory gets mode 2755 and no default ACL: only Scion components write
 // it. Missing intermediates are created as the brokers create them.

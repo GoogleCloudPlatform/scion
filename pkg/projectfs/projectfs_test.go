@@ -235,7 +235,7 @@ func TestBackendDurable(t *testing.T) {
 }
 
 // The platform volume backends resolve the same UUID-keyed tree as nfs
-// under their mount point (design-v4 §P1 Layout.Backend).
+// under their mount point.
 func TestResolve_VolumeBackendsUseUUIDTree(t *testing.T) {
 	for _, b := range []Backend{BackendCloudRunVolume, BackendGKESharedVolume} {
 		l := Layout{Backend: b, HostBase: "/mnt/ws", SubPathRoot: "projects"}
