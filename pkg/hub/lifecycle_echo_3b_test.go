@@ -171,3 +171,49 @@ func TestLifecycleEvents_3bSettleRefused(t *testing.T) {
 		assert.Zero(t, countOf(f.events(t), tc.TransitionConfigured))
 	})
 }
+
+// TestLifecycleEvents_3bAlreadyRunningStartSettlesWithoutEcho: a start that
+// found the agent already running reports the kept entry's run and, since
+// slice 3's r1 R1 fix (556965b), no effective-only field. Slice 3b still
+// settles the run (applied, and completed after running was observed);
+// there is no echo to write, so nothing is configured from it and nothing
+// is counted stale, and the next event naming run-b carries the adoption
+// (run-m, cas).
+func TestLifecycleEvents_3bAlreadyRunningStartSettlesWithoutEcho(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		before func(t *testing.T, f *echoReportFixture)
+		result string
+	}{
+		{"applied", func(*testing.T, *echoReportFixture) {}, store.LaunchReportResultApplied},
+		{"completed after running was observed", func(t *testing.T, f *echoReportFixture) { f.runningObserved(t) }, store.LaunchReportResultCompleted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newEchoReportFixture(t, "lc-3b-kept")
+			tt.before(t, f)
+			assert.Equal(t, tt.result, f.report(t, "run-b", true))
+			row := mustGetAgent(t, f.raw, f.agent.ID)
+			assert.Equal(t, "run-b", row.RunID, "the kept entry's run is adopted")
+			assert.Nil(t, row.EffectiveConfig, "no echo to record")
+			assertNoStaleEcho(t, f.counters)
+			assert.Zero(t, f.unsettledLines())
+
+			require.NoError(t, f.raw.UpdateAgentStatus(context.Background(), f.agent.ID,
+				store.AgentStatusUpdate{Phase: string(state.PhaseStopped), IfRunID: "run-b"}))
+			evs := f.events(t)
+			assert.Empty(t, configuredWithEcho(evs), lcSeqFull(evs))
+			assertNoEffective(t, evs)
+			var adopted *tc.LifecycleEvent
+			for _, e := range evs {
+				if e.AdoptedFromLaunchID != "" {
+					adopted = e
+					break
+				}
+			}
+			require.NotNil(t, adopted, "an event carries the adoption: %s", lcSeqFull(evs))
+			assert.Equal(t, "run-b", adopted.LaunchID)
+			assert.Equal(t, "run-m", adopted.AdoptedFromLaunchID)
+			assert.Equal(t, store.AdoptionSourceCAS, adopted.AdoptionSource)
+		})
+	}
+}
