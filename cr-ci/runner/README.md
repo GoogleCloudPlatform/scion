@@ -239,8 +239,9 @@ this, in order:
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
-Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
-**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop,
+**4** when an idle stop raced a job start, and **5** when the job guard refused the
+assigned job (above). A 4 can also be the runner's own
 code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
@@ -262,23 +263,54 @@ So job steps can read this runner's ephemeral registration, the JIT config on
 `run.sh`'s argv (`/proc/<pid>/cmdline`), and the spent claim token in
 `/proc/1/environ`. The claim token is worthless by then: single use, already
 exchanged. The JIT config lets a job act as its own runner registration until GitHub
-removes it after the job. sec-review-3 rates this **LOW**, but only because cr-ci
-serves trusted same-repo code:
+removes it after the job. sec-review-3 rates this **LOW**: the window in which untrusted
+code could run on a cr-ci runner is closed by the runner-side job-started hook ("Job
+guard", below). On top of it:
 - the routing expression's fork-PR guard routes only same-repo `push` and `pull_request`
   events and sends everything else to `ubuntu-latest` (fork PRs, `pull_request_target`,
   `workflow_run`, `merge_group`, schedule, workflow_dispatch);
-- the mediator's fork guard (`forkReason`) refuses runners to `pull_request_target` and
-  `workflow_run` runs, and to runs whose repository or head repository is not the target
-  repository (fork PRs);
+- the mediator's fork guard (`forkReason`) is an allowlist of the same two events and
+  also refuses runs whose repository or head repository is not the target repository
+  (fork PRs);
 - one job runs per runner;
 - the hijack guard and the reaper catch a runner registration that ends up running
   another job or is left behind.
 
-If untrusted code were ever routed to cr-ci, this would become Medium/High: **the fork
-guards are load-bearing**. The structural fix (a runner-only uid with job steps dropped
-to another uid, or passing the JIT config by file and deleting it once the listener has
-started) is tracked in ptone/scion#5978
+**Residual:** a compromised trusted job can still read its own runner's registration.
+The structural fix (a runner-only uid with job steps dropped to another uid, or passing
+the JIT config by file and deleting it once the listener has started) is tracked in
+ptone/scion#5978
 ([architecture](../docs/architecture.md#residual-risk-job-code-can-read-the-runners-credentials)).
+
+**Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh` and
+`CR_JOB_GUARD_MARKER`. The hook allows a job only if `GITHUB_EVENT_NAME` is `push`, or
+`pull_request` with the payload's `pull_request.head.repo.full_name` equal to
+`GITHUB_REPOSITORY`. It refuses anything else, and also a missing or unparsable payload
+(fail closed). Checked against actions/runner v2.338.0:
+- **Before any step:** Runner.Worker adds the hook to its pre-job steps ahead of
+  container setup, every action's `pre` step and all job steps, checkout included
+  (`src/Runner.Worker/JobExtension.cs` L303-312, L315, L328, L362; steps = pre-job
+  steps then job steps, L585-586). Only action downloads (no job code) happen
+  earlier (L301).
+- **Not overridable:** the worker reads the variable from its own process environment
+  (`Environment.GetEnvironmentVariable`, L304), inherited from `run.sh`. A workflow's or
+  job's `env:` only shapes step environments, and no step has run yet.
+- **A failed hook alone does not stop the job:** later steps with `if: always()`,
+  `failure()` or `!cancelled()` would still run (`src/Runner.Worker/StepsRunner.cs`
+  L200-235). So a refusal is a **hard stop**: the hook writes the marker (sanitized
+  reason, event and head repository; never a token or the JIT config), then SIGKILLs its
+  own process group. That group is run.sh's: the runner spawns its children without a
+  new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so it holds the
+  listener, the worker and the hook. The worker is still waiting for the hook to exit
+  (`JobHookProvider.RunHook` awaits it), so it cannot reach a step first.
+- **Fail closed:** if the kill does not take effect, the hook retries for 10 s and
+  exits 1, and the entrypoint's enforcer, which sees the marker, SIGKILLs run.sh's
+  group itself.
+
+The entrypoint then logs `ERROR job_guard_refused: ... (reason=... event=... head=...
+repository=...)` and exits **5**. The mediator's hijack guard deletes the registration
+when GitHub reports the job.
 
 ## Testing
 
