@@ -154,7 +154,12 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 
 	log, err := runStorageMigrate(t, f.srv, true)
 	require.NoError(t, err, log)
-	assert.Contains(t, log, "would-rename")
+	// The legacy tree holds a .scion, which never lands in the workspace, so
+	// the plan is a copy of the rest (merge), not a whole-tree rename; the
+	// configuration entries are copied to the project root first.
+	assert.Contains(t, log, "step 4-scion-seed would-copy")
+	assert.Contains(t, log, "step 1-legacy-hub-workspace would-merge")
+	assert.NotContains(t, log, "would-rename")
 	_, statErr := os.Stat(filepath.Join(share, "projects", f.project.ID))
 	assert.True(t, os.IsNotExist(statErr), "a dry run must not create the project tree")
 
@@ -172,6 +177,10 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	}
 	_, statErr = os.Stat(filepath.Join(root, "workspace/.scion"))
 	assert.True(t, os.IsNotExist(statErr), "the seed must not land in the workspace")
+	// The source is kept beside itself, its .scion included.
+	kept, err := filepath.Glob(filepath.Join(legacyHubProjects(t, share), "migrate-me.migrated-*", ".scion", "settings.yaml"))
+	require.NoError(t, err)
+	assert.Len(t, kept, 1, "the legacy tree must be kept as .migrated-<ts> with its .scion\n%s", log)
 	// The moves ran under the project's provisioning lock (the real
 	// provision.WithWorkspaceProvisionLocks): provision/ exists with the broker's
 	// leaf contract, and the lock was released.
