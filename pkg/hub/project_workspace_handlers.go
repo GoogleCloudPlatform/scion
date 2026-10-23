@@ -405,10 +405,10 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 // Errors are safe to show to clients (no filesystem paths). A storage
 // misconfiguration wraps errWorkspaceStorageUnavailable (503).
 func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Project) (projectfs.Resolved, error) {
-	// A linked project without a git remote whose workspace lives only on
-	// remote brokers (the linked non-git exception) has no workspace the hub can
-	// reach: 409, and the hub never creates its own copy.
-	if project != nil && project.GitRemote == "" && project.IsLinkedOrigin() {
+	// A project whose workspace lives on its remote brokers
+	// (workspaceOnRemoteBrokers) has no workspace the hub can reach unless the
+	// co-located broker serves it: 409, and the hub never creates its own copy.
+	if s.workspaceOnRemoteBrokers(project) {
 		embedded, err := s.hasEmbeddedProvider(ctx, project)
 		if err != nil {
 			return projectfs.Resolved{}, fmt.Errorf("failed to resolve project providers")

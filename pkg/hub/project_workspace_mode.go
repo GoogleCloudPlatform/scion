@@ -301,6 +301,18 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
 }
 
+// workspaceOnRemoteBrokers reports whether project's workspace lives on
+// its remote brokers rather than with the hub: a LINKED non-git project
+// (registered from an existing checkout) on a local-backend hub. Each remote
+// broker keeps that workspace in its own project directory, populated by the
+// CLI workspace bootstrap and `scion sync to`, so a remote broker without a
+// path for it is not refused, and the hub's Files tab answers 409 for it
+// unless the co-located broker serves it. On a shared backend the project
+// resolves to its projects/<uuid>/workspace like any other.
+func (s *Server) workspaceOnRemoteBrokers(project *store.Project) bool {
+	return project != nil && !s.workspaceBackendShared() && project.GitRemote == "" && project.IsLinkedOrigin()
+}
+
 // remoteBrokerWorkspaceRefusal decides whether a remote (non-embedded)
 // runtime broker can run an agent of a project whose agents mount the hub's
 // project workspace (mountsHubProjectWorkspace). The broker can when it has
@@ -314,17 +326,11 @@ func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *stor
 	}
 	const tail = "; use a co-located runtime broker, configure shared workspace storage (nfs) on the hub and the broker, " +
 		"or use a per-agent workspace mode (clone-per-agent)"
+	if s.workspaceOnRemoteBrokers(project) {
+		return "", false
+	}
 	if !s.workspaceBackendShared() {
-		// Carve-out: a LINKED non-git
-		// project (registered from an existing checkout) on a local-backend
-		// hub keeps its workspace on the remote broker, which populates it
-		// from the CLI workspace bootstrap and `scion sync to`; the broker
-		// uses its own project directory, and the hub's Files tab answers
-		// 409 for it. A hub-managed project, whose workspace the hub holds,
-		// is refused.
-		if project.GitRemote == "" && project.IsLinkedOrigin() {
-			return "", false
-		}
+		// A hub-managed project, whose workspace the hub holds, is refused.
 		return "this project's shared workspace lives on the hub's local disk, which a remote runtime broker cannot reach" + tail, true
 	}
 	hubBackend := s.config.WorkspaceStorageConfig.Backend

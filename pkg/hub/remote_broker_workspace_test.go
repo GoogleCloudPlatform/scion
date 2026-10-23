@@ -326,3 +326,34 @@ func TestProjectOriginLabel_ServerOwned(t *testing.T) {
 		assert.False(t, clone.IsLinkedOrigin(), "a clone is hub-managed")
 	}
 }
+
+// TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_SharedBackendServesUUIDTree:
+// on a shared backend a linked non-git project served only by remote
+// brokers runs its agents on projects/<uuid>/workspace, so the Files tab
+// serves that tree (PUT writes there, GET lists it) instead of answering
+// 409, and a remote broker on the same storage is not refused.
+func TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_SharedBackendServesUUIDTree(t *testing.T) {
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
+	srv, s, project, _ := setupRemoteBrokerWorkspaceServer(t)
+	markLinkedOrigin(t, s, project)
+	mountRoot := t.TempDir()
+	shareBase := filepath.Join(mountRoot, "share1")
+	require.NoError(t, os.MkdirAll(shareBase, 0o755))
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	stored, err := s.GetProject(context.Background(), project.ID)
+	require.NoError(t, err)
+	require.True(t, stored.IsLinkedOrigin(), "fixture check")
+	assert.False(t, srv.workspaceOnRemoteBrokers(stored), "on a shared backend the workspace is the uuid tree")
+
+	url := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+	rec := doRequest(t, srv, http.MethodPut, url+"/a.txt", ProjectWorkspaceWriteRequest{Content: "a"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(shareBase, "projects", project.ID, "workspace", "a.txt"))
+	require.NoError(t, err, "PUT writes into projects/<uuid>/workspace")
+	assert.Equal(t, "a", string(got))
+
+	rec = doRequest(t, srv, http.MethodGet, url, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"a.txt"`, "GET lists the uuid tree")
+}
