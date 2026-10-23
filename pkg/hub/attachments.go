@@ -53,6 +53,10 @@ type AttachmentRef struct {
 	// service (ptone/scion#4595) rather than in the AttachmentStore. It is
 	// set by send validation only and never serialized.
 	artifact bool
+	// sha256 is the hex digest of an artifact attachment's file, set with
+	// artifact by newArtifactAttachmentRef, for delivery into an agent's
+	// home. Never serialized.
+	sha256 string
 }
 
 // AttachmentStore abstracts file storage for chat attachments.

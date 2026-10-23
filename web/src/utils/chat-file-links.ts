@@ -812,11 +812,11 @@ export function isLikelyBinaryFileName(name: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Matches a `gs://bucket/object` reference in HTML-escaped text. The
- * character class deliberately excludes `& < > " '` and whitespace, `#` and
- * `?`, so a hostile object name can never inject an attribute or break out
- * of the link text; the builder ({@link buildGcsLinkHtml}) escapes anyway as
- * defense in depth.
+ * Matches a `gs://bucket/object` reference in message text (a rendered
+ * message's text nodes). The character class deliberately excludes
+ * `& < > " '` and whitespace, `#` and `?`; the builder
+ * ({@link buildGcsLinkElement}) sets values through the DOM, never as
+ * markup.
  *
  * NO LOOKBEHIND (hard rule): the left boundary is captured as group 1
  * (`^` or a char that is not a word char or `/`) and the caller re-emits it
@@ -897,27 +897,17 @@ const GCS_ASCII_WHITESPACE = /[ \t\n\r\f\v]/;
  * same as right after the raw run: trimmed trailing punctuation sits
  * between the two, and must be checked here first, not skipped over.
  *
- * `following` is HTML-escaped, so a raw `&` is the 5-character literal
- * `&amp;`, not a bare `&` — checked as that exact prefix, not just "starts
- * with `&`", so this does not misfire on `&lt;`, `&gt;`, `&quot;` or
- * `&#39;`, which start with `&` too but represent `< > " '`, none of which
- * this rule cares about. The server has no such concern: it reads the raw,
- * unescaped body, where `#`, `?` and `&` are always exactly one byte. There
+ * `following` is text, not HTML: the link pass runs over the text nodes of
+ * the rendered message, so `#`, `?` and `&` are each one character, as in
+ * the raw body the server reads. There
  * is no client-side equivalent of the server's `\` (markdown-escape) void
  * rule: by the time raw text reaches the client it has already been
  * rendered, so a markdown escape sequence like `\_` is already resolved
  * into its literal character and never appears here as a backslash.
  */
 function gcsObjectHasFragmentContinuation(following: string): boolean {
-  let markerLength: number;
-  if (following.startsWith('&amp;')) {
-    markerLength = '&amp;'.length;
-  } else if (following[0] === '#' || following[0] === '?') {
-    markerLength = 1;
-  } else {
-    return false;
-  }
-  const afterMarker = following[markerLength];
+  if (following[0] !== '#' && following[0] !== '?' && following[0] !== '&') return false;
+  const afterMarker = following[1];
   return afterMarker !== undefined && !GCS_ASCII_WHITESPACE.test(afterMarker);
 }
 
@@ -964,25 +954,21 @@ export function parseGcsUri(uri: string): GcsUriParts | null {
   return { bucket: match[1], object: match[2] };
 }
 
-/** Escapes `& < > " '` for safe interpolation into an HTML attribute value. */
-export function escAttr(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 /**
- * Build the `<a class="entity-link gcs-link">` markup for a matched gs://
+ * Build the `<a class="entity-link gcs-link">` element for a matched gs://
  * URI. Names are literal, with no percent-decoding — what's in the message
- * is exactly what `data-gcs-uri` carries.
+ * is exactly what `data-gcs-uri` carries. Built through the DOM, so no
+ * value is ever parsed as markup.
  */
-export function buildGcsLinkHtml(bucket: string, object: string): string {
+export function buildGcsLinkElement(bucket: string, object: string): HTMLAnchorElement {
   const uri = `gs://${bucket}/${object}`;
-  const escaped = escAttr(uri);
-  return `<a class="entity-link gcs-link" data-gcs-uri="${escaped}" href="javascript:void(0)" title="Open ${escaped}">${uri}</a>`;
+  const a = document.createElement('a');
+  a.setAttribute('class', 'entity-link gcs-link');
+  a.setAttribute('data-gcs-uri', uri);
+  a.setAttribute('href', 'javascript:void(0)');
+  a.setAttribute('title', `Open ${uri}`);
+  a.textContent = uri;
+  return a;
 }
 
 /**
@@ -1166,17 +1152,22 @@ export function parseArtifactRef(ref: string): ArtifactRefTarget | null {
 }
 
 /**
- * Build the `<a class="entity-link artifact-link">` markup for a matched
+ * Build the `<a class="entity-link artifact-link">` element for a matched
  * artifact reference. The text stays exactly as written; the data
- * attributes carry the parsed id and seq the click handler opens. The
- * markup is constant apart from the escaped text and the id and seq the
- * pattern validated, and carries no script-bearing attribute: href is "#"
+ * attributes carry the parsed id and seq the click handler opens. Built
+ * through the DOM, and carries no script-bearing attribute: href is "#"
  * and the click handler opens the preview.
  */
-export function buildArtifactLinkHtml(text: string, target: ArtifactRefTarget): string {
-  // `@` is written as an entity so the later @mention pass, which scans the
-  // whole HTML string, never restyles a version suffix (`@2`) as a mention.
-  const escaped = escAttr(text).replace(/@/g, '&#64;');
-  const seqAttr = target.seq > 0 ? ` data-artifact-seq="${target.seq}"` : '';
-  return `<a class="entity-link artifact-link" data-artifact-id="${escAttr(target.id)}"${seqAttr} href="#" title="Open artifact">${escaped}</a>`;
+export function buildArtifactLinkElement(
+  text: string,
+  target: ArtifactRefTarget
+): HTMLAnchorElement {
+  const a = document.createElement('a');
+  a.setAttribute('class', 'entity-link artifact-link');
+  a.setAttribute('data-artifact-id', target.id);
+  if (target.seq > 0) a.setAttribute('data-artifact-seq', String(target.seq));
+  a.setAttribute('href', '#');
+  a.setAttribute('title', 'Open artifact');
+  a.textContent = text;
+  return a;
 }

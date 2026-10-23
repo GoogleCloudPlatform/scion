@@ -146,7 +146,9 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		// CSV file upload — reuse the parseCSVEmails helper from admin_allow_list.go
-		if err := r.ParseMultipartForm(2 << 20); err != nil { // 2MB max
+		cleanup, err := parseMultipartUpload(r, 2<<20) // 2MB in memory
+		defer cleanup()
+		if err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to parse multipart form", nil)
 			return
 		}

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -131,4 +132,56 @@ func TestContention_HubSettingCreateOnly(t *testing.T) {
 // (handles wrapped errors).
 func isRevisionConflict(err error) bool {
 	return errors.Is(err, store.ErrRevisionConflict)
+}
+
+// TestContention_HubSettingsRevision races N goroutines writing operational
+// sections (several per section, unconditional upserts) on Postgres, where
+// the revision row is upserted under its row lock after the section row
+// lock. Every write must get a distinct operational-settings revision, the
+// revision must count every write, and no writer may deadlock or fail
+// (ptone/scion#4457).
+func TestContention_HubSettingsRevision(t *testing.T) {
+	cs := newStore(t)
+	ctx := context.Background()
+	n := concurrency(t)
+
+	sections := []string{"access", "lifecycle", "maintenance", "quotas"}
+	// Create the rows first: concurrent creates of one section race on the
+	// unique index, which is the create-only contention test's subject.
+	for _, sec := range sections {
+		_, err := cs.UpsertHubSetting(ctx, sec, json.RawMessage(`{}`), "setup", 0, "seeded")
+		require.NoError(t, err)
+	}
+	base := int64(len(sections))
+	var (
+		mu   sync.Mutex
+		revs = map[int64]bool{}
+	)
+	errs := make(chan error, n)
+	runConcurrently(n, func(i int) {
+		sec := sections[i%len(sections)]
+		got, err := cs.UpsertHubSetting(ctx, sec, json.RawMessage(`{}`), fmt.Sprintf("writer-%d", i), -1, "seeded")
+		if err != nil {
+			errs <- err
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if revs[got.SettingsRevision] {
+			errs <- fmt.Errorf("revision %d returned twice", got.SettingsRevision)
+		}
+		revs[got.SettingsRevision] = true
+	})
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err, "unexpected error during settings-revision contention")
+	}
+
+	assert.Len(t, revs, n)
+	row, err := cs.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, base+int64(n), row.Revision, "the revision counts every operational write")
+	for r := base + 1; r <= base+int64(n); r++ {
+		assert.True(t, revs[r], "revision %d missing", r)
+	}
 }

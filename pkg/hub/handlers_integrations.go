@@ -127,9 +127,14 @@ type IntegrationStatus struct {
 }
 
 // IntegrationConfigUpdateRequest is the request body for the PUT config endpoint.
+//
+// Settings is merged key by key into the stored config: a key the body
+// omits keeps its stored value, a key with a string value (including "")
+// replaces it, and a key sent as JSON null is deleted from the stored
+// config, so the plugin's own default applies again (ptone/scion#3913).
 type IntegrationConfigUpdateRequest struct {
-	Settings map[string]string `json:"settings"`
-	Secrets  map[string]string `json:"secrets"`
+	Settings map[string]*string `json:"settings"`
+	Secrets  map[string]string  `json:"secrets"`
 }
 
 // AvailableIntegration represents a plugin that could be installed.
@@ -593,14 +598,24 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			InternalError(w)
 			return
 		}
+		// A stored Postgres row whose config is JSON null loads as a nil
+		// map; start from an empty map so the merge below cannot panic.
+		if existing == nil {
+			existing = make(map[string]string)
+		}
 
 		// Merge new settings into existing, filtering out any secret keys.
+		// A null value deletes the stored key.
 		secretKeys := allSecretConfigKeys(name)
 		for k, v := range req.Settings {
 			if secretKeys[k] {
 				continue
 			}
-			existing[k] = v
+			if v == nil {
+				delete(existing, k)
+				continue
+			}
+			existing[k] = *v
 		}
 
 		if err := provider.Save(ctx, existing); err != nil {

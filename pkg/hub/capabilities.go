@@ -445,8 +445,8 @@ func delegatedCapabilities(ctx context.Context, resource Resource) *Capabilities
 	if !ok || action == ActionAttach {
 		return none
 	}
-	route, ok := agentSubRouteFromContext(ctx)
-	if !ok || resource.Type != "agent" || resource.ID == "" || resource.ID != route.AgentID {
+	target, ok := delegatedTargetFromContext(ctx)
+	if !ok || resource.Type != target.Type || resource.ID == "" || resource.ID != target.ID {
 		return none
 	}
 	return &Capabilities{Actions: []string{string(action)}}
