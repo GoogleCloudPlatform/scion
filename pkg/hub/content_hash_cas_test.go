@@ -193,35 +193,57 @@ func TestTemplateFinalize_V1RowStrictCompare(t *testing.T) {
 }
 
 // A harness-config commit is a compare-and-swap against the row as read. A
-// rename-only commit changes the v2 content hash, so a writer that read the
-// row before it (here recommitting the files it read) is refused instead of
-// reverting the rename (ptone/scion#5658).
-func TestHarnessConfigCommit_StaleReadOverRenameConflicts(t *testing.T) {
-	srv, s, _ := newHCCommitTestServer(t)
-	ctx := context.Background()
-	hc := ensureDeriveHC(t, srv, s)
+// rename-only or chmod-only commit changes the v2 content hash, so a writer
+// that read the row before it (here recommitting the files it read) is
+// refused instead of reverting the change (ptone/scion#5658).
+func TestHarnessConfigCommit_StaleReadOverRenameOrChmodConflicts(t *testing.T) {
+	base := map[string]string{"config.yaml": deriveBareYAML, "run.sh": casScript}
+	cases := []struct {
+		name  string
+		files map[string]string
+		modes map[string]string // manifest modes, by path
+	}{
+		{"rename only", map[string]string{"config.yaml": deriveBareYAML, "bin/run.sh": casScript}, nil},
+		{"chmod only", base, map[string]string{"run.sh": "0755"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _ := newHCCommitTestServer(t)
+			ctx := context.Background()
+			hc := ensureDeriveHC(t, srv, s)
 
-	rec := finalizeHCManifest(t, srv, hc, map[string]string{"config.yaml": deriveBareYAML, "run.sh": casScript})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seed finalize: status %d: %s", rec.Code, rec.Body.String())
-	}
-	stale := *globalHC(t, s, deriveHCName)
+			rec := finalizeHCManifest(t, srv, hc, base)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("seed finalize: status %d: %s", rec.Code, rec.Body.String())
+			}
+			stale := *globalHC(t, s, deriveHCName)
 
-	rec = finalizeHCManifest(t, srv, &stale, map[string]string{"config.yaml": deriveBareYAML, "bin/run.sh": casScript})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("rename finalize: status %d: %s", rec.Code, rec.Body.String())
-	}
-	renamed := globalHC(t, s, deriveHCName)
-	if renamed.ContentHash == stale.ContentHash {
-		t.Fatalf("rename-only commit kept content hash %q", stale.ContentHash)
-	}
+			uploadID, manifest := stageHCUpload(t, srv, &stale, tc.files)
+			for _, f := range manifest {
+				if mode, ok := tc.modes[f["path"].(string)]; ok {
+					f["mode"] = mode
+				}
+			}
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+stale.ID+"/finalize", map[string]interface{}{
+				"manifest": map[string]interface{}{"version": "1.0", "files": manifest},
+				"uploadId": uploadID,
+			})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s finalize: status %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+			changed := globalHC(t, s, deriveHCName)
+			if changed.ContentHash == stale.ContentHash {
+				t.Fatalf("%s commit kept content hash %q", tc.name, stale.ContentHash)
+			}
 
-	err := srv.commitHarnessConfigFiles(ctx, &stale, stale.Files, harnessConfigCommitOpts{})
-	if !errors.Is(err, store.ErrHarnessConfigConflict) {
-		t.Fatalf("stale commit over a rename: err = %v, want ErrHarnessConfigConflict", err)
-	}
-	got := globalHC(t, s, deriveHCName)
-	if got.ContentHash != renamed.ContentHash || !reflect.DeepEqual(got.Files, renamed.Files) {
-		t.Errorf("stale commit changed the row: hash %q files %+v, want %q %+v", got.ContentHash, got.Files, renamed.ContentHash, renamed.Files)
+			err := srv.commitHarnessConfigFiles(ctx, &stale, stale.Files, harnessConfigCommitOpts{})
+			if !errors.Is(err, store.ErrHarnessConfigConflict) {
+				t.Fatalf("stale commit over a %s change: err = %v, want ErrHarnessConfigConflict", tc.name, err)
+			}
+			got := globalHC(t, s, deriveHCName)
+			if got.ContentHash != changed.ContentHash || !reflect.DeepEqual(got.Files, changed.Files) {
+				t.Errorf("stale commit changed the row: hash %q files %+v, want %q %+v", got.ContentHash, got.Files, changed.ContentHash, changed.Files)
+			}
+		})
 	}
 }
