@@ -181,6 +181,78 @@ describe('ChatStarsController', () => {
     expect(c.state(M1)).toBe('starred');
     expect(c.state(M2)).toBe('unstarred');
   });
+
+  it('keeps a confirmed PUT when an older refresh answers after it', async () => {
+    const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
+    const fetchState = vi.fn(() => {
+      const d = deferred<string[]>();
+      gates.push(d);
+      return d.promise;
+    });
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    const load = c.load([M1]);
+    gates[0].resolve([]);
+    await load;
+    expect(c.state(M1)).toBe('unstarred');
+
+    // A refresh reads the state, then the user stars M1 and the PUT is
+    // confirmed before the (now stale) refresh answer arrives.
+    const refresh = c.invalidate();
+    expect(gates.length).toBe(2);
+    await c.setStarred(M1, 't1', true);
+    expect(c.state(M1)).toBe('starred');
+    gates[1].resolve([]);
+    await refresh;
+    expect(c.state(M1)).toBe('starred');
+  });
+
+  it('does not let a refresh answer replace a pending mutation', async () => {
+    const put = deferred<string>();
+    const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
+    const fetchState = vi.fn(() => {
+      const d = deferred<string[]>();
+      gates.push(d);
+      return d.promise;
+    });
+    const c = new ChatStarsController(
+      fakeApi({ fetchStarState: fetchState, putStar: vi.fn(() => put.promise) })
+    );
+    c.setConversation('t1');
+    const load = c.load([M1]);
+    gates[0].resolve([]);
+    await load;
+
+    const starring = c.setStarred(M1, 't1', true);
+    const refresh = c.invalidate();
+    gates[1].resolve([]);
+    await refresh;
+    put.resolve('2026-10-22T10:00:00Z');
+    await starring;
+    expect(c.state(M1)).toBe('starred');
+  });
+
+  it('refetches the IDs of a load that was in flight during an invalidation', async () => {
+    const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
+    const fetchState = vi.fn(() => {
+      const d = deferred<string[]>();
+      gates.push(d);
+      return d.promise;
+    });
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    const load = c.load([M1]);
+    expect(gates.length).toBe(1);
+    // Another tab stars M1 while the load runs; the load read older data.
+    await c.invalidate();
+    gates[0].resolve([]);
+    await vi.waitFor(() => expect(gates.length).toBe(2));
+    expect(c.state(M1)).toBe('unknown');
+    expect(fetchState.mock.calls[1][0]).toEqual([M1]);
+    gates[1].resolve([M1]);
+    await load;
+    expect(c.state(M1)).toBe('starred');
+  });
 });
 
 describe('star API helpers', () => {

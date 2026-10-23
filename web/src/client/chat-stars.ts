@@ -187,7 +187,12 @@ const MAX_TRACKED = 2000;
  *   message, optimistic with a pending flag; a failure restores the prior
  *   state and rethrows.
  * - `invalidate()` (an SSE invalidation, a reconnect) refetches every
- *   known ID; an invalidation during a fetch refetches once afterwards.
+ *   known ID. Any state request in flight when an invalidation arrives
+ *   (a refresh or a `load`) may have read older data: its answer is not
+ *   applied, and its IDs are refetched once afterwards.
+ * - A state answer never replaces a local mutation: IDs with a mutation
+ *   pending, or started or confirmed after the request began, keep the
+ *   mutation's result.
  * - A generation counter drops responses for a previous conversation.
  *
  * Events: `change` whenever a state or pending flag changes;
@@ -201,6 +206,16 @@ export class ChatStarsController extends EventTarget {
   private readonly pending = new Map<string, boolean>();
   private refreshing = false;
   private refreshAgain = false;
+  /** Bumped by every invalidation; a request that saw a bump is stale. */
+  private invalidations = 0;
+  /** IDs whose state answer was stale, refetched by the next refresh. */
+  private readonly stale = new Set<string>();
+  /** Bumped when a local mutation starts and when it is confirmed. */
+  private mutationSeq = 0;
+  /** The last `mutationSeq` of each locally mutated message. */
+  private readonly mutatedAt = new Map<string, number>();
+  /** State requests in flight; `mutatedAt` is only needed while > 0. */
+  private inflight = 0;
 
   constructor(private readonly api: StarsApi = defaultApi) {
     super();
@@ -218,6 +233,8 @@ export class ChatStarsController extends EventTarget {
     this.generation++;
     this.states.clear();
     this.pending.clear();
+    this.stale.clear();
+    this.mutatedAt.clear();
     this.refreshAgain = false;
     this.emit('change');
   }
@@ -247,7 +264,12 @@ export class ChatStarsController extends EventTarget {
    * while a refresh runs coalesce into one more refresh afterwards.
    */
   async invalidate(): Promise<void> {
+    this.invalidations++;
     this.emit('collection-changed');
+    await this.refresh();
+  }
+
+  private async refresh(): Promise<void> {
     if (this.refreshing) {
       this.refreshAgain = true;
       return;
@@ -256,8 +278,10 @@ export class ChatStarsController extends EventTarget {
     try {
       do {
         this.refreshAgain = false;
-        await this.fetchStates([...this.states.keys()]);
-      } while (this.refreshAgain);
+        const ids = new Set([...this.states.keys(), ...this.stale]);
+        this.stale.clear();
+        await this.fetchStates([...ids]);
+      } while (this.refreshAgain || this.stale.size > 0);
     } finally {
       this.refreshing = false;
     }
@@ -272,6 +296,7 @@ export class ChatStarsController extends EventTarget {
     if (this.pending.has(messageId)) return;
     const generation = this.generation;
     this.pending.set(messageId, starred);
+    this.markMutated(messageId);
     this.emit('change');
     try {
       if (starred) {
@@ -279,7 +304,10 @@ export class ChatStarsController extends EventTarget {
       } else {
         await this.api.deleteStar(messageId);
       }
-      if (generation === this.generation) this.track(messageId, starred);
+      if (generation === this.generation) {
+        this.markMutated(messageId);
+        this.track(messageId, starred);
+      }
     } finally {
       if (generation === this.generation) {
         this.pending.delete(messageId);
@@ -297,18 +325,40 @@ export class ChatStarsController extends EventTarget {
     const generation = this.generation;
     for (let i = 0; i < ids.length; i += STAR_STATE_BATCH) {
       const batch = ids.slice(i, i + STAR_STATE_BATCH);
+      const invalidations = this.invalidations;
+      const mutationSeq = this.mutationSeq;
       let starred: string[];
+      this.inflight++;
       try {
         starred = await this.api.fetchStarState(batch);
       } catch {
         // Unknown stays unknown: never infer unstarred from a failure.
         return;
+      } finally {
+        this.inflight--;
       }
       if (generation !== this.generation) return;
+      if (invalidations !== this.invalidations) {
+        // An invalidation arrived while this request ran: its answer may
+        // predate the change, so refetch these IDs instead of applying it.
+        for (const id of batch) this.stale.add(id);
+        continue;
+      }
       const set = new Set(starred);
-      for (const id of batch) this.track(id, set.has(id));
+      for (const id of batch) {
+        if (this.pending.has(id) || (this.mutatedAt.get(id) ?? 0) > mutationSeq) continue;
+        this.track(id, set.has(id));
+      }
+      if (this.inflight === 0) this.mutatedAt.clear();
       this.emit('change');
     }
+    // A `load` that came back stale outside a refresh starts one; inside a
+    // refresh, its loop picks the stale IDs up.
+    if (this.stale.size > 0 && !this.refreshing) await this.refresh();
+  }
+
+  private markMutated(messageId: string): void {
+    this.mutatedAt.set(messageId, ++this.mutationSeq);
   }
 
   private track(messageId: string, starred: boolean): void {
