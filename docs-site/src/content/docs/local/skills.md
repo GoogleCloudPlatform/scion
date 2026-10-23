@@ -393,12 +393,12 @@ In addition to managing injected skills via the CLI, the Scion Web Dashboard all
 6. Scion adds all checked skills as individual URI references in a single atomic update.
 
 :::note[Security & Privacy]
-Before performing discovery or logging requests, Scion's API automatically strips any embedded userinfo or credentials from the URL, preventing sensitive tokens or usernames from appearing in system logs.
+Before performing discovery or logging requests (`POST /api/v1/skills/discover-directory`), Scion's API strips embedded userinfo, fragments, and all query parameters except `?token=<SECRET_NAME>` (where `<SECRET_NAME>` matches `[A-Z][A-Z0-9_]*`), preventing sensitive tokens, query strings, or usernames from appearing in candidate URIs or system logs.
 :::
 
 ## Platform skills
 
-Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
+Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent (including `scion-web-serving` and its `references/web-apps.md`, which the agent instructions preamble points to for serving web apps and files over port forwarding). They provide baseline capabilities without any Hub or template setup.
 
 Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
 

@@ -17,7 +17,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
 | **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/hub-credentials/<name>.json` |
-| **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
+| **Development** | Loopback Hub only | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
 
@@ -92,6 +92,10 @@ In production mode, Scion mandates the use of TLS for all network traffic.
 - **CLI/Agents**: Use standard `Authorization` headers.
 - **Browser/Web**: Since browser WebSocket APIs cannot set custom headers, Scion uses a **Ticket-Based Authentication** system. The client requests a short-lived, single-use ticket via a POST request (authenticated by cookie) and provides it in the WebSocket query string (`?ticket=...`).
 
+### 2.3 Hub Credential Origin Binding
+
+`apiclient` and `transportauth` attach Hub credentials (`Authorization`, `X-Scion-*` headers, and transport auth such as Cloud Run ID tokens) only to requests matching the configured Hub origin (scheme, lowercase host, and effective port) and strip them when an HTTP redirect crosses to any other origin.
+
 ## 3. Authorization and Access Control
 
 ### 3.1 Domain Authorization
@@ -138,7 +142,7 @@ To guarantee that no API endpoints or handlers can be accessed without explicit 
   - **Harness config routes** grant Runtime Brokers read-only access.
   - **Project GitHub settings** require read access on the project for `GET`, and update access for any other method.
 - **Scope Boundary on Resource Reads**: User- and project-scoped skills, templates, and harness configs can be read only by their owner, members of the owning project, and Hub admins. Hub-wide member and viewer grants apply only to hub- and global-scoped records; they do not open up another user's or project's resources. The same scope check applies when a template is resolved at agent creation and when a template is cloned. There is no separate `visibility` setting on these resources, so access depends only on scope and grants.
-- **Project Agent Routes**: Project-scoped agent list, get, and update, and the resume and restart path, authorize each caller individually. Agent responses omit the environment in the agent's applied config unless the caller can attach to the agent, and `GITHUB_TOKEN` is never returned.
+- **Project Agent Routes**: Project-scoped agent list, get, and update, and the resume and restart path, authorize each caller individually. Unless the caller holds `agent.attach` on the agent, agent responses replace values with `REDACTED` (while keeping keys) in `appliedConfig.env`, `createInputs.env`, `appliedConfig.inlineConfig.mcp_servers[*].env`, `appliedConfig.inlineConfig.mcp_servers[*].headers`, `appliedConfig.inlineConfig.services[*].env`, and the corresponding maps under `createInputs.inlineConfig`; `GITHUB_TOKEN` is never returned.
 - **Chat Search Visibility**: Chat search returns DM threads only to their participants.
 - **Project Authority From Role Bindings Only**: A project's `ownerId` field grants no access. Project authority, including project stop-all, comes only from project-scoped role bindings, so a removed creator whose only claim is `ownerId` is denied. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles-and-bindings).
 - **Sandboxed Port-Forward Responses**: Responses proxied from an agent's exposed port always carry the Hub's sandbox `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, and the agent's `Set-Cookie`, CSP, and CORS headers are never relayed onto the Hub origin. See [Port Forwarding](/scion/hosted/user/port-forwarding/).
@@ -167,7 +171,7 @@ The Hub's project file handlers serve project workspaces and shared directories.
 - **Untrusted content isolation**: Workspace and shared-directory files are written by users and agents, not by the Hub. Responses that serve them, including `?view=true` previews and chat attachments, carry a `Content-Security-Policy: sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads` header and `X-Content-Type-Options: nosniff`. The sandbox omits `allow-same-origin`, so a sandboxed document gets an opaque origin: `allow-scripts` lets its scripts run, so generated HTML reports keep working in the file browser's preview, but it cannot act with the viewer's Hub session.
 - **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
 
-### 3.6 Workspace Host-Path Validation
+### 3.6 Workspace Host-Path Validation and Agent Home Confinement
 
 Before a Runtime Broker bind-mounts, syncs (for example, to GCS), uploads, or recursively `chown`s a workspace or agent-home host path, it resolves the path through any symlinks and validates the result. The check runs on every runtime and fails closed: a path that cannot be resolved, including when the home directory cannot be determined, is refused. The Runtime Broker then acts on the resolved path, not the original one. The following are always refused:
 
@@ -177,6 +181,9 @@ Before a Runtime Broker bind-mounts, syncs (for example, to GCS), uploads, or re
 - The scion home (`~/.scion`) or any ancestor of it, and anything under `~/.scion` except the subtrees that legitimately hold workspaces and agent homes, such as Hub-managed project workspaces under `~/.scion/projects/<slug>`.
 
 Where the broker knows the project's root, the resolved path must also fall under it, so a symlink inside a project that points elsewhere is judged by where it leads.
+
+- **Workspace mount derivation and `.scion` protection**: The Runtime Broker determines whether a workspace is the agent's own checkout (`<agent-dir>/workspace` or a verified linked worktree recorded under the agent's broker-owned state directory), derives container mounts only from broker-known paths using bounded git probes (`GIT_CEILING_DIRECTORIES`, ignoring global and system git config) only to verify them, and refuses a git common directory outside the project or a timed-out git probe. In shared workspaces, `.scion` is mounted read-only (on the Apple `container` runtime, which cannot bind-mount a single file, a `.scion` marker file that would be shared is refused at start), `.scion/agents` is always created and masked with an empty directory on Docker and Podman whenever `.scion` is a directory, and a hub-managed workspace root with no `.scion` entry skips the project settings and harness-config file tier rather than creating one.
+- **Agent home confinement (`pkg/agenthome`)**: On the Runtime Broker start path, writes and removals under an agent's home directory (`resetStagedProvisioning`, `restoreControlPlaneInputs`, `restoreSecretsRecord`, container-script staging, `writeAgentTokenFile`, `agent-info.json` mirror writes, and `scion-agent.json` reads and writes when the home is the agent directory) resolve relative to an open directory handle on the agent home, using `O_NOFOLLOW` on each directory component, atomic temporary-file renames over leaf files so symlinks at the leaf are replaced and never written through, and recursive removals that never descend through symlinks.
 
 ## 4. Secret Management
 
@@ -267,13 +274,16 @@ The following broker-related secrets are stored in the Hub database and are not 
 
 These are infrastructure-level secrets established during broker registration and are managed by the broker authentication subsystem rather than the user-facing secrets API.
 
-### 4.8 Credential Redaction in Logs
+### 4.8 Credential Redaction in Logs and URLs
 
 The Hub masks the password in its database connection string (DSN) before writing it to logs or stdout. This covers Hub startup and the `scion server recover-authz` and `scion server migrate-storage` commands. Both URL-style (`postgres://user:pw@host/db`) and libpq keyword/value DSNs (`password=...`) are masked, including Cloud SQL Unix-socket hosts and credentials passed as query parameters (`?password=`, `sslpassword=`). A non-SQLite DSN that cannot be parsed is replaced with a placeholder rather than logged. SQLite paths carry no credential and are logged unchanged.
+
+URL user-info redaction (`pkg/util/urlredact`) is shared across CLI output, API client errors, log text (`SanitizeText`), Hub endpoint strings, git clone URLs, template update URLs, artifact remote fetches, and tunnel endpoints. Skills directory discovery (`POST /api/v1/skills/discover-directory`) passes through only the `?token=<SECRET_NAME>` query parameter (`[A-Z][A-Z0-9_]*`) and strips all other query parameters and fragments before normalizing or logging candidate URIs.
 
 ## 5. Development Security
 
 To facilitate local development, Scion provides a **Development Authentication** mode.
-- **Developer Token**: A persistent token starting with `scion_dev_` stored in `~/.scion/dev-token`.
+- **Developer Token**: A persistent token starting with `scion_dev_` stored in `~/.scion/dev-token` (or provided via `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`).
+- **Loopback-Only Client Rule**: The CLI sends development credentials only to loopback Hub endpoints (`localhost`, `127.0.0.1`, `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
 - **Constraints & Safeguards**: Dev mode is disabled by default. Startup validation strictly prohibits binding the `devAuthMiddleware` to non-loopback interfaces (e.g., `0.0.0.0`). Because this middleware automatically logs in every cookieless request as an admin, refusing it on public interfaces prevents the accidental exposure of an unauthenticated admin UI.
 - **Warning**: The server logs clear warnings when operating in Dev Mode.
