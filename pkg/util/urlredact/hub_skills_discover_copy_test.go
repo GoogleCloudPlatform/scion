@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
 
@@ -66,6 +67,9 @@ func hubSkillsDiscoverBase(sourceURL string) (out string) {
 	//     mid-path and make every child unnormalizable. It is re-attached per
 	//     skill below. It is also irrelevant to the fetch itself, which
 	//     authenticates from project credentials, so the fetch gets the bare URL.
+	//     Only the supported query parameter (token) is kept; every other
+	//     parameter is dropped here, so nothing else the caller put in the
+	//     query is copied onto the returned URIs.
 	//   - Drop any #fragment, for the same concatenation reason: ".../skills#notes"
 	//     would yield child URLs like ".../skills#notes/alpha-skill".
 	//   - Drop any userinfo. "https://x-access-token:SECRET@github.com/..." parses
@@ -73,13 +77,30 @@ func hubSkillsDiscoverBase(sourceURL string) (out string) {
 	//     "no skills found at <base>" message — so leaving it in would write a
 	//     pasted credential to the hub log and hand it back to the client.
 	//     Discovery authenticates from project credentials, never from the URL.
+	tokenName, hasToken := api.SkillURITokenParam(u.RawQuery)
+	if hasToken && !api.IsValidSkillTokenSecretName(tokenName) {
+		// Input hygiene, not the redaction boundary: a secret name and a pasted
+		// secret cannot be told apart from the string, so this check only
+		// rejects values that cannot be a secret name. The value is never
+		// echoed. What keeps the query out of the logs is the per-skill
+		// handling below, which must not be relaxed on the strength of this
+		// check.
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"the token query parameter in sourceUrl must name a secret "+
+				"(uppercase letters, digits and underscores, starting with a letter)", nil)
+		return
+	}
 	tokenSuffix := ""
-	if u.RawQuery != "" {
-		tokenSuffix = "?" + u.RawQuery
+	if hasToken {
+		tokenSuffix = "?token=" + tokenName
 	}
 	u.Host = "github.com"
 	u.User = nil
 	u.RawQuery = ""
+	// A bare trailing '?' (".../skills?" or ".../skills?#notes") parses with an
+	// empty RawQuery but ForceQuery set, and u.String() would still write the
+	// '?': base and every child URL would carry it.
+	u.ForceQuery = false
 	u.Fragment = ""
 	base := u.String()
 	_ = tokenSuffix

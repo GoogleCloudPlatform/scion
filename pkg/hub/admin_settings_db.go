@@ -384,6 +384,12 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
 		resp.Federation = v1Server.Federation
 	}
+	// server.federation reports the same value, the one in effect, never
+	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
+	// the check keeps this line safe if that changes.
+	if resp.Server != nil {
+		resp.Server.Federation = resp.Federation
+	}
 
 	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
 	// values. An empty map (len 0, non-nil) from the snapshot is intentional
@@ -1065,6 +1071,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
+	if rejectNullFederation(w, rawBody) {
 		return
 	}
 
@@ -3146,6 +3155,8 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
+
+	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey
