@@ -157,8 +157,10 @@ runs:
         fi
         touch "$RUNNER_TEMP/go-cache-restored.stamp"
 
-    # cr-ci runner only (runner.environment is 'self-hosted' there and
-    # 'github-hosted' everywhere else, so this step never runs upstream).
+    # cr-ci runner only: it is self-hosted and its runners are named
+    # cr-job-<job id> (the mediator registers them so). runner.environment is
+    # 'github-hosted' everywhere else, so this step never runs upstream, and
+    # other self-hosted runners skip it.
     # actions/cache stores paths relative to GITHUB_WORKSPACE, so entries
     # restore to the same place on ubuntu-latest and on the cr-ci runner
     # only if the work folder and HOME match: the runner entrypoint links
@@ -167,7 +169,7 @@ runs:
     # caches (twice the Actions cache quota), so fail the job instead
     # (cr-ci/workflows/README.md, "Cache sharing").
     - name: Check cr-ci cache parity (cr-ci runner only)
-      if: runner.environment == 'self-hosted'
+      if: runner.environment == 'self-hosted' && startsWith(runner.name, 'cr-job-')
       shell: bash
       run: |
         set -uo pipefail
