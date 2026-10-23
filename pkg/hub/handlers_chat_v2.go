@@ -1273,14 +1273,16 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 //     participants, gets inbox delivery only. The projection is recorded on
 //     refs[i] (projectedPath, projectedMount) and listed after the inbox
 //     path;
-//   - an attachment stored as an artifact while the experiment is off is
-//     staged from its stored bytes, or left out when the project has no
-//     staging directory;
+//   - an attachment stored as an artifact (uploaded while the experiment
+//     was on) and sent while it is off is still delivered into the home;
+//     for a project topic thread it is also staged from its stored bytes
+//     and listed as a legacy entry, and otherwise it gets no scratchpad
+//     copy;
 //   - an AttachmentStore attachment is staged from the hub-private store;
 //     when staging is unavailable the hub-local path is sent, which
 //     host-process agents can still read.
 //
-// Without artifact delivery (the last two cases) staging is the only way a
+// Without artifact delivery (the last case) staging is the only way a
 // containerised agent reads the file, so it happens for every send; on a
 // hub without object storage (T1) a DM's attachment is therefore readable
 // by the project's other agents, a known T1-only Low that ends when the
@@ -1312,19 +1314,18 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 	for i := range attachmentRefs {
 		ref := attachmentRefs[i]
 		if ref.artifact {
-			if artifactsOn {
-				// Delivered into the recipient's home (ptone/scion#4596);
-				// the projection is an addition for sibling agents, only
-				// when they all read the message.
-				if projectAudience < 0 {
-					projectAudience = 0
-					if s.projectionAudienceIsProject(ctx, key, projectID) {
-						projectAudience = 1
-					}
+			// An attachment stored as an artifact is delivered into the
+			// recipient's home (ptone/scion#4596) whatever the experiment
+			// says now, so a scratchpad copy is only ever an addition for
+			// sibling agents, made only when they all read the message.
+			if projectAudience < 0 {
+				projectAudience = 0
+				if s.projectionAudienceIsProject(ctx, key, projectID) {
+					projectAudience = 1
 				}
-				if projectAudience == 0 {
-					continue
-				}
+			}
+			if projectAudience == 0 {
+				continue
 			}
 			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
 			if artifactsOn {
@@ -3805,7 +3806,9 @@ func (s *Server) authorizeConversationAccess(
 			return false
 		}
 	}
-	if strings.HasPrefix(key, "dm:") {
+	ctx := r.Context()
+	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	if audience == chatAudienceParticipants {
 		if !validDMKey(key) {
 			BadRequest(w, "invalid DM key format")
 			return false
@@ -3818,9 +3821,7 @@ func (s *Server) authorizeConversationAccess(
 		return s.authorizeChatTokenConversation(w, r, token, permissionID, key, "", chatRefuseNotFound)
 	}
 
-	ctx := r.Context()
-	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
+	if audience != chatAudienceProject {
 		NotFound(w, "Thread")
 		return false
 	}

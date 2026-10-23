@@ -17,9 +17,12 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -125,37 +128,77 @@ func (a *attachmentStaging) stageFrom(open func() (io.ReadCloser, error), id, fi
 	}
 	destPath := path.Join(destDir, name)
 
-	// O_EXCL both refuses a symlink planted at destPath and tells us the
-	// attachment may already be staged. An existing file is reused only when
-	// it is a regular file holding exactly the attachment's bytes: agents
-	// write this directory, so anything else there may have been planted.
-	dst, err := root.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	// An existing file is reused only when it is a regular file holding
+	// exactly the attachment's bytes: agents write this directory, so
+	// anything else there may have been planted.
+	if _, err := root.Lstat(destPath); err == nil {
+		if verr := verifyStagedCopy(root, destPath, open); verr != nil {
+			return "", verr
+		}
+		return agentPath, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("check staged file: %w", err)
+	}
+
+	// The copy is written to a temporary name, synced, and then hard-linked
+	// to the final name, which fails rather than replaces when the name
+	// exists. No partial file ever carries the final name, so an interrupted
+	// copy never blocks the attachment until the retention sweep.
+	tmpPath, err := writeStagingTemp(root, destDir, name, open)
 	if err != nil {
-		if os.IsExist(err) {
+		return "", err
+	}
+	defer func() { _ = root.Remove(tmpPath) }()
+	if err := root.Link(tmpPath, destPath); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			// Staged concurrently (fan-out); reuse only an identical copy.
 			if verr := verifyStagedCopy(root, destPath, open); verr != nil {
 				return "", verr
 			}
 			return agentPath, nil
 		}
+		return "", fmt.Errorf("publish staged file: %w", err)
+	}
+	return agentPath, nil
+}
+
+// writeStagingTemp copies what open returns into a new temporary file in
+// dir (inside root, created with O_EXCL under a random name next to the
+// final one), syncs it, and returns its path. On any failure the temporary
+// file is removed.
+func writeStagingTemp(root *os.Root, dir, name string, open func() (io.ReadCloser, error)) (string, error) {
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return "", fmt.Errorf("staging temp name: %w", err)
+	}
+	tmpPath := path.Join(dir, "."+name+".tmp-"+hex.EncodeToString(rnd[:]))
+	dst, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	if err != nil {
 		return "", fmt.Errorf("create staged file: %w", err)
 	}
-	defer func() { _ = dst.Close() }()
-
+	fail := func(err error) (string, error) {
+		_ = dst.Close()
+		_ = root.Remove(tmpPath)
+		return "", err
+	}
 	src, err := open()
 	if err != nil {
-		_ = root.Remove(destPath)
-		return "", fmt.Errorf("open attachment: %w", err)
+		return fail(fmt.Errorf("open attachment: %w", err))
 	}
 	defer func() { _ = src.Close() }()
-
 	// No LimitReader: the size ceiling is enforced at upload time, and capping
 	// the copy here would silently truncate an already-accepted attachment.
 	if _, err := io.Copy(dst, src); err != nil {
-		_ = root.Remove(destPath)
-		return "", fmt.Errorf("copy attachment: %w", err)
+		return fail(fmt.Errorf("copy attachment: %w", err))
 	}
-
-	return agentPath, nil
+	if err := dst.Sync(); err != nil {
+		return fail(fmt.Errorf("sync staged file: %w", err))
+	}
+	if err := dst.Close(); err != nil {
+		_ = root.Remove(tmpPath)
+		return "", fmt.Errorf("close staged file: %w", err)
+	}
+	return tmpPath, nil
 }
 
 // errStagedCopyMismatch: a file already at the staging destination is not
@@ -325,24 +368,22 @@ func (s *Server) resolveProjectScratchpad(ctx context.Context, project *store.Pr
 }
 
 // projectionAudienceIsProject reports whether a message on thread key of
-// project projectID is read by the whole project, so that projecting its
+// project projectID is read by the whole project, so that copying its
 // attachments into the project's scratchpad (readable by every agent that
-// mounts it) widens nothing: true only for a project topic thread of that
-// project. Direct conversations ("dm:" keys) and group conversations, whose
-// readers are their participants, and any lookup failure answer false.
+// mounts it) widens nothing. It asks the same classification the hub uses
+// to authorize reading the conversation (chatKeyReadAudience): true only
+// when reading is decided by membership of projectID (a project topic,
+// native project group conversations included); a key read by its
+// participant list (a DM) and any lookup failure answer false. Sends to
+// participant-list group conversations never reach the projection (only
+// the chat v2 send path projects).
 func (s *Server) projectionAudienceIsProject(ctx context.Context, key, projectID string) bool {
-	if key == "" || projectID == "" || strings.HasPrefix(key, "dm:") {
+	if projectID == "" {
 		return false
 	}
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
-	if wcs == nil {
-		return false
-	}
-	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
-		return false
-	}
-	return topic.ProjectID == projectID
+	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	return audience == chatAudienceProject && topic.ProjectID == projectID
 }

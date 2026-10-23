@@ -20,7 +20,7 @@ import (
 	"strings"
 )
 
-// Chat attachments projected into a shared dir (design §P4): every surface
+// Chat attachments projected into a shared dir (ptone/scion#5827): every surface
 // that makes a file visible to the agents of a project (hub chat, the chat
 // plugins, `scion message --attach`, terminal drag-drop) writes it below
 // <shared dir>/.attachments/<channel>/<id>/, and every container path for

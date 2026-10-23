@@ -41,7 +41,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Phase 4 of project storage (ptone/scion#5827, ptone/scion#5827).
+// Phase 4 of project storage (ptone/scion#5827).
 
 // ---------------------------------------------------------------------------
 // ptone/scion#5828: hub.attachment_artifacts defaults on with object storage

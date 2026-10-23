@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path"
@@ -159,6 +160,45 @@ func TestAttachmentStaging_ReusesOnlyIdenticalCopy(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dirDest, 0o755))
 	_, err = st.stage(src, "att-2", "notes.txt")
 	require.Error(t, err)
+}
+
+// errReader returns some bytes, then fails.
+type errReader struct{ sent bool }
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, "partial"), nil
+	}
+	return 0, errors.New("planted read failure")
+}
+
+// TestAttachmentStaging_InterruptedCopyLeavesNoFinalName: a copy that fails
+// part-way never leaves a file under the final name (it is written to a
+// temporary name and linked into place only when complete), so a retry
+// stages the attachment; a temporary file left by an earlier crash does not
+// block it either.
+func TestAttachmentStaging_InterruptedCopyLeavesNoFinalName(t *testing.T) {
+	st := newLocalTestStaging(t.TempDir(), false)
+	dest := filepath.Join(st.hostDir(), "att-1", "notes.txt")
+
+	_, err := st.stageFrom(func() (io.ReadCloser, error) { return io.NopCloser(&errReader{}), nil }, "att-1", "notes.txt")
+	require.Error(t, err)
+	assert.NoFileExists(t, dest, "no partial file under the final name")
+	entries, err := os.ReadDir(filepath.Dir(dest))
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the temporary file is removed")
+
+	// A temporary file left by a crash.
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(dest), ".notes.txt.tmp-0011223344556677"), []byte("part"), 0o644))
+
+	src := writeTempFile(t, "notes.txt", "hello agent")
+	p, err := st.stage(src, "att-1", "notes.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", p)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, "hello agent", string(got))
 }
 
 func TestSameContent(t *testing.T) {

@@ -162,7 +162,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	}
 
 	target := &chatSendTarget{Key: key, wcs: wcs}
-	if strings.HasPrefix(key, "dm:") {
+	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	if audience == chatAudienceParticipants {
 		target.IsDM = true
 		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
 			return nil, serr
@@ -176,9 +177,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		return target, nil
 	}
 
-	// Topic key: look up the topic to get its project and check access.
-	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
+	// Topic key: the topic gives its project, whose read access decides.
+	if audience != chatAudienceProject {
 		return nil, chatSendNotFound("Thread")
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
@@ -205,6 +205,41 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// chatKeyAudience is how reading a chat conversation key is authorized.
+type chatKeyAudience int
+
+const (
+	// chatAudienceNone: no such conversation (or the lookup failed).
+	chatAudienceNone chatKeyAudience = iota
+	// chatAudienceParticipants: a DM key, read by its participants only.
+	chatAudienceParticipants
+	// chatAudienceProject: a topic, read by anyone with read access to its
+	// project.
+	chatAudienceProject
+)
+
+// chatKeyReadAudience classifies key by how reading it is authorized: a
+// "dm:" key by its participant list, any other key as a topic, read by
+// read access to its project (the topic is returned). It is the one
+// classification the send authorization (authorizeChatSend), the
+// conversation access check (authorizeConversationAccess) and the
+// attachment projection decision (projectionAudienceIsProject) share, so
+// the three cannot disagree. A topic that cannot be loaded is
+// chatAudienceNone.
+func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic) {
+	if strings.HasPrefix(key, "dm:") {
+		return chatAudienceParticipants, nil
+	}
+	if wcs == nil || key == "" {
+		return chatAudienceNone, nil
+	}
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		return chatAudienceNone, nil
+	}
+	return chatAudienceProject, topic
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of

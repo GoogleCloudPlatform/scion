@@ -540,6 +540,59 @@ func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
 	assert.Equal(t, "legacy bytes", string(got))
 }
 
+// TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM: an attachment
+// uploaded as an artifact while the experiment was on, and sent after it
+// was turned off, is still delivered into the recipient's inbox, so in a
+// direct conversation it gets no scratchpad copy either; in a project topic
+// thread it is staged as before.
+func TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.aa.Slug}))
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+
+	inDM := f.uploadAs(t, f.ua, "", "dm.txt", "dm bytes")
+	inTopic := f.uploadAs(t, f.ua, f.projA.ID, "topic.txt", "topic bytes")
+	setAttachmentExperiments(t, f.srv, false, false)
+
+	f.sendWith(t, f.ua, dm, inDM)
+	assert.NoDirExists(t, filepath.Join(stagingDir, inDM), "an artifact attachment in a DM gets no scratchpad copy, experiment on or off")
+
+	f.sendWith(t, f.ua, f.topicA, inTopic)
+	got, err := os.ReadFile(filepath.Join(stagingDir, inTopic, "topic.txt"))
+	require.NoError(t, err, "a project topic thread still gets the copy")
+	assert.Equal(t, "topic bytes", string(got))
+}
+
+// TestChatKeyReadAudience: the classification the send authorization, the
+// conversation access check and the projection decision share. A native
+// project group conversation is a topic, read by project membership; a DM
+// is read by its participants; a key that names no topic (a
+// participant-list group conversation is not a chat v2 key) is none.
+func TestChatKeyReadAudience(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	group := seedGroupConversation(t, f.st, f.projA.ID, "classify")
+
+	aud, topic := chatKeyReadAudience(ctx, f.wcs, f.topicA)
+	assert.Equal(t, chatAudienceProject, aud)
+	require.NotNil(t, topic)
+	assert.Equal(t, f.projA.ID, topic.ProjectID)
+
+	aud, topic = chatKeyReadAudience(ctx, f.wcs, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	assert.Equal(t, chatAudienceParticipants, aud)
+	assert.Nil(t, topic)
+
+	for _, key := range []string{group, "group:" + f.projA.ID + ":classify", uuid.NewString(), ""} {
+		aud, topic = chatKeyReadAudience(ctx, f.wcs, key)
+		assert.Equal(t, chatAudienceNone, aud, key)
+		assert.Nil(t, topic, key)
+	}
+	aud, _ = chatKeyReadAudience(ctx, nil, f.topicA)
+	assert.Equal(t, chatAudienceNone, aud, "no chat store")
+}
+
 // TestProjectionAudienceIsProject: only a project topic thread of the
 // message's own project counts as a whole-project audience.
 func TestProjectionAudienceIsProject(t *testing.T) {
