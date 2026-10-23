@@ -538,6 +538,53 @@ func TestExpandSSEWildcards_NoSessionUser(t *testing.T) {
 		"without session user, subjects should pass through unchanged")
 }
 
+// TestSSE_ChatStarsSubjectIsolation pins that a user's star invalidation
+// (user.<id>.chat.stars) reaches only that user: another signed-in user
+// may not subscribe to it explicitly, and the user.> wildcard a browser
+// subscribes with expands to the caller's own subjects, so the other
+// user's star events are never delivered on it.
+func TestSSE_ChatStarsSubjectIsolation(t *testing.T) {
+	mockStore := &mockAuthzStore{}
+	ws := &WebServer{
+		store:        mockStore,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+	req := httptest.NewRequest("GET", "/events", nil)
+	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
+	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+	assert.Nil(t, ws.authorizeSSESubjects(req, []string{"user.user-1.chat.stars"}),
+		"a user may subscribe to its own star invalidations")
+	assert.Equal(t, []string{"user.other-user.chat.stars"},
+		ws.authorizeSSESubjects(req, []string{"user.other-user.chat.stars"}),
+		"a user may not subscribe to another user's star invalidations")
+
+	expanded := ws.expandSSEWildcards(req, []string{"user.>"})
+	require.Equal(t, []string{"user.user-1.>"}, expanded)
+	assert.Nil(t, ws.authorizeSSESubjects(req, expanded))
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	ch, unsub := pub.Subscribe(expanded...)
+	defer unsub()
+	pub.PublishChatStarsChanged(context.Background(), "other-user")
+	pub.PublishChatStarsChanged(context.Background(), "user-1")
+
+	var subjects []string
+	timeout := time.After(200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case evt := <-ch:
+			subjects = append(subjects, evt.Subject)
+		case <-timeout:
+			break collect
+		}
+	}
+	assert.Equal(t, []string{"user.user-1.chat.stars"}, subjects,
+		"only the caller's own star invalidation is delivered")
+}
+
 // --- SSE Handler integration test for authz ---
 
 func TestSSEHandler_SubjectAuthzDenied(t *testing.T) {
@@ -619,50 +666,3 @@ func TestValidateSSESubjects_WildcardRootRejected(t *testing.T) {
 }
 
 // --- mock store for authz tests ---
-
-// TestSSE_ChatStarsSubjectIsolation pins that a user's star invalidation
-// (user.<id>.chat.stars) reaches only that user: another signed-in user
-// may not subscribe to it explicitly, and the user.> wildcard a browser
-// subscribes with expands to the caller's own subjects, so the other
-// user's star events are never delivered on it.
-func TestSSE_ChatStarsSubjectIsolation(t *testing.T) {
-	mockStore := &mockAuthzStore{}
-	ws := &WebServer{
-		store:        mockStore,
-		authzService: NewAuthzService(mockStore, nil),
-	}
-	req := httptest.NewRequest("GET", "/events", nil)
-	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
-	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
-
-	assert.Nil(t, ws.authorizeSSESubjects(req, []string{"user.user-1.chat.stars"}),
-		"a user may subscribe to its own star invalidations")
-	assert.Equal(t, []string{"user.other-user.chat.stars"},
-		ws.authorizeSSESubjects(req, []string{"user.other-user.chat.stars"}),
-		"a user may not subscribe to another user's star invalidations")
-
-	expanded := ws.expandSSEWildcards(req, []string{"user.>"})
-	require.Equal(t, []string{"user.user-1.>"}, expanded)
-	assert.Nil(t, ws.authorizeSSESubjects(req, expanded))
-
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-	ch, unsub := pub.Subscribe(expanded...)
-	defer unsub()
-	pub.PublishChatStarsChanged(context.Background(), "other-user")
-	pub.PublishChatStarsChanged(context.Background(), "user-1")
-
-	var subjects []string
-	timeout := time.After(200 * time.Millisecond)
-collect:
-	for {
-		select {
-		case evt := <-ch:
-			subjects = append(subjects, evt.Subject)
-		case <-timeout:
-			break collect
-		}
-	}
-	assert.Equal(t, []string{"user.user-1.chat.stars"}, subjects,
-		"only the caller's own star invalidation is delivered")
-}

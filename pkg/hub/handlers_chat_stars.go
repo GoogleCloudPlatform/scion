@@ -554,13 +554,18 @@ func (s *Server) handleStarState(w http.ResponseWriter, r *http.Request, call st
 
 	// Request-local decisions, one per conversation; never kept beyond
 	// this request.
+	conversations := map[string]bool{}
+	for _, ref := range refs {
+		conversations[ref.ConversationKey] = true
+	}
+	mixed := len(conversations) > 1
 	decisions := map[string]starStateDecision{}
 	starred := map[string]bool{}
 	for _, ref := range refs {
 		d, seen := decisions[ref.ConversationKey]
 		if !seen {
 			var rerr *chatReadError
-			d, rerr = s.decideStarState(r, call, ref.ConversationKey)
+			d, rerr = s.decideStarState(r, call, ref.ConversationKey, mixed)
 			if rerr != nil {
 				writeStarReadError(w, rerr)
 				return
@@ -591,13 +596,19 @@ type starStateDecision struct {
 // route without writing a response: a refusal is allowed=false, a failed
 // lookup is an error.
 //
-// The state route answers for many conversations at once, so one
-// conversation whose read target cannot be resolved (read-switch drift: a
-// thread with no conversation record, the resolver's 409) is treated as
-// not readable and logged, rather than failing the whole batch; only a
-// real lookup failure (a 500) fails the request. The single-conversation
-// routes (list, add, detail) keep answering the resolver's error.
-func (s *Server) decideStarState(r *http.Request, call starCall, key string) (starStateDecision, *chatReadError) {
+// A conversation whose read target cannot be resolved (the resolver's
+// 409: read-switch drift, or a conversation lookup that failed, which the
+// resolver cannot tell apart) is handled by the batch's shape:
+//   - a batch whose stars are all in one conversation (the Phase 1 client,
+//     which asks for the open conversation's messages) answers the
+//     resolver's error, as list, add and detail do, so the client keeps
+//     the messages "unknown" rather than inferring "unstarred";
+//   - a batch mixing conversations (mixed) leaves that conversation out,
+//     logged, so one drifted thread does not fail every other
+//     conversation's answer.
+//
+// A real lookup failure (a 500) fails the request either way.
+func (s *Server) decideStarState(r *http.Request, call starCall, key string, mixed bool) (starStateDecision, *chatReadError) {
 	type decision = starStateDecision
 	ctx := r.Context()
 	if strings.HasPrefix(key, "dm:") {
@@ -621,8 +632,8 @@ func (s *Server) decideStarState(r *http.Request, call starCall, key string) (st
 	}
 	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, topic, GetIdentityFromContext(ctx))
 	if rerr != nil {
-		if rerr.kind == chatReadFailure && rerr.status != http.StatusInternalServerError {
-			slog.Warn("chat stars: state treats a conversation as not readable: read target unresolved",
+		if mixed && rerr.kind == chatReadFailure && rerr.status != http.StatusInternalServerError {
+			slog.Warn("chat stars: state leaves out a conversation whose read target is unresolved",
 				"conversation_key", key, "code", rerr.code)
 			return decision{}, nil
 		}

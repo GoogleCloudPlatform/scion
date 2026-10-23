@@ -312,6 +312,26 @@ func TestChatStars_DeleteAlways204(t *testing.T) {
 	rec, err := f.stars.GetMessageStar(ctx, f.member, msg)
 	require.NoError(t, err)
 	assert.Nil(t, rec)
+
+	// After the member loses the project role, the star is hidden from
+	// reads, and the member can still remove it.
+	kept := f.threadMsg(t, f.topicA, f.projA, "access will go", time.Now())
+	decodeStarPut(t, f.put(t, f.member, kept, f.topicA))
+	bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member)
+	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.projA {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "the member's role in project A")
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starPath(kept), nil).Code, "no read access any more")
+	assert.Equal(t, http.StatusNoContent, f.session(t, f.member, http.MethodDelete, starPath(kept), nil).Code)
+	rec, err = f.stars.GetMessageStar(ctx, f.member, kept)
+	require.NoError(t, err)
+	assert.Nil(t, rec, "removed after access was lost")
 }
 
 func TestChatStars_ListPaginates(t *testing.T) {
@@ -552,9 +572,9 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 	}
 }
 
-// errInjectedStarFault is the failure faultStarStore injects; its text must
+// errFailingStarStore is the failure faultStarStore returns; its text must
 // never reach a response body.
-var errInjectedStarFault = errors.New("injected star store fault: do-not-disclose")
+var errFailingStarStore = errors.New("failing star store: do-not-disclose")
 
 // faultStarStore is a chat store that opts in to MessageStarStore and can
 // fail chosen calls, and that can serve extra topics the real store does
@@ -572,7 +592,7 @@ func newFaultStarStore(f *starFixture) *faultStarStore {
 
 func (s *faultStarStore) GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error) {
 	if s.failGetTopic {
-		return nil, errInjectedStarFault
+		return nil, errFailingStarStore
 	}
 	if t, ok := s.extraTopics[topicID]; ok {
 		return t, nil
@@ -582,21 +602,21 @@ func (s *faultStarStore) GetTopic(ctx context.Context, topicID string) (*WebChat
 
 func (s *faultStarStore) AddMessageStar(ctx context.Context, userID string, target StarTarget) (StarRecord, bool, error) {
 	if s.failAdd {
-		return StarRecord{}, false, errInjectedStarFault
+		return StarRecord{}, false, errFailingStarStore
 	}
 	return s.MessageStarStore.AddMessageStar(ctx, userID, target)
 }
 
 func (s *faultStarStore) ListMessageStarCandidates(ctx context.Context, f StarFilter) (StarCandidatePage, error) {
 	if s.failList {
-		return StarCandidatePage{}, errInjectedStarFault
+		return StarCandidatePage{}, errFailingStarStore
 	}
 	return s.MessageStarStore.ListMessageStarCandidates(ctx, f)
 }
 
 func (s *faultStarStore) ListStarredMessageIDs(ctx context.Context, userID string, messageIDs []string) ([]StarredMessageRef, error) {
 	if s.failState {
-		return nil, errInjectedStarFault
+		return nil, errFailingStarStore
 	}
 	return s.MessageStarStore.ListStarredMessageIDs(ctx, userID, messageIDs)
 }
@@ -607,7 +627,7 @@ func assertStar500(t *testing.T, rec *httptest.ResponseRecorder, what string) {
 	t.Helper()
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "%s: %s", what, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "do-not-disclose", what)
-	assert.NotContains(t, rec.Body.String(), "injected", what)
+	assert.NotContains(t, rec.Body.String(), "failing star store", what)
 }
 
 func TestChatStars_StoreAndLookupFailuresAre500(t *testing.T) {
@@ -644,12 +664,13 @@ func TestChatStars_StoreAndLookupFailuresAre500(t *testing.T) {
 	assert.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil)))
 }
 
-// TestChatStars_StateTreatsUnresolvedConversationAsUnreadable: with the
-// read switch on, one starred thread whose conversation record is missing
-// (drift; the resolver's 409) is left out of the state answer instead of
-// failing it for every other conversation. The single-conversation routes
-// keep answering the resolver's 409.
-func TestChatStars_StateTreatsUnresolvedConversationAsUnreadable(t *testing.T) {
+// TestChatStars_StateUnresolvedConversation: with the read switch on, a
+// starred thread whose conversation record is missing (drift; the
+// resolver's 409) is left out of a state answer that mixes conversations,
+// so the others still answer; a state batch whose stars are all in that
+// one conversation answers the resolver's 409 (never an inferred
+// "unstarred"), as the list route does.
+func TestChatStars_StateUnresolvedConversation(t *testing.T) {
 	f := newStarFixture(t, true)
 	ctx := context.Background()
 	a1 := f.threadMsg(t, f.topicA, f.projA, "a1", time.Now())
@@ -671,8 +692,15 @@ func TestChatStars_StateTreatsUnresolvedConversationAsUnreadable(t *testing.T) {
 	f.srv.SetWebChatStore(fs)
 
 	assert.Equal(t, []string{a1}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(driftMsg, a1), nil)),
-		"the drifted conversation is not readable; the others still answer")
-	rec := f.session(t, f.admin, http.MethodGet, starListPath(drift), nil)
+		"a mixed batch leaves the drifted conversation out; the others still answer")
+	rec := f.session(t, f.admin, http.MethodGet, starStatePath(driftMsg), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "a single-conversation batch answers the resolver's error: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeConversationNotResolved)
+	// An unstarred message of the same conversation adds no star, so the
+	// batch still has one conversation.
+	rec = f.session(t, f.admin, http.MethodGet, starStatePath(driftMsg, uuid.NewString()), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	rec = f.session(t, f.admin, http.MethodGet, starListPath(drift), nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeConversationNotResolved)
 }
@@ -721,7 +749,7 @@ func TestChatReadError_WriteHistoryIsTotal(t *testing.T) {
 		want int
 	}{
 		{&chatReadError{kind: chatReadNotFound}, http.StatusNotFound},
-		{&chatReadError{kind: chatReadNotFound, err: errInjectedStarFault}, http.StatusNotFound},
+		{&chatReadError{kind: chatReadNotFound, err: errFailingStarStore}, http.StatusNotFound},
 		{&chatReadError{kind: chatReadUnauthenticated}, http.StatusUnauthorized},
 		{&chatReadError{kind: chatReadAbsent}, http.StatusOK},
 		{&chatReadError{kind: chatReadFailure, status: http.StatusConflict, code: ErrCodeConversationNotResolved, message: "x"}, http.StatusConflict},
