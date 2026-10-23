@@ -800,3 +800,28 @@ func TestDispatchAgentCreate_AsyncBindsLaunchRun(t *testing.T) {
 	require.Len(t, f.client.sends, 1)
 	assert.Equal(t, f.client.sends[0].RunID, row.LaunchRunID)
 }
+
+// TestAsyncStartDispatch_BindsLaunchRun: an async start or restart launch
+// binds the run beginRun minted for the dispatch (addendum section 1: the
+// start-launch caller passes the minted run), so the launch-report
+// classifier can tell an unsettled adoption of a start launch.
+func TestAsyncStartDispatch_BindsLaunchRun(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		kind, prior string
+	}{
+		{store.LaunchKindStart, string(state.PhaseStopped)},
+		{store.LaunchKindRestart, string(state.PhaseRunning)},
+	} {
+		t.Run(c.kind, func(t *testing.T) {
+			f := newAsyncDispatchFixture(t, "asd-bind-"+c.kind, string(state.PhaseStopped), true, nil, asyncOn)
+			res, err := f.d.DispatchAgentStartWithOptions(ctx, f.agent, "", false, StartDispatchOptions{Async: true, Kind: c.kind, PriorPhase: c.prior})
+			require.NoError(t, err)
+			require.NotNil(t, res.AcceptedLaunch())
+			row := getAgent(t, f.s, f.agent.ID)
+			require.NotEmpty(t, row.RunID)
+			assert.Equal(t, c.kind, row.LaunchKind)
+			assert.Equal(t, row.RunID, row.LaunchRunID, "the start launch binds its minted run")
+		})
+	}
+}

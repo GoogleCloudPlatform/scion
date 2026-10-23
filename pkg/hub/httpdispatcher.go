@@ -3838,7 +3838,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 
 	var resp *RemoteAgentResponse
 	var accepted *LaunchAccepted
-	launchID, settings, began, err := d.beginStartLaunch(ctx, agent, endpoint, opts, revokeEligible && issued)
+	launchID, settings, began, err := d.beginStartLaunch(ctx, agent, endpoint, opts, revokeEligible && issued, runID)
 	switch {
 	case err != nil:
 		// Nothing was sent (a delete holds the row, or the store failed):

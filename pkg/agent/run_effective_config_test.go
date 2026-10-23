@@ -136,7 +136,7 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{
-				ContainerID: "running-id", Name: "eff-agent", Phase: "running", RunID: "run-b",
+				ContainerID: "running-id", Name: "eff-agent", Phase: "running", RunID: "run-b", ProjectID: "proj-eff",
 				Harness: "listed-harness", Model: "listed-model", TemplateHash: "sha256:listed",
 				ConfigResolved: true,
 			}}, nil
@@ -148,7 +148,9 @@ func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
 	}
 	info, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
 		Name: "eff-agent", Template: "alpha", ProjectPath: project, BrokerMode: true, NoAuth: true,
-		Env: map[string]string{"SCION_MODEL": "model-x-1"},
+		// The pre-start match is project-scoped: the listed entry must be
+		// this project's.
+		Env: map[string]string{"SCION_MODEL": "model-x-1", "SCION_PROJECT_ID": "proj-eff"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
