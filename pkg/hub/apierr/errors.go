@@ -179,6 +179,10 @@ const (
 	// DM branch and serve wrong data (G3-f).
 	ErrCodeThreadProjectRequired = "thread_project_required"
 
+	// ErrCodeChatPostDenied is returned (403) when the caller may read a
+	// chat thread but its account may not post in it (project.chat_post).
+	ErrCodeChatPostDenied = "chat_post_denied"
+
 	// Addressee resolution error codes (DEF-126).
 
 	// ErrCodeAddrUnknown is returned when a user: addressee resolves to zero

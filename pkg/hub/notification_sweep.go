@@ -19,6 +19,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -37,6 +38,19 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 
 		if s.notificationDispatcher == nil {
 			return
+		}
+
+		// Expire what can no longer be retried before selecting what can:
+		// pending notifications past notificationRetryMaxAge end as failed
+		// with reason expired, including ones the query below never selects
+		// (a suspended subscriber, or one with no runtime broker), so none
+		// stays pending forever.
+		expired, err := s.store.ExpireStaleAgentNotifications(ctx, time.Now().Add(-notificationRetryMaxAge))
+		if err != nil {
+			s.agentLifecycleLog.Error("notification-dispatch-sweep: expiry failed", "error", err)
+		} else if expired > 0 {
+			s.agentLifecycleLog.Info("notification-dispatch-sweep: expired undelivered notifications",
+				"count", expired, "maxAge", notificationRetryMaxAge)
 		}
 
 		notifs, err := s.store.GetUndispatchedAgentNotifications(ctx, "")
@@ -133,11 +147,14 @@ const revertClaimTimeout = 5 * time.Second
 
 // notificationRetryMaxAge is how old a notification may be and still have a
 // failed delivery reverted for another retry. Past it, RetryDispatch gives up:
-// the notification stays claimed and is stored with the failed outcome. The
-// budget is by age, not by attempt count: the 5-minute sweep cadence is the
-// backoff, so this bounds a notification to about notificationRetryMaxAge / 5m
-// sweep attempts, plus one per broker-connect drain. Each attempt is counted
-// in the notification's DispatchAttempts.
+// the notification stays claimed and is stored with the failed outcome and
+// reason expired, and the sweep expires any pending notification older than
+// this, attempted or not. The budget is by age, not by attempt count. The
+// spacing between sweep attempts is store.NotificationRetryBackoff (5, 10,
+// 20 and 40 minutes, then hourly), so this bounds a notification to fewer
+// than 30 sweep attempts, plus one per broker-connect drain (the drain
+// ignores the backoff). Each attempt is counted in the notification's
+// DispatchAttempts.
 const notificationRetryMaxAge = 24 * time.Hour
 
 // retryOutcome is the result of one retryDispatch call.
@@ -220,9 +237,15 @@ func (nd *NotificationDispatcher) subscriberBrokerID(ctx context.Context, notif 
 // failing, ptone/scion#5030); the row then stays dispatched with that
 // outcome, which is the intended result and not an error.
 func (nd *NotificationDispatcher) revertClaim(ctx context.Context, notificationID string) {
+	nd.revertClaimUntil(ctx, notificationID, time.Time{})
+}
+
+// revertClaimUntil is revertClaim with retry backoff: the sweep does not
+// claim the notification again before notBefore (zero means at once).
+func (nd *NotificationDispatcher) revertClaimUntil(ctx context.Context, notificationID string, notBefore time.Time) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()
-	reverted, err := nd.store.UnmarkNotificationDispatched(rctx, notificationID)
+	reverted, err := nd.store.UnmarkNotificationDispatched(rctx, notificationID, notBefore)
 	if err != nil {
 		nd.log.Error("retry: failed to revert claim", "notificationID", notificationID, "error", err)
 		return
@@ -240,19 +263,20 @@ func (nd *NotificationDispatcher) recordAttempt(ctx context.Context, notificatio
 	}
 }
 
-// setOutcome stores the notification's terminal dispatch outcome. Like
+// setOutcome stores the notification's terminal dispatch outcome, with
+// reason (a store.NotificationReason* value) for a failed one. Like
 // revertClaim it runs on a context the caller's deadline cannot cancel, so an
 // attempt that ended at that deadline still records its outcome. The store
 // keeps the most informative outcome (ptone/scion#5030): delivered replaces
 // failed, and a refused write (failed over any outcome, delivered over
 // delivered) is dropped quietly.
-func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID, outcome string) {
+func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID, outcome, reason string) {
 	octx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()
-	applied, err := nd.store.SetNotificationDispatchOutcome(octx, notificationID, outcome)
+	applied, err := nd.store.SetNotificationDispatchOutcome(octx, notificationID, outcome, reason)
 	if err != nil {
 		nd.log.Error("failed to record notification dispatch outcome",
-			"notificationID", notificationID, "outcome", outcome, "error", err)
+			"notificationID", notificationID, "outcome", outcome, "reason", reason, "error", err)
 		return
 	}
 	if !applied {
@@ -270,10 +294,13 @@ func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID
 // is called before delivery to prevent double-dispatch when the sweep and hook
 // race on the same notification. If the claim fails (another caller already
 // claimed it), this is a no-op. If delivery cannot proceed (no dispatcher, no
-// broker) or the delivery attempt fails, the claim is reverted so a future
-// sweep can retry. When it gives up instead (a failed delivery older than
+// broker, a suspended subscriber) the claim is reverted with no attempt
+// counted. If the delivery attempt fails, the claim is reverted with a retry
+// backoff (store.NotificationRetryBackoff) before which the sweep does not
+// claim it again. When it gives up instead (a failed delivery older than
 // notificationRetryMaxAge, or a subscription, subscriber or watched agent
-// that is gone), the notification stays claimed with the failed outcome. A
+// that is gone), the notification stays claimed with the failed outcome and
+// a reason (store.NotificationReason*). A
 // delivered notification gets the delivered outcome, and every delivery
 // attempt is counted in DispatchAttempts.
 //
@@ -284,6 +311,13 @@ func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID
 // state-change notifications, where a duplicate is cheaper than a lost one.
 func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *store.Notification) {
 	nd.retryDispatch(ctx, notif)
+}
+
+// subscriberSuspended reports whether a subscriber agent is suspended: its
+// record is kept but it has no running agent, so nothing can be delivered
+// to it until it is resumed.
+func subscriberSuspended(subscriber *store.Agent) bool {
+	return state.Phase(subscriber.Phase) == state.PhaseSuspended
 }
 
 // retrySubscription returns the subscription a retry delivers notif for:
@@ -325,7 +359,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// does not retry this notification every 5 minutes forever.
 			nd.log.Warn("retry: subscription deleted, leaving claimed",
 				"subscriptionID", notif.SubscriptionID, "notificationID", notif.ID)
-			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed, store.NotificationReasonSubscriptionGone)
 		} else {
 			// Transient error (DB timeout, connection issue) — revert claim
 			// so a future sweep can retry once the store is reachable again.
@@ -349,7 +383,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// does not retry this notification every 5 minutes forever.
 			nd.log.Warn("retry: subscriber agent deleted, leaving claimed",
 				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
-			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed, store.NotificationReasonSubscriberGone)
 		} else {
 			// Transient error (DB timeout, connection issue) — revert claim
 			// so a future sweep can retry once the store is reachable again.
@@ -361,6 +395,18 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	}
 	if subscriber == nil {
 		nd.log.Error("retry: subscriber lookup returned nil with no error", "subscriberID", sub.SubscriberID)
+		nd.revertClaim(ctx, notif.ID)
+		return retryNotAttempted, ""
+	}
+
+	// A suspended subscriber has no running agent to deliver to. Its
+	// notifications stay pending (parked) with no attempt counted: the sweep
+	// query leaves them out until the agent leaves the suspended phase, and
+	// the sweep expires them at notificationRetryMaxAge. Reaching here means
+	// the agent was suspended after the query selected the row.
+	if subscriberSuspended(subscriber) {
+		nd.log.Debug("retry: subscriber is suspended, reverting claim",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 		nd.revertClaim(ctx, notif.ID)
 		return retryNotAttempted, ""
 	}
@@ -388,7 +434,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// Watched agent permanently deleted — leave claimed (no point retrying).
 			nd.log.Warn("retry: watched agent deleted, leaving claimed",
 				"agentID", notif.AgentID, "notificationID", notif.ID)
-			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed, store.NotificationReasonWatchedAgentGone)
 		} else {
 			// Transient error — revert claim so a future sweep can retry.
 			nd.log.Warn("retry: watched agent lookup failed, reverting claim",
@@ -439,19 +485,23 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			nd.log.Error("retry: delivery failed past max retry age, giving up",
 				"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
 				"createdAt", notif.CreatedAt, "error", err)
-			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed, store.NotificationReasonExpired)
 			return outcome, brokerID
 		}
+		// Back off before the sweep claims it again. notif.DispatchAttempts
+		// was read before this attempt was counted.
+		backoff := store.NotificationRetryBackoff(notif.DispatchAttempts + 1)
 		nd.log.Warn("retry: delivery failed, reverting claim",
-			"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
-		nd.revertClaim(ctx, notif.ID)
+			"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
+			"retryIn", backoff, "error", err)
+		nd.revertClaimUntil(ctx, notif.ID, time.Now().Add(backoff))
 		return outcome, brokerID
 	}
 
 	nd.log.Info("retry: notification delivered",
 		"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
 		"brokerID", subscriber.RuntimeBrokerID)
-	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered, "")
 	// Log to dedicated message audit log if available.
 	if nd.messageLog != nil {
 		logAttrs := []any{

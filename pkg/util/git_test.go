@@ -123,7 +123,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Remove
-		if _, err := RemoveWorktree(repoDir, worktreePath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, worktreePath, repoDir, ""); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 		// Wait/Check? git worktree remove deletes the directory usually.
@@ -164,7 +164,7 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("Failed to recreate worktree after RemoveWorktreeEntryIn: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(repoDir, stalePath, true)
+		_, _ = RemoveWorktree(repoDir, stalePath, repoDir, "")
 	})
 
 	t.Run("DeleteBranchIn", func(t *testing.T) {
@@ -174,13 +174,13 @@ func TestGitUtils(t *testing.T) {
 		if err := CreateWorktree(wtPath, branch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
-		if _, err := RemoveWorktree(repoDir, wtPath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, wtPath, repoDir, ""); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 
 		// Branch should still exist
 		if !BranchExistsIn(repoDir, branch) {
-			t.Fatal("expected branch to still exist after RemoveWorktree(deleteBranch=false)")
+			t.Fatal("expected branch to still exist after RemoveWorktree with no branch to delete")
 		}
 
 		// DeleteBranchIn should remove it
@@ -221,7 +221,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Clean up
-		_, _ = RemoveWorktree(repoDir, wtPath, true)
+		_, _ = RemoveWorktree(repoDir, wtPath, repoDir, "")
 	})
 
 	t.Run("RemoveWorktreeWithBranch", func(t *testing.T) {
@@ -232,7 +232,7 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		deleted, err := RemoveWorktree(repoDir, wtPath, true)
+		deleted, err := RemoveWorktree(repoDir, wtPath, repoDir, branch)
 		if err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
@@ -376,8 +376,8 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	}
 
 	// Clean up
-	_, _ = RemoveWorktree(mainRepo, siblingPath, true)
-	_, _ = RemoveWorktree(mainRepo, wtPath, true)
+	_, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, "")
+	_, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, "")
 }
 
 func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
@@ -473,7 +473,7 @@ func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
 	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
-	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, "") }()
 
 	// repoRoot is the LINKED worktree here, simulating a project that lives
 	// there; path is the MAIN worktree, which must still be recognized as
@@ -495,7 +495,7 @@ func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
 	// `git worktree add` accepts any destination.
 	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
 	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
-	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, mainRepo, "") }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
 	if err != nil {
@@ -515,7 +515,7 @@ func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
 	// -- it needs no special-case handling, only real git registration.
 	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
 	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
-	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, mainRepo, "") }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
 	if err != nil {
@@ -555,7 +555,7 @@ func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
 	// be accepted as a worktree of repoA.
 	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
 	addWorktreeDirect(t, repoB, wtOfB, "feature")
-	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, true) }()
+	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, repoB, "") }()
 
 	ok, err := IsRegisteredWorktree(repoA, wtOfB)
 	if err != nil {
@@ -654,7 +654,7 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
 	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
-	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, mainRepo, "") }()
 
 	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
 	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
@@ -756,7 +756,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := RemoveWorktree(base, outside, false)
+		_, err := RemoveWorktree(base, outside, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -767,7 +767,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 
 	t.Run("candidate equals base", func(t *testing.T) {
 		base := setupGitRepo(t)
-		_, err := RemoveWorktree(base, base, false)
+		_, err := RemoveWorktree(base, base, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for candidate==base, got: %v", err)
 		}
@@ -797,7 +797,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := RemoveWorktree(base, leaf, false)
+		_, err := RemoveWorktree(base, leaf, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -830,7 +830,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 		}
 		candidate := filepath.Join(base, "worktrees", "name")
 
-		_, err := RemoveWorktree(base, candidate, false)
+		_, err := RemoveWorktree(base, candidate, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained, got: %v", err)
 		}
@@ -858,7 +858,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		if _, err := RemoveWorktree(base, wtPath, false); err != nil {
+		if _, err := RemoveWorktree(base, wtPath, base, ""); err != nil {
 			t.Fatalf("RemoveWorktree of a legitimate in-tree worktree should succeed, got: %v", err)
 		}
 		if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
@@ -868,7 +868,7 @@ func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
 
 	t.Run("non-existent path is a no-op, not an error", func(t *testing.T) {
 		base := setupGitRepo(t)
-		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), false)
+		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), base, "")
 		if err != nil {
 			t.Errorf("removing a non-existent path should be a no-op, got: %v", err)
 		}
@@ -892,28 +892,28 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	t.Run("empty base", func(t *testing.T) {
-		_, err := RemoveWorktree("", "/some/path", false)
+		_, err := RemoveWorktree("", "/some/path", "", "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for empty base, got: %v", err)
 		}
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		_, err := RemoveWorktree("/some/base", "", false)
+		_, err := RemoveWorktree("/some/base", "", "/some/base", "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for empty path, got: %v", err)
 		}
 	})
 
 	t.Run("relative base", func(t *testing.T) {
-		_, err := RemoveWorktree("relative/base", "/some/path", false)
+		_, err := RemoveWorktree("relative/base", "/some/path", "relative/base", "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for relative base, got: %v", err)
 		}
 	})
 
 	t.Run("relative path", func(t *testing.T) {
-		_, err := RemoveWorktree("/some/base", "relative/path", false)
+		_, err := RemoveWorktree("/some/base", "relative/path", "/some/base", "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for relative path, got: %v", err)
 		}
@@ -926,7 +926,7 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		candidate := filepath.Join(notADir, "child")
-		_, err := RemoveWorktree(base, candidate, false)
+		_, err := RemoveWorktree(base, candidate, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for a non-ENOENT Lstat error, got: %v", err)
 		}
@@ -942,7 +942,7 @@ func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
 		if err := os.Symlink(loopA, loopB); err != nil {
 			t.Fatal(err)
 		}
-		_, err := RemoveWorktree(base, loopA, false)
+		_, err := RemoveWorktree(base, loopA, base, "")
 		if !errors.Is(err, ErrPathNotContained) {
 			t.Fatalf("expected ErrPathNotContained for a symlink loop, got: %v", err)
 		}

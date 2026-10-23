@@ -66,6 +66,7 @@ import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import {
   browserPath,
+  fullPageUrl,
   mayLeave,
   noteShownEntry,
   stripBasePath,
@@ -1405,6 +1406,10 @@ async function renderRoute(path: string): Promise<void> {
     // redirected first and never reaches it.
     loadsReady.catch(() => undefined);
     cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
+    // A newer navigation started while the check ran: its result, allow or
+    // deny, no longer applies (a deny must not redirect away from the newer
+    // page, ptone/scion#3767).
+    if (thisNav !== navigationId) return;
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {
@@ -1516,7 +1521,7 @@ function setupRouter(): void {
   // Add click handlers for client-side navigation.
   // Use the composed event path to find anchors inside shadow DOMs,
   // since target.closest('a') cannot cross shadow boundaries.
-  document.addEventListener('click', (e: MouseEvent) => {
+  const onLinkClick = (e: MouseEvent): void => {
     const path = e.composedPath();
     let anchor: HTMLAnchorElement | null = null;
     for (const el of path) {
@@ -1529,34 +1534,41 @@ function setupRouter(): void {
     if (!anchor) return;
     if (
       e.defaultPrevented ||
-      e.button !== 0 ||
-      e.metaKey ||
-      e.ctrlKey ||
-      e.shiftKey ||
-      e.altKey ||
       (anchor.target && anchor.target !== '_self') ||
       anchor.hasAttribute('download')
     )
       return;
 
-    const href = anchor.getAttribute('href');
+    const href = inAppLinkPath(anchor.getAttribute('href'));
     if (!href) return;
 
-    // Skip external links
-    if (href.startsWith('http') || href.startsWith('//')) return;
-
-    // Skip special links
-    if (href.startsWith('javascript:')) return;
-    if (href.startsWith('#')) return;
-
-    // Skip links that should trigger full page loads
-    if (href.startsWith('/api/')) return;
-    if (href.startsWith('/auth/')) return;
-    if (href.startsWith('/events')) return;
+    // Ctrl/Cmd/Shift-click or a middle click opens the link in a new tab or
+    // window. The browser would open the raw app path, which misses a
+    // non-root base path, so open the base-prefixed URL instead
+    // (ptone/scion#4196), the same URL a full page load of the path gets.
+    // Served at the root, or for a relative href, the two agree: leave the
+    // browser's own handling alone.
+    const opensElsewhere =
+      e.button === 1 || (e.button === 0 && (e.metaKey || e.ctrlKey || e.shiftKey));
+    if (opensElsewhere) {
+      const url = fullPageUrl(href);
+      if (url === href) return;
+      e.preventDefault();
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+    if (e.button !== 0 || e.altKey) return;
 
     // Handle client-side navigation
     e.preventDefault();
     navigateTo(href);
+  };
+  document.addEventListener('click', (e: MouseEvent) => {
+    // A middle click is handled on auxclick, where browsers report it.
+    if (e.button === 0) onLinkClick(e);
+  });
+  document.addEventListener('auxclick', (e: MouseEvent) => {
+    if (e.button === 1) onLinkClick(e);
   });
 
   // Handle nav-click events from shadow DOM components (e.g. sidebar nav)
@@ -1596,6 +1608,22 @@ function setupRouter(): void {
     noteShownEntry();
     void renderRoute(appPath);
   });
+}
+
+/**
+ * The app path of an in-app link's href attribute, which the router
+ * handles; null for anything the browser must load itself: an external,
+ * protocol-relative, javascript: or fragment-only link, or a server route
+ * (/api/, /auth/, /events).
+ */
+function inAppLinkPath(href: string | null): string | null {
+  if (!href) return null;
+  if (href.startsWith('http') || href.startsWith('//')) return null;
+  if (href.startsWith('javascript:') || href.startsWith('#')) return null;
+  if (href.startsWith('/api/') || href.startsWith('/auth/') || href.startsWith('/events')) {
+    return null;
+  }
+  return href;
 }
 
 /**
