@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 func TestBrokerInfoResponse_JSON(t *testing.T) {
@@ -425,6 +426,30 @@ func TestAgentInfoToResponse(t *testing.T) {
 				t.Errorf("Ready = %v, want %v", resp.Ready, tt.expectedReady)
 			}
 		})
+	}
+}
+
+// TestAgentInfoToResponse_EffectiveConfig (WP1 slice 3 addendum v12
+// section 5): the response carries the template hash, harness and model
+// Start resolved, and the broker's own build.
+func TestAgentInfoToResponse_EffectiveConfig(t *testing.T) {
+	resp := AgentInfoToResponse(api.AgentInfo{
+		Name: "agent-eff", Phase: "running", TemplateHash: "sha256:tmpl", Harness: "claude-code", Model: "model-x-1",
+	})
+	if resp.TemplateHash != "sha256:tmpl" || resp.Harness != "claude-code" || resp.Model != "model-x-1" {
+		t.Errorf("effective fields = %q %q %q", resp.TemplateHash, resp.Harness, resp.Model)
+	}
+	if resp.BrokerBuild == "" || resp.BrokerBuild != version.Short() {
+		t.Errorf("BrokerBuild = %q, want version.Short() %q", resp.BrokerBuild, version.Short())
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"templateHash":"sha256:tmpl"`, `"harness":"claude-code"`, `"model":"model-x-1"`, `"brokerBuild":`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("wire form lacks %s: %s", key, data)
+		}
 	}
 }
 

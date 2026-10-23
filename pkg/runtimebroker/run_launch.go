@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // gateAction classifies a claim/checkpoint/keepalive answer (design
@@ -506,6 +507,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 			HarnessConfigSource: sr.info.HarnessConfigSource,
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
+
+			TemplateHash:          sr.info.TemplateHash,
+			Harness:               sr.info.Harness,
+			Model:                 sr.info.Model,
+			HarnessConfigRevision: sr.info.HarnessConfigRevision,
+			BrokerBuild:           version.Short(),
 		}
 	}
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a

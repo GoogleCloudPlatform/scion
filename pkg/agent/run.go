@@ -2688,6 +2688,12 @@ authDone:
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
+				// The effective configuration the hub records (WP1 slice 3).
+				a.Harness = harnessName
+				a.Model = effectiveModel
+				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
+					a.TemplateHash = th
+				}
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				a.WorkspacePlacement = workspacePlacement
@@ -2709,6 +2715,9 @@ authDone:
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
+		Harness:               harnessName,
+		Model:                 effectiveModel,
+		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 		WorkspacePlacement:    workspacePlacement,
@@ -3668,6 +3677,20 @@ func isEmptyPerAgentStart(opts api.StartOptions) bool {
 // loaded from a content-addressed cache (see api.AgentInfo.TemplateHash).
 func infoTemplateHydrated(cfg *api.ScionConfig) bool {
 	return cfg != nil && cfg.Info != nil && cfg.Info.TemplateHash != ""
+}
+
+// startedTemplateHash is the content hash of the template a start ran
+// with: from the image provenance record for an agent with one, otherwise
+// from agent info. "" when the template was resolved by name (no hash is
+// known), so the hub records the effective template hash as unknown.
+func startedTemplateHash(provenance *imageProvenance, cfg *api.ScionConfig) string {
+	if provenance != nil {
+		return provenance.TemplateHash
+	}
+	if cfg != nil && cfg.Info != nil {
+		return cfg.Info.TemplateHash
+	}
+	return ""
 }
 
 // templateHydrated reports whether the agent's template was loaded from a

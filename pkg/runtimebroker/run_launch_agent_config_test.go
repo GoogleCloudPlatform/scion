@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // resolvedConfigManager is asyncManager whose Start reports the config it
@@ -40,6 +41,10 @@ func (m *resolvedConfigManager) Start(ctx context.Context, opts api.StartOptions
 		info.HarnessConfigSource = "template"
 		info.Template = "tmpl"
 		info.Profile = "prof"
+		info.TemplateHash = "sha256:tmpl"
+		info.Harness = "claude-code"
+		info.Model = "model-x-1"
+		info.HarnessConfigRevision = "rev-7"
 	}
 	return info, err
 }
@@ -91,6 +96,12 @@ func TestRunLaunch_SucceededReportCarriesResolvedConfig(t *testing.T) {
 		"harnessConfigSource": {got.HarnessConfigSource, "template"},
 		"template":            {got.Template, "tmpl"},
 		"profile":             {got.Profile, "prof"},
+		// The effective configuration (WP1 slice 3 addendum v12 section 5).
+		"templateHash":          {got.TemplateHash, "sha256:tmpl"},
+		"harness":               {got.Harness, "claude-code"},
+		"model":                 {got.Model, "model-x-1"},
+		"harnessConfigRevision": {got.HarnessConfigRevision, "rev-7"},
+		"brokerBuild":           {got.BrokerBuild, version.Short()},
 	}
 	for field, gw := range want {
 		if gw[0] != gw[1] {

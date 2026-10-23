@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // ============================================================================
@@ -214,6 +215,15 @@ type AgentResponse struct {
 	// the agent's workspace (api.WorkspacePlacementExport or
 	// WorkspacePlacementLocal). Empty when no start resolved it.
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
+	// The broker's effective configuration of the start (WP1 slice 3
+	// addendum v12 section 5): the template content hash, the harness and
+	// the effective model Start resolved, and the broker build. Older
+	// brokers omit them, and the hub then records nothing.
+	TemplateHash string `json:"templateHash,omitempty"`
+	Harness      string `json:"harness,omitempty"`
+	Model        string `json:"model,omitempty"`
+	BrokerBuild  string `json:"brokerBuild,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -714,6 +724,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		HarnessConfigRevision: info.HarnessConfigRevision,
 		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
+		TemplateHash:          info.TemplateHash,
+		Harness:               info.Harness,
+		Model:                 info.Model,
+		BrokerBuild:           version.Short(),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,

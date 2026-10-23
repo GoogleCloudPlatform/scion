@@ -681,6 +681,11 @@ type AgentInfo struct {
 	// Start always sets it, so empty means an older broker (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// Harness and Model are what Start resolved: the harness name and the
+	// effective model (resolveEffectiveModel), set only by Start. The hub
+	// records them as the run's effective configuration (WP1 slice 3).
+	Harness string `json:"harness,omitempty"`
+	Model   string `json:"model,omitempty"`
 
 	// Project association
 	Project string `json:"project"` // Project name (standard field)
