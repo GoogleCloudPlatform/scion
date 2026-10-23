@@ -206,6 +206,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    - backfills queued, servable jobs of runs that pass the fork guard, oldest
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
+     This is the only path that serves a job left queued for capacity, so
+     with cr-ci as the primary runner `RECONCILE_SCHEDULE` should be every
+     minute. (No in-process timer: request-based CPU throttles work done after
+     a response.)
 
    It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
    one repo, run or job only skips that item, `reconcile_skip`, unless every

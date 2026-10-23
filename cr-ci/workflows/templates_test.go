@@ -14,7 +14,7 @@ import (
 
 // routingExpr is the one runs-on expression that routes CI jobs to cr-ci. It
 // must appear byte for byte in every doc that shows it. In the live workflows
-// (.github/workflows), hack/check-runner-routing.sh checks it.
+// (.github/workflows), hack/check-runner-routing.sh (added by PR-wf1) checks it.
 const routingExpr = "${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}"
 
 const (
@@ -163,7 +163,8 @@ func TestPoCWorkflow(t *testing.T) {
 // TestCacheParityCheck: the PoC template starts with a verify-only step, on
 // the self-hosted runner only, that checks the cache-parity contract (the
 // entrypoint sets it up; see README.md, "Cache sharing"). Routed jobs in the
-// live workflows get the same check from .github/actions/setup-go-cache.
+// live workflows get the same check from .github/actions/setup-go-cache (added
+// by PR-wf1).
 func TestCacheParityCheck(t *testing.T) {
 	for _, f := range []string{"cr-runner-poc.yml"} {
 		s := readFile(t, f)

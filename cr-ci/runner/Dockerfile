@@ -106,7 +106,8 @@ COPY --from=golangci-lint --chmod=0755 /out/golangci-lint /usr/local/bin/golangc
 # The work folder is /home/runner/work (the mediator's JIT work_folder), which
 # entrypoint.sh links to /scratch/_work; the _work symlink here only covers a JIT
 # config that names the default _work. Nothing here may create /home/runner/work,
-# /home/runner/.cache or /home/runner/go: the entrypoint creates them as links.
+# /home/runner/.cache, /home/runner/go or /home/runner/.npm: the entrypoint creates
+# them as links.
 WORKDIR /home/runner/actions-runner
 RUN curl -fsSL -o /tmp/actions-runner.tgz \
       "https://github.com/actions/runner/releases/download/v${ACTIONS_RUNNER_VERSION}/actions-runner-linux-x64-${ACTIONS_RUNNER_VERSION}.tar.gz" \

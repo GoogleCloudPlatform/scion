@@ -213,7 +213,14 @@ lint job uses too: a change there changes both.
 ## Capacity and quotas
 
 `MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
-and are dispatched first in, first out as executions finish. Each execution
+and are dispatched first in, first out as executions finish: by the next
+scheduled `/reconcile` (`RECONCILE_SCHEDULE`), since nothing else dispatches a
+job that was left queued. With cr-ci as a repository's primary runner, run it every
+minute (`*/1 * * * *`, Cloud Scheduler's minimum), so an over-capacity job is
+served within about a minute of a slot freeing. The mediator has no in-process
+timer for this on purpose: it runs with Cloud Run's request-based CPU allocation
+(min-instances 0, no `--no-cpu-throttling`), so work after a response would be
+throttled until the next request arrives. Each execution
 uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
 5 x 10 GiB fits, 4 x 25 GiB fits). Above 10 GiB per runner, the per-instance
 quota must be raised as well. To raise the cap, first request the quota increase

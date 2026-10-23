@@ -68,11 +68,12 @@ gets a runner ([architecture](../docs/architecture.md#flow), "Labels").
 
 The routing lives in the workflows themselves, not in a template: the
 primary-runner work (PR-wf1, phase A; PR-wf2, phase B) gives each routed job
-the expression above as its `runs-on`, and `hack/check-runner-routing.sh` (its
-own job in `ci.yml`, `runner-routing-check`) keeps every routed `runs-on`
-byte-identical to it and keeps jobs that must not run on cr-ci off it. Routed
-jobs that use `.github/actions/setup-go-cache` get the cache-parity check from
-it (cr-ci runners only). Nothing is routed until `SCION_LARGE_RUNNER` is set on
+the expression above as its `runs-on`. PR-wf1 also adds
+`hack/check-runner-routing.sh` (its own job in `ci.yml`, `runner-routing-check`),
+which keeps every routed `runs-on` byte-identical to it and keeps jobs that must
+not run on cr-ci off it, and a cache-parity check in
+`.github/actions/setup-go-cache` for routed jobs (cr-ci runners only). Until
+those PRs land, nothing in `.github/workflows` routes to cr-ci. Nothing is routed until `SCION_LARGE_RUNNER` is set on
 a repository
 ([github-setup.md, step 8](../docs/github-setup.md#8-route-jobs-the-actions-variable-scion_large_runner-g10)).
 The design (which jobs, which phase, capacity) is in the exchange bucket,
@@ -245,7 +246,7 @@ mediator log and the execution log
 
 - Every copy of the routing expression in `docs/architecture.md`,
   `docs/github-setup.md` and this README is exactly the canonical expression
-  (the live workflows are checked by `hack/check-runner-routing.sh`).
+  (the live workflows are checked by `hack/check-runner-routing.sh`, added by PR-wf1).
 - The expression keeps the fork guard and the `ubuntu-latest` fallback.
 - The PoC triggers on `push` to `cr-ci-poc-*` branches and on
   `workflow_dispatch`, and runs on the label alone. Its default label (input
