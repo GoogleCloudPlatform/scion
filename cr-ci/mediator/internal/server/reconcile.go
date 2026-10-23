@@ -78,10 +78,10 @@ type runnerJob struct {
 
 // Reconcile runs one pass:
 //  1. discovery, without the lock: queued and in_progress runs and their jobs;
-//  2. hijack guard for jobs running on cr-ci runners (covers missed webhooks);
-//  3. under the lock: expire claims, reap stale registrations and
-//     executions, and backfill queued servable jobs, oldest first, within
-//     capacity.
+//  2. under the lock from here on: the hijack guard for jobs running on
+//     cr-ci runners (covers missed webhooks), sharing one view;
+//  3. expire claims, reap stale registrations and executions, and backfill
+//     queued servable jobs, oldest first, within capacity (a fresh view).
 func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	var res ReconcileResult
 	// Every GitHub call in a pass concerns one repo, run or job. A GitHub 5xx
@@ -109,18 +109,23 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 			"repos", len(s.o.TargetRepos), "skipped", len(res.Skipped))
 	}
 
+	// One lock hold from the hijack guard to the end of the pass, so the guard
+	// loop can share one view (each swap would otherwise list runners and
+	// executions again) and nothing launches between its checks.
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	gv := newView()
 	for _, rj := range onRunners {
-		out, err := s.checkRunnerJob(ctx, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, &rj.run, "reconcile")
+		out, err := s.checkRunnerJobLocked(ctx, gv, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, &rj.run, "reconcile")
 		if err != nil {
 			addErr("runner_check "+rj.job.RunnerName, err)
 		}
 		if out == "killed" {
 			res.HijacksKilled++
+			gv = newView() // the kill changed registrations and executions
 		}
 	}
 
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
 	now := s.o.Now()
 	for k := range s.noticed {
 		if !notices[k] {

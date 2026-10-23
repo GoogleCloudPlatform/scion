@@ -23,12 +23,21 @@ import (
 // run may be nil (it is fetched). The result is a short status for the
 // HTTP response.
 func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, runID int64, runnerName string, run *githubapp.Run, source string) (string, error) {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	return s.checkRunnerJobLocked(ctx, newView(), repoFull, jobID, runID, runnerName, run, source)
+}
+
+// checkRunnerJobLocked is checkRunnerJob for a caller that holds dispatchMu
+// and passes the view for the swap path's runner and execution lists.
+// Reconcile shares one view across its whole guard loop, under one lock hold,
+// so the lists are fetched once per pass (dispatchLocked adds its own launches
+// to the view; nothing else can launch while the lock is held).
+func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull string, jobID, runID int64, runnerName string, run *githubapp.Run, source string) (string, error) {
 	nameID, ok := parseRunnerName(runnerName)
 	if !ok {
 		return "ok", nil
 	}
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
 	rec := s.runners[runnerName]
 	served := nameID // after a restart, assume the runner serves its name's job
 	if rec != nil {
@@ -62,7 +71,6 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 		serveRepo = rec.repo
 	}
 	if reason == "" {
-		v := newView()
 		if rec == nil {
 			rec = &runnerRecord{repo: repo, serve: served, at: s.launchedAt(ctx, v, runnerName)}
 			s.runners[runnerName] = rec
@@ -115,6 +123,7 @@ func (s *Server) checkRunnerJob(ctx context.Context, repoFull string, jobID, run
 	if serveRepo == (githubapp.Repo{}) {
 		return "killed", nil // reconcile backfills it
 	}
+	// A fresh view: the kill above changed the registrations and executions.
 	if _, err := s.dispatchLocked(ctx, newView(), serveRepo, served, servedRunID, jobID, "hijack_recovery"); err != nil {
 		s.log().Error("re-serving the displaced job failed; reconcile will retry", append(attrs, "event", logging.EventError, "error", err.Error())...)
 	}

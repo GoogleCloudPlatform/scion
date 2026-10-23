@@ -555,3 +555,25 @@ func TestSwapTakerRecordAge(t *testing.T) {
 		t.Errorf("runner_swap for cr-job-101 = %q, want inherited_budget 15m0s (launched 30 min ago)", budgets)
 	}
 }
+
+// TestReconcileGuardSharesOneView: the hijack guard loop in reconcile shares
+// one view, so two swaps found in one pass list Cloud Run executions once for
+// the guard (plus once for the backfill), not once per swap.
+func TestReconcileGuardSharesOneView(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(20, fakes.GitHubJob{ID: 200, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	h.queued(200, 20)
+	// Both runners took another legitimate job; the webhooks were missed.
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.addSameRepoRun(21, fakes.GitHubJob{ID: 201, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-200"})
+	before := h.cr.ListCalls
+	res := h.reconcile()
+	if got := h.cr.ListCalls - before; got != 2 {
+		t.Errorf("executions lists in the pass = %d, want 2 (one shared by the guard loop, one for the backfill)", got)
+	}
+	if res.HijacksKilled != 0 || h.activeFor("cr-job-101") != 1 || h.activeFor("cr-job-201") != 1 {
+		t.Errorf("result %+v; want both displaced jobs served under the takers' names: %+v", res, h.executions())
+	}
+}
