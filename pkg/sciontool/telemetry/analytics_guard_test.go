@@ -892,13 +892,15 @@ func TestGuardCommitLinkFallback(t *testing.T) {
 	}
 
 	o2 := testOutbox(t)
+	var dstSeen string
 	o2.link = func(_, dst string) error {
+		dstSeen = dst
 		_ = os.WriteFile(dst, []byte("someone else\n"), 0o644) // dst appears, then link fails
 		return &os.LinkError{Op: "link", Err: syscall.EPERM}
 	}
 	_, _ = o2.PinHubID("hub-A")
 	mustAppend(t, o2, draftFor("a", "rid1:y", outboxTestTS), AppendWritten)
-	c2 := &capture{}
+	c2 := &capture{fail: errors.New("send down")} // keep ready files on disk for the check
 	d2 := NewAnalyticsDrainer(o2, c2.send, trustedHub("hub-A"))
 	d2.RunOnce(context.Background())
 	if o2.MemoryStats().FinalizeFailures != 1 || o2.MemoryStats().CommitLinkFallbacks != 0 {
@@ -907,6 +909,66 @@ func TestGuardCommitLinkFallback(t *testing.T) {
 	files, _ := o2.finalizingFiles()
 	if len(files) != 1 {
 		t.Errorf("finalizing file must stay held; got %v", files)
+	}
+	if data, err := os.ReadFile(dstSeen); err != nil || string(data) != "someone else\n" {
+		t.Errorf("existing ready file replaced: %q, %v", data, err)
+	}
+}
+
+// r3 OPT-1: only "hard links unsupported" errors fall back to the rename;
+// any other link error fails the commit (counted, retried), and the
+// fallback is counted only after its rename succeeds.
+func TestGuardCommitFallbackOnlyForUnsupportedLinks(t *testing.T) {
+	for _, tc := range []struct {
+		err          syscall.Errno
+		wantFallback bool
+	}{
+		{syscall.EPERM, true}, {syscall.EXDEV, true}, {syscall.ENOTSUP, true}, {syscall.EMLINK, true},
+		{syscall.EIO, false}, {syscall.ENOSPC, false}, {syscall.ENOENT, false},
+	} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			o := testOutbox(t)
+			o.link = func(string, string) error { return &os.LinkError{Op: "link", Err: tc.err} }
+			_, _ = o.PinHubID("hub-A")
+			mustAppend(t, o, draftFor("a", "rid1:x", outboxTestTS), AppendWritten)
+			c := &capture{}
+			NewAnalyticsDrainer(o, c.send, trustedHub("hub-A")).RunOnce(context.Background())
+			s := o.MemoryStats()
+			if tc.wantFallback {
+				if len(c.lines) != 1 || s.CommitLinkFallbacks != 1 || s.FinalizeFailures != 0 {
+					t.Errorf("sent %d, fallbacks %d, failures %d; want 1, 1, 0", len(c.lines), s.CommitLinkFallbacks, s.FinalizeFailures)
+				}
+				return
+			}
+			if len(c.lines) != 0 || s.CommitLinkFallbacks != 0 || s.FinalizeFailures != 1 {
+				t.Errorf("sent %d, fallbacks %d, failures %d; want 0, 0, 1", len(c.lines), s.CommitLinkFallbacks, s.FinalizeFailures)
+			}
+		})
+	}
+}
+
+// r3 OPT-3: unexpected finalize failures are all counted, but warned at
+// most once per analyticsBackoffMax.
+func TestGuardFinalizeFailureWarnRateLimit(t *testing.T) {
+	o := testOutbox(t)
+	o.link = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EIO} }
+	_, _ = o.PinHubID("hub-A")
+	mustAppend(t, o, draftFor("a", "rid1:x", outboxTestTS), AppendWritten)
+	d := NewAnalyticsDrainer(o, (&capture{}).send, trustedHub("hub-A"))
+	t0 := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	for i, step := range []struct {
+		at       time.Duration
+		wantWarn time.Duration
+	}{{0, 0}, {time.Minute, 0}, {analyticsBackoffMax - time.Second, 0}, {analyticsBackoffMax, analyticsBackoffMax}} {
+		clock := t0.Add(step.at)
+		d.now = func() time.Time { return clock }
+		d.RunOnce(context.Background())
+		if got := o.MemoryStats().FinalizeFailures; got != int64(i+1) {
+			t.Fatalf("step %d: failures %d, want %d", i, got, i+1)
+		}
+		if want := t0.Add(step.wantWarn); !d.lastFinalizeWarn.Equal(want) {
+			t.Errorf("step %d: last warn at %v, want %v", i, d.lastFinalizeWarn, want)
+		}
 	}
 }
 

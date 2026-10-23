@@ -167,8 +167,8 @@ type AnalyticsOutboxStats struct {
 	// RelocatedRefused counts this process's appends refused because
 	// relocated; CommitLinkFallbacks counts ready commits that used the
 	// locked rename fallback because hard links failed; FinalizeFailures
-	// counts drainer finalize attempts that failed unexpectedly (not "not
-	// verified" or "relocated").
+	// counts drainer finalize attempts (rotation or commit) that failed
+	// unexpectedly (not "not verified" or "relocated").
 	RelocatedRefused, CommitLinkFallbacks, FinalizeFailures int64
 	SyncUncertain, CorruptIntents, Unresolved               int64
 	CommitDeferred                                          int64
@@ -2203,29 +2203,47 @@ func (o *AnalyticsOutbox) writeFileFrom(dir, name string, fill func(io.Writer) e
 	return o.writeFileFromCommit(dir, name, fill, nil)
 }
 
-// linkNoReplace hard-links tmp to dst, failing if dst exists. If hard
-// links are unsupported (any error other than EEXIST), it falls back to a
-// rename after checking that dst does not exist. That fallback is
+// linkNoReplace hard-links tmp to dst, failing if dst exists. When the
+// link error means hard links are unsupported here (EPERM, EXDEV, ENOTSUP,
+// EOPNOTSUPP, EMLINK), it falls back to a rename after checking that dst
+// does not exist; any other error is returned (finalize fails, is counted,
+// and is retried). That fallback is
 // no-replace only because every creator of ready-* files does this under
 // the outbox lock (finalizeFile's commit guard is the only one; Drain only
 // removes or quarantines ready files), so nothing can create dst between
 // the check and the rename.
 func (o *AnalyticsOutbox) linkNoReplace(tmp, dst string) error {
 	err := o.link(tmp, dst)
-	if err == nil || errors.Is(err, fs.ErrExist) {
+	if err == nil || !linksUnsupported(err) {
 		return err
 	}
 	if _, serr := os.Lstat(dst); !errors.Is(serr, fs.ErrNotExist) {
 		return fmt.Errorf("analytics outbox: link %s: %w (rename fallback refused: %v)", dst, err, serr)
 	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
 	o.commitLinkFallbacks.Add(1)
-	return os.Rename(tmp, dst)
+	return nil
+}
+
+// linksUnsupported reports whether a link error means the filesystem does
+// not support hard links here (the only errors linkNoReplace falls back on).
+func linksUnsupported(err error) bool {
+	for _, e := range []error{unix.EPERM, unix.EXDEV, unix.ENOTSUP, unix.EOPNOTSUPP, unix.EMLINK} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeFileFromCommit is writeFileFrom whose final step runs inside guard
 // (when non-nil): guard decides the destination and calls link, which
 // places the synced temp file there without replacing an existing file
-// (linkNoReplace); guard must hold the outbox lock. guard may refuse; the temp file is always removed.
+// (linkNoReplace); guard must hold the outbox lock. guard may refuse. The
+// temp name never survives: it is removed, or consumed by the fallback
+// rename.
 func (o *AnalyticsOutbox) writeFileFromCommit(dir, name string, fill func(io.Writer) error, guard func(link func(dst string) error) error) error {
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {

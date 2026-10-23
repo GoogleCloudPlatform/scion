@@ -314,8 +314,9 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			case errors.Is(err, ErrAnalyticsOutboxRelocated), errors.Is(err, ErrAnalyticsHubNotVerified), ctx.Err() != nil:
 				log.Debug("Analytics drainer: finalize: %v", err)
 			default:
-				// Unexpected: ready commits are stalling (counted in
-				// FinalizeFailures); warn at most every analyticsBackoffMax.
+				// Unexpected: finalize (rotation or commit) failed (counted
+				// in FinalizeFailures); warn at most every
+				// analyticsBackoffMax.
 				d.outbox.finalizeFailures.Add(1)
 				if now := d.now(); d.lastFinalizeWarn.IsZero() || now.Sub(d.lastFinalizeWarn) >= analyticsBackoffMax {
 					d.lastFinalizeWarn = now
