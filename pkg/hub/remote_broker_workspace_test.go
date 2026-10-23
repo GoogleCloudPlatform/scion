@@ -320,11 +320,13 @@ func TestProjectOriginLabel_ServerOwned(t *testing.T) {
 	assert.True(t, after.IsLinkedOrigin(), "the label survives a labels replacement")
 
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+linked.ID+"/clone", map[string]interface{}{"name": "Origin Clone"})
-	if rec.Code < 300 {
-		var clone store.Project
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &clone))
-		assert.False(t, clone.IsLinkedOrigin(), "a clone is hub-managed")
-	}
+	require.Less(t, rec.Code, 300, "the clone succeeds: %s", rec.Body.String())
+	var clone store.Project
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &clone))
+	require.NotEmpty(t, clone.ID)
+	storedClone, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+	assert.False(t, storedClone.IsLinkedOrigin(), "a clone is hub-managed")
 }
 
 // TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_SharedBackendServesUUIDTree:
