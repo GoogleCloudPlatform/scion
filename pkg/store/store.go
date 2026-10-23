@@ -56,7 +56,8 @@ var (
 
 	// ErrInvalidTransfer is returned by TransferBrokerReservation for a
 	// contradictory request (CreateIfAbsent together with
-	// FromReservationID), before the transaction starts.
+	// FromReservationID), before the transaction starts. The hub also wraps
+	// it when it refuses a transfer to an empty broker ID.
 	ErrInvalidTransfer = errors.New("store: invalid reservation transfer request")
 
 	// ErrTransient marks a database conflict that a retry resolves: a

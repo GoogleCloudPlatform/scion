@@ -367,6 +367,27 @@ func TestTransferBroker_NoLimitDefinitionNoOp(t *testing.T) {
 	assert.Equal(t, store.BrokerReservationTransferResult{}, res)
 }
 
+// A transfer to an empty broker ID is refused with store.ErrInvalidTransfer
+// before any lookup, on the checked and the unchecked path, and nothing is
+// written: the agent keeps its source row and no row lands on scope "".
+func TestTransferBroker_EmptyTargetRefused(t *testing.T) {
+	srv, s := testServer(t)
+	f := newTransferTestFixture(t, srv, s, 5)
+
+	res, limited, err := srv.quotaService.TransferBroker(context.Background(), f.agent.ID, "", TransferOpts{})
+	require.ErrorIs(t, err, store.ErrInvalidTransfer, "an empty target broker is refused")
+	assert.False(t, limited)
+	assert.Equal(t, store.BrokerReservationTransferResult{}, res)
+
+	res, limited, err = srv.transferBrokerReservationUnchecked(context.Background(), f.agent.ID, "", TransferOpts{CreateIfAbsent: true})
+	require.ErrorIs(t, err, store.ErrInvalidTransfer, "an empty target broker is refused unchecked too")
+	assert.False(t, limited)
+	assert.Equal(t, store.BrokerReservationTransferResult{}, res)
+
+	f.requireOnSource(t)
+	assert.Zero(t, brokerReservationCount(t, s, ""), "nothing on an empty scope")
+}
+
 // moveBrokerQuota of an agent holding no reservation (an idle release freed
 // the source slot) makes the plain checked reservation on the target.
 func TestMoveBrokerQuota_AbsentReservesOnTarget(t *testing.T) {

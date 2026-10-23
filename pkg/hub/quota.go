@@ -455,9 +455,14 @@ func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker st
 // brokerTransferRequest looks up the max_agents_per_broker limit definition
 // in st and builds the TransferBrokerReservation request moving agentID's
 // reservation onto toBroker with o's flags (Cap 0). limited is false, with
-// no error, when no limit definition exists.
+// no error, when no limit definition exists. An empty toBroker is refused
+// with store.ErrInvalidTransfer before any lookup: no reservation may land
+// on an empty broker scope.
 func brokerTransferRequest(ctx context.Context, st store.Store, agentID, toBroker string, o TransferOpts) (req store.BrokerReservationTransfer, limited bool, err error) {
 	const limitName = store.LimitMaxAgentsPerBroker
+	if toBroker == "" {
+		return req, false, fmt.Errorf("quota: transfer reservation for %q to an empty broker ID: %w", limitName, store.ErrInvalidTransfer)
+	}
 	def, err := st.GetLimitDefinitionByName(ctx, limitName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

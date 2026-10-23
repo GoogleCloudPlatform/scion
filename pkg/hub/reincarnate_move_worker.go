@@ -164,18 +164,6 @@ func withBroker(a *store.Agent, brokerID string) *store.Agent {
 // data race.
 var moveBrokerQuotaTestHook atomic.Pointer[func(ctx context.Context)]
 
-// setMoveBrokerQuotaTestHook installs fn as moveBrokerQuotaTestHook and
-// returns a func that restores the previous value. For tests only; a test
-// that sets it must not call t.Parallel.
-func setMoveBrokerQuotaTestHook(fn func(ctx context.Context)) (restore func()) {
-	var p *func(ctx context.Context)
-	if fn != nil {
-		p = &fn
-	}
-	prev := moveBrokerQuotaTestHook.Swap(p)
-	return func() { moveBrokerQuotaTestHook.Store(prev) }
-}
-
 // moveBrokerQuota moves the agent's broker reservation from the source to
 // the target in one store transaction, with the cap check on the target
 // (QuotaService.TransferBroker). The source slot is freed only in the commit
