@@ -40,7 +40,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/httpcompress"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
@@ -257,6 +259,7 @@ type WebServer struct {
 	store          store.Store
 	userTokenSvc   *UserTokenService
 	events         EventPublisher              // nil when no publisher configured
+	streams        eventstreams.Registry       // open /events streams (ptone/scion#5227)
 	hubHandler     http.Handler                // mounted Hub API handler, or nil
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
@@ -838,6 +841,18 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
 func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
+}
+
+// EventStreams returns the registry of the events streams open on this
+// web server (ptone/scion#5227).
+func (ws *WebServer) EventStreams() *eventstreams.Registry {
+	return &ws.streams
+}
+
+// SetEventStreamMetrics wires the scion.hub.sse.* recorder into the events
+// stream registry (ptone/scion#5228). Nil disables it.
+func (ws *WebServer) SetEventStreamMetrics(rec ssemetrics.Recorder) {
+	ws.streams.SetMetrics(rec)
 }
 
 // adminEmails returns the live admin email list from the access settings
@@ -2009,6 +2024,13 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
 
+	// Register the stream (ptone/scion#5227) and close it on every exit
+	// path below, with the reason set where the loop returns. A panic is
+	// reported as a client close.
+	stream := ws.streams.Register(eventStreamKeyFromRequest(r), len(subjects))
+	closeReason := eventstreams.CloseClient
+	defer func() { stream.Close(closeReason, ws.logger()) }()
+
 	// The stream also ends when the server begins shutting down, so it
 	// does not hold the HTTP drain (ptone/scion#5054).
 	streamCtx, endStream := ws.shutdownMark.streamContext(r)
@@ -2054,6 +2076,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case evt, ok := <-ch:
 			if !ok {
 				// Publisher closed
+				closeReason = eventstreams.ClosePublisher
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2069,31 +2092,42 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			//   data: {"subject":"project.xxx.agent.created","data":{...}}
 			// The client's SSEClient listens for event type "update" and
 			// the StateManager parses the subject to route the event.
-			_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
+			n, _ := fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
 				eventID, evt.Subject, evt.Data)
 			flusher.Flush()
+			stream.RecordEvent(n)
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
+				closeReason = eventstreams.CloseSessionEnded
 				return
 			}
 			// A named event rather than an SSE comment: browsers never pass
 			// comments to page code, so the client could not observe them.
 			// No id line, so Last-Event-ID and update ids are unaffected.
-			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
+			n, _ := fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+			stream.RecordBytes(n)
 		case <-tiDeadline:
+			closeReason = eventstreams.CloseSessionEnded
 			return
 		case <-reconnectTimer.C:
 			// Send a reconnect hint so clients can distinguish a
 			// server-initiated close from an error, then return to
 			// close the connection cleanly.
-			_, _ = fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
 			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseMaxAge
 			return
 		case <-streamCtx.Done():
+			// The request context ending first is the client going away;
+			// otherwise the server began shutting down.
+			if r.Context().Err() == nil {
+				closeReason = eventstreams.CloseShutdown
+			}
 			return
 		}
 	}
@@ -2401,6 +2435,10 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 	return expanded
 }
 
+// sseProjectWildcardPageSize is the ListProjects page size of
+// expandProjectWildcard: the store's maximum page.
+const sseProjectWildcardPageSize = 1000
+
 // expandProjectWildcard expands a project wildcard (project.> or project.*)
 // into concrete project-scoped subjects for all projects the caller can read.
 // Returns an empty slice if no accessible projects exist (fail-closed).
@@ -2421,22 +2459,6 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 		sessionUser.Role,
 		"web",
 	)
-
-	// List all projects and filter by ActionRead.
-	allProjects, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
-		return nil // fail-closed
-	}
-	if allProjects == nil || len(allProjects.Items) == 0 {
-		return nil
-	}
-
-	resources := make([]Resource, len(allProjects.Items))
-	for i := range allProjects.Items {
-		resources[i] = projectResource(&allProjects.Items[i])
-	}
-	caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
 
 	// Build the suffix to append after the concrete project ID.
 	//
@@ -2459,15 +2481,42 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 	}
 	suffix := strings.Join(suffixParts, ".")
 
+	// List every project, a page at a time, and keep those the caller can
+	// read. Every page is drained (ptone/scion#1741): a single page would
+	// silently drop the projects beyond the store's page cap. Any list
+	// error fails closed for the whole expansion.
 	var result []string
-	for i, p := range allProjects.Items {
-		if capabilityAllows(caps[i], ActionRead) {
-			if suffix == "" {
-				result = append(result, "project."+p.ID)
-			} else {
-				result = append(result, "project."+p.ID+"."+suffix)
+	opts := store.ListOptions{Limit: sseProjectWildcardPageSize, SkipTotalCount: true}
+	for {
+		page, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, opts)
+		if err != nil {
+			ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
+			return nil // fail-closed
+		}
+		if page == nil {
+			break
+		}
+		if len(page.Items) > 0 {
+			resources := make([]Resource, len(page.Items))
+			for i := range page.Items {
+				resources[i] = projectResource(&page.Items[i])
+			}
+			caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
+			for i, p := range page.Items {
+				if capabilityAllows(caps[i], ActionRead) {
+					if suffix == "" {
+						result = append(result, "project."+p.ID)
+					} else {
+						result = append(result, "project."+p.ID+"."+suffix)
+					}
+				}
 			}
 		}
+		// A cursor that does not advance would loop forever; stop on it.
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
 	}
 	return result
 }

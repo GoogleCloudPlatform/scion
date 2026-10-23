@@ -65,7 +65,7 @@ var requestPathSites = []requestPathSite{
 	{"admin_mode.go", "WebServer.adminModeWebMiddleware", "URL.Path", 1, "comparison: matches admin-mode exempt paths"},
 	{"admin_settings.go", "Server.handleAdminServerConfigSectionReset", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"agent_routes.go", "resolveAgentSubRouteForRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route from the escaped path"},
-	{"agent_delegation_routes.go", "Server.admitDelegatedRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route for the delegated-credential admission table"},
+	{"agent_delegation_routes.go", "Server.admitDelegatedRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route or the project resource route for the delegated-credential admission table"},
 	{"agent_run_scope.go", "runScopeRequestFrom", "URL.Path", 1, "classification only: classPath picks the run-scope route class and is never logged (the logged path is logging.RequestPath)"},
 	{"attachment_delivery.go", "Server.handleAttachmentDelivery", "URL.Path", 1, "routing: extracts the delivery capability token from the path; a refusal never logs it"},
 	{"attachment_delivery.go", "attachmentDelivery.Issue", "URL(bare)", 1, "not a request URL: the capability path a wire attachment carries to the broker"},
@@ -546,7 +546,7 @@ func goFiles(t *testing.T, dirs ...string) []string {
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../artifacts")
+	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}

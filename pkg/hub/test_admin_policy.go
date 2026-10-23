@@ -436,6 +436,8 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"experiments":       testAdminPolicyDeny,
 	"artifacts":         testAdminPolicyDeny,
 	"profiling":         testAdminPolicyDeny,
+
+	"agent_delegation_policy": testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -560,6 +562,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
+	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

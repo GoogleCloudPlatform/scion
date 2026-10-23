@@ -3155,6 +3155,8 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
+
+	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

@@ -43,16 +43,18 @@ const (
 	EnvAppPrivateKeySecretName = "GITHUB_APP_PRIVATE_KEY_SECRET_NAME"
 	EnvWebhookSecretName       = "GITHUB_WEBHOOK_SECRET_NAME"
 	EnvClaimTTL                = "CLAIM_TTL"
+	EnvRunnerBuildCacheInRAM   = "RUNNER_BUILD_CACHE_IN_RAM"
 )
 
 // Cloud Run limits and contract defaults.
 const (
 	maxOwnerLen            = 39
 	maxCloudRunTaskTimeout = 168 * time.Hour
-	// maxEphemeralDiskGi: the Cloud Run server rejected an ephemeral-disk
-	// total above 10 GiB per instance in the P6 deploy (deploy-demo-test),
-	// although the volume API documents up to 100 GiB.
-	maxEphemeralDiskGi       = 10
+	// maxEphemeralDiskGi: the per-volume maximum Cloud Run documents. Above
+	// 10 GiB per instance needs the per-instance quota
+	// run.googleapis.com/max_per_instance_ephemeral_disk raised first (the
+	// server rejects the job otherwise); see docs/gcp-setup.md, "Quotas".
+	maxEphemeralDiskGi       = 100
 	maxCloudRunMemoryMi      = 32 * 1024
 	minCloudRunMemoryMi      = 512
 	defaultRunnerLabel       = "scion-cr-8c32g"
@@ -131,6 +133,7 @@ type Config struct {
 	AppPrivateKeySecretName string
 	WebhookSecretName       string
 	ClaimTTL                time.Duration
+	RunnerBuildCacheInRAM   bool // used by deploy-job.sh and the runner entrypoint only
 }
 
 // Defaults returns the default value of every optional variable. Required
@@ -139,7 +142,7 @@ func Defaults() map[string]string {
 	return map[string]string{
 		EnvTargetRepos:             "",
 		EnvGitHubAppID:             "",
-		EnvGitHubInstallScope:      "",
+		EnvGitHubInstallScope:      string(ScopeRepo),
 		EnvGCPProject:              "",
 		EnvRegion:                  "",
 		EnvRunnerLabel:             defaultRunnerLabel,
@@ -166,6 +169,7 @@ func Defaults() map[string]string {
 		EnvAppPrivateKeySecretName: defaultAppKeySecret,
 		EnvWebhookSecretName:       defaultWebhookSecret,
 		EnvClaimTTL:                defaultClaimTTL,
+		EnvRunnerBuildCacheInRAM:   "false",
 	}
 }
 
@@ -276,8 +280,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		c.GitHubAppID = id
 	}
 
-	switch scope := InstallScope(required(EnvGitHubInstallScope)); scope {
-	case "":
+	switch scope := InstallScope(get(EnvGitHubInstallScope)); scope {
 	case ScopeRepo, ScopeOrg:
 		c.InstallScope = scope
 	default:
@@ -327,6 +330,18 @@ func Load(getenv func(string) string) (*Config, error) {
 		fail(EnvRunnerDiskGi, "%d exceeds the %d GiB ephemeral-disk maximum", c.RunnerDiskGi, maxEphemeralDiskGi)
 	}
 	c.MaxConcurrentRunners = posInt(EnvMaxConcurrentRunners)
+	switch raw := get(EnvRunnerBuildCacheInRAM); raw {
+	case "true":
+		c.RunnerBuildCacheInRAM = true
+	case "false":
+	default:
+		fail(EnvRunnerBuildCacheInRAM, "%q must be true or false", raw)
+	}
+	// The in-RAM cache (~9.5 GB) comes on top of the lint's ~21 GB compile (P6 PoC
+	// run 4: 27.9 GB of 32 GiB), so only the 32 GiB shape has room for it.
+	if c.RunnerBuildCacheInRAM && c.RunnerMemoryMi != 0 && c.RunnerMemoryMi < maxCloudRunMemoryMi {
+		fail(EnvRunnerBuildCacheInRAM, "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got %s", c.RunnerMemory)
+	}
 
 	if raw := get(EnvTaskTimeout); raw != "" {
 		d, err := time.ParseDuration(raw)

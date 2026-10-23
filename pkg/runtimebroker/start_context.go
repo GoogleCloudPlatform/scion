@@ -328,6 +328,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// A hub-managed workspace's .scion entry must be in the state the
+	// broker recorded for it before anything is read through it (see
+	// checkWorkspaceConfigRecord); recordHubProjectFiles records the state
+	// it leaves.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		var checkErr error
+		if err := s.withWorkspaceLock(ctx, func() { checkErr = checkWorkspaceConfigRecord(in.ProjectPath, in.ProjectID) }, in.ProjectPath); err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if checkErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(checkErr, in.Name)
+		}
+	}
+
 	// Shared-workspace dispatch verifies the project identity before loading
 	// project settings, before the marker handling below and before the
 	// recorded profile is computed (ptone/scion#1799): see
@@ -368,8 +383,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// the process-wide workspace lock on the project, so two Runtime
 		// Broker instances never write them concurrently. It is released
 		// before worktree provisioning takes it again.
-		if err := s.withWorkspaceLock(ctx, func() { s.recordHubProjectFiles(ctx, in) }, in.ProjectPath); err != nil {
+		var recordErr error
+		if err := s.withWorkspaceLock(ctx, func() { recordErr = s.recordHubProjectFilesChecked(ctx, in) }, in.ProjectPath); err != nil {
 			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
+		if recordErr != nil {
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			return nil, s.workspaceConfigStartContextError(recordErr, in.Name)
 		}
 	}
 
