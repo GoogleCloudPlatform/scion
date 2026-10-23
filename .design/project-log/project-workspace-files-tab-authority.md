@@ -1,7 +1,7 @@
 # Project storage phase 2: workspace Files tab on the authority; retire hub-projects; delete the GCS workspace sync and the linked-project cache
 
 **Date**: 2026-10-23
-**Issue**: ptone/scion#5813 (sub-issues ptone/scion#5814, ptone/scion#5815, ptone/scion#5816, ptone/scion#5818; the storage migration, ptone/scion#5819, is in `fsstore-p2-m2-project-storage-migrate.md`; tracking ptone/scion#5805)
+**Issue**: ptone/scion#5813 (sub-issues ptone/scion#5814, ptone/scion#5815, ptone/scion#5816, ptone/scion#5818; the storage migration, ptone/scion#5819, is in `project-storage-migrate.md`; tracking ptone/scion#5805)
 
 ## Summary
 
