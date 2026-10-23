@@ -110,4 +110,4 @@ pkg/projectfs volume backends; pkg/hub `project_workspace_layout_test.go`
 closed, seed at ProjectRoot, no hub clone, alignment skipped, no
 migrationNotice by default), `remote_broker_workspace_test.go` (remote broker refusal), rewritten
 delete-dir and embedded-cleanup tests; pkg/runtimebroker existing-workspace
-bootstrap test; shared-dir storage loading tests (ptone/scion#5881).
+bootstrap test; shared-dir storage loading tests.

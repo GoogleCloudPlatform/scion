@@ -357,7 +357,7 @@ func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 
 // TestSharedDirFiles_CloudRun_NoWorkspaceStorageRefused pins the write gate
 // on a Cloud Run Service with no workspace_storage and no
-// shared_dir_storage at all (ptone/scion#5881): shared dirs resolve to instance-local disk, so upload,
+// shared_dir_storage at all: shared dirs resolve to instance-local disk, so upload,
 // write and delete answer 503 and create nothing, while reads are allowed.
 func TestSharedDirFiles_CloudRun_NoWorkspaceStorageRefused(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)

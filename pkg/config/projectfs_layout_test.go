@@ -105,9 +105,8 @@ func TestLoadHubSharedDirStorage(t *testing.T) {
 		assert.Equal(t, "nfs", got.Backend)
 		assert.Error(t, got.Validate())
 	})
-	// ptone/scion#5881: a legacy
-	// (pre-schema_version) file that mentions shared_dir_storage but from
-	// which no block loads fails closed: an error, never a nil block that
+	// A legacy (pre-schema_version) file that mentions shared_dir_storage
+	// but from which no block loads fails closed: an error, never a nil block that
 	// the hub would read as "local".
 	t.Run("legacy file mentioning the key without a block fails closed", func(t *testing.T) {
 		writeGlobalSettingsForTest(t, "shared_dir_storage:\n  backend: nfs\n")
