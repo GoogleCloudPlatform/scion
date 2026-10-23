@@ -147,7 +147,9 @@ const effectiveConfigAttempts = 3
 // effectiveConfigRaceHook, when non-nil, is called between
 // SetAgentEffectiveConfig's classifying read and its conditional write, so
 // a test can land a concurrent write in that window (possible only with no
-// observer installed, when the read is not in a transaction).
+// observer installed, when the read is not in a transaction). It is read
+// without synchronisation: tests that set it must not run in parallel
+// (t.Parallel) with any test that calls SetAgentEffectiveConfig.
 var effectiveConfigRaceHook func()
 
 // effectiveConfigRow reads the full row of uid, locked for update where the

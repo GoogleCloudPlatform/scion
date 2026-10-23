@@ -672,6 +672,20 @@ type StatsResponse struct {
 // Conversion Functions
 // ============================================================================
 
+// effectiveBrokerBuild is the broker build echoed with info: this
+// broker's version.Short() when the start that produced info resolved the
+// agent's configuration, else "". Harness is set only by agent Start's
+// resolving return paths, so a start that found the agent already
+// running, and every list or get entry, carry no brokerBuild and so no
+// effective-only field: the hub records nothing for them (WP1 slice 3
+// addendum v13 section 5).
+func effectiveBrokerBuild(info api.AgentInfo) string {
+	if info.Harness == "" {
+		return ""
+	}
+	return version.Short()
+}
+
 // AgentInfoToResponse converts an api.AgentInfo to an AgentResponse.
 func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	phase := info.Phase
@@ -727,7 +741,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		TemplateHash:          info.TemplateHash,
 		Harness:               info.Harness,
 		Model:                 info.Model,
-		BrokerBuild:           version.Short(),
+		BrokerBuild:           effectiveBrokerBuild(info),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,

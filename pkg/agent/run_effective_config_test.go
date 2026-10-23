@@ -119,3 +119,38 @@ func TestStartedTemplateHash(t *testing.T) {
 		t.Errorf("nothing known: %q", got)
 	}
 }
+
+// TestStart_AlreadyRunningReportsNoEffectiveConfig (review wp1s3-r1 R1,
+// addendum v13 section 5): a start with no task that finds the agent
+// already running resolves no configuration, so it returns the running
+// entry with Harness, Model and TemplateHash unset, even if the listing
+// carried them, and starts nothing.
+func TestStart_AlreadyRunningReportsNoEffectiveConfig(t *testing.T) {
+	project := effectiveConfigFixture(t)
+	var ran atomic.Bool
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{
+				ContainerID: "running-id", Name: "eff-agent", Phase: "running", RunID: "run-b",
+				Harness: "listed-harness", Model: "listed-model", TemplateHash: "sha256:listed",
+			}}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			ran.Store(true)
+			return "mock-id", nil
+		},
+	}
+	info, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name: "eff-agent", Template: "alpha", ProjectPath: project, BrokerMode: true, NoAuth: true,
+		Env: map[string]string{"SCION_MODEL": "model-x-1"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if ran.Load() || info.ContainerID != "running-id" || info.RunID != "run-b" {
+		t.Fatalf("fixture: the already-running path was not taken (ran=%v, %+v)", ran.Load(), info)
+	}
+	if info.Harness != "" || info.Model != "" || info.TemplateHash != "" {
+		t.Errorf("an already-running start reports effective fields: harness %q model %q template hash %q", info.Harness, info.Model, info.TemplateHash)
+	}
+}
