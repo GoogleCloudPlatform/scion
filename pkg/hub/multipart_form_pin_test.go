@@ -20,7 +20,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -51,8 +50,9 @@ var implicitMultipartParsers = map[string]bool{
 	"FormFile":      false,
 }
 
-// TestMultipartFormSourcePin checks the pkg/hub non-test sources so that every
-// multipart form a handler parses is removed by that handler:
+// TestMultipartFormSourcePin checks the pkg/hub non-test sources (and those
+// of its guardScanSubdirs subpackages) so that every multipart form a handler
+// parses is removed by that handler:
 //
 //  1. ParseMultipartForm is referenced only inside parseMultipartUpload; no
 //     function is exempt. The whole file is walked, package-level function
@@ -75,7 +75,13 @@ var implicitMultipartParsers = map[string]bool{
 // method on another type is checked too (conservative), and a ParseForm is
 // accepted only on a *http.Request parameter of the enclosing function.
 func TestMultipartFormSourcePin(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards multipart form parsing and cleanup.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards multipart form parsing and cleanup.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards multipart form parsing and cleanup.
+	files, err := globGuardScanDirs(".", "*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}

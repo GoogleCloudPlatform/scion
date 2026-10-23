@@ -7,9 +7,34 @@ is P6, and the `ci.yml` change is P7.
 
 | File | What it is |
 | :--- | :--- |
-| [`cr-runner-poc.yml`](cr-runner-poc.yml) | PoC workflow (`workflow_dispatch`): runs `golangci-lint` on a cr-ci runner without the `-c=1` throttle, then reports peak memory and `/scratch` use |
+| [`cr-runner-poc.yml`](cr-runner-poc.yml) | PoC workflow (push to a throwaway `cr-ci-poc-*` branch, or `workflow_dispatch`): runs `golangci-lint` on a cr-ci runner without the `-c=1` throttle, sampling memory and `/scratch` use |
 | [`ci-lint-routing.snippet.yml`](ci-lint-routing.snippet.yml) | The lines of `ci.yml`'s `lint` job that change: the routing `runs-on` expression and the lint step's env |
 | [`templates_test.go`](templates_test.go) | Static checks (stdlib only) on these templates and on `scripts/github-app-manifest.json` |
+
+## Running the PoC: a push-triggered throwaway branch
+
+`workflow_dispatch` only offers workflows whose file is on the default branch,
+and a fork's main must mirror upstream exactly. So the PoC (P6) runs from a
+throwaway branch instead, which is how the P6 PoC ran:
+
+```bash
+git switch -c cr-ci-poc-1 <a commit that contains cr-ci/>
+cp cr-ci/workflows/cr-runner-poc.yml .github/workflows/cr-ci-poc.yml
+git add .github/workflows/cr-ci-poc.yml && git commit -m "cr-ci PoC (throwaway; delete after the run)"
+git push origin cr-ci-poc-1             # the push triggers the run
+gh run list --repo REPO --branch cr-ci-poc-1 --limit 1
+```
+
+- The template triggers on `push` to `cr-ci-poc-*` branches; the inputs fall
+  back to their defaults on push. Pushing needs write access, the same trust as
+  a dispatch. The mediator treats a same-repo push as allowed (fork guard).
+- Pushing a branch that adds a workflow file needs a token with the
+  `workflows` permission (or the classic `workflow` scope).
+- Afterwards, delete the branch (`git push origin --delete cr-ci-poc-1`) and any
+  cache the run created (`gh cache list --repo REPO --ref refs/heads/cr-ci-poc-1`,
+  then `gh cache delete <id> --repo REPO`).
+- Other one-off checks (for example poc-checklist E1) use the same pattern,
+  with `on: push: branches: [cr-ci-poc-<name>]`.
 
 ## The routing expression
 
@@ -149,14 +174,25 @@ From design section 7, phase 1. Read them from the PoC run's log, the
 mediator log and the execution log
 ([github-setup.md, step 9](../docs/github-setup.md#9-verify-a-routed-job)):
 
-- Queue to first step in under 20 s.
+- Queue to first step in under 20 s. (P6 measured 40-67 s: Cloud Run's
+  sandbox start alone takes 18-47 s, and the first execution after an image
+  change adds ~34 s of image import; `deploy-job.sh --warm-up` removes the latter.)
 - The Go cache is warm: the "Check that the Go cache is warm" step prints
   `go cache warm: yes`, based on the file count of `$(go env GOCACHE)` after
   the restore, not only the matched key.
 - `golangci-lint` finishes in under 14 minutes (the step prints its
-  duration). Compare it with CI's warm lint (584-776 s on ubuntu-latest).
-- `memory.peak` at about 50% of 32 GiB (about 15.5 to 17 GiB), and `/scratch`
-  takes the 5 to 8 GiB of caches instead of RAM.
+  duration). Compare it with CI's warm lint (584-776 s on ubuntu-latest); P6
+  measured 1026 s (17.1 min) with the build cache in RAM.
+- Memory: `memory.peak` is not available under gVisor, so read the lint step's
+  `sample peaks:` line (`MemTotal - MemAvailable`, which includes RAM-held
+  files). P6 measured a compile peak near 21 GB, and 27.9 GB with the build
+  cache in RAM, of 32 GiB.
+- Disk: the caches (8-9.5 GB of Go build cache during the lint, plus the
+  workspace, modules and temp dirs; about 15-20 GiB in total) fit on `/scratch`.
+  That needs `RUNNER_DISK_GI` of about 25 after the per-instance quota increase
+  ([gcp-setup, "Quotas"](../docs/gcp-setup.md#9-quotas)), or
+  `RUNNER_BUILD_CACHE_IN_RAM=true`. With the default 10 GiB the lint runs out of
+  space.
 - The runner deregisters itself, and the execution ends (and stops billing)
   when the job ends.
 - The runner checkpoints in [runner/README.md](../runner/README.md#runtime-contract)
@@ -171,10 +207,11 @@ mediator log and the execution log
   every copy of it in `docs/architecture.md`, `docs/github-setup.md` and this
   README.
 - The expression keeps the fork guard and the `ubuntu-latest` fallback.
-- The PoC is `workflow_dispatch` only, and runs on the label alone. Its
-  default label equals `RUNNER_LABEL`'s default in `config.example.env`.
-  It contains no `-c=1` throttle, and it reports `memory.peak` and
-  `df -h /scratch`.
+- The PoC triggers on `push` to `cr-ci-poc-*` branches and on
+  `workflow_dispatch`, and runs on the label alone. Its default label (input
+  and push fallback) equals `RUNNER_LABEL`'s default in `config.example.env`.
+  It contains no `-c=1` throttle, samples memory and `/scratch` during the lint,
+  and reports `df -h /scratch`.
 - Both templates start with the self-hosted-only, verify-only cache parity
   step (`HOME`, the work folder and cache links, `go env` paths,
   `GITHUB_WORKSPACE`, zstd). It creates no links and writes no `GITHUB_ENV`.

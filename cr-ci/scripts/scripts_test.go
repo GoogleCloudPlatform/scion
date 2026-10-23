@@ -136,6 +136,9 @@ func (e *env) run(script string, stdin string, args ...string) result {
 		"HOME=" + e.dir,
 		"STUB_DIR=" + e.stubDir,
 		"LC_ALL=C",
+		// git in the scripts (default image tags) must not find a stray
+		// repository at or above the temp root, e.g. /tmp/.git.
+		"GIT_CEILING_DIRECTORIES=" + os.TempDir(),
 	}, e.extra...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
@@ -266,6 +269,7 @@ var dryCases = []dryCase{
 	{"build-runner-image", "build-runner-image.sh", []string{"--tag", "golden"}, nil},
 	{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 	{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, nil},
+	{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, nil},
 	{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, nil},
 	{"deploy-mediator-no-invoker-iam-check", "deploy-mediator.sh", []string{"--tag", "golden", "--no-invoker-iam-check"}, nil},
 	{"deploy-scheduler", "deploy-scheduler.sh", nil, nil},
@@ -325,6 +329,9 @@ func TestApplyRunsExactlyTheDryRunCommands(t *testing.T) {
 		{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 		{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, func(e *env) {
 			// apply refuses a missing image; dry-run only shows the check.
+			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
+		}},
+		{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, func(e *env) {
 			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
 		}},
 		{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, func(e *env) {
@@ -810,6 +817,21 @@ func TestTeardown(t *testing.T) {
 	}
 }
 
+// minimalGitEnv is the whole environment for the tests' own git calls: nothing
+// is inherited, so no GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_* or
+// hooks setting can point git at another repository (such as the real checkout)
+// or change its behaviour. home holds the throwaway repository.
+func minimalGitEnv(home string) []string {
+	return []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"LC_ALL=C",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(home),
+	}
+}
+
 // ---- default image tag ------------------------------------------------------------------
 
 // TestDefaultTag builds a throwaway git repo holding the module files the
@@ -837,7 +859,7 @@ func TestDefaultTag(t *testing.T) {
 	g := func(args ...string) string {
 		cmd := exec.Command(git, append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		cmd.Env = minimalGitEnv(root)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
