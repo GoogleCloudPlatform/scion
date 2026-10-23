@@ -53,26 +53,25 @@ type reincStepFixture struct {
 	ls       lifecycleEventStore
 	sink     *telemetryemit.MemorySink
 	counters *telemetryemit.MemoryCounters
-	hooks    *reincStepFaultStore
-	fault    *storeFaultSwitch
 	agent    *store.Agent
 }
 
-// reincStepFaultStore fails the plain path's UpdateAgent while armed. The
-// transactional path writes through the transaction's store, not this
-// wrapper.
-type reincStepFaultStore struct {
-	store.Store
-	fault *storeFaultSwitch
+// failAfterObserver runs the real lifecycle observer (its cursor bump and
+// outbox insert happen in the write's transaction) and then fails, so the
+// write and everything the observer wrote must roll back.
+type failAfterObserver struct {
+	inner store.AgentWriteObserver
+	ran   int
 }
 
 var errInjectedReincStep = errors.New("injected reincarnation step failure")
 
-func (w *reincStepFaultStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
-	if w.fault.Active() {
-		return errInjectedReincStep
+func (o *failAfterObserver) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, w store.AgentWrite) error {
+	if err := o.inner.ObserveAgentWrite(ctx, tx, w); err != nil {
+		return err
 	}
-	return w.Store.UpdateAgent(ctx, a)
+	o.ran++
+	return errInjectedReincStep
 }
 
 func newReincStepFixture(t *testing.T, name string) *reincStepFixture {
@@ -86,9 +85,6 @@ func newReincStepFixture(t *testing.T, name string) *reincStepFixture {
 	st, err := srv.installLifecycleObserver()
 	require.NoError(t, err)
 	require.Equal(t, telemetryemit.ObserverStateEnabled, st)
-	hooks, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *reincStepFaultStore {
-		return &reincStepFaultStore{Store: inner, fault: f}
-	})
 	ctx := context.Background()
 	project := &store.Project{ID: tid("project-" + name), Slug: name, Name: name, Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -100,16 +96,16 @@ func newReincStepFixture(t *testing.T, name string) *reincStepFixture {
 	}
 	cctx := lifecycleevents.WithCreateContext(ctx, lifecycleevents.CreateContext{CreatorType: "user", CreatorID: "u1"})
 	require.NoError(t, s.WithTx(cctx, func(tx store.Store) error { return tx.CreateAgent(cctx, agent) }))
-	return &reincStepFixture{srv: srv, raw: s, ls: ls, sink: sink, counters: counters, hooks: hooks, fault: fault, agent: agent}
+	return &reincStepFixture{srv: srv, raw: s, ls: ls, sink: sink, counters: counters, agent: agent}
 }
 
 // lifecycleState is the agent's committed lifecycle metadata: its outbox
 // rows, its cursor, and the observer's enqueue count.
 type lifecycleState struct {
-	rows, maxRowID, maxSeq  int64
-	transitionRev, metaRev  int64
-	metaDigest, fingerprint string
-	enqueued                int64
+	rows, maxAgentSeq, maxSeq int64
+	transitionRev, metaRev    int64
+	metaDigest, fingerprint   string
+	enqueued                  int64
 }
 
 func (f *reincStepFixture) state(t *testing.T) lifecycleState {
@@ -118,7 +114,7 @@ func (f *reincStepFixture) state(t *testing.T) lifecycleState {
 	ctx := context.Background()
 	var st lifecycleState
 	require.NoError(t, db.QueryRowContext(ctx,
-		"SELECT COUNT(*), COALESCE(MAX(seq), 0) FROM agent_lifecycle_outbox WHERE agent_id = ?", f.agent.ID).Scan(&st.rows, &st.maxRowID))
+		"SELECT COUNT(*), COALESCE(MAX(seq), 0) FROM agent_lifecycle_outbox WHERE agent_id = ?", f.agent.ID).Scan(&st.rows, &st.maxAgentSeq))
 	// The outbox-wide seq: a rolled-back step must not advance it either.
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM agent_lifecycle_outbox").Scan(&st.maxSeq))
 	require.NoError(t, db.QueryRowContext(ctx,
@@ -172,6 +168,8 @@ func (f *reincStepFixture) assertCommitted(t *testing.T, before lifecycleState) 
 	assert.Greater(t, after.rows, before.rows, "the committed step left outbox rows")
 	assert.Greater(t, after.transitionRev, before.transitionRev, "the cursor advanced")
 	assert.Greater(t, after.enqueued, before.enqueued, "the enqueue count moved after commit")
+	assert.Equal(t, after.rows-before.rows, after.enqueued-before.enqueued,
+		"one enqueue count per committed outbox row (no drainer runs, so no row has left the outbox)")
 	assert.Equal(t, "m-b", mustGetAgent(t, f.raw, f.agent.ID).AppliedConfig.Model)
 	evs := lcEvents(t, f.ls, f.sink, f.agent.ID)
 	assertDense(t, evs)
@@ -241,12 +239,23 @@ func TestReincarnationStepLifecycle_TxConflictRetryCommitsOnce(t *testing.T) {
 	f.assertCommitted(t, before)
 }
 
-// TestReincarnationStepLifecycle_PlainFailureLeavesNothing: the plain
-// path's write fails (every attempt): nothing is recorded.
-func TestReincarnationStepLifecycle_PlainFailureLeavesNothing(t *testing.T) {
-	f := newReincStepFixture(t, "reinc-lc-plainfail")
+// TestReincarnationStepLifecycle_PlainObserverFailureRollsBack: on the plain
+// path the real observer runs inside the write's own transaction (it bumps
+// the cursor and inserts the outbox row) and then fails, so the agent write
+// and everything the observer wrote roll back: no outbox row, no cursor or
+// outbox-seq advance, no enqueue count.
+func TestReincarnationStepLifecycle_PlainObserverFailureRollsBack(t *testing.T) {
+	f := newReincStepFixture(t, "reinc-lc-plainobs")
 	before := f.state(t)
-	f.fault.Arm()
-	require.ErrorIs(t, f.step(2, nil), errInjectedReincStep)
+	inner, err := lifecycleevents.NewObserver(lifecycleevents.ObserverConfig{
+		HubID: f.srv.HubID(), ProducerBuild: "test", Counters: f.counters,
+	})
+	require.NoError(t, err)
+	obs := &failAfterObserver{inner: inner}
+	f.ls.SetAgentWriteObserver(obs)
+	err = f.step(2, nil)
+	f.ls.SetAgentWriteObserver(inner) // for the reads in assertNothingCommitted
+	require.ErrorIs(t, err, errInjectedReincStep)
+	require.Positive(t, obs.ran, "the real observer ran inside the write before the failure")
 	f.assertNothingCommitted(t, before)
 }
