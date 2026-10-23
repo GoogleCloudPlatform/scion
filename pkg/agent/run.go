@@ -2397,12 +2397,13 @@ authDone:
 
 	// For git-backed worktree / shared-plain / fallback
 	// layouts on the bind-mount runtimes (docker/podman/apple), seed a per-agent
-	// private copy of the repository's .git/config in the agent's state dir, for
-	// the runtime to bind read-only over the container's .git/config so in-container
-	// git reads a credential-stripped config without writes reaching the host or
-	// siblings. Fail closed: a seeding error refuses the start (the runtime also
-	// refuses if the source is missing or unsafe). Kubernetes has no per-agent
-	// private config yet; its shared-repo shapes are refused at start
+	// private copy of the repository's .git/config in the agent's state dir. On
+	// docker/podman the runtime binds it read-only over the container's .git/config
+	// so in-container git reads a credential-stripped config without writes reaching
+	// the host or siblings; on Apple the copy is seeded but not bound (Apple reads
+	// the repository config directly). Fail closed: a seeding error refuses the start
+	// (the runtime also refuses if the source is missing or unsafe). Kubernetes has
+	// no per-agent private config yet; its shared-repo shapes are refused at start
 	// (k8sSharedRepoShapeRefusal). clone-per-agent and empty-per-agent have no
 	// shared .git to protect.
 	privateGitConfigSource := ""

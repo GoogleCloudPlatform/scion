@@ -1734,8 +1734,9 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 // directory name for that worktree (the last path element of the gitdir
 // pointer in <workspace>/.git) does not have to match agentName — `git
 // worktree add` appends a numeric suffix on a name collision, so
-// trustedWorktreeAdminName reads the real name from that gitfile rather than
-// assuming filepath.Base(workspace). This test builds exactly that gitfile
+// trustedWorktreeAdminName finds the real name by matching each
+// worktrees/<name>/gitdir back-link against <workspace>/.git (never from the
+// agent-writable gitfile) rather than assuming filepath.Base(workspace). This test builds exactly that gitfile
 // (naming admin dir "workspace1", distinct from the agent name "agent-1")
 // and confirms the back-link mount follows the resolved name, not the agent
 // name, while the sharer-registry mount is unaffected by any of this.
@@ -1758,7 +1759,8 @@ func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
 
 	// The admin dir's resolved name ("workspace1") intentionally differs from
 	// the agent name ("agent-1") — this is what forces trustedWorktreeAdminName
-	// to actually read the gitfile rather than fall back to filepath.Base.
+	// to resolve the name from the worktrees/<name>/gitdir back-link rather than
+	// assume the agent name.
 	adminDir := filepath.Join(gitDir, "worktrees", "workspace1")
 	if err := os.MkdirAll(adminDir, 0755); err != nil {
 		t.Fatal(err)

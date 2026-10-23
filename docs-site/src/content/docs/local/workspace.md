@@ -348,8 +348,8 @@ creates it, because creating it would turn on rerere in your own checkout. On do
 the private copy has credential-bearing settings stripped and is pre-seeded (the agent's branch
 upstream plus `push.autoSetupRemote`) so that a bare `git push` exits 0 — without the pre-seed a bare
 push fails with "no upstream branch". `git push -u origin <branch>` exits 0 and reaches the remote
-either way; under the read-only `.git` git cannot persist the upstream and prints `error: could not
-lock config file`, but the push still succeeds.
+either way; git cannot persist the upstream (the private `.git/config` is read-only) and prints an
+`error:`, but the push still succeeds.
 That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
 commands do not try to write lock files in the read-only root. Personal git preferences inside the
 agent go in the agent's own global git config, which is writable, not in the repository config. On the
