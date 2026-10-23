@@ -459,9 +459,11 @@ func TestAttachmentArtifacts_ArtifactRoutesAnswerNotFound(t *testing.T) {
 }
 
 // While the experiment is on, an attachment stored as an artifact sent to
-// an agent is no longer staged into the project's scratchpad: it reaches
-// the agent by delivery into its home (ptone/scion#4596).
-func TestAttachmentArtifacts_NotStagedForAgent(t *testing.T) {
+// an agent reaches it by delivery into its home (ptone/scion#4596), and is
+// additionally projected into the project's scratchpad through the layout
+// authority so sibling agents find it (ptone/scion#5827): the
+// projection holds the stored bytes under .attachments/_webchat/<id>/.
+func TestAttachmentArtifacts_ProjectedForSiblings(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
@@ -469,8 +471,97 @@ func TestAttachmentArtifacts_NotStagedForAgent(t *testing.T) {
 
 	id := f.uploadAs(t, f.ua, f.projA.ID, "log.txt", "agent bytes")
 	f.sendWith(t, f.ua, f.topicA, id)
-	_, err := os.Stat(filepath.Join(stagingDir, id, "log.txt"))
-	require.True(t, os.IsNotExist(err), "the attachment is not staged: %v", err)
+	got, err := os.ReadFile(filepath.Join(stagingDir, id, "log.txt"))
+	require.NoError(t, err, "the attachment is projected into the scratchpad")
+	assert.Equal(t, "agent bytes", string(got))
+}
+
+// stageChatAttachments records an artifact attachment's projection on its
+// reference (experiment on, project topic thread) and adds no legacy entry
+// for it; the delivery built from the reference carries the projection after
+// the inbox path. On a direct conversation's key the same attachment is not
+// projected.
+func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "p.txt", "projected")
+	resp := f.sendWith(t, f.ua, dm, id)
+
+	info, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{resp.ID})
+	require.NoError(t, err)
+	require.Len(t, info[resp.ID], 1)
+
+	// Direct conversation key: inbox only.
+	refs := []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
+	paths, mounts := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, resp.ID, refs)
+	assert.Empty(t, paths)
+	assert.Empty(t, mounts)
+	assert.Empty(t, refs[0].projectedPath, "a DM attachment is never projected")
+	assert.NoDirExists(t, filepath.Join(stagingDir, id))
+
+	// Project topic thread key: projected.
+	refs = []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
+	paths, mounts = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, resp.ID, refs)
+	assert.Empty(t, paths, "a delivered artifact attachment adds no legacy entry")
+	assert.Empty(t, mounts)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+id+"/p.txt", refs[0].projectedPath)
+	assert.Equal(t, attachmentSharedDirName, refs[0].projectedMount)
+	assert.FileExists(t, filepath.Join(stagingDir, id, "p.txt"))
+
+	dels := attachmentDeliveries(resp.ID, refs)
+	require.Len(t, dels, 1)
+	assert.Equal(t, refs[0].projectedPath, dels[0].ProjectedPath)
+	assert.Equal(t, attachmentSharedDirName, dels[0].ProjectedMount)
+}
+
+// TestAttachmentArtifacts_DMToAgentNotProjected: with artifacts on, an
+// attachment sent to an agent in a direct conversation is delivered to the
+// inbox only and never projected into the scratchpad.
+// The experiment is read at send time: once it is off, the same kind of
+// send stages the legacy attachment for the agent (T1 behaviour, the
+// documented T1-only Low).
+func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+
+	id := f.uploadAs(t, f.ua, "", "secret.txt", "dm bytes")
+	f.sendWith(t, f.ua, dm, id)
+	assert.NoDirExists(t, filepath.Join(stagingDir, id), "a DM attachment is not projected while artifacts are on")
+
+	setAttachmentExperiments(t, f.srv, false, false)
+	legacy := f.uploadAs(t, f.ua, "", "legacy.txt", "legacy bytes")
+	f.sendWith(t, f.ua, dm, legacy)
+	got, err := os.ReadFile(filepath.Join(stagingDir, legacy, "legacy.txt"))
+	require.NoError(t, err, "with artifacts off a DM attachment is staged (no inbox delivery exists)")
+	assert.Equal(t, "legacy bytes", string(got))
+}
+
+// TestProjectionAudienceIsProject: only a project topic thread of the
+// message's own project counts as a whole-project audience.
+func TestProjectionAudienceIsProject(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	group := seedGroupConversation(t, f.st, f.projA.ID, "audience")
+	for _, c := range []struct {
+		name, key, project string
+		want               bool
+	}{
+		{"own topic", f.topicA, f.projA.ID, true},
+		{"topic of another project", f.topicB, f.projA.ID, false},
+		{"user-agent dm", dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID), f.projA.ID, false},
+		{"user-user dm", dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID), f.projA.ID, false},
+		{"group conversation id", group, f.projA.ID, false},
+		{"group conversation ref", "group:" + f.projA.ID + ":audience", f.projA.ID, false},
+		{"unknown key", uuid.NewString(), f.projA.ID, false},
+		{"empty key", "", f.projA.ID, false},
+		{"no project", f.topicA, "", false},
+	} {
+		assert.Equal(t, c.want, f.srv.projectionAudienceIsProject(ctx, c.key, c.project), c.name)
+	}
 }
 
 // A retry of a send whose upload the first send already bound, with the

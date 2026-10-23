@@ -1255,21 +1255,42 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// stageChatAttachments returns the agent-visible file paths of a message's
-// attachments (same pattern as the Discord plugin — agents receive []string
-// of paths). The attachment store lives on the hub host, which agent
-// containers cannot read, so each file is staged into the project's
-// scratchpad shared dir first. Staging is best-effort: when it is
-// unavailable the hub-local path is sent, which host-process agents can
-// still read. Call it only after the message is authorized and stored.
+// stageChatAttachments makes a message's attachments visible to agents,
+// after the message is authorized and stored, and returns the entries for
+// the message's legacy attachment list with, for each entry that is a path
+// in a shared dir, that dir's name (StructuredMessage.AttachmentMounts).
 //
-// An attachment stored as an artifact has no hub-local path: it is staged
-// from its stored bytes (stageArtifactAttachment), or left out when the
-// project has no staging directory. messageID is the stored message the
+// The hub's attachment stores (the artifact service, the hub-private
+// AttachmentStore) are not mounted into agent containers, so each file is
+// projected into the project's scratchpad shared dir, resolved through the
+// layout authority (resolveAttachmentStaging, ptone/scion#5827):
+//   - an attachment stored as an artifact while hub.attachment_artifacts is
+//     on (read now, at send time) reaches the recipient by delivery into its
+//     home and adds no legacy entry. It is projected only when the message's
+//     read audience is the whole project (a project topic thread, key):
+//     a projection is readable by every agent that mounts the scratchpad,
+//     so a direct or group conversation, whose readers are its
+//     participants, gets inbox delivery only. The projection is recorded on
+//     refs[i] (projectedPath, projectedMount) and listed after the inbox
+//     path;
+//   - an attachment stored as an artifact while the experiment is off is
+//     staged from its stored bytes, or left out when the project has no
+//     staging directory;
+//   - an AttachmentStore attachment is staged from the hub-private store;
+//     when staging is unavailable the hub-local path is sent, which
+//     host-process agents can still read.
+//
+// Without artifact delivery (the last two cases) staging is the only way a
+// containerised agent reads the file, so it happens for every send; on a
+// hub without object storage (T1) a DM's attachment is therefore readable
+// by the project's other agents, a known T1-only Low that ends when the
+// hub enables attachment artifacts.
+//
+// key is the message's thread key and messageID the stored message the
 // attachments are bound to.
-func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID string, attachmentRefs []AttachmentRef) []string {
+func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messageID string, attachmentRefs []AttachmentRef) ([]string, map[string]string) {
 	if len(attachmentRefs) == 0 {
-		return nil
+		return nil, nil
 	}
 	s.mu.RLock()
 	as := s.attachmentStore
@@ -1277,22 +1298,51 @@ func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID 
 	s.mu.RUnlock()
 	localAS, _ := as.(*LocalDiskAttachmentStore)
 	var paths []string
+	var mounts map[string]string
+	addStaged := func(p string, staging *attachmentStaging) {
+		paths = append(paths, p)
+		if mounts == nil {
+			mounts = make(map[string]string)
+		}
+		mounts[p] = staging.mount.Name
+	}
 	staging := s.resolveAttachmentStaging(ctx, projectID)
-	for _, ref := range attachmentRefs {
+	artifactsOn := s.experimentEnabled(experiments.AttachmentArtifacts)
+	projectAudience := -1 // unknown until an artifact attachment asks
+	for i := range attachmentRefs {
+		ref := attachmentRefs[i]
 		if ref.artifact {
-			// While the experiment is on, an attachment stored as an artifact
-			// reaches the agent by delivery into its home, not through the
-			// project's scratchpad (ptone/scion#4596).
-			if s.experimentEnabled(experiments.AttachmentArtifacts) {
-				continue
+			if artifactsOn {
+				// Delivered into the recipient's home (ptone/scion#4596);
+				// the projection is an addition for sibling agents, only
+				// when they all read the message.
+				if projectAudience < 0 {
+					projectAudience = 0
+					if s.projectionAudienceIsProject(ctx, key, projectID) {
+						projectAudience = 1
+					}
+				}
+				if projectAudience == 0 {
+					continue
+				}
 			}
 			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
+			if artifactsOn {
+				switch {
+				case err == nil:
+					attachmentRefs[i].projectedPath, attachmentRefs[i].projectedMount = staged, staging.mount.Name
+				case !errors.Is(err, errNoAttachmentStaging):
+					s.messageLog.Error("Failed to project attachment into the scratchpad",
+						"attachment", ref.ID, "error", err)
+				}
+				continue
+			}
 			if err != nil {
 				s.messageLog.Error("Failed to stage attachment for agent",
 					"attachment", ref.ID, "error", err)
 				continue
 			}
-			paths = append(paths, staged)
+			addStaged(staged, staging)
 			continue
 		}
 		if localAS == nil {
@@ -1308,19 +1358,21 @@ func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID 
 			}
 		}
 		hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
-		agentPath := hostPath
 		if staging != nil {
-			staged, err := staging.stage(hostPath, ref.ID, ref.Name)
-			if err != nil {
-				s.messageLog.Error("Failed to stage attachment for agent",
-					"attachment", ref.ID, "error", err)
-			} else {
-				agentPath = staged
+			staged, err := staging.stageFrom(func() (io.ReadCloser, error) {
+				rc, _, err := localAS.Get(ctx, storedIn, ref.ID)
+				return rc, err
+			}, ref.ID, ref.Name)
+			if err == nil {
+				addStaged(staged, staging)
+				continue
 			}
+			s.messageLog.Error("Failed to stage attachment for agent",
+				"attachment", ref.ID, "error", err)
 		}
-		paths = append(paths, agentPath)
+		paths = append(paths, hostPath)
 	}
-	return paths
+	return paths, mounts
 }
 
 // resolveReplyTarget resolves the reply-to agent override (nc-reply-recipient)
@@ -1894,13 +1946,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Attachments stored as artifacts move to the message's scope now that
 	// it is stored; one that cannot be bound is left out of the message.
 	attachmentRefs = s.bindChatAttachments(ctx, artifacts.PrincipalKindUser, user.ID(), storeMsg.ID, s.bindProject(ctx, storeMsg, attachmentRefs), attachmentRefs)
-	// The bound ones are delivered into the agent's home (ptone/scion#4596).
+	// Attachment files are projected into the project's scratchpad only
+	// now: every check that can refuse the send (authorization, validation,
+	// wake, conversation resolution, persistence) has passed.
+	stagedPaths, stagedMounts := s.stageChatAttachments(ctx, key, projectID, storeMsg.ID, attachmentRefs)
+	msg.Attachments = append(msg.Attachments, stagedPaths...)
+	msg.AttachmentMounts = stagedMounts
+	// The bound ones are delivered into the agent's home (ptone/scion#4596),
+	// with their scratchpad projection listed after the inbox path.
 	msg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, attachmentRefs)
-
-	// Attachment files are copied to the agent's scratchpad only now: every
-	// check that can refuse the send (authorization, validation, wake,
-	// conversation resolution, persistence) has passed.
-	msg.Attachments = append(msg.Attachments, s.stageChatAttachments(ctx, projectID, storeMsg.ID, attachmentRefs)...)
 
 	// The row was stored with the optimistic "dispatched" state, which the
 	// primary dispatch below confirms or replaces. If the function exits
@@ -2106,6 +2160,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			mentionMsg.ThreadID = key
 			// W7: Copy attachment paths and metadata to mention messages.
 			mentionMsg.Attachments = msg.Attachments
+			mentionMsg.AttachmentMounts = msg.AttachmentMounts
 			mentionMsg.Metadata = msg.Metadata
 			// #2257 P2: strip on this copy too (U5(a) row). msg.Metadata was
 			// already stripped above, so this is a defence-in-depth no-op
