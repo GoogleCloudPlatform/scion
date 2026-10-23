@@ -28,9 +28,6 @@ func TestWorkspaceRecordPaths_SingleCleanPathElement(t *testing.T) {
 		if !isSinglePathElement(s) {
 			t.Errorf("isSinglePathElement(%q) = false, want true", s)
 		}
-		if _, err := HubWorkspaceRecordPath(s); err != nil {
-			t.Errorf("HubWorkspaceRecordPath(%q): %v", s, err)
-		}
 		if _, err := BrokerWorkspaceRecordPath(s); err != nil {
 			t.Errorf("BrokerWorkspaceRecordPath(%q): %v", s, err)
 		}
@@ -42,9 +39,6 @@ func TestWorkspaceRecordPaths_SingleCleanPathElement(t *testing.T) {
 	for _, s := range []string{"", ".", "..", "a/b", `a\b`, "a\x00b", "\x00", "proj\x00"} {
 		if isSinglePathElement(s) {
 			t.Errorf("isSinglePathElement(%q) = true, want false", s)
-		}
-		if _, err := HubWorkspaceRecordPath(s); err == nil {
-			t.Errorf("HubWorkspaceRecordPath(%q): want error", s)
 		}
 		if _, err := BrokerWorkspaceRecordPath(s); err == nil {
 			t.Errorf("BrokerWorkspaceRecordPath(%q): want error", s)

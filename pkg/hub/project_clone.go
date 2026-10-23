@@ -199,6 +199,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			if k == store.LabelWorkspaceMode {
 				continue // re-derived, not copied raw
 			}
+			if k == store.LabelProjectOrigin {
+				continue // set below: a clone is created on the hub
+			}
 			if remoteOverridden && isGitSourceLabel(k) {
 				continue // describe the template's repo; re-derived below
 			}
@@ -236,6 +239,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 		clone.Labels[store.LabelWorkspaceMode] = mode
 	}
+
+	// A clone is created on the hub: hub-managed origin (server-owned).
+	if clone.Labels == nil {
+		clone.Labels = make(map[string]string, 1)
+	}
+	clone.Labels[store.LabelProjectOrigin] = store.ProjectOriginHub
 
 	// ── asTemplate: mark clone as a project template ─────────────────────
 	if req.AsTemplate {
@@ -400,6 +409,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		if err := s.cloneSharedWorkspaceProject(ctx, clone); err != nil {
 			slog.Error("project clone: shared workspace clone failed",
 				"clone_id", clone.ID, "error", err)
+			if writeSharedCloneSourceRefused(w, err) {
+				return
+			}
 			if writeWorkspaceStorageUnavailable(w, err) {
 				return
 			}

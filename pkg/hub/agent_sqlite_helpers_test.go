@@ -77,10 +77,14 @@ func addProjectOnBroker(t *testing.T, s store.Store, slug string, broker *store.
 		Slug: slug,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -413,11 +417,15 @@ type runIntentErrStore struct {
 // createRollbackSite is one create failure site: the dispatcher and server
 // setup that make the create fail there, and the stage its rollback records.
 type createRollbackSite struct {
-	name      string
-	disp      AgentDispatcher
-	setup     func(t *testing.T, srv *Server)
-	req       CreateAgentRequest
-	wantStage string
+	name  string
+	disp  AgentDispatcher
+	setup func(t *testing.T, srv *Server)
+	req   CreateAgentRequest
+	// remoteBroker clears the fixture broker's local path for the project
+	// (clearCreateAgentProviderPath): the CLI workspace bootstrap and the
+	// remote-broker refusal need a remote broker without one.
+	remoteBroker bool
+	wantStage    string
 }
 
 // createTxFaultStore injects failures into the writes of the agent-create

@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -4648,19 +4649,32 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 // which cannot produce a path separator or ".." by construction), and the
 // joined-path-prefix check below is a second, structurally different gate
 // that doesn't depend on the slug regex ever staying correct.
+//
+// The layout is pkg/projectfs': the project ID and subpath root are read
+// back from workspaceSubPath ("<subpath root>/<pid>/workspace") and the
+// shared dir is resolved by Layout.Resolve, which validates the name (the
+// slug check) and confines the leaf to <subpath root>/<pid>/shared-dirs/
+// (shareddirs.ConfineLeaf). The prefix check below stays as the second,
+// structurally different gate.
 func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
 		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
 	}
-	// workspaceSubPath is "projects/<pid>/workspace"
-	// We need "projects/<pid>/shared-dirs/<name>"
-	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
-	wantDir := filepath.Join(parent, "shared-dirs")
-	joined := filepath.Join(wantDir, sharedDirName)
-	if !strings.HasPrefix(joined, wantDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, joined, wantDir)
+	if filepath.Base(workspaceSubPath) != "workspace" || !filepath.IsLocal(workspaceSubPath) {
+		return "", fmt.Errorf("shared dir %q: unexpected NFS workspace subPath %q", sharedDirName, workspaceSubPath)
 	}
-	return joined, nil
+	parent := filepath.Dir(workspaceSubPath) // "<subpath root>/<pid>"
+	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: filepath.Dir(parent)}
+	res, err := layout.Resolve(projectfs.Project{ID: filepath.Base(parent)}, "",
+		projectfs.SharedDirMount(api.SharedDir{Name: sharedDirName}, ""))
+	if err != nil {
+		return "", fmt.Errorf("shared dir %q: %w", sharedDirName, err)
+	}
+	wantDir := filepath.Join(parent, "shared-dirs")
+	if !strings.HasPrefix(res.RelPath, wantDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, res.RelPath, wantDir)
+	}
+	return res.RelPath, nil
 }
 
 // nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,

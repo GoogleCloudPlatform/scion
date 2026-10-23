@@ -465,10 +465,12 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 }
 
 // TestBuiltInRoles_SuperAdminRevision pins the super-admin revision and its
-// latest change: revision 8 drops project.register, a reserved row.
+// latest changes: revision 9 adds project.chat_post (ptone/scion#5518),
+// revision 8 drops project.register, a reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 8, admin.Revision)
+	assert.Equal(t, 9, admin.Revision)
+	assert.Contains(t, admin.Permissions, "project.chat_post")
 	assert.NotContains(t, admin.Permissions, "project.register")
 	assert.Contains(t, admin.Permissions, "project.create")
 }
