@@ -23,6 +23,9 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import { t, type MessageKey } from '../../i18n/index.js';
+import { LocaleController } from '../../i18n/controller.js';
+
 import type { User } from '../../shared/types.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
@@ -35,14 +38,14 @@ import {
 
 interface NavItem {
   path: string;
-  label: string;
+  label: MessageKey;
   icon: string;
   /** Feature flag the item needs; the item is hidden while it is off. */
   flag?: string;
 }
 
 interface NavSection {
-  title: string;
+  title: MessageKey;
   items: NavItem[];
 }
 
@@ -51,19 +54,19 @@ interface NavSection {
  */
 const NAV_SECTIONS: NavSection[] = [
   {
-    title: 'Overview',
-    items: [{ path: '/', label: 'Dashboard', icon: 'house' }],
+    title: 'nav.overview',
+    items: [{ path: '/', label: 'page.dashboard', icon: 'house' }],
   },
   {
-    title: 'Management',
+    title: 'nav.management',
     items: [
-      { path: '/projects', label: 'Projects', icon: 'folder' },
-      { path: '/agents', label: 'Agents', icon: 'cpu' },
-      { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
-      { path: '/skills', label: 'Skills', icon: 'lightning-charge' },
+      { path: '/projects', label: 'page.projects', icon: 'folder' },
+      { path: '/agents', label: 'page.agents', icon: 'cpu' },
+      { path: '/brokers', label: 'page.brokers', icon: 'hdd-rack' },
+      { path: '/skills', label: 'page.skills', icon: 'lightning-charge' },
       {
         path: '/artifacts',
-        label: 'Artifacts',
+        label: 'page.artifacts',
         icon: 'file-earmark-richtext',
         flag: ARTIFACTS_FLAG,
       },
@@ -81,20 +84,20 @@ function visibleItems(items: NavItem[]): NavItem[] {
  * These cover scopeable resources that hub-admins can manage.
  */
 const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
-  { path: '/settings', label: 'Hub Resources', icon: 'gear' },
-  { path: '/admin/server-config', label: 'Server Config', icon: 'sliders' },
-  { path: '/admin/federation', label: 'Federation', icon: 'globe' },
-  { path: '/admin/integrations', label: 'Integrations', icon: 'plug' },
-  { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
-  { path: '/admin/users', label: 'Users', icon: 'people' },
-  { path: '/admin/groups', label: 'Groups', icon: 'diagram-3' },
-  { path: '/admin/roles', label: 'Roles', icon: 'shield-lock' },
-  { path: '/admin/role-bindings', label: 'Role Bindings', icon: 'link-45deg' },
-  { path: '/admin/access-boundaries', label: 'Access Constraints', icon: 'shield-check' },
-  { path: '/admin/quotas', label: 'Quotas', icon: 'speedometer2' },
-  { path: '/health', label: 'Health', icon: 'heart-pulse' },
-  { path: '/metrics', label: 'Metrics', icon: 'graph-up' },
-  { path: '/admin/skill-registries', label: 'Skill Registries', icon: 'cloud-arrow-down' },
+  { path: '/settings', label: 'page.hubResources', icon: 'gear' },
+  { path: '/admin/server-config', label: 'page.serverConfig', icon: 'sliders' },
+  { path: '/admin/federation', label: 'page.federation', icon: 'globe' },
+  { path: '/admin/integrations', label: 'page.integrations', icon: 'plug' },
+  { path: '/admin/scheduler', label: 'page.scheduler', icon: 'clock' },
+  { path: '/admin/users', label: 'page.users', icon: 'people' },
+  { path: '/admin/groups', label: 'page.groups', icon: 'diagram-3' },
+  { path: '/admin/roles', label: 'page.roles', icon: 'shield-lock' },
+  { path: '/admin/role-bindings', label: 'page.roleBindings', icon: 'link-45deg' },
+  { path: '/admin/access-boundaries', label: 'page.accessConstraints', icon: 'shield-check' },
+  { path: '/admin/quotas', label: 'page.quotas', icon: 'speedometer2' },
+  { path: '/health', label: 'page.health', icon: 'heart-pulse' },
+  { path: '/metrics', label: 'page.metrics', icon: 'graph-up' },
+  { path: '/admin/skill-registries', label: 'page.skillRegistries', icon: 'cloud-arrow-down' },
 ];
 
 /**
@@ -102,12 +105,13 @@ const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
  * These cover system-level operations that require full admin privileges.
  */
 const ADMIN_SUPERADMIN_ITEMS: NavItem[] = [
-  { path: '/admin/diagnostics', label: 'Diagnostics', icon: 'journal-text' },
-  { path: '/admin/maintenance', label: 'Maintenance', icon: 'wrench-adjustable' },
+  { path: '/admin/diagnostics', label: 'page.diagnostics', icon: 'journal-text' },
+  { path: '/admin/maintenance', label: 'page.maintenance', icon: 'wrench-adjustable' },
 ];
 
 @customElement('scion-nav')
 export class ScionNav extends LitElement {
+  readonly locale = new LocaleController(this);
   /**
    * Current authenticated user
    */
@@ -427,7 +431,7 @@ export class ScionNav extends LitElement {
         <div class="logo-icon">🌱</div>
         <div class="logo-text">
           <h1>Scion</h1>
-          <span>Agent Orchestration</span>
+          <span>${t('nav.tagline')}</span>
         </div>
       </div>
 
@@ -435,14 +439,14 @@ export class ScionNav extends LitElement {
         ${NAV_SECTIONS.map(
           (section) => html`
             <div class="nav-section">
-              <div class="nav-section-title">${section.title}</div>
+              <div class="nav-section-title">${t(section.title)}</div>
               <ul class="nav-list">
                 ${visibleItems(section.items).map(
                   (item) => html`
                     <li class="nav-item">
                       <sl-tooltip
                         style="display: block;"
-                        content="${item.label}"
+                        content="${t(item.label)}"
                         placement="right"
                         ?disabled=${!this.collapsed}
                         hoist
@@ -453,7 +457,7 @@ export class ScionNav extends LitElement {
                           @click=${(e: Event) => this.handleNavClick(e, item.path)}
                         >
                           <sl-icon name="${item.icon}"></sl-icon>
-                          <span class="nav-link-text">${item.label}</span>
+                          <span class="nav-link-text">${t(item.label)}</span>
                         </a>
                       </sl-tooltip>
                     </li>
@@ -472,7 +476,7 @@ export class ScionNav extends LitElement {
           ))
           ? html`
               <div class="nav-section admin-section">
-                <div class="nav-section-title">Admin</div>
+                <div class="nav-section-title">${t('nav.admin')}</div>
                 <ul class="nav-list">
                   ${ADMIN_SCOPEABLE_ITEMS.filter(
                     (item) =>
@@ -483,7 +487,7 @@ export class ScionNav extends LitElement {
                       <li class="nav-item">
                         <sl-tooltip
                           style="display: block;"
-                          content="${item.label}"
+                          content="${t(item.label)}"
                           placement="right"
                           ?disabled=${!this.collapsed}
                           hoist
@@ -494,7 +498,7 @@ export class ScionNav extends LitElement {
                             @click=${(e: Event) => this.handleNavClick(e, item.path)}
                           >
                             <sl-icon name="${item.icon}"></sl-icon>
-                            <span class="nav-link-text">${item.label}</span>
+                            <span class="nav-link-text">${t(item.label)}</span>
                           </a>
                         </sl-tooltip>
                       </li>
@@ -506,7 +510,7 @@ export class ScionNav extends LitElement {
                           <li class="nav-item">
                             <sl-tooltip
                               style="display: block;"
-                              content="${item.label}"
+                              content="${t(item.label)}"
                               placement="right"
                               ?disabled=${!this.collapsed}
                               hoist
@@ -517,7 +521,7 @@ export class ScionNav extends LitElement {
                                 @click=${(e: Event) => this.handleNavClick(e, item.path)}
                               >
                                 <sl-icon name="${item.icon}"></sl-icon>
-                                <span class="nav-link-text">${item.label}</span>
+                                <span class="nav-link-text">${t(item.label)}</span>
                               </a>
                             </sl-tooltip>
                           </li>
@@ -536,11 +540,11 @@ export class ScionNav extends LitElement {
             <button
               class="collapse-toggle"
               @click=${(): void => this.handleCollapseToggle()}
-              aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label=${this.collapsed ? t('nav.expand') : t('nav.collapse')}
+              title=${this.collapsed ? t('nav.expand') : t('nav.collapse')}
             >
               <sl-icon name="chevron-left"></sl-icon>
-              <span class="collapse-toggle-text">Collapse</span>
+              <span class="collapse-toggle-text">${t('nav.collapseShort')}</span>
             </button>
           `}
     `;

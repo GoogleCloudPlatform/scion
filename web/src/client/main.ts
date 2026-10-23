@@ -20,6 +20,9 @@
  * Handles client-side routing and real-time state management via SSE.
  */
 
+import { initializeLocalization } from '../i18n/index.js';
+import { I18N_FLAG } from '../utils/feature-flags.js';
+
 import themeCSS from '../styles/theme.css?inline';
 import '@shoelace-style/shoelace/dist/themes/light.css';
 import '@shoelace-style/shoelace/dist/themes/dark.css';
@@ -1037,6 +1040,7 @@ async function init(): Promise<void> {
   // TZ_LOAD_BUDGET_MS (review R3-1); all three started above and overlap,
   // so this adds no latency beyond the slowest of them.
   await Promise.all([featureFlagsReady, onboardingChecked, tzReady]);
+  if (isFeatureEnabled(I18N_FLAG)) await initializeLocalization(true);
   ensureRoots();
 
   // The unread conversation count (the header's chat badge and the tab-title

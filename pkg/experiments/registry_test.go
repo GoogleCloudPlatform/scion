@@ -519,3 +519,13 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+func TestWebI18n_DefaultOffAndWebOnly(t *testing.T) {
+	e, ok := Default().Lookup(WebI18n)
+	if !ok || e.Default || !e.HasLayer(LayerWeb) || e.HasLayer(LayerServer) {
+		t.Fatalf("WebI18n must be registered, default-off and web-only: %+v, found=%v", e, ok)
+	}
+	if e.Issue != "GoogleCloudPlatform/scion#4085" {
+		t.Fatalf("WebI18n tracking issue = %q", e.Issue)
+	}
+}

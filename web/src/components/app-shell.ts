@@ -25,6 +25,9 @@ import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
+import { t, type MessageKey } from '../i18n/index.js';
+import { LocaleController } from '../i18n/controller.js';
+
 // Import shared components
 import './shared/nav.js';
 import './shared/header.js';
@@ -48,31 +51,37 @@ import { renderTestIdentityChip, testIdentityChipStyles } from './shared/test-id
 /**
  * Page title configuration
  */
-const PAGE_TITLES: Record<string, string> = {
-  '/': 'Dashboard',
-  '/projects': 'Projects',
-  '/agents': 'Agents',
-  '/terminals': 'Terminals',
-  '/brokers': 'Brokers',
-  '/settings': 'Settings',
-  '/admin/scheduler': 'Scheduler',
-  '/admin/users': 'Users',
-  '/admin/groups': 'Groups',
-  '/admin/server-config': 'Server Config',
-  '/admin/federation': 'Federation',
-  '/admin/integrations': 'Integrations',
-  '/admin/roles': 'Roles',
-  '/admin/role-bindings': 'Role Bindings',
-  '/admin/quotas': 'Quotas',
-  '/metrics': 'Metrics',
-  '/admin/skill-registries': 'Skill Registries',
-  '/skills': 'Skills',
-  '/github-app/installed': 'GitHub App Setup',
-  '/onboarding': 'Setup',
+const PAGE_TITLES: Record<string, MessageKey> = {
+  '/': 'page.dashboard',
+  '/projects': 'page.projects',
+  '/agents': 'page.agents',
+  '/terminals': 'page.terminals',
+  '/brokers': 'page.brokers',
+  '/settings': 'page.settings',
+  '/admin/scheduler': 'page.scheduler',
+  '/admin/users': 'page.users',
+  '/admin/groups': 'page.groups',
+  '/admin/server-config': 'page.serverConfig',
+  '/admin/federation': 'page.federation',
+  '/admin/integrations': 'page.integrations',
+  '/admin/roles': 'page.roles',
+  '/admin/role-bindings': 'page.roleBindings',
+  '/admin/quotas': 'page.quotas',
+  '/metrics': 'page.metrics',
+  '/admin/skill-registries': 'page.skillRegistries',
+  '/skills': 'page.skills',
+  '/github-app/installed': 'page.githubSetup',
+  '/onboarding': 'page.setup',
 };
 
 @customElement('scion-app')
 export class ScionApp extends LitElement {
+  readonly locale = new LocaleController(this, () => {
+    // Replay entity names as data, without translating or discarding them.
+    if (this.detailTitle) setDocumentTitle(...this.detailTitle);
+    else this.updateDocumentTitle();
+  });
+  private detailTitle: string[] | null = null;
   /**
    * Current authenticated user
    */
@@ -271,6 +280,7 @@ export class ScionApp extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
+      this.detailTitle = null;
       this.updateDocumentTitle();
       // Retry a status fetch that failed earlier; a no-op once it is known.
       this._testHubBanner.ensure();
@@ -284,6 +294,7 @@ export class ScionApp extends LitElement {
   private handlePageTitle(event: CustomEvent<PageTitleDetail>): void {
     const segments = event.detail?.segments;
     if (segments && segments.length > 0) {
+      this.detailTitle = segments;
       setDocumentTitle(...segments);
     }
   }
@@ -366,78 +377,78 @@ export class ScionApp extends LitElement {
     const path = this.currentPath.split(/[?#]/, 1)[0];
     // Check for exact match
     if (PAGE_TITLES[path]) {
-      return PAGE_TITLES[path];
+      return t(PAGE_TITLES[path]);
     }
 
     // Check for pattern matches
     if (path === '/projects/new') {
-      return 'Create Project';
+      return t('page.createProject');
     }
     if (path.match(/^\/projects\/[^/]+\/settings$/)) {
-      return 'Project Settings';
+      return t('page.projectSettings');
     }
     if (path.match(/^\/projects\/[^/]+\/schedules$/)) {
-      return 'Schedules';
+      return t('page.schedules');
     }
     if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
-      return 'Project Metrics';
+      return t('page.projectMetrics');
     }
     if (path.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) && isFeatureEnabled(ARTIFACTS_FLAG)) {
-      return 'Artifact';
+      return t('page.artifact');
     }
     if (path === '/artifacts' && isFeatureEnabled(ARTIFACTS_FLAG)) {
-      return 'Artifacts';
+      return t('page.artifacts');
     }
     if (path.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
-      return 'Template';
+      return t('page.template');
     }
     if (path.startsWith('/projects/')) {
-      return 'Project';
+      return t('page.project');
     }
     if (path === '/agents/new') {
-      return 'Create Agent';
+      return t('page.createAgent');
     }
     if (path.match(/^\/agents\/[^/]+\/terminal$/)) {
-      return 'Terminal';
+      return t('page.terminal');
     }
     if (path === '/terminals' || path.match(/^\/terminals\/[^/]+$/)) {
-      return 'Terminals';
+      return t('page.terminals');
     }
     if (path.match(/^\/agents\/[^/]+\/edit$/)) {
-      return 'Edit Agent';
+      return t('page.editAgent');
     }
     if (path.startsWith('/agents/')) {
-      return 'Agent';
+      return t('page.agent');
     }
     if (path.startsWith('/brokers/')) {
-      return 'Broker';
+      return t('page.broker');
     }
     if (path.match(/^\/settings\/harness-configs\/[^/]+$/)) {
-      return 'Harness Config';
+      return t('page.harnessConfig');
     }
     if (path.match(/^\/settings\/templates\/[^/]+$/)) {
-      return 'Template';
+      return t('page.template');
     }
     if (path.match(/^\/admin\/groups\/[^/]+$/)) {
-      return 'Group';
+      return t('page.group');
     }
     if (path === '/admin/maintenance') {
-      return 'Maintenance';
+      return t('page.maintenance');
     }
     if (path.match(/^\/admin\/integrations\/[^/]+$/)) {
-      return 'Integration';
+      return t('page.integration');
     }
     if (path === '/skills/new') {
-      return 'Create Skill';
+      return t('page.createSkill');
     }
     if (path.startsWith('/skills/')) {
-      return 'Skill';
+      return t('page.skill');
     }
     if (path.match(/^\/admin\/skill-registries\/[^/]+$/)) {
-      return 'Skill Registry';
+      return t('page.skillRegistry');
     }
 
-    return 'Page Not Found';
+    return t('page.notFound');
   }
 
   private handleSidebarToggle(): void {
