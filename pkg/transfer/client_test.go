@@ -230,9 +230,14 @@ func TestClient_UploadFiles(t *testing.T) {
 	uploadDir := filepath.Join(dir, "uploads")
 
 	files := []FileInfo{
-		{Path: "file1.txt", FullPath: file1, Size: 8},
-		{Path: "file2.txt", FullPath: file2, Size: 8},
+		{Path: "file1.txt", FullPath: file1, Size: 8, Hash: HashBytes([]byte("content1"))},
+		{Path: "file2.txt", FullPath: file2, Size: 8, Hash: HashBytes([]byte("content2"))},
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
 
 	urls := []UploadURLInfo{
 		{Path: "file1.txt", URL: "file://" + filepath.Join(uploadDir, "file1.txt"), Method: "PUT"},
@@ -246,7 +251,7 @@ func TestClient_UploadFiles(t *testing.T) {
 		return nil
 	}
 
-	err := client.UploadFiles(context.Background(), files, urls, progress)
+	err = client.UploadFiles(context.Background(), root, files, urls, progress)
 	if err != nil {
 		t.Fatalf("UploadFiles failed: %v", err)
 	}

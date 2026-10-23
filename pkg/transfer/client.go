@@ -173,9 +173,14 @@ func (c *Client) DownloadToFile(ctx context.Context, signedURL, destPath string)
 	return os.WriteFile(destPath, content, 0644)
 }
 
-// UploadFiles uploads multiple files to their respective signed URLs.
+// UploadFiles uploads collected files to their respective signed URLs.
+// root must be opened at the directory the files were collected from; each
+// file is read through it with OpenCollectedFile, so links that leave that
+// directory are refused, the entry must still be a regular file, and a file
+// whose size or content changed since collection fails its upload, which
+// stops the whole upload.
 // If progress is not nil, it is called after each file is uploaded.
-func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []UploadURLInfo, progress ProgressCallback) error {
+func (c *Client) UploadFiles(ctx context.Context, root *os.Root, files []FileInfo, urls []UploadURLInfo, progress ProgressCallback) error {
 	// Build URL map for quick lookup
 	urlMap := make(map[string]UploadURLInfo)
 	for _, u := range urls {
@@ -188,9 +193,9 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 			continue // Skip files without URLs (may be existing)
 		}
 
-		f, err := os.Open(file.FullPath)
+		f, err := OpenCollectedFile(root, file)
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
+			return err
 		}
 
 		err = c.UploadFile(ctx, url, f)

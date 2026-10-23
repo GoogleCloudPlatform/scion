@@ -1230,6 +1230,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// every file in the project directory, which is extremely expensive for
 	// large workspaces.
 	var workspaceFiles []transfer.FileInfo
+	var workspaceRoot *os.Root // opened at the collected directory; uploads read through it
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal && !config.IsHubContext() {
 		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
 		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
@@ -1245,6 +1246,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 				return fmt.Errorf("failed to collect workspace files: %w", err)
 			}
 			if len(files) > 0 {
+				workspaceRoot, err = os.OpenRoot(projectDir)
+				if err != nil {
+					return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
+				}
+				defer func() { _ = workspaceRoot.Close() }()
 				req.WorkspaceFiles = files
 				workspaceFiles = files
 			}
@@ -1439,7 +1445,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
 		tc := transfer.NewClient(nil)
-		uploadErr := tc.UploadFiles(ctx, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
+		uploadErr := tc.UploadFiles(ctx, workspaceRoot, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
 			if bytesTransferred == file.Size {
 				statusf("  Uploaded: %s\n", file.Path)
 			}
