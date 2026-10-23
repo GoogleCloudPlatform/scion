@@ -244,8 +244,10 @@ func TestAdmissionKeyring_CrossReplicaMixedActive(t *testing.T) {
 			fresh, err := p.refresh(t, p.b, "s-agent", agentAdm.AdmissionToken)
 			require.NoError(t, err, "refresh on B of an expired A token")
 			assertTokenFormat(t, emit, "gen2", fresh)
-			_, err = rpcCall(t, p.a.hub, "s-agent", fresh, "/v1/unknown")
-			require.NoError(t, err, "the refreshed token is accepted by A")
+			// Agent sessions may not forward this RPC (403 after the token
+			// check), so A's acceptance is shown by a re-check instead.
+			res = sessionRecheck(t, p.a.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: fresh})
+			require.True(t, res[0].OK && !res[0].Close, "the refreshed token is accepted by A: %+v", res[0])
 		})
 	}
 }
@@ -271,9 +273,11 @@ func TestAdmissionKeyring_RetiredGenerationAndExpiry(t *testing.T) {
 
 			// A fresh gen1 token from A (whose gen1 is unbounded), its claims
 			// unexpired throughout: B's rpc accepts it just before gen1's
-			// verify_until and refuses it at and after.
+			// verify_until and refuses it at and after. A user session, which
+			// may forward the RPC (an agent session gets 403 after the token
+			// check).
 			*p.clock = admVerifyUntil.Add(-10 * time.Minute)
-			fresh := p.a.mustAdmit(t, p.agentHeader(t), "s-fresh")
+			fresh := p.a.mustAdmit(t, bearer(testDevToken), "s-fresh")
 			assertTokenFormat(t, emit, "gen1", fresh.AdmissionToken)
 			*p.clock = admVerifyUntil.Add(-time.Second)
 			_, err := rpcCall(t, p.b.hub, "s-fresh", fresh.AdmissionToken, "/v1/unknown")
