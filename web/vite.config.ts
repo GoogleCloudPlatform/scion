@@ -195,6 +195,12 @@ export default defineConfig({
                 chunkFileNames: 'assets/[name]-[hash].js',
                 assetFileNames: 'assets/[name]-[hash].[ext]',
                 manualChunks(id) {
+                    // Optional Shoelace translations must not be pulled into the
+                    // always-loaded vendor chunk. English remains its default.
+                    const locale = id.match(/node_modules\/@shoelace-style\/shoelace\/dist\/translations\/(?!en\.)([^/]+)\.js$/);
+                    if (locale) {
+                        return `shoelace-locale-${locale[1]}`;
+                    }
                     if (id.includes('node_modules/@shoelace-style')) {
                         return 'shoelace';
                     }

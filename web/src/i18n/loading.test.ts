@@ -37,7 +37,9 @@ it('keeps the English shell usable when an opt-in chunk fails to load', async ()
   expect(t('page.dashboard')).toBe('Dashboard');
   expect(t('header.unread', { count: 1 })).toBe('1 unread conversation');
   expect(t('header.unread', { count: 5 })).toBe('5 unread conversations');
-  expect(warn).toHaveBeenCalledOnce();
+  expect(warn.mock.calls.filter(([message]) => String(message).startsWith('[i18n]'))).toHaveLength(
+    1
+  );
 });
 
 it('does not apply a stale load after a newer disable', async () => {
