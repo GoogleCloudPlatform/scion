@@ -98,12 +98,14 @@ The mediator sets these env overrides on each execution (see
 | `MEDIATOR_URL` | https origin of the mediator, no trailing slash |
 | `GH_JOB_ID` | numeric GitHub job ID (used in logs only) |
 | `RUNNER_NAME` | normally `cr-job-<GH_JOB_ID>` (used in logs only). After a runner swap or hijack recovery the mediator may reuse another job's name, so a mismatch is only a warning |
+| `GH_REPO` | `owner/name` of the repository the runner is launched to serve; the job guard refuses any job of another repository |
 
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
-1. **Checks the env.** All four variables and `HOME` must be set, and `HOME`
-   must be `/home/runner`. The token must be
+1. **Checks the env and the job guard.** All five variables and `HOME` must be set, and `HOME`
+   must be `/home/runner`; `GH_REPO` must be `owner/name`. The job-started hook must be
+   the pinned, protected file ("Job guard", below), or it exits 2 here, in warm-up too. The token must be
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
@@ -282,12 +284,39 @@ the JIT config by file and deleting it once the listener has started) is tracked
 ptone/scion#5978
 ([architecture](../docs/architecture.md#residual-risk-job-code-can-read-the-runners-credentials)).
 
-**Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports
-`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh` and
-`CR_JOB_GUARD_MARKER`. The hook allows a job only if `GITHUB_EVENT_NAME` is `push`, or
-`pull_request` with the payload's `pull_request.head.repo.full_name` equal to
-`GITHUB_REPOSITORY`. It refuses anything else, and also a missing or unparsable payload
-(fail closed). Checked against actions/runner v2.338.0:
+**Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports, read-only,
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh`,
+`CR_JOB_GUARD_MARKER` and `CR_JOB_GUARD_REPO` (= `GH_REPO`, the repository the runner
+serves). The hook allows a job only if `GITHUB_REPOSITORY` is `CR_JOB_GUARD_REPO` and
+`GITHUB_EVENT_NAME` is `push`, or `pull_request` with the payload's
+`pull_request.head.repo.full_name` equal to `GITHUB_REPOSITORY`. It refuses anything
+else, and also a missing served repository or a missing or unparsable payload (fail
+closed).
+
+**No fail-open: the hook must be the pinned one.** If the worker cannot run the hook
+(missing, not executable), only its pre-job step fails and the job's `always()` steps
+still run. So before any claim (and in warm-up) the entrypoint exits **2**, without
+starting `run.sh`, unless:
+- the hook and `/etc/cr-ci/job-guard.sha256` are regular files (not symlinks), owned by
+  root, with no group or other write bit and not writable by the runner's uid, and so
+  are their directories (`/usr/local/bin`, `/etc/cr-ci`); the runner must not run as
+  root;
+- the hook is executable and its sha256 equals the one in `/etc/cr-ci/job-guard.sha256`.
+  That value is the committed `runner/cr-ci-job-guard.sh.sha256`, installed read-only by
+  the Dockerfile, which also checks it (`sha256sum -c`) and the owners and modes at build
+  time. `TestJobGuardPinnedSHA` fails when the hook changes without its pin.
+
+**The path is fixed in production.** `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE`,
+`CR_JOB_GUARD_OWNER_UID` and every other `CR_*` override take effect only in test mode:
+`CR_TEST_MODE=1` and the entrypoint not PID 1. Production runs it as PID 1 (the
+image's exec-form `ENTRYPOINT`), so it cannot enable test mode; otherwise each override
+is logged (`ignoring CR_...`) and dropped. A job cannot set any of them anyway: the
+entrypoint's environment is the Cloud Run execution's (deploy-job.sh and the
+mediator's overrides), and the entrypoint has made its checks and exported the guard's
+settings before `run.sh`, and so any job, exists. A value for one of the exported
+variables in the execution environment is replaced, not used.
+
+Checked against actions/runner v2.338.0:
 - **Before any step:** Runner.Worker adds the hook to its pre-job steps ahead of
   container setup, every action's `pre` step and all job steps, checkout included
   (`src/Runner.Worker/JobExtension.cs` L303-312, L315, L328, L362; steps = pre-job
@@ -299,17 +328,27 @@ ptone/scion#5978
 - **A failed hook alone does not stop the job:** later steps with `if: always()`,
   `failure()` or `!cancelled()` would still run (`src/Runner.Worker/StepsRunner.cs`
   L200-235). So a refusal is a **hard stop**: the hook writes the marker (sanitized
-  reason, event and head repository; never a token or the JIT config), then SIGKILLs its
-  own process group. That group is run.sh's: the runner spawns its children without a
-  new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so it holds the
-  listener, the worker and the hook. The worker is still waiting for the hook to exit
+  reason, event, head, job and served repository; never a token or the JIT config),
+  then SIGKILLs, in this order, its parent (the worker), the parent's process group,
+  and its own group unless that group is its alone. The runner spawns its children
+  without a new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so
+  normally both are run.sh's group (listener, worker, hook) and the hook dies last.
+  Killing the parent first means the stop does not rest on the hook sharing the
+  worker's group. The worker is still waiting for the hook to exit
   (`JobHookProvider.RunHook` awaits it), so it cannot reach a step first.
-- **Fail closed:** if the kill does not take effect, the hook retries for 10 s and
-  exits 1, and the entrypoint's enforcer, which sees the marker, SIGKILLs run.sh's
-  group itself.
+- **Runs under `bash -e`:** the runner starts a `.sh` hook as `bash -e <file>`
+  (`src/Runner.Worker/Handlers/ScriptHandler.cs` L213-216 with
+  `ScriptHandlerHelpers.cs` L19), so the hook turns errexit off first (`set +e`): a
+  failing `kill` cannot end it before the rest of the stop sequence.
+- **Fail closed:** if the hook is still alive after the kills (a group of its own), it
+  checks once a second that the worker and its group are gone and exits 1; if they are
+  not gone after 10 s it exits 1 with `could not stop the runner`. Independently, the
+  entrypoint's enforcer, which sees the marker, SIGKILLs run.sh's group itself.
+  (Residual, rated very unlikely by sec-review-3: if every SIGKILL and the marker write
+  all fail, the enforcer has nothing to act on.)
 
 The entrypoint then logs `ERROR job_guard_refused: ... (reason=... event=... head=...
-repository=...)` and exits **5**. The mediator's hijack guard deletes the registration
+repository=... served=...)` and exits **5**. The mediator's hijack guard deletes the registration
 when GitHub reports the job.
 
 ## Testing
@@ -326,7 +365,10 @@ loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
 `CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_EXPECTED_HOME` (default
 `/home/runner`) lets the harness use a temp dir as `HOME`. `CR_METADATA_URL` defaults
 to `http://metadata.google.internal` and accepts only that value or a
-loopback http origin. Production leaves them all unset.
+loopback http origin. `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE` and
+`CR_JOB_GUARD_OWNER_UID` point the job guard check at a copy of the hook and its pin
+owned by the test's uid. All of them need test mode (`CR_TEST_MODE=1`, which the
+harness sets; the entrypoint is not PID 1 there) and are ignored otherwise.
 Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
 run has a `~/.curlrc` containing `verbose`, so if `curl -q` were dropped, the
 leak assertions would catch the tokens on stderr. Like the real metadata

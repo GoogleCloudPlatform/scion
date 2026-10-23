@@ -300,11 +300,18 @@ logged (a unit test enforces this).
   than wait for a job it could only give part of the task timeout. The next
   `/reconcile` reaps its registration (`runner_reaped`) and re-serves its job if
   that is still queued.
+- **Runner execution exits 2 with `job guard: ... refusing to start the runner`:**
+  the image's job-started hook or its pinned sha256 (`/etc/cr-ci/job-guard.sha256`)
+  is missing, not root-owned and read-only, or does not match. The runner was not
+  started and no claim was spent. This means a broken or tampered image: rebuild it
+  from the repository (the Docker build checks the same thing) and redeploy. A line
+  `ignoring CR_...: test overrides take effect only in test mode` means a test
+  override was set on the job; remove it.
 - **Runner execution exits 5 with `ERROR job_guard_refused`:** GitHub assigned the
-  runner a job cr-ci does not run (a fork PR or a disallowed event, typically one
-  queued on the label), and the runner's job-started hook stopped the runner
-  before any of the job's steps. The log line names the reason, event and head
-  repository. The mediator's hijack guard deletes the registration, and the job
+  runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of
+  another repository; typically one queued on the label), and the runner's
+  job-started hook stopped the runner before any of the job's steps. The log line
+  names the reason, event, head, job and served repository. The mediator's hijack guard deletes the registration, and the job
   shows as failed in GitHub. This is the guard working; look at who queued that job
   on the label (`SECURITY_REJECT_FORK_PR` in the mediator log for the same run).
 - **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop

@@ -225,9 +225,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 - One execution per runner, with exactly these env overrides:
   `RUNNER_CLAIM_TOKEN` (32 lowercase hex characters from `crypto/rand`, single
   use), `MEDIATOR_URL` (https origin, no trailing slash), `GH_JOB_ID` (the job
-  the runner is launched to serve) and `RUNNER_NAME` (normally
+  the runner is launched to serve), `RUNNER_NAME` (normally
   `cr-job-<GH_JOB_ID>`; after a swap or a hijack it carries another job's ID,
-  and the runner only logs the mismatch). The JIT config is never in env,
+  and the runner only logs the mismatch) and `GH_REPO` (the repository it
+  serves, which the runner's job guard binds jobs to). The JIT config is never in env,
   args or labels: execution env overrides are visible to anyone with
   `roles/run.viewer`.
 - The runner fetches a Google ID token for itself from the metadata server
@@ -265,10 +266,14 @@ entrypoint sets `ACTIONS_RUNNER_HOOK_JOB_STARTED` to `cr-ci-job-guard.sh`.
 Runner.Worker reads it from its own environment and runs the hook after the job
 is assigned and before any of its steps, checkout included. The hook allows only
 `push`, or `pull_request` whose head repository is the repository (the same
-allowlist as the routing expression and the fork guard). Anything else is a
-**hard stop**: the hook kills the runner's process group, so no step of the job
-runs. A failed hook alone would not do: the runner would still run steps marked
-`if: always()` or `failure()`. The entrypoint exits 5
+allowlist as the routing expression and the fork guard), and only jobs of the
+repository the runner was launched for (`GH_REPO`). Anything else is a
+**hard stop**: the hook kills the worker and the runner's process group, so no
+step of the job runs. A failed hook alone would not do: the runner would still
+run steps marked `if: always()` or `failure()`. For the same reason the
+entrypoint does not start the runner at all (exit 2) unless the hook is the
+root-owned, read-only file whose sha256 was pinned at image build; its path is
+fixed in production. The entrypoint exits 5 on a refusal
 ([runner README](../runner/README.md), "Job guard", which cites the actions/runner
 2.338.0 source for each of these points).
 
