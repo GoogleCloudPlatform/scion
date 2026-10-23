@@ -1143,8 +1143,11 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
-// directory (projectConfigDir) and returns it. On the local backend it also
-// creates the workspace directory holding it when createWorkspace is set.
+// directory (.scion) and returns it: on a shared backend
+// <ProjectRoot(uuid)>/.scion, beside workspace/ and inside no Mount; on the
+// local backend ~/.scion/projects/<slug>/.scion, which is both the project
+// root and the workspace root. On the local backend it also creates the
+// workspace directory holding it when createWorkspace is set.
 func (s *Server) ensureProjectConfigDir(project *store.Project, createWorkspace bool) (string, error) {
 	layout, err := s.workspaceLayout()
 	if err != nil {

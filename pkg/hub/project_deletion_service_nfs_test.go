@@ -171,3 +171,17 @@ func TestCleanupNFSSharedDirTree_FailClosedCases(t *testing.T) {
 		assert.Empty(t, buf.String())
 	})
 }
+
+// An invalid project ID never reaches the filesystem: cleanup refuses
+// before resolving anything, and the share's other trees are untouched.
+func TestCleanupNFSSharedDirTree_InvalidProjectIDRefused(t *testing.T) {
+	mountRoot := t.TempDir()
+	other := filepath.Join(mountRoot, "scion-shared", "projects", "pid-other", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(other, 0o2775))
+	svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
+	for _, id := range []string{"../pid-other", "", "a/b", ".."} {
+		svc.cleanupNFSSharedDirTree(context.Background(), id)
+	}
+	_, err := os.Stat(other)
+	assert.NoError(t, err, "no other project's tree is touched")
+}

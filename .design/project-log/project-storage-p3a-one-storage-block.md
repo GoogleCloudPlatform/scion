@@ -69,10 +69,11 @@ every runtime through it.
 
 ## Decisions
 
-- **Shared-dir declaration DELETE** deletes the leaf on every shared
-  backend through the confined deleter (`shareddirs.DeleteSharedDir`), as
-  on the local backend. Phase 1 kept the leaf when the layout came from
-  `workspace_storage`. With one block there is one rule. While the hub
+- **Shared-dir declaration DELETE** deletes the directory and its data on
+  every shared backend through the confined deleter
+  (`shareddirs.DeleteSharedDir`), as on the local backend, which is
+  unchanged. This is disclosed in the user docs. Phase 1 kept the leaf
+  when the layout came from `workspace_storage`. With one block there is one rule. While the hub
   default makes the scratchpad Required, removing its declaration is
   refused with 409.
 - **Cloud Run agent runtimes** cannot mount the shared tree. They keep
@@ -82,7 +83,8 @@ every runtime through it.
   and is tracked in ptone/scion#5926. Only the legacy split is refused.
   Refusing every Cloud Run agent would have been an outage, because every
   project has the Required scratchpad.
-- **Volume backends without `shared_dir_storage`**. A synthesized block
+- **Volume backends without an nfs `shared_dir_storage`** (unset, or set to
+  local). A synthesized block
   keeps shared dirs where they are (per-dir claims on Kubernetes) through
   the same kind of transitional split, so nothing becomes invisible on
   upgrade. The hub treats them as non-durable until the block is written.
@@ -103,6 +105,10 @@ every runtime through it.
   the broker reading project configuration at the project root, the
   bootstrap re-target and the broker migration hook. A stacked
   phase-3b change owns these.
+
+- **Layout identity covers shared-dir placement**: brokers report a
+  transitional split's shared-dir backend, and the hub refuses a broker
+  whose placement differs.
 
 ## Tests
 

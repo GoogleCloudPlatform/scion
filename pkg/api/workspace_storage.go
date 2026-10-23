@@ -37,6 +37,10 @@ type BrokerWorkspaceStorage struct {
 	// Volume identifies the shared volume the broker places project trees
 	// on, for the cloudrun-volume and gke-shared-volume backends.
 	Volume *BrokerVolumeWorkspaceStorage `json:"volume,omitempty"`
+	// SharedDirs is where the broker places shared dirs when that differs
+	// from Backend (a transitional split of deprecated storage settings):
+	// "local" or "nfs". Empty means with the workspace, on Backend.
+	SharedDirs string `json:"sharedDirs,omitempty"`
 	// Homes is where the broker places agent homes, server.project_storage
 	// homes: "local" or "nfs" (on the share described by NFS). Empty when
 	// the broker predates the field (unknown).

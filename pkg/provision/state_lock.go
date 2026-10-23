@@ -52,7 +52,7 @@ func WorkspaceProvisionLockDirs(workspacePath string) []string {
 // directory with the broker's leaf contract (shareddirs.EnsureLeaf),
 // because a directory created here would lack the setgid bit and default
 // ACL the provisioning init container needs.
-func WithWorkspaceProvisionLocks(ctx context.Context, workspacePath string, fn func(ctx context.Context) error) error {
+func WithWorkspaceProvisionLocks(ctx context.Context, workspacePath string, fn func(ctx context.Context) error) (runErr error) {
 	if workspacePath == "" || !filepath.IsAbs(workspacePath) {
 		return errors.New("provision: an absolute workspace path is required")
 	}
@@ -70,9 +70,11 @@ func WithWorkspaceProvisionLocks(ctx context.Context, workspacePath string, fn f
 	if err != nil {
 		return fmt.Errorf("provision: acquire provisioning locks: %w", err)
 	}
-	runErr := fn(held.ctx)
-	if relErr := held.release(); relErr != nil && runErr == nil {
-		return fmt.Errorf("provision: release provisioning locks: %w", relErr)
-	}
-	return runErr
+	// Deferred so a panic in fn still releases the locks.
+	defer func() {
+		if relErr := held.release(); relErr != nil && runErr == nil {
+			runErr = fmt.Errorf("provision: release provisioning locks: %w", relErr)
+		}
+	}()
+	return fn(held.ctx)
 }

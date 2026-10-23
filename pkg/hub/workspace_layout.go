@@ -103,26 +103,3 @@ func (s *Server) projectWorkspaceResolved(project *store.Project) (projectfs.Res
 	}
 	return layout.Resolve(p, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 }
-
-// projectConfigDir returns the directory holding a hub-managed project's
-// configuration (.scion) as the hub seeds it: on a
-// shared backend <ProjectRoot(uuid)>/.scion, beside workspace/ and inside
-// no Mount; on the local backend ~/.scion/projects/<slug>/.scion, which is
-// both the project root and the workspace root (unchanged).
-func (s *Server) projectConfigDir(project *store.Project) (string, error) {
-	layout, err := s.workspaceLayout()
-	if err != nil {
-		return "", err
-	}
-	if layout.Backend.Shared() {
-		root, err := layout.ProjectRoot(project.ID)
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(root.HostPath, ".scion"), nil
-	}
-	if err := validateProjectSlug(project.Slug); err != nil {
-		return "", err
-	}
-	return filepath.Join(layout.HostBase, "projects", project.Slug, ".scion"), nil
-}

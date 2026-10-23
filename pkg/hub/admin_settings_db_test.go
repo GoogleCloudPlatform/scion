@@ -2330,7 +2330,7 @@ func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
 // Layer-0. A DB-mode PUT carrying it is rejected with 422 layer0_rejected
 // and never stored.
 func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
+	srv, fakeStore, ops := newTestDBServer(t)
 	body := `{"server": {"project_storage": {"backend": "nfs", "nfs": {"mount_root": "/mnt/x", "shares": [{"id": "a", "server": "10.0.0.2", "export": "/e"}]}}}}`
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
@@ -2346,6 +2346,13 @@ func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "server.project_storage") {
 		t.Errorf("the refusal should name server.project_storage, got: %s", rr.Body.String())
+	}
+	// Never stored: no settings section carries the block.
+	for _, section := range []string{"server", "project_storage"} {
+		if got, err := fakeStore.GetHubSetting(context.Background(), section); err == nil && got != nil &&
+			strings.Contains(string(got.Value), "project_storage") {
+			t.Errorf("section %q stored the rejected block: %s", section, got.Value)
+		}
 	}
 }
 

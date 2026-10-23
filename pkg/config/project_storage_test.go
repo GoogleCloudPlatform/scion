@@ -72,6 +72,8 @@ func TestSynthesizeProjectStorage(t *testing.T) {
 		{name: "workspace_storage nfs synthesizes", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, wantBackend: "nfs", wantHomes: "", wantWarn: []string{"legacy storage blocks in use (server.workspace_storage)", "write server.project_storage instead", "project_storage:\n        backend: nfs", "shared dirs now follow the workspace onto the nfs export"}},
 		{name: "workspace_storage cloudrun-volume synthesizes, shared dirs stay", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "v"}}, wantBackend: "cloudrun-volume", wantLocal: true, wantWarn: []string{"legacy storage blocks in use", "shared dirs stay where they are today", "NOT moved automatically"}},
 		{name: "workspace_storage gke-shared-volume synthesizes, shared dirs stay", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "v", PVClaimName: "c"}}, wantBackend: "gke-shared-volume", wantLocal: true, wantWarn: []string{"per-dir claims on Kubernetes"}},
+		{name: "gke-shared-volume with explicit local shared_dir_storage keeps shared dirs", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "v", PVClaimName: "c"}}, sd: &V1SharedDirStorageConfig{Backend: "local"}, wantBackend: "gke-shared-volume", wantLocal: true, wantWarn: []string{"shared dirs stay where they are today", "NOT moved automatically"}},
+		{name: "cloudrun-volume with empty shared_dir_storage backend keeps shared dirs", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "v"}}, sd: &V1SharedDirStorageConfig{}, wantBackend: "cloudrun-volume", wantLocal: true},
 		{name: "project_storage gke-shared-volume puts shared dirs on the volume", ps: &V1ProjectStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "v"}}, wantBackend: "gke-shared-volume", wantNoWarn: true},
 		{name: "workspace_storage invalid", ws: &V1WorkspaceStorageConfig{Backend: "nfs"}, wantErr: "server.workspace_storage: workspace_storage.backend is \"nfs\" but no NFS shares"},
 		{name: "home_storage nfs with workspace nfs", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: nfsA()}, hs: &V1HomeStorageConfig{Backend: "nfs", Leaf: "broker", StopGraceSeconds: 40}, wantBackend: "nfs", wantHomes: "nfs", wantWarn: []string{"legacy storage blocks in use (server.workspace_storage, server.shared_dir_storage, server.home_storage)"}},
@@ -84,7 +86,8 @@ func TestSynthesizeProjectStorage(t *testing.T) {
 		{name: "shared_dir_storage nfs, workspace cloudrun-volume: split", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "v"}}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: nfsA()}, wantBackend: "cloudrun-volume", wantSplit: true},
 		{name: "both nfs, other share", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/mnt/nfs", "b", "10.0.0.3", "/share/b", "")}, wantErr: "both nfs but name different trees"},
 		{name: "both nfs, other subpath_root", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/mnt/nfs", "a", "10.0.0.2", "/share/a", "team")}, wantErr: "both nfs but name different trees"},
-		{name: "both nfs, same tree, other share id and mount_root", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/srv/other", "sd-id", "10.0.0.2", "/share/a/", "projects")}, wantBackend: "nfs", wantWarn: []string{"legacy storage blocks in use"}},
+		{name: "both nfs, same tree, other share id and mount_root", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/srv/other", "sd-id", "10.0.0.2", "/share/a/", "projects")}, wantBackend: "nfs", wantWarn: []string{"legacy storage blocks in use", "mount it differently on this host", `"/mnt/nfs/a"`}},
+		{name: "both nfs, same tree, workspace mount_root relative", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: psNFS("", "a", "10.0.0.2", "/share/a", "")}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/srv/sd", "a", "10.0.0.2", "/share/a", "")}, wantBackend: "nfs", wantWarn: []string{"that path is not absolute"}},
 		{name: "both nfs, other export", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/mnt/nfs", "a", "10.0.0.2", "/share/b", "")}, wantErr: "both nfs but name different trees"},
 		{name: "both nfs, same tree", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "nfs", NFS: psNFS("/mnt/nfs", "a", "10.0.0.2", "/share/a", "projects")}, wantBackend: "nfs", wantWarn: []string{"legacy storage blocks in use"}},
 		{name: "shared_dir_storage local, workspace nfs", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: nfsA()}, sd: &V1SharedDirStorageConfig{Backend: "local"}, wantBackend: "nfs", wantWarn: []string{"shared dirs are now placed on the nfs export"}},
@@ -377,6 +380,24 @@ server:
     backend: nfs
 `), 0o600))
 
+	check := func(t *testing.T, vs *VersionedSettings) {
+		t.Helper()
+		require.Equal(t, "from-project", vs.ActiveProfile, "sanity: the project layer was loaded")
+		require.NotNil(t, vs.Server)
+		assert.Nil(t, vs.Server.ProjectStorage, "project_storage must come from global settings only")
+		assert.Nil(t, vs.Server.SharedDirStorage)
+		assert.Nil(t, vs.Server.HomeStorage)
+		require.NotNil(t, vs.Server.WorkspaceStorage, "the global block is kept")
+		assert.Equal(t, "local", vs.Server.WorkspaceStorage.Backend)
+		assert.Nil(t, vs.Server.WorkspaceStorage.NFS, "no project key is merged into the global block")
+	}
+	t.Run("project found through the current directory (external layer step)", func(t *testing.T) {
+		t.Chdir(filepath.Dir(projectDir))
+		vs, _, err := LoadEffectiveSettings("")
+		require.NoError(t, err)
+		check(t, vs)
+	})
+
 	vs, _, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
 	require.Equal(t, "from-project", vs.ActiveProfile, "sanity: the project layer was loaded")
@@ -415,4 +436,38 @@ func TestCheckGlobalStorageBlocksLoaded_LegacyTopLevelBlock(t *testing.T) {
 	require.NoError(t, err)
 	err = CheckGlobalStorageBlocksLoaded(cfg)
 	assert.ErrorContains(t, err, "has a shared_dir_storage block that was not loaded")
+}
+
+// TestGlobalSettingsStorageKey: only parsed mapping keys count, never a
+// comment or a key that only contains a storage key's name.
+func TestGlobalSettingsStorageKey(t *testing.T) {
+	write := func(t *testing.T, content string) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0o600))
+	}
+	keys := []string{"project_storage", "workspace_storage", "shared_dir_storage"}
+	write(t, "# shared_dir_storage: moved\nruntimes:\n  k8s:\n    shared_dir_storage_class: rwx\n")
+	assert.Equal(t, "", GlobalSettingsStorageKey(keys), "a comment and a containing key name do not count")
+	write(t, "shared_dir_storage:\n  backend: nfs\n")
+	assert.Equal(t, "shared_dir_storage", GlobalSettingsStorageKey(keys))
+	write(t, "server: [unterminated\n")
+	assert.Equal(t, "", GlobalSettingsStorageKey(keys), "an unparseable file is left to the load-error path")
+}
+
+// TestCheckGlobalStorageBlocksLoaded_V1BlockNotLoaded: a schema_version "1"
+// file that holds a storage block the hub's loader did not carry (gc has
+// none) refuses startup, whatever the reason the block did not load.
+func TestCheckGlobalStorageBlocksLoaded_V1BlockNotLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n"), 0o600))
+	err := CheckGlobalStorageBlocksLoaded(&GlobalConfig{})
+	assert.ErrorContains(t, err, "shared_dir_storage")
+	assert.NoError(t, CheckGlobalStorageBlocksLoaded(&GlobalConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "nfs"}}), "a loaded block passes")
 }

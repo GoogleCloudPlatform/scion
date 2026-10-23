@@ -412,7 +412,14 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 	if !layout.Backend.Shared() {
 		return
 	}
-	// ProjectRoot validates the project ID (hub project IDs are UUIDs it
+	if !shareddirs.ValidProjectID(projectID) {
+		// Should be unreachable (hub project IDs are UUIDs it generates
+		// itself); checked before the filesystem is touched at all.
+		svc.logger.ErrorContext(ctx, "refusing shared-dir cleanup on project delete: project ID fails validation",
+			"project_id", projectID)
+		return
+	}
+	// ProjectRoot validates the project ID again (hub project IDs are UUIDs it
 	// generates itself, so a failure should be unreachable) before the
 	// filesystem is touched at all.
 	root, err := layout.ProjectRoot(projectID)
