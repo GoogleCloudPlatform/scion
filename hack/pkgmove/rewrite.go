@@ -291,6 +291,7 @@ func (a *analysis) safetyFindings() {
 	a.loggingFindings()
 	a.testdataFindings()
 	a.sourceScanFindings()
+	a.outsideRefFindings()
 	a.scanLinknames()
 	a.reflectionFindings()
 	// Staying var initialisers that use moved code. Calls run moved code

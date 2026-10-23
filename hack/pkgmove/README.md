@@ -382,6 +382,7 @@ severity:
 | HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
 | HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)), including into an existing target whose own `TestMain` differs |
 | HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass. A file with a [`pkgmove:scan-covers`](#declaring-scan-coverage-pkgmovescan-covers) marker that covers the target gets the INFO below instead |
+| HIGH | outside reference to a moved file: a string literal in any other Go file of the module (the source package's staying files included) names a moved file by its repo path (`"pkg/hub/x.go"`), by its path elements (`filepath.Join("pkg", "hub", "x.go")`) or by its base name (`"x.go"`, `"x.go:fn"`), or a line of `hack/**/*.sh`, the root `Makefile` or `.github/workflows/*.yml` does. After the move it silently stops matching (see [Outside references](#outside-references-to-moved-files-pkgmoveref-ok)). A `pkgmove:ref-ok` comment on the line above gets the INFO below instead |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
 | WARN | a wrapper alias used as a func value in a moved file: the moved file now uses the target func, whose identity differs from staying uses of the wrapper |
@@ -411,6 +412,7 @@ severity:
 | INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
 | INFO | source-scanning test declares coverage of the target: a source-scanning test file that carries a `pkgmove:scan-covers` marker covering the target (a directory, a `/...` parent, or a `guardScanSubdirs` list entry). The line names the marker's file:line (and the list entry) and echoes its reason line, so the reviewer can verify each one |
+| INFO | outside reference to a moved file accepted (pkgmove:ref-ok): the reference and the marker's reason |
 | INFO | test-only move: the target's `TestMain` is equivalent to the source's |
 
 `-rewrite-aliases` reports: WARN for files excluded by build tags that name
@@ -557,6 +559,54 @@ marker at the next move. So a new scan test carries a claim that holds for
 every future area from the day it lands, and the move's prep is one
 `guardScanSubdirs` entry. Run `hack/check-scan-coverage.sh --self-test` after
 changing the script.
+
+### Outside references to moved files (`pkgmove:ref-ok`)
+
+pkgmove rewrites Go references to moved symbols, but not code that names a
+moved **file**: a classification table keyed on its repo path (the authzop
+`MutationClassifications` `File`/`Scope` fields), a test keyed on its base
+name (the logging `TestRequestPathSites` table, `"x.go:fn:callee"` census
+keys), a shell guard that exempts its path. After the move those keys no
+longer match, and the failure shows up only in upstream CI, or never. So
+pkgmove scans the module for each moved file (and each moved file asset):
+
+- **Go files:** every `.go` file of the module tree except the moved ones,
+  the source package's staying files included. Only string literals count
+  (`go/ast`), so comments do not. A literal that contains the repo path
+  (`"pkg/hub/x.go"`, `"./pkg/hub/x.go"`) is a *repo path* reference; a call
+  whose consecutive string arguments are the trailing elements of the repo
+  path, at least the directory and the file name
+  (`filepath.Join("pkg", "hub", "x.go")`, `filepath.Join("..", "hub", "x.go")`),
+  is a *path elements* reference; any other literal that contains the file
+  name as a whole path element (`"x.go"`, `"../hub/x.go"`, `"x.go:fn"`, not
+  `"fix.go"`) is a *base name* reference. A file that does not parse is
+  matched as text.
+- **Text files:** `hack/**/*.sh`, the root `Makefile` and
+  `.github/workflows/*.yml` (and `.yaml`), matched line by line for the repo
+  path or the base name, comments included.
+- **Skipped:** directories named `.design`, `docs-site`, `node_modules` or
+  `vendor`, other dot directories except `.github`, and Markdown files.
+
+Each reference is a HIGH, an ERROR under `-strict`, naming the file:line, the
+form and the matched text. Fix it in the move's prep (or in the move PR):
+a repo path or path elements usually just change to the new path; a base-name
+key or a shell exemption needs a look, since a non-recursive glob may also
+have to widen (as in the logging test). To keep a reference on purpose, put a
+marker with a reason on the line above it; the report then lists it as INFO:
+
+```go
+	// pkgmove:ref-ok the history table records the path at the time.
+	{File: "pkg/hub/x.go", ...},
+```
+
+```sh
+# pkgmove:ref-ok fixture path for the guard's self-test.
+fixture="pkg/hub/x.go"
+```
+
+The Go marker is a whole comment line with one space after `//`; the text
+marker is `#`, blanks, then the word. A marker without a reason accepts
+nothing (the HIGH says so). pkgmove does not rewrite these references.
 
 ### What counts as a pure initialiser call
 
@@ -714,6 +764,7 @@ Each is phrased as a check for the reviewer of a generated PR.
   x_test`) use the source package beyond plain selectors, run them; they are
   rewritten syntactically.
 - **Source-scanning guard tests:** if the report lists "source-scanning test does not cover the target", extend each listed test to scan the target directory as well. For example, use the package directory from `go list`, or walk both directories. Then check that it still fails on a planted violation in a moved file. pkg/hub has dozens of these, such as the `*_resource_literal_guard_test.go`, `*_enumeration_test.go` and `*_callsite*_test.go` files.
+- **Outside references:** for each "outside reference to a moved file", check the fix keeps the reference's meaning (a key that now names the new path, a glob that now reaches the new directory), and that each `pkgmove:ref-ok` reason is true. The scan sees string literals and listed text files only: a path built at run time (`dir + "/" + name`) or named in another kind of file is not found.
 - **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target. For a `guardScanSubdirs` marker, verify the site reads through the guardScanSubdirs helpers (the tool trusts the list literal; in `pkg/hub`, `hack/check-scan-coverage.sh` checks that the function uses one of the helpers).
 - **Working-directory paths in moved tests:** if moved tests build paths from the working directory (`..`, `../`, `os.Getwd`, a `find...Dir` helper walking up to the module root), check that each path still resolves from the target directory, which is one level deeper. A test that skips when a file is missing passes silently.
 - **Assets read at run time:** if moved code reads files relative to the

@@ -589,6 +589,143 @@ func TestScanCoversGuardScanSubdirs(t *testing.T) {
 	}
 }
 
+// TestOutsideRefs checks the outside-reference findings: references to a
+// moved file from outside the move set, by repo path, by path elements and by
+// base name, in Go string literals (the source package's staying tests
+// included), shell guards, the Makefile and workflows. The tree reproduces
+// the two references the maintenance move had to fix by hand: the authzop
+// MutationClassifications entry keyed on the repo path, and the logging
+// TestRequestPathSites table keyed on the base name.
+func TestOutsideRefs(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":                           "module example.com/fx\n\ngo 1.26\n",
+		"pkg/hub/maintenance_executors.go": "package hub\n\n// CheckForReleaseUpdates is moved; \"maintenance_executors.go\" here is the moved file itself.\nfunc CheckForReleaseUpdates() string { return \"maintenance_executors.go\" }\n",
+		"pkg/hub/stay.go":                  "package hub\n\nconst version = 1\n",
+		"pkg/hub/stay_test.go": "package hub\n\n" +
+			"var censusSites = map[string]bool{\"maintenance_executors.go:Run:GetSecretValue\": true}\n\n" + // line 3: base name in a staying test
+			"// pkgmove:ref-ok the history table keeps the old path on purpose.\n" +
+			"var oldPath = \"pkg/hub/maintenance_executors.go\"\n\n" + // line 6: accepted
+			"// pkgmove:ref-ok\n" +
+			"var noReason = `maintenance_executors.go`\n", // line 9: marker without a reason
+		"pkg/hub/authzop/catalog.go": "package authzop\n\n" +
+			"type MutationClassification struct{ File, Function, Symbol, Scope string }\n\n" +
+			"var MutationClassifications = []MutationClassification{\n" +
+			"\t// pkg/hub/maintenance_executors.go - maintenance operations (a comment: not reported)\n" +
+			"\t{File: \"pkg/hub/maintenance_executors.go\", Function: \"Run\", Symbol: \"GetSecretValue\", Scope: \"pkg/hub/maintenance_executors.go\"},\n" + // line 7
+			"}\n",
+		"pkg/util/logging/request_path_sites_test.go": "package logging\n\nimport \"path/filepath\"\n\n" +
+			"var requestPathSites = []struct{ file, fn string }{\n" +
+			"\t{\"maintenance_executors.go\", \"CheckForReleaseUpdates\"},\n" + // line 6
+			"\t{\"premaintenance_executors.go\", \"Other\"},\n" +
+			"\t{\"maintenance_executors.gox\", \"Other\"},\n" +
+			"}\n\n" +
+			"var hubFiles, _ = filepath.Glob(filepath.Join(\"..\", \"..\", \"hub\", \"*.go\"))\n",
+		"pkg/secret/backend_test.go": "package secret\n\nimport \"path/filepath\"\n\n" +
+			"var keyFile = filepath.Join(\"pkg\", \"hub\",\n\t\"maintenance_executors.go\")\n", // line 5
+		"hack/check-guard.sh":      "#!/bin/sh\nexempt=\"pkg/hub/maintenance_executors.go\"\n# pkgmove:ref-ok fixture path for the guard's self-test.\nfixture=\"pkg/hub/maintenance_executors.go\"\n",
+		"Makefile":                 "check:\n\t@grep -q maintenance_executors.go pkg/hub/*.go\n",
+		".github/workflows/ci.yml": "jobs:\n  check:\n    steps:\n      - run: test -f pkg/hub/maintenance_executors.go\n",
+		"scripts/other.sh":         "echo pkg/hub/maintenance_executors.go\n",
+		"docs/notes.md":            "pkg/hub/maintenance_executors.go\n",
+		".design/x.go":             "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"docs-site/x.go":           "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+	})
+	cfg := func(strict bool, out *bytes.Buffer) *Config {
+		return &Config{
+			SrcDir: filepath.Join(dir, "pkg", "hub"), DstDir: filepath.Join(dir, "pkg", "hub", "maintenance"),
+			Files: []string{"maintenance_executors.go"}, NoGit: true, DryRun: true, Strict: strict, Stdout: out,
+		}
+	}
+	const dst = "update it to pkg/hub/maintenance/maintenance_executors.go"
+	const base = "check what it matches after the move"
+	high := []string{
+		`pkg/hub/authzop/catalog.go:7: Go string literal "pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path: after the move it no longer matches the file - ` + dst,
+		`pkg/util/logging/request_path_sites_test.go:6: Go string literal "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its base name: after the move it no longer matches the file - ` + base,
+		`pkg/secret/backend_test.go:5: Go string literals "pkg", "hub", "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its path elements: after the move it no longer matches the file - update the elements to pkg/hub/maintenance/maintenance_executors.go`,
+		`pkg/hub/stay_test.go:3: Go string literal "maintenance_executors.go:Run:GetSecretValue" names moved pkg/hub/maintenance_executors.go by its base name`,
+		"pkg/hub/stay_test.go:9: Go string literal `maintenance_executors.go` names moved pkg/hub/maintenance_executors.go by its base name: after the move it no longer matches the file - " + base,
+		"(the pkgmove:ref-ok marker at pkg/hub/stay_test.go:8 has no reason, so it accepts nothing)",
+		`hack/check-guard.sh:2: line "exempt=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path: after the move it no longer matches the file - ` + dst,
+		`Makefile:2: line "@grep -q maintenance_executors.go pkg/hub/*.go" names moved pkg/hub/maintenance_executors.go by its base name`,
+		`.github/workflows/ci.yml:4: line "- run: test -f pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path`,
+	}
+	info := []string{
+		`pkg/hub/stay_test.go:6: Go string literal "pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "the history table keeps the old path on purpose."`,
+		`hack/check-guard.sh:4: line "fixture=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "fixture path for the guard's self-test."`,
+	}
+	absent := []string{"catalog.go:6", "premaintenance", ".gox", "scripts/other.sh", "notes.md", ".design/", "docs-site/", "pkg/hub/maintenance_executors.go:4: Go string literal"}
+
+	// Without -strict the references are HIGH findings and the plan stands.
+	var buf bytes.Buffer
+	if err := run(cfg(false, &buf)); err != nil {
+		t.Fatalf("dry run without -strict: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if n := strings.Count(out, "\n== HIGH: outside reference to a moved file ==\n"); n != 1 {
+		t.Errorf("want one HIGH outside-reference section, got %d:\n%s", n, out)
+	}
+	for _, w := range append(append(high, info...), "== INFO: outside reference to a moved file accepted (pkgmove:ref-ok) ==") {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+	for _, w := range absent {
+		if strings.Contains(out, w) {
+			t.Errorf("unexpected %q:\n%s", w, out)
+		}
+	}
+	// Exactly the expected sites: 8 HIGH lines (one per line of code, the
+	// catalog entry's two literals included) and 2 INFO lines.
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 8 {
+		t.Errorf("got %d HIGH outside references, want 8:\n%s", got, out)
+	}
+	if got := strings.Count(out, "; ref-ok: "); got != 2 {
+		t.Errorf("got %d accepted outside references, want 2:\n%s", got, out)
+	}
+
+	// Under -strict each one is an error.
+	buf.Reset()
+	if err := run(cfg(true, &buf)); !errors.Is(err, errPlan) {
+		t.Fatalf("want errPlan under -strict, got %v\n%s", err, buf.String())
+	}
+	out = buf.String()
+	if got := strings.Count(out, ": -strict: outside reference to a moved file: "); got != 8 {
+		t.Errorf("got %d -strict outside-reference errors, want 8:\n%s", got, out)
+	}
+	if !strings.Contains(out, "pkg/hub/authzop/catalog.go:7: -strict: outside reference to a moved file: ") {
+		t.Errorf("missing the catalog error:\n%s", out)
+	}
+}
+
+func TestContainsPathElem(t *testing.T) {
+	for _, tc := range []struct {
+		s, p string
+		want bool
+	}{
+		{"x.go", "x.go", true},
+		{"hub/x.go", "x.go", true},
+		{"../../hub/x.go", "x.go", true},
+		{"x.go:fn:callee", "x.go", true},
+		{"a x.go b", "x.go", true},
+		{"fix.go", "x.go", false},
+		{"a-x.go", "x.go", false},
+		{"a.x.go", "x.go", false},
+		{"x.gox", "x.go", false},
+		{"x.go_test", "x.go", false},
+		{"fix.go x.go", "x.go", true},
+		{"pkg/hub/x.go", "pkg/hub/x.go", true},
+		{"./pkg/hub/x.go", "pkg/hub/x.go", true},
+		{"xpkg/hub/x.go", "pkg/hub/x.go", false},
+		{"pkg/hub/sub/x.go", "pkg/hub/x.go", false},
+	} {
+		if got := containsPathElem(tc.s, tc.p); got != tc.want {
+			t.Errorf("containsPathElem(%q, %q) = %v, want %v", tc.s, tc.p, got, tc.want)
+		}
+	}
+}
+
 func TestScanCoversMarker(t *testing.T) {
 	for _, tc := range []struct {
 		comment string
