@@ -32,7 +32,7 @@ func TestLayoutDescriptorDiff(t *testing.T) {
 	}
 	homesNFS := hub
 	homesNFS.Homes = BackendNFS
-	gke := Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects"}
+	gke := Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects", Share: Share{ID: "v", PVName: "claim"}}
 
 	tests := []struct {
 		name     string
@@ -58,8 +58,14 @@ func TestLayoutDescriptorDiff(t *testing.T) {
 		{"homes unknown, hub local", hub, func() *api.BrokerWorkspaceStorage { d := match(); d.Homes = ""; return d }, "", nil},
 		{"homes unknown, hub nfs", homesNFS, func() *api.BrokerWorkspaceStorage { d := match(); d.Homes = ""; return d }, "", []string{`homes: hub "nfs", broker unknown (upgrade it)`}},
 		{"volume backend same", gke, func() *api.BrokerWorkspaceStorage {
-			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local"}
+			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local", Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "claim", SubPathRoot: "projects"}}
 		}, "", nil},
+		{"volume without identity", gke, func() *api.BrokerWorkspaceStorage {
+			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local"}
+		}, "", []string{"volume: broker reports no volume identity (upgrade it)"}},
+		{"volume other claim and root", gke, func() *api.BrokerWorkspaceStorage {
+			return &api.BrokerWorkspaceStorage{Backend: "gke-shared-volume", Homes: "local", Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "other", SubPathRoot: "team"}}
+		}, "", []string{`subpath_root: hub "projects", broker "team"`, `volume claim: hub "claim", broker "other"`}},
 		{"volume backend differs", gke, func() *api.BrokerWorkspaceStorage { return &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local"} }, "", []string{`backend: hub "gke-shared-volume", broker "nfs"`}},
 		{"several", hub, func() *api.BrokerWorkspaceStorage {
 			d := match()

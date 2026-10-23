@@ -1395,13 +1395,20 @@ func resolveHubProjectStorage(cfg *config.GlobalConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	if err := config.CheckStorageBlocksLoaded(cfg, config.GlobalSettingsMentions); err != nil {
+	if err := config.CheckGlobalStorageBlocksLoaded(cfg); err != nil {
 		return fmt.Errorf("invalid project storage settings: %w", err)
 	}
 	ps, warnings, err := config.ResolveGlobalProjectStorage(cfg)
 	if err != nil {
 		// The wrapped error already names the key (for example
 		// server.project_storage.nfs.uid), so do not repeat it here.
+		return fmt.Errorf("invalid project storage settings: %w", err)
+	}
+	// The hub serves files from its own mount of a shared backend: its
+	// Layout must build, with an absolute host base, or the hub does not
+	// start (rather than refusing every shared-dir request and shared-mode
+	// dispatch later).
+	if err := config.ValidateHubProjectStorageLayout(ps); err != nil {
 		return fmt.Errorf("invalid project storage settings: %w", err)
 	}
 	for _, w := range warnings {

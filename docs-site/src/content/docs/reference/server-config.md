@@ -582,13 +582,13 @@ The operational content of the deprecated sections still applies to the same fie
 
 #### Validation
 
-The Hub and the Runtime Brokers refuse to start, and `scion config validate` reports an error, when:
+The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. A Runtime Broker does not refuse to start: it logs the error and reports the local layout, and the Hub then refuses shared-mode dispatches to it (see [Layout identity](#layout-identity-check)).
 
 - `server.project_storage` is set together with any of `server.workspace_storage`, `server.shared_dir_storage` or `server.home_storage`. Exactly one storage block configures a deployment; the error names the blocks to remove.
 - the backend block is invalid, by the same rules as [`server.workspace_storage`](#startup-validation), reported under `server.project_storage`;
 - `homes` is not `local` or `nfs`, or is `nfs` while `backend` is not `nfs`;
 - a `homes_options` value is invalid;
-- the global settings file mentions a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) but no storage block was loaded, for example because the file has no `schema_version: "1"` or the block is not under `server:`. The process refuses to fall back to the local backend.
+- (Hub) a legacy-format global settings file (no `schema_version: "1"`) has a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) as a mapping key that was not loaded, for example a block not under `server:`. The Hub refuses to fall back to the local backend. A `schema_version: "1"` file is used as loaded; a comment, or a key such as `shared_dir_storage_class` that only contains the name, never triggers this.
 
 #### Migrating from the deprecated blocks
 
@@ -596,16 +596,18 @@ Without `server.project_storage`, the Hub and the Runtime Brokers synthesize it 
 
 - `server.workspace_storage` gives `backend` and the backend blocks.
 - `server.home_storage.backend` gives `homes`; its other fields give `homes_options`.
-- `server.shared_dir_storage` keeps its current placement:
-  - `nfs` on the same tree as the workspace (same share server, export and mount root, and the same `subpath_root`): nothing changes.
+- `server.shared_dir_storage` decides where shared directories go:
+  - `nfs` on the same tree as the workspace (same NFS server, export and `subpath_root`): nothing changes.
   - `nfs` while the workspace is not on `nfs`: shared directories (and `nfs` homes) stay on the `shared_dir_storage` export and workspaces stay where they are. This transitional split exists only for synthesized configurations; it cannot be written as a `server.project_storage` block.
   - `local` while the workspace is on `nfs`: shared directories are now placed on the export with the workspace, and a warning says so.
+  - unset while the workspace is on `nfs`: shared directories follow the workspace onto the export on every runtime (Docker, Podman and Apple agents kept them node-local before), and a warning says so. The project-storage migration copies node-local shared-directory trees.
+  - unset while the workspace is on `cloudrun-volume` or `gke-shared-volume`: shared directories stay where they are today (their own claims on Kubernetes) until `server.project_storage` is written. The Hub then treats them as non-durable, so a Cloud Run Hub refuses shared-directory writes with `503`. Writing the block moves shared directories onto the volume, and **the contents of the existing per-directory claims are not moved automatically**. While such a claim still exists, every agent start that now places that directory on the volume returns a warning naming the claim. Scion never deletes those claims.
 
 Every synthesis logs a startup warning that names the deprecated blocks in use and prints the exact `server.project_storage` block to write, with defaults filled in. The Hub's `project_storage_config` health check reports `degraded` until the block is written. For the transitional split, the printed block is `backend: nfs` on the shared-directory export: writing it moves workspaces onto the export too, because one backend places both.
 
 Synthesis is refused, and startup fails, only when the deprecated blocks are ambiguous:
 
-- `workspace_storage` and `shared_dir_storage` are both `nfs` but name different trees (a different share server, export or mount root, or a different `subpath_root`). One storage block places both, so choosing either would hide the other's data. Move one tree onto the other's share, then write `server.project_storage` naming it.
+- `workspace_storage` and `shared_dir_storage` are both `nfs` but name different trees (a different NFS server or export, or a different `subpath_root`; the share id and `mount_root` are host-local naming and may differ). One storage block places both, so choosing either would hide the other's data. Move one tree onto the other's share, then write `server.project_storage` naming it.
 - `home_storage.backend` is `nfs` but neither `workspace_storage` nor `shared_dir_storage` is `nfs`, so there is no share for the homes.
 
 For example, a deployment with workspaces and shared directories on the same export and the broker home leaf:

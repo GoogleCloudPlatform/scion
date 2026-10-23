@@ -299,6 +299,9 @@ type Resolved struct {
 	Name string
 	// ReadOnly is the resolved Mount's: the realized mount is read-only.
 	ReadOnly bool
+	// ClaimName is the PersistentVolumeClaim of the share this directory
+	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
+	ClaimName string
 }
 
 const (
@@ -397,6 +400,7 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		SubPath:     filepath.ToSlash(rel),
 		Target:      m.Target,
 		ReadOnly:    m.ReadOnly,
+		ClaimName:   l.Share.PVName,
 		Kind:        m.Kind,
 		Name:        m.Name,
 	}

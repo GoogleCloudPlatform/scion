@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -245,6 +246,7 @@ func resolveSharedDirs(
 	return volumes, &runtime.SharedDirRealization{
 		Backend:            string(backend),
 		PVClaimName:        sdLayout.Share.PVName,
+		ProjectID:          projectID,
 		SubPaths:           subPaths,
 		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdLayout.GID),
 	}, nil
@@ -412,3 +414,54 @@ func agentSharedDirs(settings *config.VersionedSettings, opts api.StartOptions) 
 // server.project_storage places every agent's shared dirs. It is only
 // moved with the rest of a legacy agent directory (migrateLegacyAgentState).
 const legacySharedDirStorageRecordFile = "shared-dir-storage.json"
+
+// retiredSharedDirRecordSuffix is appended to a retired per-agent shared-dir
+// backend record when it is moved aside.
+const retiredSharedDirRecordSuffix = ".retired"
+
+// retireSharedDirRecord handles an agent's per-agent shared-dir backend
+// record from earlier versions, once: when it named another backend for any
+// of dirs than the one sdLayout now places them on, it returns a warning for
+// the start naming those dirs. The record is then moved aside, so the
+// warning is shown only on the first start after the upgrade. The agent now
+// follows the project's layout; node-local content is copied onto the shared
+// tree by the storage migration.
+func retireSharedDirRecord(agentDir string, sdLayout projectfs.Layout, dirs []api.SharedDir) string {
+	if agentDir == "" {
+		return ""
+	}
+	path := filepath.Join(agentDir, legacySharedDirStorageRecordFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var rec struct {
+		Backend string            `json:"backend"`
+		Dirs    map[string]string `json:"dirs,omitempty"`
+	}
+	current := "local"
+	if sdLayout.Backend.Shared() {
+		current = "nfs"
+	}
+	var changed []string
+	if json.Unmarshal(data, &rec) == nil {
+		for _, d := range dirs {
+			recorded := rec.Backend
+			if b, ok := rec.Dirs[d.Name]; ok {
+				recorded = b
+			}
+			if recorded != "" && recorded != current {
+				changed = append(changed, d.Name)
+			}
+		}
+	}
+	if err := os.Rename(path, path+retiredSharedDirRecordSuffix); err != nil {
+		slog.Warn("Start: could not move the retired shared-dir storage record aside", "path", path, "error", err)
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: this agent's shared dirs %s were pinned to another storage backend by an earlier version; "+
+		"they now follow the project's storage layout (server.project_storage), and earlier content stays where it was until the storage migration copies it",
+		strings.Join(changed, ", "))
+}

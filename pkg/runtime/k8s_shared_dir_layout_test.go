@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,4 +135,83 @@ func TestNFSSharedDirInitMounts_OnlyOnWorkspaceClaim(t *testing.T) {
 	mounts, err = nfsSharedDirInitMounts(cfg)
 	require.NoError(t, err)
 	assert.Nil(t, mounts, "local backend: no init mounts")
+}
+
+// TestBuildPod_LegacyWorkspaceNFS_SubPathsAndClaimUnchanged is the end to
+// end check for a hub still on the deprecated server.workspace_storage nfs
+// block: the shared-dir Layout synthesized from it puts every shared dir on
+// the workspace claim at <subpath_root>/<project>/shared-dirs/<name>,
+// exactly where Kubernetes pods mounted them before (the workspace subPath's
+// sibling shared-dirs/), so no pod's mounts move.
+func TestBuildPod_LegacyWorkspaceNFS_SubPathsAndClaimUnchanged(t *testing.T) {
+	const pid = "0123abcd-0000-0000-0000-000000000000"
+	srv := &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{MountRoot: t.TempDir(), SubPathRoot: "team/projects",
+			Shares: []config.V1NFSShare{{ID: "ws", Server: "10.0.0.2", Export: "/e", PVName: "scion-workspaces"}}},
+	}}
+	sdLayout, split, err := config.SharedDirStorageLayout(srv)
+	require.NoError(t, err)
+	require.False(t, split)
+	dirs := []api.SharedDir{{Name: "scratchpad"}, {Name: "notes", InWorkspace: true}}
+	r := &SharedDirRealization{Backend: string(sdLayout.Backend), PVClaimName: sdLayout.Share.PVName, ProjectID: pid, SubPaths: map[string]string{}}
+	for _, d := range dirs {
+		res, err := sdLayout.Resolve(projectfs.Project{ID: pid}, "", projectfs.SharedDirMount(d, ""))
+		require.NoError(t, err)
+		r.SubPaths[d.Name] = res.SubPath
+	}
+
+	rt := newNFSTestK8sRuntime()
+	cfg := RunConfig{
+		Name: "test-agent", Image: "test-image", UnixUsername: "scion",
+		Labels:               map[string]string{"scion.project": "myproject"},
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "team/projects/" + pid + "/workspace",
+		SharedDirs:           dirs,
+		SharedDirStorage:     r,
+	}
+	pod, err := rt.buildPod("default", cfg)
+	require.NoError(t, err)
+	for i, d := range dirs {
+		volName := []string{"shared-dir-0", "shared-dir-1"}[i]
+		vol := findVolume(pod, volName)
+		require.NotNil(t, vol, volName)
+		require.NotNil(t, vol.PersistentVolumeClaim, volName)
+		assert.Equal(t, "scion-workspaces", vol.PersistentVolumeClaim.ClaimName, "the workspace claim, as before")
+		m := findVolumeMount(&pod.Spec.Containers[0], volName)
+		require.NotNil(t, m, volName)
+		// The pre-Layout formula: the workspace subPath's parent, then
+		// shared-dirs/<name>.
+		assert.Equal(t, "team/projects/"+pid+"/shared-dirs/"+d.Name, m.SubPath, d.Name)
+	}
+}
+
+// TestLegacySharedDirClaimWarnings: a shared dir now placed on the shared
+// volume whose previous per-dir claim still exists gets a dispatch warning
+// naming the claim; the claim is left untouched, and nothing is reported on
+// the local backend or for a dir without an old claim.
+func TestLegacySharedDirClaimWarnings(t *testing.T) {
+	rt, clientset, _ := newTestK8sRuntime()
+	cfg := RunConfig{
+		Name: "test-agent", Labels: map[string]string{"scion.project": "myproject"},
+		SharedDirs: []api.SharedDir{{Name: "notes"}, {Name: "cache"}},
+	}
+	// The local backend creates the per-dir claims, as before.
+	require.NoError(t, rt.createSharedDirPVCs(t.Context(), "default", cfg))
+	require.NoError(t, clientset.CoreV1().PersistentVolumeClaims("default").Delete(t.Context(), sharedDirPVCName("myproject", "cache"), metav1.DeleteOptions{}))
+
+	got, err := rt.LegacySharedDirClaimWarnings(t.Context(), cfg)
+	require.NoError(t, err)
+	assert.Empty(t, got, "the local backend uses the claims")
+
+	cfg.SharedDirStorage = sharedDirsOnClaim("gke-shared-volume", "filestore-claim", "projects/pid-1", "notes", "cache")
+	got, err = rt.LegacySharedDirClaimWarnings(t.Context(), cfg)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], `shared dir "notes"`)
+	assert.Contains(t, got[0], sharedDirPVCName("myproject", "notes"))
+	assert.Contains(t, got[0], "not moved automatically")
+	_, err = clientset.CoreV1().PersistentVolumeClaims("default").Get(t.Context(), sharedDirPVCName("myproject", "notes"), metav1.GetOptions{})
+	assert.NoError(t, err, "the old claim is never deleted")
 }

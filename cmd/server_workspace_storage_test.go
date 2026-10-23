@@ -87,6 +87,11 @@ func TestResolveHubProjectStorage_FromSettings(t *testing.T) {
 			wantErr: "exactly one storage block",
 		},
 		{
+			name:    "project_storage with a relative mount_root",
+			extra:   "  project_storage:\n    backend: nfs\n    nfs:\n      mount_root: mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x\n",
+			wantErr: "absolute path",
+		},
+		{
 			name:    "project_storage without shares",
 			extra:   "  project_storage:\n    backend: nfs\n",
 			wantErr: "server.project_storage.backend is \"nfs\" but no NFS shares",

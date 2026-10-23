@@ -3506,6 +3506,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// A hub-managed workspace root without a .scion entry has no project
 	// settings: its own settings file is workspace content.
 	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
+	// The storage blocks are Layer-0: a project's settings never supply
+	// them. They are taken from the layers loaded so far (defaults and the
+	// global file) and put back after the project layers.
+	storageSnapshot := snapshotLayer0StorageKeys(k)
 	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
@@ -3531,6 +3535,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		if migratedHub {
 			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
 		}
+	}
+
+	if err := restoreLayer0StorageKeys(k, storageSnapshot, res.sources); err != nil {
+		return nil, err
 	}
 
 	// The hub project ID of the settings files, before the environment

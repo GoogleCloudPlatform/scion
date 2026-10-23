@@ -1943,6 +1943,9 @@ authDone:
 	if w := sharedDirsNotSharedWarning(sdLayout, sdSplit, m.Runtime.Name(), effectiveSharedDirs); w != "" {
 		warnings = append(warnings, w)
 	}
+	if w := retireSharedDirRecord(agentDir, sdLayout, effectiveSharedDirs); w != "" {
+		warnings = append(warnings, w)
+	}
 	// Home storage: local, or (Kubernetes only) an NFS home on the export of
 	// server.shared_dir_storage. Chosen at the agent's first start
 	// and recorded, before any pod exists; later starts use the record.
@@ -2597,6 +2600,16 @@ authDone:
 	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
 		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
 			"agent", opts.Name, "run_id", runID, "error", err)
+	}
+	// A shared dir now on the shared volume whose previous per-dir claim
+	// still exists: the claim's contents are not on the volume. Warn on
+	// every dispatch until the claim is gone; the claim is never touched.
+	if checker, ok := m.Runtime.(runtime.LegacySharedDirClaimChecker); ok {
+		claimWarnings, claimErr := checker.LegacySharedDirClaimWarnings(ctx, runCfg)
+		if claimErr != nil {
+			slog.Warn("Start: could not check for previous shared-dir claims", "agent", opts.Name, "error", claimErr)
+		}
+		warnings = append(warnings, claimWarnings...)
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {

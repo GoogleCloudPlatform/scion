@@ -67,6 +67,7 @@ func BuildWorkspaceStorageDescriptor(backend string, nfs *config.V1NFSConfig, sh
 func (s *Server) workspaceStorageDescriptor() *api.BrokerWorkspaceStorage {
 	desc := BuildWorkspaceStorageDescriptor(s.config.WorkspaceStorageBackend, s.config.NFSConfig, s.nfsShareHealthy)
 	desc.Homes = StorageHomes(s.config.StorageLayout)
+	desc.Volume = StorageVolume(s.config.StorageLayout)
 	if desc.NFS != nil && desc.NFS.Healthy {
 		if dir, err := exportIDMarkerDir(s.config.NFSConfig); err == nil {
 			desc.NFS.ExportID = s.exportIDs.get(dir, exportIDReadTimeout)
@@ -82,6 +83,19 @@ func StorageHomes(layout projectfs.Layout) string {
 		return api.WorkspaceStorageBackendNFS
 	}
 	return api.WorkspaceStorageBackendLocal
+}
+
+// StorageVolume is the volume identity a broker reports for layout on the
+// cloudrun-volume and gke-shared-volume backends, or nil.
+func StorageVolume(layout projectfs.Layout) *api.BrokerVolumeWorkspaceStorage {
+	if layout.Backend != projectfs.BackendCloudRunVolume && layout.Backend != projectfs.BackendGKESharedVolume {
+		return nil
+	}
+	root := layout.SubPathRoot
+	if root == "" {
+		root = projectfs.DefaultSubPathRoot
+	}
+	return &api.BrokerVolumeWorkspaceStorage{ClaimName: layout.Share.PVName, SubPathRoot: root}
 }
 
 // defaultProfile returns the broker's default (active) profile name, as

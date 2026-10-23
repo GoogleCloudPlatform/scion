@@ -1045,27 +1045,29 @@ func TestHandlePutServerConfig_SharedDirSize_ValidPersisted(t *testing.T) {
 	}
 }
 
-// File-mode PUT accepts shared_dir_storage_backend on runtime and profile
-// entries when the request carries a complete nfs block, and persists it.
-func TestHandlePutServerConfig_SharedDirStorageBackend_ValidPersisted(t *testing.T) {
-	srv := &Server{}
-	rr, settingsPath := fileModePutServerConfig(t, srv, `{
-		"server": {"shared_dir_storage": {"backend": "local", "nfs": {"mount_root": "/srv/nfs", "shares": [{"id": "share-1", "pv_name": "pv-1"}]}}},
-		"runtimes": {"docker": {"type": "docker"}, "k8s": {"type": "kubernetes", "shared_dir_storage_backend": "nfs"}},
-		"profiles": {"local": {"runtime": "docker", "shared_dir_storage_backend": "local"}, "gke": {"runtime": "k8s", "shared_dir_storage_backend": "nfs"}}
-	}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(string(data), "shared_dir_storage_backend: nfs"); got != 2 {
-		t.Errorf("settings.yaml should carry both nfs overrides, got %d in: %s", got, data)
-	}
-	if !strings.Contains(string(data), "shared_dir_storage_backend: local") {
-		t.Errorf("settings.yaml should carry the local override: %s", data)
+// File-mode PUT rejects the removed storage overrides on runtime and
+// profile entries, naming the key and volumes:, and writes nothing.
+func TestHandlePutServerConfig_RemovedStorageOverridesRejected(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"runtimes":{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"nfs"}}}`:          "runtimes.k8s.shared_dir_storage_backend",
+		`{"profiles":{"gke":{"runtime":"k8s","shared_dir_storage_backends":{"cache":"local"}}}}`: "profiles.gke.shared_dir_storage_backends",
+		`{"profiles":{"gke":{"runtime":"k8s","home_storage_backend":"nfs"}}}`:                    "profiles.gke.home_storage_backend",
+		`{"runtimes":{"k8s":{"type":"kubernetes","home_storage_leaf":"broker"}}}`:                "runtimes.k8s.home_storage_leaf",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) || !strings.Contains(rr.Body.String(), "volumes:") {
+				t.Errorf("400 body should name %s and volumes:, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted, got settings.yaml: %s", data)
+			}
+		})
 	}
 }
 
@@ -1125,41 +1127,6 @@ server:
 		t.Fatal(err)
 	}
 	return settingsPath
-}
-
-// A file-mode PUT that changes only server.shared_dir_storage is checked
-// against the runtimes and profiles already stored: removing or emptying
-// the nfs block while a stored override selects nfs is rejected, naming
-// the override, and nothing is written.
-func TestHandlePutServerConfig_SharedDirStorage_CheckedAgainstStoredOverrides(t *testing.T) {
-	for name, body := range map[string]string{
-		"nfs block removed": `{"server":{"shared_dir_storage":{"backend":"local"}}}`,
-		"no shares":         `{"server":{"shared_dir_storage":{"backend":"local","nfs":{"mount_root":"/srv/nfs"}}}}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			settingsPath := sdsWriteFileWithNFSOverride(t)
-			before, err := os.ReadFile(settingsPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			srv := &Server{}
-			rr := httptest.NewRecorder()
-			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
-			}
-			if !strings.Contains(rr.Body.String(), "profiles.gke.shared_dir_storage_backend") {
-				t.Errorf("400 body should name the stored override, got: %s", rr.Body.String())
-			}
-			after, err := os.ReadFile(settingsPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(after) != string(before) {
-				t.Errorf("settings.yaml must be unchanged, got: %s", after)
-			}
-		})
-	}
 }
 
 // A file-mode PUT of server.shared_dir_storage is accepted when the merged

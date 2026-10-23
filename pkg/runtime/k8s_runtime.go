@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -4550,6 +4551,13 @@ func sharedDirClaimSubPath(r *SharedDirRealization, sharedDirName string) (claim
 	if !filepath.IsLocal(subPath) || filepath.Clean(subPath) != subPath ||
 		filepath.Base(subPath) != sharedDirName || filepath.Base(filepath.Dir(subPath)) != "shared-dirs" {
 		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not <project>/shared-dirs/%s", sharedDirName, subPath, sharedDirName)
+	}
+	// The project component is a valid project ID and, when the
+	// realization names its project (pkg/agent always does), that project:
+	// a subPath can never name another project's tree.
+	project := filepath.Base(filepath.Dir(filepath.Dir(subPath)))
+	if !shareddirs.ValidProjectID(project) || (r.ProjectID != "" && project != r.ProjectID) {
+		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not under this project's tree", sharedDirName, subPath)
 	}
 	return r.PVClaimName, subPath, nil
 }

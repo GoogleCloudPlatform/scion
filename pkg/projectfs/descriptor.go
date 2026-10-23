@@ -40,8 +40,9 @@ func homesOrLocal(b Backend) Backend {
 // (hubExportID, d.NFS.ExportID); and homes. A broker that reports no
 // descriptor, or (for nfs) no usable share, disagrees. A broker that
 // predates the homes field disagrees only when this Layout keeps homes on
-// nfs. Share IDs and mount roots are host-local naming and are not
-// compared; nor is share health.
+// nfs. For the volume backends: the subpath root and, for
+// gke-shared-volume, the claim. Share IDs, mount roots and volume names are
+// host-local naming and are not compared; nor is share health.
 func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string) []string {
 	if !l.Backend.Shared() {
 		return nil
@@ -52,6 +53,19 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 	var diff []string
 	if Backend(d.Backend) != l.Backend {
 		diff = append(diff, fmt.Sprintf("backend: hub %q, broker %q", l.Backend, d.Backend))
+	} else if l.Backend == BackendCloudRunVolume || l.Backend == BackendGKESharedVolume {
+		root, _ := l.subPathRoot()
+		switch {
+		case d.Volume == nil:
+			diff = append(diff, "volume: broker reports no volume identity (upgrade it)")
+		default:
+			if d.Volume.SubPathRoot != root {
+				diff = append(diff, fmt.Sprintf("subpath_root: hub %q, broker %q", root, d.Volume.SubPathRoot))
+			}
+			if l.Share.PVName != "" && d.Volume.ClaimName != l.Share.PVName {
+				diff = append(diff, fmt.Sprintf("volume claim: hub %q, broker %q", l.Share.PVName, d.Volume.ClaimName))
+			}
+		}
 	} else if l.Backend == BackendNFS {
 		root, _ := l.subPathRoot()
 		switch {

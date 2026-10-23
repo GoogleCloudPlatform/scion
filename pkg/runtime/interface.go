@@ -449,6 +449,9 @@ type SharedDirRealization struct {
 	// claim; buildPod must then fail closed rather than fall back to
 	// per-dir claims or an EmptyDir (design G5).
 	PVClaimName string
+	// ProjectID is the hub project ID the subPaths were resolved for;
+	// buildPod checks every subPath's project component against it.
+	ProjectID string
 	// SubPaths maps every shared dir name to its subPath within
 	// PVClaimName, "<subpath root>/<project ID>/shared-dirs/<name>".
 	// buildPod fails closed when one is missing.

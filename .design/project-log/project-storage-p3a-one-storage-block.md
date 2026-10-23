@@ -15,12 +15,16 @@ every runtime through it.
   backend (`local`, `nfs`, `cloudrun-volume`, `gke-shared-volume`) for
   workspaces and shared dirs, a `homes` choice (`local`, `nfs`), and
   `homes_options` (the former `home_storage` knobs). It is Layer-0: it is
-  not in the DB, project settings cannot set it, and `config set` cannot
-  write it.
+  not in the DB, and `config set` cannot write it. The settings loader
+  drops every storage block a project's settings.yaml sets and keeps the
+  global ones, so a project file places neither workspaces nor shared dirs
+  nor homes (this also closes the project-level `workspace_storage`
+  override that existed before).
 - **Synthesis (M1)**. Without the block, `SynthesizeProjectStorage` builds
-  it from the deprecated blocks and keeps today's placement of every data
-  class. A hub with `shared_dir_storage: nfs` but no nfs workspace keeps
-  its shared dirs on that export through a transitional split
+  it from the deprecated blocks. Shared dirs follow the workspace backend
+  (one backend places both). A hub with `shared_dir_storage: nfs` but no
+  nfs workspace keeps its shared dirs on that export through a transitional
+  split
   (`LegacySharedDirsNFS` / `projectfs.Layout.SharedDirs`), which cannot be
   configured. The startup warning prints the exact block to write. The
   hub health check `project_storage_config` stays degraded until the block
@@ -78,9 +82,19 @@ every runtime through it.
   and is tracked in ptone/scion#5926. Only the legacy split is refused.
   Refusing every Cloud Run agent would have been an outage, because every
   project has the Required scratchpad.
+- **Volume backends without `shared_dir_storage`**. A synthesized block
+  keeps shared dirs where they are (per-dir claims on Kubernetes) through
+  the same kind of transitional split, so nothing becomes invisible on
+  upgrade. The hub treats them as non-durable until the block is written.
+  Once `server.project_storage` places shared dirs on the volume, every
+  start that finds a dir's old per-dir claim returns a warning naming it.
+  The claim is never deleted; copying its contents is ptone/scion#5932.
+- **Retired per-agent records**. An agent whose old record pinned a dir to
+  another backend gets a one-time start warning, and the record is moved
+  aside.
 - **Volume backends** (cloudrun-volume, gke-shared-volume) are shared
-  backends in projectfs, so shared dirs follow the workspace onto the
-  volume's uuid tree.
+  backends in projectfs. With `server.project_storage`, shared dirs follow
+  the workspace onto the volume's uuid tree.
 - **Environment**. `server.project_storage` takes the hub's
   `SCION_SERVER_*` overlay, as `workspace_storage` did. The deprecated
   `shared_dir_storage` and `home_storage` stay file-only.

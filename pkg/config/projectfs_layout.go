@@ -106,6 +106,9 @@ func ProjectStorageLayout(ps *V1ProjectStorageConfig, volumeBase string) (projec
 		return projectfs.Layout{}, fmt.Errorf("%s.backend %q is not supported", ProjectStorageKey, ps.Backend)
 	}
 	layout.Homes = homes
+	if ps != nil && ps.LegacySharedDirsLocal {
+		layout.SharedDirs = &projectfs.Layout{Backend: projectfs.BackendLocal, Homes: homes}
+	}
 	if ps != nil && ps.LegacySharedDirsNFS != nil {
 		sdLayout, err := NFSLayout(ps.LegacySharedDirsNFS)
 		if err != nil {
@@ -134,4 +137,21 @@ func volumeLayout(backend projectfs.Backend, volumeBase, volumeName, subPathRoot
 		SubPathRoot: root,
 		Share:       projectfs.Share{ID: volumeName, PVName: claim},
 	}, nil
+}
+
+// ValidateHubProjectStorageLayout checks that ps builds a Layout a hub can
+// serve files from: ProjectStorageLayout succeeds and every shared host
+// base (the backend's, and the transitional shared-dir split's) is an
+// absolute path on this host.
+func ValidateHubProjectStorageLayout(ps *V1ProjectStorageConfig) error {
+	layout, err := ProjectStorageLayout(ps, DefaultVolumeMountBase)
+	if err != nil {
+		return err
+	}
+	for _, l := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
+		if l.Backend.Shared() && !filepath.IsAbs(l.HostBase) {
+			return fmt.Errorf("the %s share must be mounted at an absolute path on the hub (mount_root gives host base %q)", l.Backend, l.HostBase)
+		}
+	}
+	return nil
 }

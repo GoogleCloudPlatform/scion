@@ -2102,7 +2102,7 @@
       "description": "The one project storage block: backend places every project's workspace and shared dirs, homes places agent homes. Replaces workspace_storage, shared_dir_storage and home_storage (set it alone). Global-only, Layer-0 (restart to apply).",
       "x-since": "1",
       "properties": {
-        "backend": { "type": "string", "enum": ["local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "backend": { "type": "string", "enum": ["", "local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
         "homes": { "type": "string", "enum": ["", "local", "nfs"], "default": "local", "description": "Where agent homes live: local (in the pod or on the broker host) or nfs (on the backend's share; needs backend nfs)." },
         "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
         "cloudrun_volume": {

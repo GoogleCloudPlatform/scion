@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -93,7 +94,7 @@ func TestBrokerRegistrationWorkspaceStorage(t *testing.T) {
 func TestBrokerStorageLayout(t *testing.T) {
 	ps := &config.VersionedSettings{Server: &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{
 		Backend: "nfs", Homes: "nfs",
-		NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a"}}},
+		NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a", PVName: "pv-a"}}},
 	}}}
 	layout, warnings := brokerStorageLayout(ps)
 	assert.Empty(t, warnings)
@@ -123,4 +124,21 @@ func TestBrokerStorageLayout(t *testing.T) {
 	assert.Equal(t, projectfs.BackendLocal, layout.Backend, "an unusable block reports the local layout")
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0], "exactly one storage block")
+}
+
+// TestBrokerSharedDirLayoutWarnings: a shared-dir Layout that would fail
+// Kubernetes starts is reported once at startup.
+func TestBrokerSharedDirLayoutWarnings(t *testing.T) {
+	missing := func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	present := func(string) (os.FileInfo, error) { return nil, nil }
+	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendLocal}, missing))
+	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendNFS, Share: projectfs.Share{PVName: "pv"}}, missing))
+	got := brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendNFS}, missing)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], "pv_name")
+	got = brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, HostBase: "/mnt/v"}, missing)
+	require.Len(t, got, 2)
+	assert.Contains(t, got[0], "pv_claim_name")
+	assert.Contains(t, got[1], "not mounted on this broker at /mnt/v")
+	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, Share: projectfs.Share{PVName: "c"}}, present))
 }

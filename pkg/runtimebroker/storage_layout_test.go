@@ -33,3 +33,18 @@ func TestWorkspaceStorageDescriptor_ReportsHomes(t *testing.T) {
 		}
 	}
 }
+
+// TestStorageVolume: the descriptor identifies a volume backend's tree.
+func TestStorageVolume(t *testing.T) {
+	if v := StorageVolume(projectfs.Layout{Backend: projectfs.BackendNFS}); v != nil {
+		t.Errorf("nfs has no volume identity, got %+v", v)
+	}
+	v := StorageVolume(projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, Share: projectfs.Share{PVName: "claim"}})
+	if v == nil || v.ClaimName != "claim" || v.SubPathRoot != "projects" {
+		t.Errorf("gke volume identity = %+v", v)
+	}
+	s := &Server{config: ServerConfig{StorageLayout: projectfs.Layout{Backend: projectfs.BackendCloudRunVolume, SubPathRoot: "team"}}}
+	if got := s.workspaceStorageDescriptor().Volume; got == nil || got.SubPathRoot != "team" || got.ClaimName != "" {
+		t.Errorf("cloudrun volume identity = %+v", got)
+	}
+}

@@ -107,7 +107,14 @@ func (l Layout) Realize(r Resolved, kind RuntimeKind) (Realized, error) {
 		if r.SubPath == "" || path.IsAbs(r.SubPath) {
 			return Realized{}, fmt.Errorf("projectfs: invalid subPath %q", r.SubPath)
 		}
-		out.ClaimName, out.SubPath = l.Share.PVName, r.SubPath
+		// The claim of the share r was resolved on: for a directory that
+		// came through the transitional SharedDirs split it is that
+		// share's, not l's.
+		claim := r.ClaimName
+		if claim == "" {
+			claim = l.Share.PVName
+		}
+		out.ClaimName, out.SubPath = claim, r.SubPath
 	default:
 		return Realized{}, fmt.Errorf("projectfs: unknown runtime kind %q", kind)
 	}

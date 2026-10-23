@@ -1460,6 +1460,23 @@ func TestSharedDirClaimSubPath_RejectsTraversal(t *testing.T) {
 			t.Errorf("subPath %q must be refused", sub)
 		}
 	}
+	// The project component must be a valid project ID and the
+	// realization's own project.
+	other := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "proj-123",
+		SubPaths: map[string]string{"notes": "projects/proj-999/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(other, "notes"); err == nil {
+		t.Error("a subPath under another project's tree must be refused")
+	}
+	own := &SharedDirRealization{Backend: "nfs", PVClaimName: "c", ProjectID: "proj-123",
+		SubPaths: map[string]string{"notes": "projects/proj-123/shared-dirs/notes"}}
+	if _, got, err := sharedDirClaimSubPath(own, "notes"); err != nil || got != "projects/proj-123/shared-dirs/notes" {
+		t.Errorf("own project subPath = %q, %v", got, err)
+	}
+	invalid := &SharedDirRealization{Backend: "nfs", PVClaimName: "c",
+		SubPaths: map[string]string{"notes": "projects/-bad/shared-dirs/notes"}}
+	if _, _, err := sharedDirClaimSubPath(invalid, "notes"); err == nil {
+		t.Error("an invalid project ID component must be refused")
+	}
 }
 
 func TestProjectRWXClaimName(t *testing.T) {

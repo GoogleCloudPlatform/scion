@@ -16,11 +16,14 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
@@ -73,6 +76,14 @@ type V1ProjectStorageConfig struct {
 	// server.project_storage (ptone/scion#5821). It cannot be
 	// configured; phase 6 removes it with the old blocks.
 	LegacySharedDirsNFS *V1NFSConfig `json:"-" yaml:"-" koanf:"-"`
+	// LegacySharedDirsLocal is not a setting either: set only by
+	// SynthesizeProjectStorage for a hub whose deprecated workspace_storage
+	// is cloudrun-volume or gke-shared-volume with no shared_dir_storage.
+	// Shared dirs then stay where they are today (per-dir claims on
+	// Kubernetes, node-local elsewhere) until server.project_storage is
+	// written; writing it moves them onto the volume and leaves the per-dir
+	// claims' contents behind (ptone/scion#5932).
+	LegacySharedDirsLocal bool `json:"-" yaml:"-" koanf:"-"`
 }
 
 // V1HomesOptionsConfig is server.project_storage.homes_options. Each field
@@ -182,10 +193,10 @@ func (p *V1ProjectStorageConfig) Validate() error {
 //   - otherwise the block is synthesized from server.workspace_storage
 //     (backend and backend blocks) and server.home_storage (backend ->
 //     homes, the rest -> homes_options), with a warning that prints the
-//     block to write. Synthesis keeps today's placement of every data
-//     class: shared dirs on server.shared_dir_storage's nfs export stay
-//     there even when the workspace is not on nfs (LegacySharedDirsNFS, a
-//     transitional split). Only the genuinely ambiguous cases are errors:
+//     block to write. Shared dirs on server.shared_dir_storage's nfs export
+//     stay there even when the workspace is not on nfs (LegacySharedDirsNFS,
+//     a transitional split); otherwise shared dirs follow the workspace
+//     backend, as one backend places both. Only the genuinely ambiguous cases are errors:
 //     two nfs blocks naming different trees, or nfs homes with no nfs share.
 //   - nothing set: nil (the local backend).
 func ResolveProjectStorage(srv *V1ServerConfig) (*V1ProjectStorageConfig, []string, error) {
@@ -269,6 +280,16 @@ func SynthesizeProjectStorage(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorage
 			return nil, nil, err
 		}
 		warnings = append(warnings, w...)
+	} else if sd == nil && (out.Backend == WorkspaceStorageBackendCloudRunVolume || out.Backend == WorkspaceStorageBackendGKESharedVolume) {
+		out.LegacySharedDirsLocal = true
+		warnings = append(warnings, fmt.Sprintf("%s is not set and the workspace is on %s: shared dirs stay where they are today "+
+			"(per-dir claims on Kubernetes) until %s is written. Writing it moves shared dirs onto the volume; "+
+			"the contents of the existing per-dir claims are NOT moved automatically (copy them first)",
+			sharedDirStorageKey, out.Backend, ProjectStorageKey))
+	} else if sd == nil && out.Backend == WorkspaceStorageBackendNFS {
+		warnings = append(warnings, fmt.Sprintf("%s is not set and the workspace is on nfs: shared dirs now follow the workspace onto the nfs export "+
+			"on every runtime (Docker, Podman and Apple agents kept them node-local before; the project-storage migration moves node-local shared-dir trees)",
+			sharedDirStorageKey))
 	} else if sd != nil && sd.Backend == WorkspaceStorageBackendLocal && out.Backend == WorkspaceStorageBackendNFS {
 		warnings = append(warnings, fmt.Sprintf("%s.backend is \"local\" but the workspace is on nfs: "+
 			"shared dirs are now placed on the nfs export with the workspace (node-local shared-dir trees are moved by the project-storage migration)",
@@ -312,8 +333,11 @@ func placeLegacySharedDirs(ps *V1ProjectStorageConfig, sd *V1SharedDirStorageCon
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", workspaceStorageKey, err)
 	}
-	if sdLayout.HostBase != psLayout.HostBase || sdLayout.SubPathRoot != psLayout.SubPathRoot ||
-		sdLayout.Share.Server != psLayout.Share.Server || sdLayout.Share.Export != psLayout.Share.Export {
+	// One tree is one server, export and subpath root. The share id and
+	// mount_root are this host's naming for its mount of it (as
+	// projectfs.Layout.DescriptorDiff treats them), so they may differ.
+	if sdLayout.SubPathRoot != psLayout.SubPathRoot || sdLayout.Share.Server != psLayout.Share.Server ||
+		api.NormalizeExportPath(sdLayout.Share.Export) != api.NormalizeExportPath(psLayout.Share.Export) {
 		return nil, fmt.Errorf("%s and %s are both nfs but name different trees (workspace: share %q %s:%s, subpath_root %q; "+
 			"shared dirs: share %q %s:%s, subpath_root %q): one storage block places both, and choosing one would hide the other's data; "+
 			"move one tree onto the other's share, then write %s naming it",
@@ -527,23 +551,83 @@ func (s *V1ServerConfig) EffectiveHomeStorage() *V1HomeStorageConfig {
 // appear in a settings file.
 var storageSettingKeys = []string{"project_storage", "workspace_storage", "shared_dir_storage", "home_storage"}
 
-// CheckStorageBlocksLoaded fails closed when the global settings file
-// mentions a storage block key but gc carries none of the blocks: the file
-// plausibly configures storage (for example a block in a file without
-// schema_version "1", or one nested where the loader does not read it), and
-// running on the local backend instead would put project data on the wrong
-// disk. mentions reports whether the file mentions a key
-// (GlobalSettingsMentions in production).
-func CheckStorageBlocksLoaded(gc *GlobalConfig, mentions func(string) bool) error {
+// CheckStorageBlocksLoaded fails closed when a legacy-format global
+// settings file (no schema_version "1") holds a storage block that the
+// loader did not carry into gc. Such a file plausibly configures storage,
+// and running on the local backend instead would put project data on the
+// wrong disk. data is the file's content. A schema_version "1" file is
+// authoritative as loaded, so this check never applies to one, and neither
+// does a file in which a storage key appears only inside another key's name
+// (shared_dir_storage_class) or a comment: keys are matched as parsed
+// mapping keys. A legacy file that does not parse at all is refused when its
+// bytes mention a storage key.
+func CheckStorageBlocksLoaded(gc *GlobalConfig, legacyFormat bool, data []byte) error {
 	if gc != nil && (gc.ProjectStorage != nil || gc.WorkspaceStorage != nil || gc.SharedDirStorage != nil || gc.HomeStorage != nil) {
 		return nil
 	}
-	for _, key := range storageSettingKeys {
-		if mentions(key) {
-			return fmt.Errorf("the global settings file mentions %s but no storage block was loaded (missing schema_version \"1\", or the block is not under server:?); refusing to fall back to the local backend", key)
+	if !legacyFormat || len(data) == 0 {
+		return nil
+	}
+	var doc interface{}
+	if err := yamlv3.Unmarshal(data, &doc); err != nil {
+		for _, key := range storageSettingKeys {
+			if strings.Contains(string(data), key) {
+				return fmt.Errorf("the global settings file cannot be parsed and mentions %s; refusing to fall back to the local backend", key)
+			}
 		}
+		return nil
+	}
+	if key := findMappingKey(doc, storageSettingKeys); key != "" {
+		return fmt.Errorf("the global settings file (legacy format, no schema_version \"1\") has a %s block that was not loaded; "+
+			"add schema_version: \"1\" and put the block under server:; refusing to fall back to the local backend", key)
 	}
 	return nil
+}
+
+// CheckGlobalStorageBlocksLoaded is CheckStorageBlocksLoaded for the global
+// settings file of this process.
+func CheckGlobalStorageBlocksLoaded(gc *GlobalConfig) error {
+	if !GlobalSettingsIsLegacyFormat() {
+		return nil
+	}
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return nil
+	}
+	path := GetSettingsPath(globalDir)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return CheckStorageBlocksLoaded(gc, true, data)
+}
+
+// findMappingKey returns the first of keys that is a mapping key anywhere
+// in the parsed YAML document doc, or "".
+func findMappingKey(doc interface{}, keys []string) string {
+	switch v := doc.(type) {
+	case map[string]interface{}:
+		for _, key := range keys {
+			if _, ok := v[key]; ok {
+				return key
+			}
+		}
+		for _, child := range v {
+			if k := findMappingKey(child, keys); k != "" {
+				return k
+			}
+		}
+	case []interface{}:
+		for _, child := range v {
+			if k := findMappingKey(child, keys); k != "" {
+				return k
+			}
+		}
+	}
+	return ""
 }
 
 // SharedDirPlacementKeys are the global settings keys that place shared
@@ -590,4 +674,52 @@ func SharedDirStorageLayout(srv *V1ServerConfig) (layout projectfs.Layout, split
 		return projectfs.Layout{}, false, err
 	}
 	return full.SharedDirLayout(), full.SharedDirs != nil, nil
+}
+
+// layer0StorageKeys are the settings paths of the storage blocks. They are
+// Layer-0: read from the global settings (and the process environment),
+// never from a project's settings file.
+var layer0StorageKeys = []string{
+	ProjectStorageKey, workspaceStorageKey, sharedDirStorageKey, homeStorageKey,
+}
+
+// snapshotLayer0StorageKeys copies the storage blocks k holds now (the
+// defaults and global layers), keyed by path; a block k does not hold maps
+// to nil.
+func snapshotLayer0StorageKeys(k *koanf.Koanf) map[string]*koanf.Koanf {
+	snap := make(map[string]*koanf.Koanf, len(layer0StorageKeys))
+	for _, key := range layer0StorageKeys {
+		if k.Exists(key) {
+			snap[key] = k.Cut(key)
+		} else {
+			snap[key] = nil
+		}
+	}
+	return snap
+}
+
+// restoreLayer0StorageKeys drops whatever the project layers set under the
+// storage blocks and puts back the snapshot taken before them, so a
+// project's settings.yaml can never place a project's storage. sources, when
+// non-nil, loses the project attribution of the dropped keys.
+func restoreLayer0StorageKeys(k *koanf.Koanf, snap map[string]*koanf.Koanf, sources map[string]string) error {
+	for _, key := range layer0StorageKeys {
+		k.Delete(key)
+		for src := range sources {
+			if src == key || strings.HasPrefix(src, key+".") {
+				delete(sources, src)
+			}
+		}
+		if saved := snap[key]; saved != nil {
+			if err := k.MergeAt(saved, key); err != nil {
+				return fmt.Errorf("restoring %s: %w", key, err)
+			}
+			for _, sub := range saved.Keys() {
+				if sources != nil {
+					sources[key+"."+sub] = "global"
+				}
+			}
+		}
+	}
+	return nil
 }

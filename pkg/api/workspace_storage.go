@@ -34,6 +34,9 @@ type BrokerWorkspaceStorage struct {
 	// NFS describes the share agent workspaces are placed on. It is set only
 	// when Backend is "nfs" and the broker's NFS configuration is valid.
 	NFS *BrokerNFSWorkspaceStorage `json:"nfs,omitempty"`
+	// Volume identifies the shared volume the broker places project trees
+	// on, for the cloudrun-volume and gke-shared-volume backends.
+	Volume *BrokerVolumeWorkspaceStorage `json:"volume,omitempty"`
 	// Homes is where the broker places agent homes, server.project_storage
 	// homes: "local" or "nfs" (on the share described by NFS). Empty when
 	// the broker predates the field (unknown).
@@ -63,6 +66,16 @@ type BrokerNFSWorkspaceStorage struct {
 	// strings alone are not proof. Empty when the broker could not read the
 	// marker (share unhealthy, marker unreadable) or predates the marker.
 	ExportID string `json:"exportId,omitempty"`
+}
+
+// BrokerVolumeWorkspaceStorage identifies a shared volume backend's tree.
+type BrokerVolumeWorkspaceStorage struct {
+	// ClaimName is the PersistentVolumeClaim of the volume
+	// (gke-shared-volume pv_claim_name); empty for cloudrun-volume.
+	ClaimName string `json:"claimName,omitempty"`
+	// SubPathRoot is the directory under the volume holding the
+	// per-project trees.
+	SubPathRoot string `json:"subPathRoot"`
 }
 
 // ExportIDMarkerName is the export identity marker's file name, directly

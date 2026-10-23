@@ -17,6 +17,7 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.Broke
 	desc := runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
 	layout, _ := brokerStorageLayout(vs)
 	desc.Homes = runtimebroker.StorageHomes(layout)
+	desc.Volume = runtimebroker.StorageVolume(layout)
 	return desc
 }
 
@@ -122,7 +124,32 @@ func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []stri
 	if err != nil {
 		return local, append(warnings, fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err))
 	}
-	return layout, warnings
+	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...)
+}
+
+// brokerSharedDirLayoutWarnings returns startup warnings for a shared-dir
+// Layout that would fail Kubernetes agent starts with shared dirs (every
+// project has the default scratchpad): a share without a claim (nfs
+// shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
+// this broker has not mounted. Agent starts still refuse; this says so once,
+// at startup, instead of only per start.
+func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (os.FileInfo, error)) []string {
+	sd := layout.SharedDirLayout()
+	var out []string
+	switch sd.Backend {
+	case projectfs.BackendNFS:
+		if sd.Share.PVName == "" {
+			out = append(out, "project storage: the nfs share has no pv_name; Kubernetes agent starts with shared dirs will fail until nfs.shares[0].pv_name is set")
+		}
+	case projectfs.BackendGKESharedVolume:
+		if sd.Share.PVName == "" {
+			out = append(out, "project storage: gke_shared_volume.pv_claim_name is not set; Kubernetes agent starts with shared dirs will fail until it is")
+		}
+		if _, err := stat(sd.HostBase); err != nil {
+			out = append(out, fmt.Sprintf("project storage: the shared volume is not mounted on this broker at %s; agent starts with shared dirs will fail until it is", sd.HostBase))
+		}
+	}
+	return out
 }
 
 // loadBrokerRegistrationWorkspaceStorage loads the global settings and

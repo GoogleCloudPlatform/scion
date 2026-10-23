@@ -97,7 +97,7 @@ func TestProjectConfigEntry(t *testing.T) {
 		HostPath: "/mnt/nfs/a/projects/" + testPID + "/workspace/.scion",
 		RelPath:  "projects/" + testPID + "/workspace/.scion",
 		SubPath:  "projects/" + testPID + "/workspace/.scion", ServerPath: "/e/projects/" + testPID + "/workspace/.scion",
-		Target: "/workspace/.scion", Kind: KindProjectConfig, Name: ".scion", ReadOnly: true,
+		Target: "/workspace/.scion", Kind: KindProjectConfig, Name: ".scion", ReadOnly: true, ClaimName: "a-pv",
 	}
 	if entry != want {
 		t.Errorf("entry = %+v\nwant    %+v", entry, want)
@@ -115,5 +115,24 @@ func TestProjectConfigEntry(t *testing.T) {
 	}
 	if _, err := ProjectConfigEntry(Resolved{Kind: KindWorkspace, HostPath: "/x"}); err == nil {
 		t.Error("a workspace without a target has no entry target")
+	}
+}
+
+// TestRealize_SplitUsesItsOwnClaim: a shared dir resolved through the
+// transitional SharedDirs split is realized on that share's claim, not on
+// the outer Layout's.
+func TestRealize_SplitUsesItsOwnClaim(t *testing.T) {
+	sd := Layout{Backend: BackendNFS, HostBase: "/mnt/sd/s", SubPathRoot: "projects", Share: Share{ID: "s", PVName: "sd-pv"}}
+	outer := Layout{Backend: BackendLocal, HostBase: "/home/u/.scion", Share: Share{PVName: "outer-pv"}, SharedDirs: &sd}
+	r, err := outer.Resolve(Project{ID: testPID}, "", SharedDirMount(api.SharedDir{Name: "scratchpad"}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := outer.Realize(r, RuntimePod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClaimName != "sd-pv" {
+		t.Errorf("claim = %q, want the split share's sd-pv", got.ClaimName)
 	}
 }

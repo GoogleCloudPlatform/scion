@@ -49,17 +49,6 @@ func (d *HTTPAgentDispatcher) storageLayoutPrecheck(ctx context.Context, agent *
 	if d.storageLayout == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return nil
 	}
-	layout, err := d.storageLayout()
-	if err != nil {
-		return &RuntimeTargetRefusal{
-			Code:    ErrCodeConflict,
-			Status:  http.StatusConflict,
-			Message: "the hub's project storage layout is unusable; shared workspaces cannot be dispatched (see hub logs)",
-		}
-	}
-	if !layout.Backend.Shared() {
-		return nil
-	}
 	info, err := d.resolveDispatchProjectInfo(ctx, agent)
 	if err != nil {
 		return err
@@ -70,6 +59,19 @@ func (d *HTTPAgentDispatcher) storageLayoutPrecheck(ctx context.Context, agent *
 	switch store.ResolveWorkspaceSharingMode(info.workspaceMode) {
 	case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
 	default:
+		return nil
+	}
+	layout, err := d.storageLayout()
+	if err != nil {
+		// Unreachable for a hub that started: hub startup validates the
+		// same Layout. Only shared-mode dispatches are refused.
+		return &RuntimeTargetRefusal{
+			Code:    ErrCodeConflict,
+			Status:  http.StatusConflict,
+			Message: "the hub's project storage layout is unusable; shared workspaces cannot be dispatched (see hub logs)",
+		}
+	}
+	if !layout.Backend.Shared() {
 		return nil
 	}
 	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)

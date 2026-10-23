@@ -112,7 +112,7 @@ browser behave exactly as they do today — this is an additive, opt-in feature.
 `server.project_storage` replaces `server.workspace_storage`,
 `server.shared_dir_storage` and `server.home_storage` with one block whose
 `backend` places workspaces **and** shared directories (see
-[Project Storage]({SC}#project-storage-serverproject_storage)).
+[Project Storage](../../docs-site/src/content/docs/reference/server-config.md#project-storage-serverproject_storage)).
 A hybrid hub's settings have only `shared_dir_storage: nfs`; workspaces are on
 the local backend (hub-local, under `~/.scion/projects/<slug>` for hub-native
 projects). The upgrade runs in this order:

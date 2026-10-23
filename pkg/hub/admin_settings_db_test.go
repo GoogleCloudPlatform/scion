@@ -2326,6 +2326,29 @@ func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
 	}
 }
 
+// TestPutServerConfigDB_ProjectStorage_422: server.project_storage is
+// Layer-0. A DB-mode PUT carrying it is rejected with 422 layer0_rejected
+// and never stored.
+func TestPutServerConfigDB_ProjectStorage_422(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	body := `{"server": {"project_storage": {"backend": "nfs", "nfs": {"mount_root": "/mnt/x", "shares": [{"id": "a", "server": "10.0.0.2", "export": "/e"}]}}}}`
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp["error"] != "layer0_rejected" {
+		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+	}
+	if !strings.Contains(rr.Body.String(), "server.project_storage") {
+		t.Errorf("the refusal should name server.project_storage, got: %s", rr.Body.String())
+	}
+}
+
 // ---- N6: Presence-aware field clearing tests ----
 
 func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {

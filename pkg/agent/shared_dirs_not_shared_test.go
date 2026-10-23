@@ -15,10 +15,14 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSharedDirsNotSharedWarning: a runtime that cannot mount the shared
@@ -54,4 +58,28 @@ func TestSharedDirsNotSharedWarning(t *testing.T) {
 			t.Errorf("%s: unexpected message %q", tc.name, got)
 		}
 	}
+}
+
+// TestRetireSharedDirRecord: a record from an earlier version that pinned a
+// dir to another backend gives a one-time start warning and is moved aside;
+// a record that agrees is moved aside silently.
+func TestRetireSharedDirRecord(t *testing.T) {
+	nfs := projectfs.Layout{Backend: projectfs.BackendNFS}
+	dirs := []api.SharedDir{{Name: "scratchpad"}, {Name: "cache"}}
+	dir := t.TempDir()
+	rec := filepath.Join(dir, legacySharedDirStorageRecordFile)
+	require.NoError(t, os.WriteFile(rec, []byte(`{"backend":"nfs","dirs":{"cache":"local"}}`), 0o600))
+
+	got := retireSharedDirRecord(dir, nfs, dirs)
+	assert.Contains(t, got, "cache")
+	assert.NotContains(t, got, "scratchpad")
+	_, err := os.Stat(rec)
+	assert.True(t, os.IsNotExist(err), "the record is moved aside")
+	_, err = os.Stat(rec + retiredSharedDirRecordSuffix)
+	assert.NoError(t, err)
+	assert.Empty(t, retireSharedDirRecord(dir, nfs, dirs), "only once")
+
+	require.NoError(t, os.WriteFile(rec, []byte(`{"backend":"nfs"}`), 0o600))
+	assert.Empty(t, retireSharedDirRecord(dir, nfs, dirs), "an agreeing record gives no warning")
+	assert.Empty(t, retireSharedDirRecord("", nfs, dirs))
 }
