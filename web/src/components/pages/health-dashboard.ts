@@ -368,7 +368,10 @@ export class ScionPageHealthDashboard extends LitElement {
         : nothing}
 
       <div class="grid-full">
-        <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
+        <scion-health-broker-table
+          .brokers=${d.runtime_brokers}
+          .hubVersion=${d.hub?.version ?? ''}
+        ></scion-health-broker-table>
       </div>
 
       ${integrationsSectionVisible(

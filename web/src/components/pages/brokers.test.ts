@@ -158,3 +158,57 @@ describe('scion-page-brokers — not_enforced marker (design.md Amendment A1)', 
     expect(element.shadowRoot?.querySelector('.not-enforced-marker')).toBeNull();
   });
 });
+
+describe('scion-page-brokers — version against the hub (ptone/scion#5972)', () => {
+  let element: (HTMLElement & { updateComplete: Promise<boolean> }) | null = null;
+
+  beforeAll(async () => {
+    await import('./brokers.js');
+  }, 60_000);
+
+  beforeEach(() => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    localStorage.removeItem('scion-view-brokers');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const MISMATCHED = { ...ENFORCED_BROKER, version: 'v1.2.0', versionStatus: 'mismatch' };
+
+  for (const view of ['grid', 'list'] as const) {
+    it(`${view} view: shows the version without a "v" prefix, the mark and the hub version`, async () => {
+      localStorage.setItem('scion-view-brokers', view);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => Promise.resolve(jsonResponse({ brokers: [MISMATCHED], hubVersion: 'v1.3.0' })))
+      );
+      element = await mountBrokersPage();
+
+      const text = shadowText(element);
+      expect(text).toContain('Hub: v1.3.0');
+      expect(text).not.toContain('vv1.2.0');
+      const cell = element.shadowRoot?.querySelector('[data-version-status]');
+      expect(cell?.getAttribute('data-version-status')).toBe('mismatch');
+      expect(cell?.querySelector('.version-token')?.textContent).toBe('v1.2.0');
+      expect(cell?.querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-triangle');
+    });
+  }
+
+  it('an older hub (no hubVersion, no versionStatus) shows unknown, never matching', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({ brokers: [ENFORCED_BROKER] })))
+    );
+    element = await mountBrokersPage();
+
+    expect(shadowText(element)).toContain('Hub: unknown');
+    const cell = element.shadowRoot?.querySelector('[data-version-status]');
+    expect(cell?.getAttribute('data-version-status')).toBe('unknown');
+    expect(cell?.querySelector('.version-token')?.textContent).toBe('1.0.0');
+  });
+});

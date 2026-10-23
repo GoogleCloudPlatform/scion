@@ -54,9 +54,13 @@ function list(items: HealthSummaryBroker[], over: Partial<HealthSummaryBrokerLis
 
 const mounted: HTMLElement[] = [];
 
-async function mount(brokers: HealthSummaryBrokerList | null): Promise<ShadowRoot> {
+async function mount(
+  brokers: HealthSummaryBrokerList | null,
+  hubVersion = ''
+): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-broker-table') as ScionHealthBrokerTable;
   el.brokers = brokers;
+  el.hubVersion = hubVersion;
   document.body.appendChild(el);
   mounted.push(el);
   await el.updateComplete;
@@ -84,7 +88,8 @@ describe('scion-health-broker-table cells', () => {
   });
 
   it('shows a dash when the broker reported no runtime', async () => {
-    const root = await mount(list([broker({ runtime: null })]));
+    // A known hub version, so the only possible "unknown" would be the runtime cell's.
+    const root = await mount(list([broker({ runtime: null })]), '1.2.3');
     expect(cell(rows(root)[0]!, 'runtime')).toBe('—');
     expect(root.textContent).not.toMatch(/unknown/);
     expect(root.textContent).not.toMatch(/✗/);
@@ -400,4 +405,52 @@ describe('scion-health-broker-table contrast', () => {
       }
     });
   }
+});
+
+describe('scion-health-broker-table version against the hub (ptone/scion#5972)', () => {
+  it('marks a mismatched version and names the hub version', async () => {
+    const root = await mount(
+      list([
+        broker({ id: 'old', name: 'old', version: 'v1.2.0', version_status: 'mismatch' }),
+        broker({ id: 'new', name: 'new', version: 'v1.3.0', version_status: 'match' }),
+        broker({ id: 'unrep', name: 'unrep', version: '', version_status: 'unknown' }),
+      ]),
+      'v1.3.0'
+    );
+    expect(root.querySelector('.hub-version-note')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Hub: v1.3.0'
+    );
+    const status = (id: string): string | null | undefined =>
+      root
+        .querySelector(`tr[data-broker-id="${id}"] td.version [data-version-status]`)
+        ?.getAttribute('data-version-status');
+    expect(status('old')).toBe('mismatch');
+    expect(status('new')).toBe('match');
+    expect(status('unrep')).toBe('unknown');
+  });
+
+  it('shows the mixed and unknown hub copy', async () => {
+    let root = await mount(list([broker({ version_status: 'unknown' })]), 'mixed');
+    expect(root.querySelector('.hub-version-note')?.textContent).toContain(
+      'mixed versions (upgrade in progress)'
+    );
+    root = await mount(list([broker({})]), '');
+    expect(root.querySelector('.hub-version-note')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Hub: unknown'
+    );
+    expect(
+      root.querySelector('td.version [data-version-status]')?.getAttribute('data-version-status')
+    ).toBe('unknown');
+  });
+
+  it('sorts an online mismatched broker with the problem rows; unknown is not a problem', () => {
+    expect(brokerHasProblem(broker({ version_status: 'mismatch' }))).toBe(true);
+    expect(brokerHasProblem(broker({ version_status: 'unknown' }))).toBe(false);
+    expect(brokerHasProblem(broker({ version_status: 'match' }))).toBe(false);
+    const sorted = sortBrokers([
+      broker({ id: 'a', name: 'a', version_status: 'match' }),
+      broker({ id: 'z', name: 'z', version_status: 'mismatch' }),
+    ]);
+    expect(sorted.map((b) => b.id)).toEqual(['z', 'a']);
+  });
 });
