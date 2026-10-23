@@ -151,7 +151,7 @@ func remoteHelperForm(raw string) bool {
 	for i < len(raw) {
 		c := raw[i]
 		letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-		if !letter && (i == 0 || !((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')) {
+		if !letter && (i == 0 || ((c < '0' || c > '9') && c != '+' && c != '-' && c != '.')) {
 			break
 		}
 		i++
