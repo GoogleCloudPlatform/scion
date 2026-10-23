@@ -83,6 +83,19 @@ helpers=(
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# candidate_files <dir>: the *_test.go files in <dir> that import go/parser,
+# go/ast or golang.org/x/tools/go/packages, sorted. Prints nothing (and
+# succeeds) when there are none or <dir> cannot be entered. Runs in a
+# subshell, so the cd does not leak.
+candidate_files() (
+  if ! cd "$1" 2>/dev/null; then
+    exit 0
+  fi
+  if ! grep -lE '^[[:space:]]*(import[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)?"(go/parser|go/ast|golang.org/x/tools/go/packages)"' -- *_test.go 2>/dev/null | sort; then
+    exit 0
+  fi
+)
+
 # scan <root>: checks <root>/pkg/hub. Prints findings on stderr. Returns 0
 # clean, 1 violations, 4 when nothing was analysed.
 scan() {
@@ -94,7 +107,7 @@ scan() {
   local files=() f
   while IFS= read -r f; do
     files+=("$f")
-  done < <(cd "$hub" && grep -lE '^[[:space:]]*(import[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)?"(go/parser|go/ast|golang.org/x/tools/go/packages)"' -- *_test.go 2>/dev/null | sort || true)
+  done < <(candidate_files "$hub")
   if [[ ${#files[@]} -eq 0 ]]; then
     echo "$name: no pkg/hub test file imports go/parser, go/ast or go/packages under $hub — NOTHING WAS ANALYSED" >&2
     return 4
