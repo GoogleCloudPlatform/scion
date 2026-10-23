@@ -534,14 +534,19 @@ func (a *AuthzService) relationshipProjectAccessStage(
 }
 
 // relationshipSourceStage is runRelationshipStages' stage 4 for a resolved
-// sharing source: the owner must be active
-// (relationshipSourceActive), and an agent-owned source must hold the
-// permission through its delegation chain
-// (relationshipSourceDelegationHolds). It returns the candidate detail of
-// the first failing check. principal and action are not read by these two
-// checks; they are passed so the stage has the whole request tuple.
+// sharing source. It returns the candidate detail of the first failing
+// check.
+//
+// A hubDeliveryIdentity principal (ptone/scion#2228 part 2b) always takes
+// hubDeliverySourceHolds (authz_delivery_credential.go), a typed nil
+// included, and never reaches the two checks below. Every other principal
+// gets them unchanged: the owner must be active (relationshipSourceActive),
+// and an agent-owned source must hold the permission through its
+// delegation chain (relationshipSourceDelegationHolds).
 func (a *AuthzService) relationshipSourceStage(ctx context.Context, principal PrincipalContext, src *SharingSource, resource Resource, action Action, permissionID string) (bool, string) {
-	_, _ = principal, action
+	if h, ok := principal.Identity.(*hubDeliveryIdentity); ok {
+		return a.hubDeliverySourceHolds(ctx, h, src, resource, action, permissionID)
+	}
 	if active, detail := a.relationshipSourceActive(ctx, src.OwnerID); !active {
 		return false, detail
 	}

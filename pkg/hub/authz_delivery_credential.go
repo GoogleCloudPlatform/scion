@@ -16,7 +16,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // hubDeliveryPermissionIDs are the only permissions a hub_delivery principal
@@ -146,21 +149,21 @@ func deliveryCredentialRestriction() Restriction {
 // principal (ptone/scion#2228 part 2). checkDelegationCeiling routes every
 // hubDeliveryIdentity here before its own AgentIdentity assertion, so the
 // ordinary delegator-permission proof (walkDelegationChain) is never reached
-// for this type — every failed condition below is a terminal, named deny,
-// and the function never calls walkDelegationChain itself. The five
-// conditions below are the whole arm: the function performs no store read,
-// and every request that passes all five reaches the terminal deny below —
-// admission is a dedicated walk function gated on its own set membership
-// (deliveryCredentialKinds), added together with that membership in one
-// change.
+// for this type: every failed condition below is a terminal, named deny,
+// and neither this function nor hubDeliveryAdmission calls
+// walkDelegationChain.
+//
+// The five gate conditions run first and perform no store read. A request
+// that passes all five goes to hubDeliveryAdmission, the admission walk.
 //
 // h may be a typed nil (the caller's type assertion against *hubDeliveryIdentity
 // succeeds even when the underlying pointer is nil); the first condition
 // below handles that case before any field of h is read.
 //
-// Every deny here returns a nil error with cause left at its zero value
-// (""), so Decide's read-only allow-on-error for step-10 errors
-// (authz.go, isReadOnlyOperation) can never apply to a hub_delivery deny.
+// Every deny here, and every deny from hubDeliveryAdmission, returns a nil
+// error: a lookup error inside the walk is itself a deny with cause
+// ceiling_error. So Decide's step-10 error branch never applies to a
+// hub_delivery request, and nothing here can fall open.
 func (a *AuthzService) checkHubDeliveryCeiling(
 	ctx context.Context,
 	req AuthzRequest,
@@ -212,17 +215,351 @@ func (a *AuthzService) checkHubDeliveryCeiling(
 	// An empty project is a named deny, before any store read. The
 	// constructor never returns a project-less agent, so this is reachable
 	// only through a test-only literal; without it, an empty scope would
-	// already fail closed inside walkDelegationChain, but this type never
-	// reaches that function, so the gate names the reason itself.
+	// fail closed in the admission walk (no edge matches it), but the gate
+	// names the reason itself.
 	if h.projectID == "" {
 		return deny("delivery credential has no project")
 	}
 
-	// Terminal deny. Admission (the per-hop walk plus
-	// ResolveProvenanceRoot) is a later change, gated on adding the kind to
-	// deliveryCredentialKinds; every hub_delivery request that reaches step
-	// 10 denies here, never reaching walkDelegationChain.
-	return deny("delivery credential admission is not enabled")
+	return a.hubDeliveryAdmission(ctx, req, h, permissionID, agentID, explain, cause)
+}
+
+// hubDeliveryAdmission is the step-10 admission walk for a hub_delivery
+// request that passed every gate condition (ptone/scion#2228 part 2b; the
+// RQ-1 ruling). It does not require any delegator to hold the deliver
+// permission through a role. Instead, in order:
+//
+//   - the resource must not be in another project than the credential's
+//     (cause ceiling_provenance_missing: no edge of the agent exists there);
+//   - hubDeliveryChainWalk: every hop of the target's delegation chain in the
+//     credential's project has exactly one active edge, is not the migration
+//     sentinel, passes the local-development source check, has known
+//     recorded provenance, has an effect ceiling that allows the exact
+//     permission with no self-operation exception, and names a live
+//     delegator;
+//   - ResolveProvenanceRoot(target, {PermissionID}) succeeds: the recorded
+//     provenance is consistent, and the root user is active and admitted to
+//     the target's project for the exact permission
+//     (ProjectAdmissionForClass).
+//
+// The item grant itself (progeny today) is authorized separately, by the
+// relationship stages that ran before step 10. Every failure is a deny
+// with a named reason and cause and a nil error.
+func (a *AuthzService) hubDeliveryAdmission(
+	ctx context.Context,
+	req AuthzRequest,
+	h *hubDeliveryIdentity,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+) (bool, string, error) {
+	addStep := func(step, detail string) {
+		if explain != nil {
+			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
+		}
+	}
+	deny := func(reason string, c DenyCause) (bool, string, error) {
+		addStep("delegation_ceiling_delivery_denied", reason)
+		if cause != nil {
+			*cause = c
+		}
+		return false, reason, nil
+	}
+
+	if rp := resourceProjectScope(req.Resource); rp != "" && rp != h.projectID {
+		return deny("delivery resource is in a different project", DenyCauseCeilingProvenanceMissing)
+	}
+
+	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
+		if cause != nil {
+			*cause = c
+		}
+		return false, reason, nil
+	}
+
+	root, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
+	if err != nil {
+		c := DenyCauseForProvenanceError(err)
+		if c == DenyCauseCeilingError {
+			return deny("delivery ceiling check failed (fail-closed): "+err.Error(), c)
+		}
+		return deny("delivery provenance root denied: "+err.Error(), c)
+	}
+	addStep("delegation_ceiling_delivery_root",
+		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, h.projectID, permissionID))
+	return true, "delivery ceiling passed", nil
+}
+
+// delegatorLiveness is one hop's delegator state, as seen by
+// hubDeliveryDelegatorLiveness.
+type delegatorLiveness int
+
+const (
+	delegatorLive        delegatorLiveness = iota
+	delegatorNotFound                      // no record
+	delegatorDeleted                       // agent with DeletedAt set
+	delegatorInactive                      // user whose status is not active
+	delegatorUnsupported                   // delegator type is neither user nor agent
+)
+
+// hubDeliveryDelegatorLiveness reports one hop's delegator liveness for
+// the hub_delivery admission walk. It never consults roles or super-admin
+// status (a suspended super-admin is inactive like any other user), and it
+// never reads or writes the request-scoped delegator-authority cache. A
+// stopped agent is live. The returned string is the user's status for
+// delegatorInactive. Any lookup error other than not-found is returned.
+func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegatorType, delegatorID string) (delegatorLiveness, string, error) {
+	switch delegatorType {
+	case store.DelegationPrincipalUser:
+		u, err := a.store.GetUser(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && u == nil) {
+			return delegatorNotFound, "", nil
+		}
+		if err != nil {
+			return delegatorLive, "", err
+		}
+		if u.Status != store.UserStatusActive {
+			return delegatorInactive, u.Status, nil
+		}
+		return delegatorLive, "", nil
+	case store.DelegationPrincipalAgent:
+		ag, err := a.store.GetAgent(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && ag == nil) {
+			return delegatorNotFound, "", nil
+		}
+		if err != nil {
+			return delegatorLive, "", err
+		}
+		if !ag.DeletedAt.IsZero() {
+			return delegatorDeleted, "", nil
+		}
+		return delegatorLive, "", nil
+	default:
+		return delegatorUnsupported, "", nil
+	}
+}
+
+// hubDeliveryChainWalk walks the delegation chain upward from startAgentID
+// in project scopeProjectID and applies the per-hop checks of the RQ-1
+// ruling to every hop, for the exact permissionID. It returns whether
+// every hop passed, the deny reason and the deny cause. It never returns an
+// error: a lookup error is a deny with cause ceiling_error. It shares only
+// the edge-data cache with the ordinary walk (getCachedDelegationEdges); it
+// has no pre-backfill or read allowance, and never calls
+// migrationSentinelCeiling.
+//
+// Per hop, in order:
+//  1. exactly one active edge in scope (none: ceiling_provenance_missing;
+//     more than one: ceiling_provenance_ambiguous);
+//  2. not the migration sentinel (ceiling_orphaned);
+//  3. local-development provenance needs dev auth on this server and the
+//     delegator user:DevUserID (ceiling_source_not_allowed);
+//  4. known provenance version (ceiling_unrecorded);
+//  5. effect ceiling: principal passes, bounded must allow permissionID
+//     with no self-operation exception (ceiling_effect_exceeded), any other
+//     kind denies (ceiling_unrecorded);
+//  6. live delegator (hubDeliveryDelegatorLiveness);
+//  7. a user delegator ends the chain; an agent delegator is the next hop;
+//     the depth bound and a repeated agent deny with no cause, like the
+//     ordinary walk.
+func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep) (bool, string, DenyCause) {
+	addStep := func(step, detail string) {
+		if explain != nil {
+			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
+		}
+	}
+	deny := func(reason string, c DenyCause) (bool, string, DenyCause) {
+		addStep("delegation_ceiling_delivery_denied", reason)
+		return false, reason, c
+	}
+	failClosed := func(err error) (bool, string, DenyCause) {
+		return deny("delivery ceiling check failed (fail-closed): "+err.Error(), DenyCauseCeilingError)
+	}
+	if a.store == nil {
+		return failClosed(errors.New("store not available"))
+	}
+	if permissionID == "" || scopeProjectID == "" {
+		return deny("delivery ceiling: no permission or project to evaluate", "")
+	}
+
+	// The delegator side is evaluated for principals other than the
+	// requester, so it must never read the requester's memoized inputs.
+	ctx = maskAuthzInputs(ctx)
+
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := startAgentID
+	for depth := 0; ; depth++ {
+		if depth > maxDelegationDepth {
+			return deny("delegation chain exceeded maximum depth", "")
+		}
+		if visited[delegateID] {
+			return deny("delegation chain cycle", "")
+		}
+		visited[delegateID] = true
+
+		allEdges, err := a.getCachedDelegationEdges(ctx, store.DelegationPrincipalAgent, delegateID)
+		if err != nil {
+			return failClosed(err)
+		}
+		var active []*store.DelegationEdge
+		for _, e := range filterEdgesByScope(allEdges, store.RoleScopeProject, scopeProjectID) {
+			if e.Active {
+				active = append(active, e)
+			}
+		}
+		if len(active) == 0 {
+			addStep("delegation_ceiling_delivery_hop", fmt.Sprintf("agent:%s has no active edge in project %s", delegateID, scopeProjectID))
+			return deny("no active delegation edge", DenyCauseCeilingProvenanceMissing)
+		}
+		if len(active) > 1 {
+			addStep("delegation_ceiling_delivery_hop", fmt.Sprintf("agent:%s has %d active edges in project %s", delegateID, len(active), scopeProjectID))
+			return deny("multiple active delegation edges", DenyCauseCeilingProvenanceAmbiguous)
+		}
+		edge := active[0]
+		addStep("delegation_ceiling_delivery_hop",
+			fmt.Sprintf("edge %s: %s:%s -> agent:%s, ceiling %q, provenance version %d",
+				edge.ID, edge.DelegatorType, edge.DelegatorID, delegateID, edge.Kind, edge.ProvenanceVersion))
+
+		if isMigrationSentinel(edge) {
+			return deny("migration-provenance delegation supplies no delivery authority", DenyCauseCeilingOrphaned)
+		}
+		if edgeHasDevLocalProvenance(edge) {
+			if !a.devLocalAuthorityEnabled() {
+				return deny("delegation ceiling: "+reasonDevLocalDisabled, DenyCauseCeilingSourceNotAllowed)
+			}
+			if edge.DelegatorType != store.DelegationPrincipalUser || edge.DelegatorID != DevUserID {
+				return deny("delegation ceiling: local development provenance with another delegator", DenyCauseCeilingSourceNotAllowed)
+			}
+		}
+		if !knownProvenanceVersion(edge.ProvenanceVersion) {
+			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
+		}
+		switch edge.Kind {
+		case store.EffectCeilingPrincipal:
+		case store.EffectCeilingBounded:
+			if !EffectCeilingAllows(edge.EffectCeiling, permissionID, false) {
+				return deny(fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID), DenyCauseCeilingEffectExceeded)
+			}
+		default:
+			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
+		}
+
+		live, status, err := a.hubDeliveryDelegatorLiveness(ctx, edge.DelegatorType, edge.DelegatorID)
+		if err != nil {
+			return failClosed(err)
+		}
+		switch live {
+		case delegatorLive:
+		case delegatorNotFound, delegatorDeleted:
+			if edge.DelegatorType == store.DelegationPrincipalAgent {
+				return deny(fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
+			}
+			return deny(fmt.Sprintf("delegator %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
+		case delegatorInactive:
+			return deny(fmt.Sprintf("delegator %s is %s", edge.DelegatorID, status), DenyCauseCeilingDelegatorLacksPermission)
+		default:
+			return deny("unsupported delegator type", "")
+		}
+
+		if edge.DelegatorType == store.DelegationPrincipalUser {
+			return true, "delivery ceiling chain passed", ""
+		}
+		delegateID = edge.DelegatorID
+	}
+}
+
+// hubDeliverySourceHolds is relationship stage 4 for a hub_delivery
+// principal (ptone/scion#2228 part 2b; the RQ-1b ruling): it decides
+// whether the sharing source's owner may supply the item. It replaces the
+// owner-activity and owner-delegation checks other principals get
+// (relationshipSourceStage), which type the owner by probing the store and
+// would require an agent owner to hold the deliver permission through a
+// role. It returns the candidate detail on failure and never an error.
+//
+// The owner is typed by its position in the target agent's stored
+// ancestry (the credential's stored-agent evidence), never by probing an
+// ID: position 0 is the root user, later positions are creator agents.
+//
+//   - S1: the tuple is a hub_delivery credential with evidence, bound to its
+//     own agent, for one of the three deliver permissions with ActionDeliver.
+//   - S2: the owner is non-empty and occurs exactly once in the ancestry.
+//   - S3: a user source must not also resolve as an agent.
+//   - S4: a user source must exist and be active.
+//
+// An agent source (position 1 or later) is refused. Admitting one is the
+// RQ-1b agent-owned source arm, which waits on the P-2 ruling
+// (ptone/scion#2228): an agent creator differs from the owner of the
+// user-scope row it shares, and P-2 decides whether that sharing needs the
+// owner's authorization. Until then no agent-owned source is delivered.
+func (a *AuthzService) hubDeliverySourceHolds(ctx context.Context, h *hubDeliveryIdentity, src *SharingSource, resource Resource, action Action, permissionID string) (bool, string) {
+	_ = resource
+	// S1: the step-10 gate texts.
+	if h == nil {
+		return false, "delivery credential is missing"
+	}
+	if h.evidence == nil {
+		return false, "delivery credential has no stored-agent evidence"
+	}
+	if h.boundAgentID == "" || h.boundAgentID != h.agentID {
+		return false, "delivery credential is bound to a different agent"
+	}
+	if _, ok := hubDeliveryPermissionIDs[permissionID]; !ok || action != ActionDeliver {
+		return false, "delivery credential is limited to deliver permissions"
+	}
+	if src == nil {
+		return false, "delivery source has no owner"
+	}
+
+	// S2: typed position in the stored ancestry.
+	owner := src.OwnerID
+	if owner == "" {
+		return false, "delivery source has no owner"
+	}
+	pos, count := -1, 0
+	for i, id := range h.evidence.Ancestry() {
+		if id == owner {
+			if pos < 0 {
+				pos = i
+			}
+			count++
+		}
+	}
+	switch {
+	case count == 0:
+		return false, "delivery source is not in the target's ancestry"
+	case count > 1:
+		return false, "delivery source appears more than once in the target's ancestry"
+	}
+	if pos > 0 {
+		// The RQ-1b agent-owned source arm is not enabled: it waits on the
+		// P-2 ruling (ptone/scion#2228). Deny before any store read.
+		return false, "delivery source is an agent; agent-owned sources are not admitted"
+	}
+
+	if a.store == nil {
+		return false, "delivery source check failed (fail-closed): store not available"
+	}
+	// S3: the user source must not also name an agent.
+	ag, err := a.store.GetAgent(ctx, owner)
+	switch {
+	case err == nil && ag != nil:
+		return false, "delivery source owner resolves to both a user and an agent"
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return false, "delivery source check failed (fail-closed): " + err.Error()
+	}
+	// S4: the user source is live.
+	u, err := a.store.GetUser(ctx, owner)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && u == nil) {
+		return false, fmt.Sprintf("delivery source user %s is not live", owner)
+	}
+	if err != nil {
+		return false, "delivery source check failed (fail-closed): " + err.Error()
+	}
+	if u.Status != store.UserStatusActive {
+		return false, fmt.Sprintf("delivery source user %s is %s", owner, u.Status)
+	}
+	return true, ""
 }
 
 // relationshipStageAncestryAttested is runRelationshipStages' stage-2 check.

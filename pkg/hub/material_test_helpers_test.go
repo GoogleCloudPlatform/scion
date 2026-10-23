@@ -166,6 +166,8 @@ type materialFailingStore struct {
 	getDelegationEdgesForDelegateHook func(call int)
 	delegationEdgesOverride           []*store.DelegationEdge
 	listProgenySecretsErr             error
+	// getAgentErr, if set, fails every GetAgent call.
+	getAgentErr error
 	// createAgentCalls counts CreateAgent calls, including those made on
 	// the transaction store inside WithTx.
 	createAgentCalls int
@@ -200,6 +202,13 @@ func (f *materialFailingStore) ListProgenySecrets(ctx context.Context, ancestorI
 		return nil, f.listProgenySecretsErr
 	}
 	return f.Store.ListProgenySecrets(ctx, ancestorIDs)
+}
+
+func (f *materialFailingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if f.getAgentErr != nil {
+		return nil, f.getAgentErr
+	}
+	return f.Store.GetAgent(ctx, id)
 }
 
 func (f *materialFailingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
