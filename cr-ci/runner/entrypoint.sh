@@ -49,6 +49,8 @@
 #   4      the idle stop raced a job start: the SIGTERM cancelled a job that started just
 #          as the deadline passed (logged as "ERROR idle_timeout_raced_job"; a 4 without
 #          that line is run.sh's own code)
+#   5      the job-started hook (cr-ci-job-guard.sh) refused the assigned job and the runner
+#          was stopped before any of its steps (logged as "ERROR job_guard_refused")
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
@@ -73,6 +75,7 @@ readonly CLAIM_MAX_ATTEMPTS=5
 readonly EXIT_CONFIG=2
 readonly EXIT_CLAIM=3
 readonly EXIT_IDLE_RACE=4
+readonly EXIT_JOB_REFUSED=5
 
 scratch=${CR_SCRATCH_DIR:-/scratch}
 mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
@@ -334,6 +337,7 @@ idle_fifo="$fifo_dir/idle-wait"
 listener_code_file="$fifo_dir/listener-exit-code"
 job_started_file="$fifo_dir/job-started"
 idle_stopped_file="$fifo_dir/idle-stopped"
+guard_marker="$fifo_dir/job-guard-refused"
 mkfifo -m 600 -- "$out_fifo" "$done_fifo" "$idle_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
 
 # --- 4. Claim exchange (claim contract v2) -----------------------------------
@@ -518,6 +522,14 @@ exit_if_signalled
 watch_runner_output &
 watcher_pid=$!
 
+# The job-started hook (cr-ci-job-guard.sh): Runner.Worker runs it before any step of an
+# assigned job (it reads ACTIONS_RUNNER_HOOK_JOB_STARTED from its own environment, which
+# it inherits from run.sh; a workflow cannot change it). A job that is not a same-repo
+# push or pull_request is refused with a hard stop: the hook writes the marker and
+# SIGKILLs run.sh's process group (section 5, "Job guard").
+export ACTIONS_RUNNER_HOOK_JOB_STARTED="${CR_JOB_GUARD_HOOK:-/usr/local/bin/cr-ci-job-guard.sh}"
+export CR_JOB_GUARD_MARKER="$guard_marker"
+
 log "starting run.sh (ephemeral JIT runner)"
 set -m
 # Opened read-write (never blocks); nothing is ever written, so read -t on it is a
@@ -555,6 +567,24 @@ idle_left=$((idle_timeout - SECONDS))
 ) {done_fd}>&- &
 idle_pid=$!
 
+# Job guard enforcer (fail closed). The hook stops the runner itself; if its kill did not
+# take effect, this subshell (PID 1's child, same uid) sees the marker and SIGKILLs
+# run.sh's process group (run.sh leads its own group: set -m above) until it is gone, so
+# no later step of a refused job can run. Polls once a second with read -t (no external
+# sleep). The mediator's hijack guard deletes the refused job's registration.
+(
+  trap - TERM INT
+  until [[ -e $guard_marker ]]; do
+    kill -0 "$runner_pid" 2>/dev/null || exit 0
+    read -r -t 1 -u "$idle_fd" _ || true
+  done
+  while kill -0 -- "-$runner_pid" 2>/dev/null; do
+    kill -KILL -- "-$runner_pid" 2>/dev/null || true
+    read -r -t 1 -u "$idle_fd" _ || true
+  done
+) {done_fd}>&- &
+guard_pid=$!
+
 runner_rc=0
 while :; do
   if wait "$runner_pid"; then runner_rc=0; else runner_rc=$?; fi
@@ -572,6 +602,7 @@ else
 fi
 trap - TERM INT
 kill "$idle_pid" 2>/dev/null || true
+kill "$guard_pid" 2>/dev/null || true
 
 # Let the watcher drain the last lines (bounded: a process left holding the pipe
 # open must not keep the execution alive).
@@ -582,9 +613,22 @@ idle_stopped=0
 [[ -e $idle_stopped_file ]] && idle_stopped=1
 job_started=0
 [[ -e $job_started_file ]] && job_started=1
+guard_refused=""
+if [[ -e $guard_marker ]]; then
+  # Written by the hook; sanitized again here (letters, digits, ._/:=- and spaces only,
+  # at most 300 characters), since its fields come from GitHub and from a fork's name.
+  guard_refused=$(head -n 1 -- "$guard_marker" | tr -d '\n' | head -c 300 | tr -c 'A-Za-z0-9._/:= -' '_')
+  [[ -n $guard_refused ]] || guard_refused="(empty marker)"
+fi
 kill "$watcher_pid" 2>/dev/null || true
 rm -rf -- "$fifo_dir"
 
+if [[ -n $guard_refused ]]; then
+  # The job-started hook refused the job GitHub assigned to this runner (not a same-repo
+  # push or pull_request) and the runner was stopped before any of its steps ran.
+  log "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner ($guard_refused); runner stopped before any step; exiting $EXIT_JOB_REFUSED"
+  exit "$EXIT_JOB_REFUSED"
+fi
 if ((idle_stopped && job_started)); then
   # The watchdog found no job and sent SIGTERM, but a job started in that gap (or its
   # "Running job:" line was still in the pipe): the SIGTERM cancelled that job. Rare, and

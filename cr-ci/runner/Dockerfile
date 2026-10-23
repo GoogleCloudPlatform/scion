@@ -167,6 +167,9 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
  && chown -R runner:runner /home/runner
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
+# The job-started hook (entrypoint.sh exports ACTIONS_RUNNER_HOOK_JOB_STARTED to it):
+# refuses, with a hard stop, any job that is not a same-repo push or pull_request.
+COPY --chmod=0755 cr-ci-job-guard.sh /usr/local/bin/cr-ci-job-guard.sh
 
 ENV HOME=/home/runner
 USER runner
