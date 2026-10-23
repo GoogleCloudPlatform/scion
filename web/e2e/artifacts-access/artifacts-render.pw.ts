@@ -72,6 +72,7 @@ import {
   type Locator,
   type Page,
   type Request,
+  type Response,
 } from '@playwright/test';
 
 import {
@@ -270,6 +271,10 @@ interface FrameRequest {
    * session".
    */
   cookieHeader: { read: boolean; present: boolean | null; names: string[] };
+  /** Whether an Authorization header was sent (presence only; null until the headers were read). */
+  authorizationPresent: boolean | null;
+  /** Set-Cookie cookie names on the response (names only; documents only; absent until answered). */
+  setCookieNames?: string[];
   /** Fetch metadata read from the same full headers (null: missing or unread). */
   secFetchSite: string | null;
   secFetchDest: string | null;
@@ -360,6 +365,8 @@ const r2 = {
   heldViewUrl: undefined as string | undefined,
   frames: [] as Array<Record<string, unknown>>,
   probes: [] as Array<Record<string, unknown>>,
+  /** Every pollTextIn poll: step, what, elapsed time, bound, reads and whether it matched. */
+  polls: [] as Array<Record<string, unknown>>,
   publishes: [] as Array<Record<string, unknown>>,
   history: {} as Record<string, unknown>,
   files: {} as Record<string, unknown>,
@@ -375,7 +382,10 @@ const r2 = {
   frameSessionAll: { swept: false } as Record<string, number | boolean>,
   chat: {} as Record<string, unknown>,
   /** R2b: the chat HTML preview's records (no view URL, ids only). */
-  chatHtml: { dialogs: [], frames: [], ready: [], probes: [] } as Record<string, unknown>,
+  chatHtml: { dialogs: [], frames: [], ready: [], probes: [], routes: [] } as Record<
+    string,
+    unknown
+  >,
 };
 
 function suffix(): string {
@@ -464,6 +474,21 @@ function readCookieHeader(req: Request, rec: FrameRequest): void {
       rec.secFetchDest = h['sec-fetch-dest'] ?? null;
       rec.secFetchMode = h['sec-fetch-mode'] ?? null;
       rec.cookieHeader = { read: true, present: !!h.cookie, names: cookieNames(h.cookie) };
+      rec.authorizationPresent = 'authorization' in h;
+    })
+    .catch(() => undefined);
+  r2.pendingHeaderReads.push(p);
+}
+
+/** Reads the Set-Cookie cookie names of a document response once (names only, never values). */
+function readSetCookieNames(res: Response, rec: FrameRequest): void {
+  const p = res
+    .headersArray()
+    .then((hs) => {
+      rec.setCookieNames = hs
+        .filter((h) => h.name.toLowerCase() === 'set-cookie')
+        .map((h) => h.value.split(';')[0]?.split('=')[0]?.trim() ?? '')
+        .filter((n) => n !== '');
     })
     .catch(() => undefined);
   r2.pendingHeaderReads.push(p);
@@ -503,6 +528,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
       topLevelDocument,
       ...(frameUnavailable ? { frameUnavailable } : {}),
       cookieHeader: { read: false, present: null, names: [] },
+      authorizationPresent: null,
       secFetchSite: null,
       secFetchDest: null,
       secFetchMode: null,
@@ -520,6 +546,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     if (rec) {
       rec.status = res.status();
       if (!rec.cookieHeader.read) readCookieHeader(res.request(), rec);
+      if (rec.resourceType === 'document') readSetCookieNames(res, rec);
       if (rec.frameUnavailable) {
         // The frame exists by now: classify from it rather than the fallback.
         try {
@@ -579,6 +606,7 @@ async function frameSessionFacts(records: FrameRequest[]): Promise<{
   unverified: number;
   excludedParentLoads: number;
   excludedParentLoadsWithCookie: number;
+  authBearing: number;
 }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
@@ -599,10 +627,40 @@ async function frameSessionFacts(records: FrameRequest[]): Promise<{
     total: frameOnly.length,
     unread: frameOnly.filter((q) => !q.cookieHeader.read).length,
     bearing: frameOnly.filter((q) => q.cookieHeader.present === true).length,
+    authBearing: frameOnly.filter((q) => q.authorizationPresent === true).length,
     // Recorded only: a failed or unanswered request's headers may be the
     // provisional ones, which never show a Cookie header.
     unverified: frameOnly.filter((q) => q.failed || q.status === undefined).length,
   };
+}
+
+/**
+ * The Set-Cookie cookie names (names only, sorted, unique) on the responses
+ * to frame-initiated document requests among records; call after
+ * frameSessionFacts (which settles the reads and classifies).
+ */
+function frameDocumentSetCookieNames(records: FrameRequest[]): string[] {
+  const names = new Set<string>();
+  for (const q of records) {
+    if (q.classification !== 'frame-initiated' || q.resourceType !== 'document') continue;
+    for (const n of q.setCookieNames ?? []) names.add(n);
+  }
+  return [...names].sort();
+}
+
+/**
+ * The frame's own navigation to the API probe path carried no credentials:
+ * its request headers were read, with no Cookie and no Authorization header.
+ * This is the property the isolation rows grade; the response status depends
+ * on the hub's sign-in configuration and is only recorded.
+ */
+function noCredentials(q: FrameRequest | undefined): boolean {
+  return (
+    !!q &&
+    q.cookieHeader.read &&
+    q.cookieHeader.present === false &&
+    q.authorizationPresent === false
+  );
 }
 
 /** Bundle requests of one identity in the given steps. */
@@ -1390,6 +1448,9 @@ test.describe.serial('artifact page view and render (R2)', () => {
         mode: t.mode,
         baseURL: t.baseURL,
         hubId: t.hub?.hubId ?? null,
+        // The hub's start flags by name (no values): the isolation rows'
+        // statuses depend on its sign-in configuration (recorded, not graded).
+        hubStartFlags: t.hub?.startFlags ?? (t.mode === 'local' ? null : 'remote: unknown'),
         experimentToggle: !!j.adminToken(),
       };
       j.state.evidence.fixture = {
@@ -1795,15 +1856,17 @@ async function runMain(browser: Browser): Promise<void> {
         const apiNavStatus = (await apiNav).status();
         await settle(page);
         // Every frame request of the owner so far (R2-01..R2-05), by step.
-        const session = await frameSessionFacts(
-          requestsIn('owner', ['R2-01', 'R2-02', 'R2-03', 'R2-04', 'R2-05'])
+        const ownFrameRequests = requestsIn('owner', ['R2-01', 'R2-02', 'R2-03', 'R2-04', 'R2-05']);
+        const session = await frameSessionFacts(ownFrameRequests);
+        // The frame's own navigation to the API path: graded on the
+        // credentials it carried, never on the status (which follows the
+        // hub's sign-in configuration and is recorded as a fact).
+        const apiNavRec = requestsIn('owner', ['R2-05']).find(
+          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
         );
-        if (session.bearing > 0 || apiNavStatus === 200) r2.frameSessionAlert = true;
-        if (apiNavStatus !== 200 && apiNavStatus !== 401) {
-          // An ordinary finding, kept in the restricted evidence only (no
-          // annotation, so no output tells which check it was); the status
-          // is in the probe record.
-          j.state.findings.push({ id: 'R2-05', text: ISOLATION_FAIL });
+        const apiNavNoCredentials = noCredentials(apiNavRec);
+        if (session.bearing > 0 || session.authBearing > 0 || !apiNavNoCredentials) {
+          r2.frameSessionAlert = true;
         }
         const probeRec = {
           who: 'owner',
@@ -1812,7 +1875,14 @@ async function runMain(browser: Browser): Promise<void> {
           parent,
           nav,
           apiNavStatus,
+          apiNavCredentials: {
+            recorded: !!apiNavRec,
+            headersRead: apiNavRec?.cookieHeader.read ?? null,
+            cookie: apiNavRec?.cookieHeader.present ?? null,
+            authorization: apiNavRec?.authorizationPresent ?? null,
+          },
           session,
+          frameDocumentSetCookieNames: frameDocumentSetCookieNames(ownFrameRequests),
         };
         r2.probes.push(probeRec);
         r.ui.probe = probeRec;
@@ -1836,12 +1906,9 @@ async function runMain(browser: Browser): Promise<void> {
         checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
         checks.frameRequestsSeen = session.total > 0;
         checks.headersAllRead = session.unread === 0;
-        checks.noSessionBearing = session.bearing === 0;
-        checks.apiNavUnauthenticated = apiNavStatus === 401;
+        checks.noSessionBearing = session.bearing === 0 && session.authBearing === 0;
+        checks.apiNavNoCredentials = apiNavNoCredentials;
         // Rule 7a: the frame's own navigation to the API path is frame-initiated.
-        const apiNavRec = requestsIn('owner', ['R2-05']).find(
-          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
-        );
         checks.apiNavClassifiedFrameInitiated = apiNavRec?.classification === 'frame-initiated';
         // (c)
         checks.popupBlocked = String(result.popup).startsWith('blocked:');
@@ -2777,6 +2844,8 @@ const r2b = {
   topicId: undefined as string | undefined,
   /** The home project's name as the member reads it (the dialog footer shows it). */
   homeName: '',
+  /** The home project's slug as the member reads it (the chat page's canonical route names it). */
+  homeSlug: '',
   sideProjectId: undefined as string | undefined,
   /** The side artifact's id from its create on (for the cleanup). */
   sideCreatedId: undefined as string | undefined,
@@ -2861,6 +2930,7 @@ async function setUpChatHtml(): Promise<void> {
     const home = await j.api('member', 'GET', `/api/v1/projects/${projectId}`);
     const homeBody = (home.body ?? {}) as { name?: string; slug?: string };
     r2b.homeName = homeBody.name || homeBody.slug || '';
+    r2b.homeSlug = homeBody.slug || '';
     fx.homeRead = home.status;
     const thread = await j.api('owner', 'POST', `/api/v1/chat/spaces/${projectId}/threads`, {
       name: `R2b chat ${suffix()}`,
@@ -2971,14 +3041,67 @@ function threadPath(): string {
   return `/chat/space/${j.state.projectId}/thread/${r2b.topicId}`;
 }
 
-/** Opens the R2b thread as key and waits for the bundle's unpinned link. */
+/**
+ * The thread a chat page URL names, on the canonical route
+ * /chat/<slug>/<topicId> only; null for any other path (the legacy
+ * /chat/space/<projectId>/thread/<topicId> route included).
+ */
+function canonicalThreadOf(url: string): { slug: string; topicId: string } | null {
+  const m = /^\/chat\/([^/]+)\/([^/]+)$/.exec(new URL(url).pathname);
+  if (!m || m[1] === 'space' || m[1] === 'dm') return null;
+  return { slug: decodeURIComponent(m[1]), topicId: decodeURIComponent(m[2]) };
+}
+
+/** True when url names the R2b thread on its canonical route. */
+function isR2bThread(url: string): boolean {
+  const t = canonicalThreadOf(url);
+  return !!t && t.topicId === r2b.topicId && (r2b.homeSlug === '' || t.slug === r2b.homeSlug);
+}
+
+/**
+ * Opens the R2b thread as key and waits for the bundle's unpinned link, then
+ * for the chat page's own route canonicalisation to settle. The page rewrites
+ * the legacy /chat/space/<projectId>/thread/<topicId> route in place to
+ * /chat/<slug>/<topicId> once it knows the project's slug, which can land
+ * after the messages render; a URL captured before that is not the URL the
+ * page settles on. The wait is on the address bar (user-observable), bounded.
+ * Both paths are recorded with ids only (the slug as a match flag).
+ */
 async function openThread(key: Key): Promise<Page> {
   const page = await j.pageOf(key);
+  const started = Date.now();
   await page.goto(threadPath(), { waitUntil: 'domcontentloaded' });
   await expect(chatArtifactLinkFor(page, bundleId(), 0), 'reference shown as a link').toBeVisible({
     timeout: 30_000,
   });
+  const atLink = Date.now() - started;
+  const canonicalAtLink = isR2bThread(page.url());
+  let settled = true;
+  await page
+    .waitForURL((u) => isR2bThread(u.href), { timeout: 15_000 })
+    .catch(() => {
+      settled = false;
+    });
+  const t = canonicalThreadOf(page.url());
+  (r2.chatHtml.routes as Array<Record<string, unknown>>).push({
+    who: key,
+    step: r2.step,
+    legacy: '/chat/space/<projectId>/thread/<topicId>',
+    canonical: t ? '/chat/<slug>/<topicId>' : redactPath(new URL(page.url()).pathname),
+    slugIsHomeSlug: t ? t.slug === r2b.homeSlug : null,
+    topicIdMatches: t ? t.topicId === r2b.topicId : null,
+    canonicalAtLink,
+    linkVisibleMs: atLink,
+    settledMs: Date.now() - started,
+    settled,
+  });
+  expect(settled, 'chat route settled on /chat/<slug>/<topicId> of the R2b thread').toBe(true);
   return page;
+}
+
+/** Whether the page still shows the R2b thread on its canonical route (its identity, not the raw URL). */
+function onR2bThread(page: Page): boolean {
+  return isR2bThread(page.url());
 }
 
 /** Clicks a bundle reference in the open thread and waits for the preview's frame. */
@@ -2991,15 +3114,52 @@ async function openBundlePreview(page: Page, seq: number): Promise<void> {
   await page.locator(RENDER_SELECTORS.chatHtmlFrame).waitFor({ state: 'attached' });
 }
 
-/** Polls a locator's whitespace-collapsed text until one of wants matches (10 s); returns the last text. */
-async function pollTextIn(locator: Locator, wants: string[], timeoutMs = 10_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
+/** The bound of one text read in pollTextIn (never past the poll's own deadline). */
+const POLL_READ_CAP_MS = 2_000;
+
+/**
+ * Polls a locator's whitespace-collapsed text until one of wants matches,
+ * within timeoutMs; returns the last text. Each read's own timeout is capped
+ * by the time left in the poll, and no read starts once none is left, so the
+ * poll never runs past its bound. Each poll is recorded (r2.polls) with its
+ * elapsed time.
+ */
+async function pollTextIn(
+  locator: Locator,
+  wants: string[],
+  what: string,
+  timeoutMs = 10_000
+): Promise<string> {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   let got = '';
-  while (Date.now() < deadline) {
-    got = await textOf(locator).catch(() => '');
-    if (wants.includes(got)) return got;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+  let reads = 0;
+  let matched = false;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) break;
+    reads++;
+    got = await locator
+      .first()
+      .textContent({ timeout: Math.min(POLL_READ_CAP_MS, left) })
+      .then((t) => (t ?? '').replace(/\s+/g, ' ').trim())
+      .catch(() => '');
+    if (wants.includes(got)) {
+      matched = true;
+      break;
+    }
+    const pause = Math.min(200, deadline - Date.now());
+    if (pause <= 0) break;
+    await new Promise((resolve) => setTimeout(resolve, pause));
   }
+  r2.polls.push({
+    step: r2.step,
+    what,
+    boundMs: timeoutMs,
+    elapsedMs: Date.now() - started,
+    reads,
+    matched,
+  });
   return got;
 }
 
@@ -3115,10 +3275,22 @@ async function runChatHtmlRows(): Promise<void> {
       const dialog = page.locator(RENDER_SELECTORS.chatPreviewDialog);
       const ui = {
         label: await textOf(page.locator(RENDER_SELECTORS.chatPreviewLabel)),
-        badge: await pollTextIn(page.locator(RENDER_SELECTORS.chatVersionBadge), ['v3 · current']),
+        badge: await pollTextIn(
+          page.locator(RENDER_SELECTORS.chatVersionBadge),
+          ['v3 · current'],
+          'version badge'
+        ),
         notice: await textOf(chatRemoteImagesNotice(page)),
-        bar: await pollTextIn(page.locator(RENDER_SELECTORS.chatUntrustedBar), barWants),
-        footerPath: await pollTextIn(page.locator(RENDER_SELECTORS.chatFooterPath), footerWants),
+        bar: await pollTextIn(
+          page.locator(RENDER_SELECTORS.chatUntrustedBar),
+          barWants,
+          'untrusted bar'
+        ),
+        footerPath: await pollTextIn(
+          page.locator(RENDER_SELECTORS.chatFooterPath),
+          footerWants,
+          'footer path'
+        ),
         copyLink: await isShown(chatFooterButton(page, 'Copy link')),
         openInViewer: {
           visible: await isShown(viewer),
@@ -3134,6 +3306,7 @@ async function runChatHtmlRows(): Promise<void> {
           .filter({ hasText: /Open in new tab/ })
           .count(),
         urlUnchanged: page.url() === appUrl,
+        sameThread: onR2bThread(page),
       };
       r.ui.dialog = ui;
       (r2.chatHtml.dialogs as Array<Record<string, unknown>>).push({
@@ -3141,6 +3314,7 @@ async function runChatHtmlRows(): Promise<void> {
         step: 'R2b-02',
         ...ui,
       });
+      expect.soft(ui.sameThread, 'page stays on the thread').toBe(true);
       expect.soft(ui.urlUnchanged, 'page URL unchanged').toBe(true);
       expect.soft(ui.label, 'label names the bundle').toContain(title);
       expect.soft(ui.badge, 'badge').toBe('v3 · current');
@@ -3365,11 +3539,13 @@ async function runChatHtmlRows(): Promise<void> {
         page2Seq: page2Info.viewSeq,
         sameCapability,
         urlUnchanged: page.url() === appUrl,
+        sameThread: onR2bThread(page),
         dialogOpen: await page.locator(RENDER_SELECTORS.chatPreviewDialog).isVisible(),
       };
       r.ui.link = facts;
       expect.soft(facts.page2Entry, 'frame at page2.html').toBe('page2.html');
       expect.soft(sameCapability, 'same capability').toBe(true);
+      expect.soft(facts.sameThread, 'page stays on the thread').toBe(true);
       expect.soft(facts.urlUnchanged, 'page URL unchanged').toBe(true);
       expect.soft(facts.dialogOpen, 'dialog still open').toBe(true);
       await settle(page);
@@ -3421,6 +3597,7 @@ async function runChatHtmlRows(): Promise<void> {
           .requests.filter((q) => Object.values(PROBE_PATHS).some((p) => q.path === p));
         const nav = {
           pageUrlUnchanged: page.url() === appUrl,
+          sameThread: onR2bThread(page),
           dialogOpen: await page.locator(RENDER_SELECTORS.chatPreviewDialog).isVisible(),
           probePathRequests: probeRequests.length,
           newPages: j.who('member').context.pages().length - pagesBefore,
@@ -3436,10 +3613,16 @@ async function runChatHtmlRows(): Promise<void> {
         await chatHtmlFrame(page).locator('#api-nav').click();
         const apiNavStatus = (await apiNav).status();
         await settle(page);
-        const session = await frameSessionFacts(requestsIn('member', CHAT_STEPS));
-        if (session.bearing > 0 || apiNavStatus === 200) r2.frameSessionAlert = true;
-        if (apiNavStatus !== 200 && apiNavStatus !== 401) {
-          j.state.findings.push({ id: 'R2b-06', text: ISOLATION_FAIL });
+        const chatFrameRequests = requestsIn('member', CHAT_STEPS);
+        const session = await frameSessionFacts(chatFrameRequests);
+        // Graded on the credentials the frame's API navigation carried, not
+        // on its status (recorded; it follows the hub's sign-in configuration).
+        const apiNavRec = requestsIn('member', ['R2b-06']).find(
+          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
+        );
+        const apiNavNoCredentials = noCredentials(apiNavRec);
+        if (session.bearing > 0 || session.authBearing > 0 || !apiNavNoCredentials) {
+          r2.frameSessionAlert = true;
         }
         const probeRec: Record<string, unknown> = {
           who: 'member',
@@ -3449,7 +3632,14 @@ async function runChatHtmlRows(): Promise<void> {
           ready,
           nav,
           apiNavStatus,
+          apiNavCredentials: {
+            recorded: !!apiNavRec,
+            headersRead: apiNavRec?.cookieHeader.read ?? null,
+            cookie: apiNavRec?.cookieHeader.present ?? null,
+            authorization: apiNavRec?.authorizationPresent ?? null,
+          },
           session,
+          frameDocumentSetCookieNames: frameDocumentSetCookieNames(chatFrameRequests),
         };
         r2.probes.push(probeRec);
         (r2.chatHtml.probes as Array<Record<string, unknown>>).push(probeRec);
@@ -3474,15 +3664,13 @@ async function runChatHtmlRows(): Promise<void> {
         checks.fetchBlocked = String(result.fetch).startsWith('blocked:');
         checks.frameRequestsSeen = session.total > 0;
         checks.headersAllRead = session.unread === 0;
-        checks.noSessionBearing = session.bearing === 0;
-        checks.apiNavUnauthenticated = apiNavStatus === 401;
-        const apiNavRec = requestsIn('member', ['R2b-06']).find(
-          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
-        );
+        checks.noSessionBearing = session.bearing === 0 && session.authBearing === 0;
+        checks.apiNavNoCredentials = apiNavNoCredentials;
         checks.apiNavClassifiedFrameInitiated = apiNavRec?.classification === 'frame-initiated';
         // (c)
         checks.popupBlocked = String(result.popup).startsWith('blocked:');
         checks.pageUrlUnchanged = nav.pageUrlUnchanged;
+        checks.sameThread = nav.sameThread;
         checks.dialogStillOpen = nav.dialogOpen;
         checks.noProbePathRequests = nav.probePathRequests === 0;
         checks.noNewPages = nav.newPages === 0;
@@ -3542,7 +3730,11 @@ async function runChatHtmlRows(): Promise<void> {
       const mints = r2.mints.length;
       const reqs = j.who('member').requests.length;
       await openBundlePreview(page, 1);
-      const badge = await pollTextIn(page.locator(RENDER_SELECTORS.chatVersionBadge), ['v1']);
+      const badge = await pollTextIn(
+        page.locator(RENDER_SELECTORS.chatVersionBadge),
+        ['v1'],
+        'version badge (pinned)'
+      );
       const label = await textOf(page.locator(RENDER_SELECTORS.chatPreviewLabel));
       const info = viewInfo((await htmlFrameAttributes(page, sel)).src, id());
       await expect(chatHtmlFrame(page).locator('#ver')).toHaveText('R2 bundle v1');
@@ -3774,12 +3966,16 @@ async function unavailableFacts(
   await link.first().click();
   const dialog = page.locator(RENDER_SELECTORS.chatPreviewDialog);
   await dialog.waitFor({ state: 'visible' });
-  const label = await pollTextIn(page.locator(RENDER_SELECTORS.chatPreviewLabel), [
-    'Artifact unavailable',
-  ]);
-  const text = await pollTextIn(page.locator(RENDER_SELECTORS.chatUnavailableText), [
-    UNAVAILABLE_TEXT,
-  ]);
+  const label = await pollTextIn(
+    page.locator(RENDER_SELECTORS.chatPreviewLabel),
+    ['Artifact unavailable'],
+    'unavailable label'
+  );
+  const text = await pollTextIn(
+    page.locator(RENDER_SELECTORS.chatUnavailableText),
+    [UNAVAILABLE_TEXT],
+    'unavailable text'
+  );
   const dialogText = ((await dialog.textContent()) ?? '').replace(/\s+/g, ' ');
   const names = [
     ...(artifactId === r2b.side?.id ? [r2b.side.title] : []),
@@ -3917,7 +4113,7 @@ async function runCleanup(testInfo: {
     const all = await frameSessionFacts(r2.frameRequests.filter((q) => q.who !== 'anonymous'));
     const unavailable = r2.frameRequests.filter((q) => q.frameUnavailable).length;
     r2.frameSessionAll = { swept: true, ...all, frameUnavailable: unavailable };
-    if (all.bearing > 0 || all.unread > 0) {
+    if (all.bearing > 0 || all.authBearing > 0 || all.unread > 0) {
       r2.frameSessionAlert = true;
       j.state.findings.push({ id: 'frame-session-sweep', text: ISOLATION_FAIL });
     }
@@ -4170,6 +4366,7 @@ async function runCleanup(testInfo: {
   };
   ev.frameSessionAlert = r2.frameSessionAlert;
   ev.frameSessionAll = r2.frameSessionAll;
+  ev.polls = r2.polls;
   ev.rows = j.state.rows;
   ev.findings = j.state.findings;
   ev.hardFailures = j.state.hardFailures;

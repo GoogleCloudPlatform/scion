@@ -61,6 +61,13 @@ export interface HubState {
   hubId?: string;
   /** Private HOME of a member-level test hub (under dbDir), else unset. */
   homeDir?: string;
+  /** The `server start` flags, by name only (no values), in start order. */
+  startFlags?: string[];
+}
+
+/** The flag names of a command line (`--name` or `--name=value` gives `--name`); values are dropped. */
+export function flagNames(args: readonly string[]): string[] {
+  return args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]);
 }
 
 /** Options of startHub. The defaults start the hub the main suite uses. */
@@ -453,6 +460,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     devToken,
     ...(hubId ? { hubId } : {}),
     ...(homeDir ? { homeDir } : {}),
+    startFlags: flagNames(args),
   };
 
   // Write state file for teardown. It holds the dev token: owner-only, and
