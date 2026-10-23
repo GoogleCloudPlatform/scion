@@ -552,6 +552,12 @@ func TestHealthSummaryClientTypeMatchesHub(t *testing.T) {
 	assert.NotEmpty(t, hubPaths)
 }
 
+// TestHealthAttentionKindMirror pins hubclient's mirror of the attention
+// kinds it names to the hub's constants (ptone/scion#5972).
+func TestHealthAttentionKindMirror(t *testing.T) {
+	assert.Equal(t, hub.HealthAttentionBrokerVersionMismatch, hubclient.HealthAttentionBrokerVersionMismatch)
+}
+
 // jsonFieldPaths records the JSON path of every field reachable from t.
 func jsonFieldPaths(t reflect.Type, prefix string, out map[string]bool) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
