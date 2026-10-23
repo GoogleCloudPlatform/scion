@@ -34,10 +34,11 @@ ARG GO_SHA256
 ARG GOLANGCI_LINT_VERSION
 ARG GOLANGCI_LINT_SHA256
 
-# RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh (PID 1) trap TERM/INT, forward
-# SIGINT to the runner's process group (graceful job cancel on Cloud Run's
-# SIGTERM) and exit with the runner's exit code. Without it, run.sh installs
-# no handler, so PID 1 drops SIGTERM, and it exits 0 whatever the runner returned.
+# RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh trap TERM/INT and forward SIGINT to the
+# runner's process group: a graceful job cancel when entrypoint.sh (PID 1) forwards
+# Cloud Run's SIGTERM. Without it, run.sh installs no handler. run.sh exits 0 for
+# any runner exit code but 2 and 7 (run-helper.sh maps unknown codes to 0), so
+# entrypoint.sh recovers the real code (runner/README.md, step 5).
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     RUNNER_MANUALLY_TRAP_SIG=1
@@ -76,7 +77,11 @@ RUN curl -fsSL -o /tmp/golangci-lint.tgz \
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.
-# _diag is a symlink into /scratch so the runner's logs land on the ephemeral disk.
+# _diag (the runner's logs and the job's step logs under _diag/pages; about 1 MB for
+# the P6 lint job, more for jobs with large output) stays a plain directory on the
+# root filesystem, NOT on /scratch: when a job fills /scratch, the runner must still be
+# able to write its logs and report the failure (P6 PoC run 2 lost the runner, and the
+# job's log, to ENOSPC on _diag).
 # The work folder is /home/runner/work (the mediator's JIT work_folder), which
 # entrypoint.sh links to /scratch/_work; the _work symlink here only covers a JIT
 # config that names the default _work. Nothing here may create /home/runner/work,
@@ -90,7 +95,7 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
  && ./bin/installdependencies.sh \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /scratch/_work _work \
- && ln -s /scratch/_diag _diag \
+ && mkdir -p _diag \
  && chown -R runner:runner /home/runner
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh

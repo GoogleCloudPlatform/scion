@@ -168,6 +168,7 @@ export function buildFixture() {
       status: 200,
       body: {
         experiments: {
+          'hub.agent_edit_held': false,
           'hub.artifacts': false,
           'hub.attachment_artifacts': false,
           'hub.flat_runtime_brokers': false,
@@ -175,6 +176,7 @@ export function buildFixture() {
           'web.agent_edit': true,
           'web.chat_scheduled_send': false,
           'web.gcs_links': false,
+          'web.sse_hidden_tab_close': false,
         },
       },
     },

@@ -16,11 +16,13 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -29,13 +31,20 @@ import (
 // ---------------------------------------------------------------------------
 
 // RecoveryService provides offline disable and recovery operations for
-// access boundaries. Every operation produces an atomic audit record:
-// if the audit write fails, the operation rolls back.
+// access boundaries. Each affected constraint is changed in its own
+// transaction together with exactly one access_constraint_history row
+// (operation recovery_disable or recovery_enable). Constraints are processed
+// sequentially; the first failure stops the operation, and the constraints
+// already committed stay committed (see RecoveryPartialError). Each
+// transaction re-reads its constraint first: one that no longer exists, or
+// whose disabled state already matches the target (it changed after the
+// list was taken), is skipped, with no mutation, no row, and no count.
+//
+// The service has no production caller; it is exercised by tests only.
 type RecoveryService struct {
-	store       store.Store
-	auditWriter *BoundaryAuditWriter
-	eventBus    *InvalidationEventBus
-	logger      *slog.Logger
+	store    store.Store
+	eventBus *InvalidationEventBus
+	logger   *slog.Logger
 
 	// recoveryLock enforces database-level online/offline exclusion.
 	// Only one recovery operation can run at a time per Hub instance.
@@ -46,10 +55,9 @@ type RecoveryService struct {
 }
 
 // NewRecoveryService creates a new RecoveryService.
-func NewRecoveryService(s store.Store, auditWriter *BoundaryAuditWriter, eventBus *InvalidationEventBus, logger *slog.Logger) *RecoveryService {
+func NewRecoveryService(s store.Store, eventBus *InvalidationEventBus, logger *slog.Logger) *RecoveryService {
 	return &RecoveryService{
 		store:        s,
-		auditWriter:  auditWriter,
 		eventBus:     eventBus,
 		logger:       logger,
 		recoveryLock: NewRecoveryLock(),
@@ -57,8 +65,45 @@ func NewRecoveryService(s store.Store, auditWriter *BoundaryAuditWriter, eventBu
 	}
 }
 
+// RecoveryPartialError reports a recovery operation that stopped at its
+// first failure. Committed constraints are NOT rolled back: each one was
+// committed in its own transaction together with its history row. The
+// failed constraint has neither its change nor a row.
+type RecoveryPartialError struct {
+	// Operation is the history operation: recovery_disable or
+	// recovery_enable.
+	Operation string
+
+	// Committed is the number of constraints committed before the failure.
+	Committed int
+
+	// CommittedIDs are the committed constraint IDs, in processing order.
+	CommittedIDs []string
+
+	// AuditIDs are the history event IDs of the committed constraints'
+	// rows, index-aligned with CommittedIDs.
+	AuditIDs []string
+
+	// FailedID is the constraint whose transaction failed.
+	FailedID string
+
+	// Err is the failure cause.
+	Err error
+}
+
+func (e *RecoveryPartialError) Error() string {
+	return fmt.Sprintf("%s stopped at constraint %s after committing %d constraint(s); committed constraints stay committed: %v",
+		e.Operation, e.FailedID, e.Committed, e.Err)
+}
+
+func (e *RecoveryPartialError) Unwrap() error { return e.Err }
+
+// errRecoveryAlreadyInState ends a per-constraint transaction without a
+// change: the constraint already has the target state, or no longer exists.
+var errRecoveryAlreadyInState = errors.New("constraint already in the target state")
+
 // ---------------------------------------------------------------------------
-// DisableAll — all-or-nothing boundary disable
+// DisableAll — disable every active boundary, one transaction per boundary
 // ---------------------------------------------------------------------------
 
 // DisableAllResult is the outcome of disabling all boundaries.
@@ -69,19 +114,26 @@ type DisableAllResult struct {
 	// DisabledIDs is the list of boundary IDs that were disabled.
 	DisabledIDs []string
 
-	// AuditID is the durable audit ID for this operation.
-	AuditID string
+	// AuditIDs are the event IDs of the history rows written for the
+	// disabled boundaries, index-aligned with DisabledIDs.
+	AuditIDs []string
 }
 
-// DisableAll deactivates all active boundaries in a single atomic operation.
-// Either all boundaries are disabled and the audit record is written, or
-// nothing changes. Returns the number of disabled boundaries.
-func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*DisableAllResult, error) {
+// DisableAll deactivates every active boundary. Each boundary is disabled in
+// its own transaction with one recovery_disable history row (classification
+// relax) carrying that boundary's revisions before and after. On the first
+// failure it returns a *RecoveryPartialError; boundaries disabled before the
+// failure stay disabled.
+func (rs *RecoveryService) DisableAll(ctx context.Context, actor PrincipalContext) (*DisableAllResult, error) {
 	// Acquire the recovery lock.
-	if !rs.recoveryLock.TryAcquire(actorID) {
+	if !rs.recoveryLock.TryAcquire(actor.ID) {
 		return nil, fmt.Errorf("recovery lock already held — another recovery operation is in progress")
 	}
 	defer rs.recoveryLock.Release()
+
+	// One audit operation per call: the request ID when there is one, else
+	// one fresh operation ID shared by every row this call writes.
+	ctx = withAccessBoundaryAuditOperation(ctx)
 
 	// Publish recovery.started event.
 	if rs.eventBus != nil {
@@ -110,63 +162,53 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*Dis
 		return &DisableAllResult{DisabledCount: 0}, nil
 	}
 
-	// Disable all active constraints.
-	// NOTE: The Store interface lacks RunInTx, so we disable one-by-one.
-	// If any disable fails, we attempt to re-enable the already-disabled ones
-	// (best-effort rollback).
-	var disabledIDs []string
+	var disabledIDs, auditIDs []string
 	for _, id := range activeIDs {
-		if err := rs.store.DisableAccessConstraint(ctx, id); err != nil {
-			// Rollback: attempt to re-enable already-disabled constraints.
-			rs.rollbackDisable(ctx, disabledIDs)
-			return nil, fmt.Errorf("failed to disable constraint %s (rolled back %d): %w", id, len(disabledIDs), err)
+		var auditID string
+		err := rs.store.WithTx(ctx, func(tx store.Store) error {
+			before, err := tx.GetAccessConstraint(ctx, id)
+			if errors.Is(err, store.ErrNotFound) {
+				return errRecoveryAlreadyInState // deleted after the list was taken
+			}
+			if err != nil {
+				return fmt.Errorf("load constraint: %w", err)
+			}
+			if before.Disabled {
+				return errRecoveryAlreadyInState
+			}
+			if err := tx.DisableAccessConstraint(ctx, id); err != nil {
+				return fmt.Errorf("disable constraint: %w", err)
+			}
+			after, err := tx.GetAccessConstraint(ctx, id)
+			if err != nil {
+				return fmt.Errorf("reload constraint: %w", err)
+			}
+			auditID, err = appendRecoveryHistory(ctx, tx, auditevent.AccessBoundaryRecoveryDisable, actor, before, after, ClassificationRelax)
+			return err
+		})
+		if errors.Is(err, errRecoveryAlreadyInState) {
+			continue
+		}
+		if err != nil {
+			return nil, &RecoveryPartialError{
+				Operation:    string(auditevent.AccessBoundaryRecoveryDisable),
+				Committed:    len(disabledIDs),
+				CommittedIDs: disabledIDs,
+				AuditIDs:     auditIDs,
+				FailedID:     id,
+				Err:          err,
+			}
 		}
 		disabledIDs = append(disabledIDs, id)
+		auditIDs = append(auditIDs, auditID)
 	}
 
-	// Write the audit entry. If this fails, the disable must roll back.
-	if rs.auditWriter != nil {
-		auditID, err := rs.auditWriter.WriteAuditEntry(ctx, AuditRequest{
-			ConstraintID:   "all",
-			Operation:      "disable_all",
-			ActorID:        actorID,
-			CorrelationID:  correlationIDFromContext(ctx),
-			BeforeRevision: int64(len(disabledIDs)),
-			AfterRevision:  0,
-			Classification: ClassificationRelax,
-			ImpactCounts: ImpactCounts{
-				AffectedPrincipals: len(disabledIDs),
-			},
-		})
-		if err != nil {
-			// Audit write failed — roll back the disable.
-			rs.rollbackDisable(ctx, disabledIDs)
-			return nil, fmt.Errorf("audit write failed, disable rolled back: %w", err)
-		}
+	rs.logger.Info("all boundaries disabled",
+		"disabled_count", len(disabledIDs),
+		"actor_id", actor.ID,
+	)
 
-		rs.logger.Info("all boundaries disabled",
-			"disabled_count", len(disabledIDs),
-			"audit_id", auditID,
-			"actor_id", actorID,
-		)
-
-		// Publish recovery.completed event (N4: fires regardless of audit config).
-		if rs.eventBus != nil {
-			rs.eventBus.Publish(InvalidationEvent{
-				Type:      EventRecoveryCompleted,
-				EntityID:  "all",
-				Timestamp: rs.nowFunc(),
-			})
-		}
-
-		return &DisableAllResult{
-			DisabledCount: len(disabledIDs),
-			DisabledIDs:   disabledIDs,
-			AuditID:       auditID,
-		}, nil
-	}
-
-	// Publish recovery.completed event even when audit is not configured (N4).
+	// Publish recovery.completed event.
 	if rs.eventBus != nil {
 		rs.eventBus.Publish(InvalidationEvent{
 			Type:      EventRecoveryCompleted,
@@ -178,28 +220,12 @@ func (rs *RecoveryService) DisableAll(ctx context.Context, actorID string) (*Dis
 	return &DisableAllResult{
 		DisabledCount: len(disabledIDs),
 		DisabledIDs:   disabledIDs,
+		AuditIDs:      auditIDs,
 	}, nil
 }
 
-// rollbackDisable attempts to re-enable constraints that were disabled
-// during a failed disable-all operation. Best-effort — errors are logged
-// but not returned.
-func (rs *RecoveryService) rollbackDisable(ctx context.Context, ids []string) {
-	for _, id := range ids {
-		c, err := rs.store.GetAccessConstraint(ctx, id)
-		if err != nil {
-			rs.logger.Error("rollback: failed to get constraint", "id", id, "error", err)
-			continue
-		}
-		c.Disabled = false
-		if _, err := rs.store.UpdateAccessConstraint(ctx, c, 0); err != nil {
-			rs.logger.Error("rollback: failed to re-enable constraint", "id", id, "error", err)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
-// Recovery — re-enable boundaries
+// Recovery — re-enable boundaries, one transaction per boundary
 // ---------------------------------------------------------------------------
 
 // RecoveryResult is the outcome of a recovery operation.
@@ -210,19 +236,26 @@ type RecoveryResult struct {
 	// RecoveredIDs is the list of boundary IDs that were re-enabled.
 	RecoveredIDs []string
 
-	// AuditID is the durable audit ID for this operation.
-	AuditID string
+	// AuditIDs are the event IDs of the history rows written for the
+	// re-enabled boundaries, index-aligned with RecoveredIDs.
+	AuditIDs []string
 }
 
-// RecoverAll re-enables all recovery-disabled boundaries. The operation
-// verifies state consistency before re-enabling. If the audit write fails
-// the recovery is rolled back.
-func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*RecoveryResult, error) {
+// RecoverAll re-enables all recovery-disabled boundaries. It first verifies
+// that every disabled boundary is still valid, then re-enables each one in
+// its own transaction with one recovery_enable history row (classification
+// tighten) carrying that boundary's revisions before and after. On the first
+// failure it returns a *RecoveryPartialError; boundaries re-enabled before
+// the failure stay enabled.
+func (rs *RecoveryService) RecoverAll(ctx context.Context, actor PrincipalContext) (*RecoveryResult, error) {
 	// Acquire the recovery lock.
-	if !rs.recoveryLock.TryAcquire(actorID) {
+	if !rs.recoveryLock.TryAcquire(actor.ID) {
 		return nil, fmt.Errorf("recovery lock already held — another recovery operation is in progress")
 	}
 	defer rs.recoveryLock.Release()
+
+	// One audit operation per call (see DisableAll).
+	ctx = withAccessBoundaryAuditOperation(ctx)
 
 	// Publish recovery.started event.
 	if rs.eventBus != nil {
@@ -262,61 +295,53 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*Rec
 		}
 	}
 
-	// Re-enable all disabled constraints.
-	var recoveredIDs []string
+	var recoveredIDs, auditIDs []string
 	for _, c := range disabledConstraints {
-		c.Disabled = false
-		if _, err := rs.store.UpdateAccessConstraint(ctx, c, 0); err != nil {
-			// Rollback: re-disable already-recovered constraints.
-			rs.rollbackRecovery(ctx, recoveredIDs)
-			return nil, fmt.Errorf("failed to recover constraint %s (rolled back %d): %w", c.ID, len(recoveredIDs), err)
-		}
-		recoveredIDs = append(recoveredIDs, c.ID)
-	}
-
-	// Write the audit entry. If this fails, recovery is rolled back.
-	if rs.auditWriter != nil {
-		auditID, err := rs.auditWriter.WriteAuditEntry(ctx, AuditRequest{
-			ConstraintID:   "all",
-			Operation:      "recovery",
-			ActorID:        actorID,
-			CorrelationID:  correlationIDFromContext(ctx),
-			BeforeRevision: 0,
-			AfterRevision:  int64(len(recoveredIDs)),
-			Classification: ClassificationTighten,
-			ImpactCounts: ImpactCounts{
-				AffectedPrincipals: len(recoveredIDs),
-			},
+		id := c.ID
+		var auditID string
+		err := rs.store.WithTx(ctx, func(tx store.Store) error {
+			before, err := tx.GetAccessConstraint(ctx, id)
+			if errors.Is(err, store.ErrNotFound) {
+				return errRecoveryAlreadyInState // deleted after the list was taken
+			}
+			if err != nil {
+				return fmt.Errorf("load constraint: %w", err)
+			}
+			if !before.Disabled {
+				return errRecoveryAlreadyInState
+			}
+			enabled := *before
+			enabled.Disabled = false
+			after, err := tx.UpdateAccessConstraint(ctx, &enabled, before.Revision)
+			if err != nil {
+				return fmt.Errorf("re-enable constraint: %w", err)
+			}
+			auditID, err = appendRecoveryHistory(ctx, tx, auditevent.AccessBoundaryRecoveryEnable, actor, before, after, ClassificationTighten)
+			return err
 		})
+		if errors.Is(err, errRecoveryAlreadyInState) {
+			continue
+		}
 		if err != nil {
-			// Audit write failed — roll back the recovery.
-			rs.rollbackRecovery(ctx, recoveredIDs)
-			return nil, fmt.Errorf("recovery audit write failed, recovery rolled back: %w", err)
+			return nil, &RecoveryPartialError{
+				Operation:    string(auditevent.AccessBoundaryRecoveryEnable),
+				Committed:    len(recoveredIDs),
+				CommittedIDs: recoveredIDs,
+				AuditIDs:     auditIDs,
+				FailedID:     id,
+				Err:          err,
+			}
 		}
-
-		rs.logger.Info("all boundaries recovered",
-			"recovered_count", len(recoveredIDs),
-			"audit_id", auditID,
-			"actor_id", actorID,
-		)
-
-		// Publish recovery.completed event (N4: fires regardless of audit config).
-		if rs.eventBus != nil {
-			rs.eventBus.Publish(InvalidationEvent{
-				Type:      EventRecoveryCompleted,
-				EntityID:  "all",
-				Timestamp: rs.nowFunc(),
-			})
-		}
-
-		return &RecoveryResult{
-			RecoveredCount: len(recoveredIDs),
-			RecoveredIDs:   recoveredIDs,
-			AuditID:        auditID,
-		}, nil
+		recoveredIDs = append(recoveredIDs, id)
+		auditIDs = append(auditIDs, auditID)
 	}
 
-	// Publish recovery.completed event even when audit is not configured (N4).
+	rs.logger.Info("all boundaries recovered",
+		"recovered_count", len(recoveredIDs),
+		"actor_id", actor.ID,
+	)
+
+	// Publish recovery.completed event.
 	if rs.eventBus != nil {
 		rs.eventBus.Publish(InvalidationEvent{
 			Type:      EventRecoveryCompleted,
@@ -328,17 +353,42 @@ func (rs *RecoveryService) RecoverAll(ctx context.Context, actorID string) (*Rec
 	return &RecoveryResult{
 		RecoveredCount: len(recoveredIDs),
 		RecoveredIDs:   recoveredIDs,
+		AuditIDs:       auditIDs,
 	}, nil
 }
 
-// rollbackRecovery re-disables constraints that were recovered during a
-// failed recovery operation.
-func (rs *RecoveryService) rollbackRecovery(ctx context.Context, ids []string) {
-	for _, id := range ids {
-		if err := rs.store.DisableAccessConstraint(ctx, id); err != nil {
-			rs.logger.Error("recovery rollback: failed to re-disable constraint", "id", id, "error", err)
-		}
+// appendRecoveryHistory writes the single history row for one recovered or
+// disabled constraint inside tx and returns its event ID. before and after
+// are the constraint as read in tx around the mutation.
+func appendRecoveryHistory(
+	ctx context.Context,
+	tx store.Store,
+	action auditevent.AccessBoundaryHistoryAction,
+	actor PrincipalContext,
+	before, after *store.AccessConstraint,
+	classification string,
+) (string, error) {
+	beforeRevision := before.Revision
+	afterRevision := after.Revision
+	event, err := buildAccessConstraintHistoryEvent(ctx, accessConstraintHistoryEventInput{
+		Action:         action,
+		Actor:          actor,
+		Constraint:     after,
+		BeforeRevision: &beforeRevision,
+		AfterRevision:  &afterRevision,
+		Classification: classification,
+	})
+	if err != nil {
+		return "", fmt.Errorf("build audit event: %w", err)
 	}
+	history, err := accessConstraintHistoryFromEvent(event)
+	if err != nil {
+		return "", fmt.Errorf("map audit history: %w", err)
+	}
+	if err := tx.AppendConstraintHistoryTx(ctx, history); err != nil {
+		return "", fmt.Errorf("append audit history: %w", err)
+	}
+	return event.EventID, nil
 }
 
 // ---------------------------------------------------------------------------

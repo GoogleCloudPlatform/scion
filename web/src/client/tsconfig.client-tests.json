@@ -1,35 +1,10 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
-  "include": [
-    "agent-palette-candidate.test.ts",
-    "agent-store.test.ts",
-    "agent-store-feed.test.ts",
-    "agent-store-probe.test.ts",
-    "paginate-all.test.ts",
-    "chat-routes.test.ts",
-    "chat-unread-dms.test.ts",
-    "state.test.ts",
-    "state-message-clear.test.ts",
-    "sorted-log-buffer.test.ts",
-    "main-admin-status.test.ts",
-    "main-auth-me.test.ts",
-    "main-boot-waterfall.test.ts",
-    "main-chat-flag-gate.test.ts",
-    "main-terminal-lazy.test.ts",
-    "main-terminal-load-failure.test.ts",
-    "main-terminal-superseded.test.ts",
-    "main-leave-guard.test.ts",
-    "main-terminal-hides-outlet.test.ts",
-    "main-terminal-loading.test.ts",
-    "main-terminal-loading-handoff.test.ts",
-    "main-terminal-loading-teardown.test.ts",
-    "main-onboarding-base-path.test.ts",
-    "__fixtures__/agent-store-harness.ts",
-    "__fixtures__/request-url.ts",
-    "__fixtures__/main-boot.ts",
-    "__fixtures__/terminal-workspace-fake.ts",
-    "visible-interval.test.ts"
-  ],
-  "exclude": []
+  // Type-checks every client unit test and fixture, which the root project
+  // excludes (ptone/scion#5335). Globs, so a new test file is checked from
+  // its first commit. The terminal tests have their own project
+  // (tsconfig.terminal-tests.json).
+  "include": ["*.test.ts", "__fixtures__/*.ts"],
+  "exclude": ["terminal-*.test.ts"]
 }

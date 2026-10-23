@@ -2968,6 +2968,10 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	// server.shared_dir_storage, read once from the global settings file
+	// through the same env-free loader the brokers use, so the hub's
+	// shared-dir browser and the agents resolve shared dirs from one source.
+	hubCfg.SharedDirStorageConfig, hubCfg.SharedDirStorageError = config.LoadHubSharedDirStorage()
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -4112,7 +4116,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 		return startFlatRuntimeBrokerHost(ctx, flatHostParams{
 			cfg: cfg, hubSrv: hubSrv, webSrv: webSrv, store: s, instances: flatInstances,
-			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc, devAuthToken: devAuthToken,
+			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc,
 			settings: brokerSettings, globalDir: globalDir, autoProvide: autoProvide,
 			requestLogger: requestLogger, messageLogger: messageLogger, wg: wg, errCh: errCh,
 			shutdownContext: shutdownContext,
@@ -4331,7 +4335,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubEndpointForRH != "",
-		HubToken:             devAuthToken,
 		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
 		WorkstationMode:      !hostedMode,
 		TemplateCacheDir:     templateCacheDir,

@@ -350,6 +350,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	var fuseMounts []string
 	var gcsVolumes []gcsVolumeInfo
 
+	// volumeErr is the first configured volume refused below; it fails the
+	// whole call once the volumes have been processed.
+	var volumeErr error
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
 
@@ -378,6 +381,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 
 		src := expandPath(v.Source, false)
+		if _, exists := volumeMap[tgt]; exists {
+			// Already mounted (for example the workspace, checked on its
+			// own path); registerMount below would not add this one.
+			return
+		}
+		// Agents' own directories under ~/.scion/project-configs hold state
+		// the host relies on; no configured volume may mount them
+		// (checkVolumeSource).
+		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
 		registerMount(src, tgt, v.ReadOnly, false)
 	}
@@ -508,16 +525,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				}
 				if ok {
 					registerMount(src, tgt, true, true)
-					if isDir(src) {
-						if config.RuntimeName != appleContainerRuntimeName {
-							if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-								runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-									"agent", config.Name, "error", err)
-							}
-						}
-						if isDir(filepath.Join(src, "agents")) {
-							sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
-						}
+					if err := ensureAgentsMaskPoint(config, src); err != nil {
+						return nil, err
+					}
+					if isDir(filepath.Join(src, "agents")) {
+						sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 					}
 				}
 			}
@@ -560,11 +572,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
-					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-							"agent", config.Name, "error", err)
-					}
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
 				}
 			}
 			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
@@ -584,9 +593,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--workdir", "/workspace")
 		// A workspace that holds a project configuration directory (a
 		// project that keeps its .scion directory in place, or an explicit
-		// workspace pointing at one) gets it read-only, with any agents
-		// root in it masked, as in the shared-workspace layout above.
-		// The agent's own workspace (AgentOwnWorkspace) is left as is.
+		// workspace pointing at one) gets it read-only, with its agents
+		// root masked, as in the shared-workspace layout above: on
+		// Docker/Podman the broker creates the agents dir first (the
+		// read-only mount leaves the runtime no way to create the mount
+		// point), so the mask is always present; Apple masks only an
+		// existing agents dir. The agent's own workspace
+		// (AgentOwnWorkspace) is left as is.
 		if !config.AgentOwnWorkspace {
 			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
 			if err != nil {
@@ -594,6 +607,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
+				}
 				if isDir(filepath.Join(src, "agents")) {
 					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 				}
@@ -614,6 +630,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 	for _, tgt := range dedupedOrder {
 		addVolume(dedupedVolumes[tgt])
+	}
+	if volumeErr != nil {
+		return nil, volumeErr
 	}
 
 	// If workdir was not set by the RepoRoot/Workspace logic above, check if we have an explicit
@@ -807,6 +826,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// equivalent --tmpfs flag. Kubernetes keeps the path out of its pods
 	// itself (k8sWorkspaceAgentsExcluded).
 	if sharedWorkspaceAgentsMask != "" {
+		// Create <workspace>/.scion/agents on the host first, owned by the
+		// broker, so the runtime mounts the tmpfs over an existing directory
+		// rather than creating the mount point through the bind and leaving a
+		// root-owned directory in the user's checkout. The tmpfs then hides
+		// whatever is there.
+		if config.Workspace != "" {
+			_ = os.MkdirAll(filepath.Join(config.Workspace, filepath.FromSlash(sharedWorkspaceAgentsDir)), 0o755)
+		}
 		if config.RuntimeName == appleContainerRuntimeName {
 			addArg("--tmpfs", sharedWorkspaceAgentsMask)
 		} else {
@@ -941,12 +968,13 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 	if err != nil {
 		return false
 	}
-	// `git rev-parse --git-common-dir` (how RepoRoot is ultimately derived,
-	// see pkg/agent/run.go's detectRepoRoot) returns a resolved (symlink-free)
-	// path, while os.UserHomeDir() may itself be reached through a symlink
-	// (e.g. /home -> /var/home). Resolve both sides the same way before
-	// comparing so a symlinked home directory doesn't cause a hub-native base
-	// to be misclassified as linked (and so miss the mount narrowing).
+	// RepoRoot is symlink-resolved by Start and again in buildCommonRunArgs
+	// before this call, whatever its source, and this function resolves
+	// repoAbs itself; os.UserHomeDir() may instead be reached through a
+	// symlink (e.g. /home -> /var/home). Resolve both sides the same way
+	// before comparing so a symlinked home directory doesn't cause a
+	// hub-native base to be misclassified as linked (and so miss the mount
+	// narrowing).
 	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
 		repoAbs = resolved
 	}
@@ -988,6 +1016,13 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // never legitimately needs to write them (identity and credentials are
 // supplied via $HOME/.gitconfig, not .git/config, and there is no
 // in-container `git config --local` write).
+//
+// objects/ stays writable on purpose (in-container commit) and is shared
+// across the project's agents, so this read-only narrowing (here and in
+// narrowSharerRegistryMounts) is not, on its own, complete hardening of the
+// shared store (ptone/scion#4611). The durable fix is a read-only shared
+// store as an alternate plus a writable per-container
+// store.
 //
 // Each subpath is mounted read-only only if it currently exists, so a
 // freshly-cloned base without a config.worktree (the common case —

@@ -736,7 +736,7 @@ func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -800,6 +800,9 @@ func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string)
 // resolved host base (<mount_root>/<share id>) so the caller can
 // pre-populate/inspect the export directly. Must be called BEFORE
 // testServer(t), since HOME must be set before any settings are read.
+// The hub's shared-dir browser reads the block from its in-memory server
+// config, so tests of it also call useNFSSharedDirStorage on the server;
+// the file is still read by the project deletion service.
 func setNFSSharedDirStorageGlobalSettings(t *testing.T) (hostBase string) {
 	t.Helper()
 	tmpHome := t.TempDir()
@@ -822,6 +825,35 @@ server:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 	return hostBase
+}
+
+// useNFSSharedDirStorage gives srv the server.shared_dir_storage block that
+// setNFSSharedDirStorageGlobalSettings wrote, the way the hub holds it after
+// loading its server config at startup: the shared-dir browser reads only
+// the in-memory ServerConfig, never the settings file per request.
+func useNFSSharedDirStorage(srv *Server, hostBase string) {
+	srv.config.SharedDirStorageConfig = nfsSharedDirStorageTestConfig(hostBase)
+}
+
+// nfsSharedDirStorageTestConfig is the in-memory form of the block
+// setNFSSharedDirStorageGlobalSettings writes for hostBase.
+func nfsSharedDirStorageTestConfig(hostBase string) *config.V1SharedDirStorageConfig {
+	return &config.V1SharedDirStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: filepath.Dir(hostBase),
+			Shares:    []config.V1NFSShare{{ID: filepath.Base(hostBase), PVName: "pv"}},
+		},
+	}
+}
+
+// invalidNFSSharedDirStorageTestConfig is an nfs block that fails
+// V1SharedDirStorageConfig.Validate (no mount_root).
+func invalidNFSSharedDirStorageTestConfig() *config.V1SharedDirStorageConfig {
+	return &config.V1SharedDirStorageConfig{
+		Backend: "nfs",
+		NFS:     &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "nfs-export"}}},
+	}
 }
 
 // outsideSecret is the content the handlers must never read out of the tree

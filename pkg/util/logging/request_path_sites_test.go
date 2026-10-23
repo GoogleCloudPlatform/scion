@@ -58,6 +58,7 @@ var requestPathSites = []requestPathSite{
 	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
 	{"auditlog.go", "routeTemplate", "URL.EscapedPath", 1, "classification only: maps the path to a constant route template for the artifact decision log; no path segment is logged"},
 	{"read.go", "serveFileTTL", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
+	{"handlers_projects_core.go", "Server.provisionSharedWorkspace", "URL(bare)", 1, "not a request URL: the project's git clone URL, checked before the clone on the hub host"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_maintenance.go", "Server.handleAdminMaintenanceMigrations", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -96,7 +97,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_access_constraints.go", "Server.handleAdminAccessConstraintPreviews", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_auth.go", "Server.handleTokenByID", "URL.Path", 1, "routing: extracts the token id"},
 	{"handlers_brokers.go", "Server.handleBrokerByIDRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
-	{"handlers_chat_send.go", "Server.authorizeChatSend", "URL(bare)", 1, "not the served request: a synthetic request carrying a chat-send label path"},
+	{"handlers_chat_send.go", "Server.authorizeChatConversation", "URL(bare)", 2, "not the served request: a synthetic request carrying a chat-send label path"},
 	{"handlers_chat_v2.go", "Server.handleChatAttachmentByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatConversationRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatSpaceRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -546,7 +547,7 @@ func goFiles(t *testing.T, dirs ...string) []string {
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../artifacts")
+	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}
