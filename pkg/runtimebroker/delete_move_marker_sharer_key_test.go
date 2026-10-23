@@ -99,8 +99,8 @@ func TestDeleteAgent_ForcedMoveRollback_HubAgentIDSharerStateRefused(t *testing.
 	// The refusal comes from the real check finding the ID-keyed sharer
 	// state, not from the handler's fallbacks.
 	log := logs.String()
-	if !strings.Contains(log, "registered on a shared worktree") && !strings.Contains(log, "a worktree exists") {
-		t.Errorf("the refusal does not name the ID-keyed registration or worktree; log:\n%s", log)
+	if !strings.Contains(log, "registered on a shared worktree") {
+		t.Errorf("the refusal does not name the ID-keyed registration; log:\n%s", log)
 	}
 	for _, fallback := range []string{"cannot check move markers", "no project path"} {
 		if strings.Contains(log, fallback) {
