@@ -262,8 +262,8 @@ The selection logic lives in
 5. Computes the next tag from the highest `vX.Y.Z-preview.N` for the line, comparing `N`
    numerically, or `vX.Y.0-preview.1` if there is none. It fails if that tag exists or if the line
    has already been promoted to stable `vX.Y.Z`.
-6. Pushes the fast-forward of `release/vX.Y` (a plain push, which the remote rejects unless it is
-   a fast-forward) and the new tag.
+6. Pushes the fast-forward of `release/vX.Y` and the new tag in one atomic push (a plain push,
+   which the remote rejects unless the branch update is a fast-forward).
 7. Calls `build-release.yml` with the tag, because tags pushed with `GITHUB_TOKEN` do not start
    other workflows. The build publishes the pre-release, moves the `preview` branch and updates
    `LATEST.json`.

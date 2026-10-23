@@ -77,11 +77,12 @@ jobs:
           SHA: ${{ steps.select.outputs.sha }}
           TAG: ${{ steps.select.outputs.tag }}
         run: |
+          git tag "$TAG" "$SHA"
           # A plain (non-force) push: the remote rejects it unless it is a
           # fast-forward, so a branch that moved since the fetch fails here.
-          git push origin "${SHA}:refs/heads/${BRANCH}"
-          git tag "$TAG" "$SHA"
-          git push origin "refs/tags/${TAG}"
+          # --atomic updates the branch and the tag together or not at all,
+          # so a rejected tag cannot leave the branch moved without a tag.
+          git push --atomic origin "${SHA}:refs/heads/${BRANCH}" "refs/tags/${TAG}"
           echo "tagged=true" >> "$GITHUB_OUTPUT"
           echo "Pushed ${BRANCH} -> ${SHA} and tag ${TAG}" >> "$GITHUB_STEP_SUMMARY"
 
