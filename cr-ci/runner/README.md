@@ -253,8 +253,29 @@ stdin, as a curl config, not in its argv. `curl -q` ignores any `~/.curlrc`,
 so no config file can turn on verbose header output. Responses stay in shell
 memory, and the ID token is cleared before `run.sh` starts. The script never
 uses `set -x`; keep it that way. The JIT config does appear in `run.sh`'s argv,
-as the runner requires. That is acceptable because it is single use and dies
-with the execution.
+as the runner requires.
+
+**Trust boundary: job code can read the runner's credentials.** The entrypoint
+(PID 1), `run.sh`, the runner listener and worker, and every job step run as the same
+uid (`runner`, 1001); there is no boundary between the runner and the job code it runs.
+So job steps can read this runner's ephemeral registration, the JIT config on
+`run.sh`'s argv (`/proc/<pid>/cmdline`), and the spent claim token in
+`/proc/1/environ`. The claim token is worthless by then: single use, already
+exchanged. The JIT config lets a job act as its own runner registration until GitHub
+removes it after the job. sec-review-3 rates this **LOW**, but only because cr-ci
+serves trusted same-repo code:
+- the routing expression's fork-PR guard keeps fork PRs, `pull_request_target`,
+  schedule and workflow_dispatch on `ubuntu-latest`;
+- the mediator's fork guard refuses runners to fork-PR and `pull_request_target` runs;
+- one job runs per runner;
+- the hijack guard and the reaper catch a runner registration that ends up running
+  another job or is left behind.
+
+If untrusted code were ever routed to cr-ci, this would become Medium/High: **the fork
+guards are load-bearing**. The structural fix (a runner-only uid with job steps dropped
+to another uid, or passing the JIT config by file and deleting it once the listener has
+started) is tracked in ptone/scion#5978
+([architecture](../docs/architecture.md#residual-risk-job-code-can-read-the-runners-credentials)).
 
 ## Testing
 
