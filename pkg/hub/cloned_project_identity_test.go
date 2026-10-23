@@ -572,7 +572,11 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 	}{
 		{"project-id file, upload", false, false, true},
 		{"marker file, upload", true, false, true},
-		{"project-id file, broker record present, upload", false, true, true},
+		// No "broker record present, upload" case: without the retired hub
+		// workspace record the broker cannot tell the hub's workspace from
+		// its own on a shared HOME, and the hub no longer sends a workspace
+		// upload for its own hub-managed workspace (a co-located broker gets
+		// the workspace path; a remote broker without a path is refused).
 		{"project-id file, no upload", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
