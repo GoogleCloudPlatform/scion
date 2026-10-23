@@ -979,8 +979,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if sharedLayout {
 		req.ProjectPath = sharedProjectPath
-		if _, statErr := os.Lstat(filepath.Join(sharedProjectPath, "workspace")); os.IsNotExist(statErr) {
-			req.workspaceAbsentAtAdmission = true
+		// A workspace bootstrap is skipped for a shared workspace that was
+		// already provisioned (it carries the provisioning sentinel) when
+		// the create was admitted.
+		if ws, _, ok, wsErr := s.sharedBootstrapWorkspace(req); ok && wsErr == nil {
+			req.workspaceAdmissionChecked = true
+			req.workspaceAbsentAtAdmission = !sharedWorkspaceProvisioned(ws)
 		}
 		var checkErr error
 		if lockErr := s.withWorkspaceLock(ctx, func() {
@@ -2151,6 +2155,32 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "", "", nil
 	}
 
+	// A hub-managed project on the shared Layout: the upload is applied to
+	// the shared workspace under the project's provisioning locks, only
+	// when no provisioner has populated it yet (no sentinel), and the
+	// sentinel is written after it. No broker-local record or workspace
+	// marker is written: the project's identity lives in its configuration
+	// at the project root.
+	if _, rel, shared, _ := s.sharedBootstrapWorkspace(req); shared {
+		skipped, applyErr := s.applySharedBootstrap(ctx, workspaceDir, rel, func(lockCtx context.Context) error {
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
+					"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
+			}
+			return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
+		})
+		if applyErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, applyErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+		if skipped {
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace was provisioned meanwhile",
+				"agent_id", req.ID, "project_id", req.ProjectID)
+		}
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
 		return opts, attemptMsg, httpMessage, err
@@ -2219,7 +2249,18 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 	var workspaceDir string
 	var workspaceRoot string
-	if req.ProjectSlug != "" {
+	sharedWS, _, shared, sharedErr := s.sharedBootstrapWorkspace(req)
+	switch {
+	case sharedErr != nil:
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, sharedErr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
+			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, sharedErr)
+	case shared:
+		// A hub-managed project on the shared Layout: the project's
+		// workspace Mount on the share, below its project root.
+		workspaceRoot = req.ProjectPath
+		workspaceDir = sharedWS
+	case req.ProjectSlug != "":
 		globalDir, gdErr := config.GetGlobalDir()
 		if gdErr != nil {
 			return "", "failed to resolve global dir", failedOpText(opGetGlobalDir),
@@ -2227,7 +2268,7 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
-	} else {
+	default:
 		workspaceRoot = s.config.WorktreeBase
 		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
 	}

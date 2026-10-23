@@ -4460,6 +4460,19 @@ func resolveGID(in ProvisionInput) int {
 	return DefaultOwnerID(in.NFSGID)
 }
 
+// MarkProvisioned writes the provisioning sentinel in sentinelDir (the
+// project state directory, ProjectStateDir, for a shared workspace), so
+// every later provisioner takes the reuse path. The caller holds the
+// provisioning locks (WithWorkspaceProvisionLocks) and has placed the
+// workspace's content first: a broker applying a workspace bootstrap upload
+// into a shared workspace that no provisioner has populated yet.
+func MarkProvisioned(sentinelDir string) error {
+	if sentinelDir == "" || !filepath.IsAbs(sentinelDir) {
+		return errors.New("provision: an absolute sentinel directory is required")
+	}
+	return writeSentinel(filepath.Join(sentinelDir, ProvisionSentinelFile))
+}
+
 // writeSentinel writes the provisioning sentinel file atomically using
 // write-to-temp + rename. The sentinel's existence is the fast-path check
 // that short-circuits re-provisioning.

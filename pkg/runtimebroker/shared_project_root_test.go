@@ -18,6 +18,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -366,5 +368,135 @@ func TestCheckNFSForDispatch_WarnOnlyRefusedOnSharedLayout(t *testing.T) {
 				t.Fatalf("checkNFSForDispatch on a local Layout = %v, want nil (warn only)", err)
 			}
 		})
+	}
+}
+
+// postSharedBootstrapCreate creates an agent of the shared-layout fixture's
+// project with a workspace bootstrap upload.
+func postSharedBootstrapCreate(t *testing.T, f *sharedRootFixture, download func(context.Context, string, string, string) error) *httptest.ResponseRecorder {
+	t.Helper()
+	f.srv.config.StorageBucket = "test-bucket"
+	f.srv.SetWorkspaceDownloader(download)
+	body := fmt.Sprintf(`{
+		"name": "a1", "id": "agent-uuid-a1", "slug": "a1",
+		"projectId": %q, "projectSlug": "web",
+		"workspaceStoragePath": "workspaces/%s/files",
+		"config": {"template": "claude", "sharedWorkspace": true}
+	}`, sharedRootProjectID, sharedRootProjectID)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// A workspace bootstrap for a project on the shared Layout lands in the
+// project's workspace on the share (the Mount the agents use), under the
+// provisioning locks, and leaves the provisioning sentinel; nothing is
+// written broker-locally or into the workspace's .scion.
+func TestCreateAgent_SharedBootstrapTargetsSharedWorkspace(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	var dest string
+	w := postSharedBootstrapCreate(t, f, func(ctx context.Context, bucket, prefix, localPath string) error {
+		dest = localPath
+		return os.WriteFile(filepath.Join(localPath, "downloaded.txt"), []byte("x"), 0o644)
+	})
+	if w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	ws := filepath.Join(f.root, "workspace")
+	if real, _ := filepath.EvalSymlinks(ws); dest != real && dest != ws {
+		t.Fatalf("download target = %q, want the shared workspace %q", dest, ws)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "downloaded.txt")); err != nil {
+		t.Fatalf("the upload should be in the shared workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "provision", ".scion-provisioned")); err != nil {
+		t.Fatalf("the provisioning sentinel should be written: %v", err)
+	}
+	if f.mgr.lastOpts.Workspace != dest {
+		t.Errorf("agent workspace = %q, want %q", f.mgr.lastOpts.Workspace, dest)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, config.DotScion)); !os.IsNotExist(err) {
+		t.Errorf("no workspace marker may be written on the share (err %v)", err)
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(globalDir, "projects", "web")); !os.IsNotExist(err) {
+		t.Errorf("no broker-local project dir may be created (err %v)", err)
+	}
+	if rec, err := config.BrokerWorkspaceRecordPath("web"); err == nil {
+		if _, err := os.Stat(rec); !os.IsNotExist(err) {
+			t.Errorf("no broker workspace record may be written (err %v)", err)
+		}
+	}
+}
+
+// A shared workspace that was already provisioned when the create was
+// admitted (its sentinel exists) is never overwritten from the upload; the
+// create answers with the skipped warning.
+func TestCreateAgent_SharedBootstrapSkipsProvisionedWorkspace(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	ws := filepath.Join(f.root, "workspace")
+	for _, dir := range []string{ws, filepath.Join(f.root, "provision")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "provision", ".scion-provisioned"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	downloaded := false
+	w := postSharedBootstrapCreate(t, f, func(context.Context, string, string, string) error {
+		downloaded = true
+		return nil
+	})
+	if w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	if downloaded {
+		t.Fatal("a provisioned shared workspace must not be downloaded into")
+	}
+	var resp CreateAgentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Agent == nil {
+		t.Fatalf("response: %v %s", err, w.Body.String())
+	}
+	found := false
+	for _, warning := range resp.Agent.Warnings {
+		found = found || warning == bootstrapSkippedWarning
+	}
+	if !found {
+		t.Errorf("warnings = %v, want the skipped warning", resp.Agent.Warnings)
+	}
+}
+
+// A sentinel that appears between admission and the provisioning locks
+// (another provisioner won) also skips the apply; a failing apply writes no
+// sentinel.
+func TestApplySharedBootstrap(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	rel := filepath.Join("projects", sharedRootProjectID, "workspace")
+	ws := filepath.Join(f.layout.HostBase, rel)
+	sentinel := filepath.Join(f.root, "provision", ".scion-provisioned")
+
+	if _, err := f.srv.applySharedBootstrap(context.Background(), ws, rel, func(context.Context) error {
+		return errors.New("download failed")
+	}); err == nil {
+		t.Fatal("a failing apply must fail")
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("no sentinel after a failed apply (err %v)", err)
+	}
+
+	applied := 0
+	skipped, err := f.srv.applySharedBootstrap(context.Background(), ws, rel, func(context.Context) error { applied++; return nil })
+	if err != nil || skipped || applied != 1 {
+		t.Fatalf("first apply = (skipped %v, err %v, applied %d)", skipped, err, applied)
+	}
+	skipped, err = f.srv.applySharedBootstrap(context.Background(), ws, rel, func(context.Context) error { applied++; return nil })
+	if err != nil || !skipped || applied != 1 {
+		t.Fatalf("second apply = (skipped %v, err %v, applied %d), want skipped", skipped, err, applied)
 	}
 }

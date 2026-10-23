@@ -23,6 +23,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 // Hub-managed projects on a shared storage backend (ptone/scion#5823).
@@ -198,4 +200,74 @@ func (s *Server) sharedProjectsWithLocalAgents() []string {
 		}
 	}
 	return out
+}
+
+// sharedBootstrapWorkspace returns the target of a workspace bootstrap for
+// a hub-managed project on the broker's shared Layout (req.ProjectPath is
+// the project's root, set by createAgent): the project's workspace Mount as
+// the agent manager's backend resolves it, Layout.Resolve(workspace) =
+// <ProjectRoot>/workspace, with its path relative to the Layout's host
+// base. ok is false for any other request, which keeps the broker-local
+// target (ptone/scion#5823).
+func (s *Server) sharedBootstrapWorkspace(req CreateAgentRequest) (ws, rel string, ok bool, err error) {
+	layout := s.config.StorageLayout
+	if req.ProjectSlug == "" || !layout.Backend.Shared() || !isSharedHubProjectRoot(req.ProjectPath) {
+		return "", "", false, nil
+	}
+	pr, err := layout.ProjectRoot(req.ProjectID)
+	if err != nil {
+		return "", "", true, err
+	}
+	if filepath.Clean(pr.HostPath) != filepath.Clean(req.ProjectPath) {
+		return "", "", true, fmt.Errorf("project path is not the root of project %s on the shared layout", req.ProjectID)
+	}
+	r, err := layout.Resolve(projectfs.Project{ID: req.ProjectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
+	if err != nil {
+		return "", "", true, err
+	}
+	return r.HostPath, r.RelPath, true, nil
+}
+
+// sharedWorkspaceProvisioned reports whether the shared workspace at ws
+// carries the provisioning sentinel: in the project state directory, or at
+// the workspace root where an older layout kept it.
+func sharedWorkspaceProvisioned(ws string) bool {
+	return provision.SentinelPresent(provision.ProjectStateDir(ws), ws)
+}
+
+// applySharedBootstrap applies a workspace bootstrap to the shared
+// workspace at ws (rel below the Layout's host base) under the project's
+// provisioning locks (provision.WithWorkspaceProvisionLocks, the locks every
+// provisioner of the workspace takes): when the workspace already carries
+// the provisioning sentinel it is left alone (skipped); otherwise apply
+// places the upload and the sentinel is written, so later provisioners
+// reuse it. The workspace and its state directory are created first with
+// the broker's leaf contract (shareddirs.EnsureLeaf).
+func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply func(ctx context.Context) error) (skipped bool, err error) {
+	base, err := filepath.EvalSymlinks(s.config.StorageLayout.HostBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve host base: %w", err)
+	}
+	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
+	for _, leaf := range []string{rel, stateRel} {
+		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
+		if err != nil {
+			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
+		}
+		if err := shareddirs.CloseFd(fd); err != nil {
+			return false, err
+		}
+	}
+	wsPath := filepath.Join(base, rel)
+	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
+		if sharedWorkspaceProvisioned(wsPath) {
+			skipped = true
+			return nil
+		}
+		if err := apply(lockCtx); err != nil {
+			return err
+		}
+		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
+	})
+	return skipped, err
 }
