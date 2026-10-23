@@ -348,8 +348,16 @@ func TestDeleteAgent_MoveReincarnationIDValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d: %s", q, rec.Code, rec.Body.String())
 		}
+		if !strings.Contains(rec.Body.String(), moveRollbackValidationMessage) {
+			t.Errorf("%s: the 400 does not give the rollback delete's rules (%q): %s", q, moveRollbackValidationMessage, rec.Body.String())
+		}
 	}
 }
+
+// moveRollbackValidationMessage is the broker's 400 text for a malformed
+// forced move's rollback delete; it names every option such a delete must
+// not carry, removeBranch included.
+const moveRollbackValidationMessage = "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained"
 
 // A forced move's reincarnation ID on a create that is not provision-only
 // is refused (400) before anything runs.
