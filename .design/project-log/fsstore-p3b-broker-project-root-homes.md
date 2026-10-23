@@ -49,8 +49,12 @@ the start.
 - Agents provisioned before the move in a non-shared mode keep their state in
   `~/.scion/projects/<slug>/.scion/agents/<name>`; look-ups fall back to it
   read-only (temporary, retired with ptone/scion#5835) and agent delete removes
-  it. Their persisted workspace lies under that legacy directory, so a restart
-  from the project root is refused cleanly by the workspace containment check.
+  it. When such an agent has its own agent-scoped workspace in that directory
+  (clone-per-agent, possibly with unpushed work), exactly that agent directory
+  is admitted as an extra workspace root until the agent is recreated (logged
+  once per agent); a shared or project-scoped workspace is never admitted from
+  the legacy tree, and such an agent's restart is refused cleanly. Upgrade
+  note: push the work of these agents and recreate them at your convenience.
 - A broker without its own mount of the share now refuses: leaf creation no
   longer leaves directories to the node, and on a shared Layout the NFS
   dispatch check refuses a Kubernetes or Cloud Run dispatch whose share is not
