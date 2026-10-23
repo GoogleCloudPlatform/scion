@@ -853,10 +853,11 @@ func TestAdminUserInvite_CharacterizationOnSharedCore(t *testing.T) {
 	// The mutation audit table is not written by invite.
 	assert.Empty(t, provisionAudits(t, s, ""))
 
-	// Bulk invite (only its email rule moved to NormalizeInviteEmail):
-	// response shape, counts, the user_invited_bulk event and the
-	// bulk_invited publication are unchanged. Invalid emails are skipped
-	// silently, as before.
+	// Bulk invite shares the core and the email rule. Since the batch
+	// invite change (ptone/scion#4952) it reports one result per input
+	// entry, counts invalid entries in total, and records one user_invited
+	// per created row before its user_invited_bulk event; the bulk_invited
+	// publication is unchanged.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", map[string]interface{}{"emails": []map[string]string{
 		{"email": " Bob@Example.com "}, {"email": "alice@example.com"}, {"email": "not-an-email"}, {"email": "carol@example.com", "note": "n"},
 	}})
@@ -868,18 +869,24 @@ func TestAdminUserInvite_CharacterizationOnSharedCore(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	assert.Equal(t, []string{"errors", "invited", "skipped", "total"}, keys, "bulk response shape unchanged")
+	assert.Equal(t, []string{"batchId", "complete", "counts", "invited", "results", "skipped", "total"}, keys, "bulk response shape")
 	assert.Equal(t, float64(2), raw["invited"])
 	assert.Equal(t, float64(1), raw["skipped"])
-	assert.Equal(t, float64(3), raw["total"])
+	assert.Equal(t, float64(4), raw["total"])
 	assert.Equal(t, store.UserStatusInvited, userByEmail(t, s, "bob@example.com").Status)
 	logger.mu.Lock()
-	require.Len(t, logger.invite, 2)
-	bulkEv := logger.invite[1]
+	require.Len(t, logger.invite, 4)
+	perUser := []*InviteAuditEvent{logger.invite[1], logger.invite[2]}
+	bulkEv := logger.invite[3]
 	logger.mu.Unlock()
+	for i, email := range []string{"bob@example.com", "carol@example.com"} {
+		assert.Equal(t, InviteAuditUserInvited, perUser[i].EventType)
+		assert.Equal(t, email, perUser[i].Email)
+	}
 	assert.Equal(t, InviteAuditUserInvitedBulk, bulkEv.EventType)
 	assert.Equal(t, 2, bulkEv.Count)
-	assert.Equal(t, map[string]string{"skipped": "1"}, bulkEv.Details)
+	assert.Equal(t, "1", bulkEv.Details["already_invited"])
+	assert.Equal(t, "1", bulkEv.Details["invalid"])
 	assert.Equal(t, []string{"invited:alice@example.com", "bulk_invited:"}, spy.actions())
 }
 
