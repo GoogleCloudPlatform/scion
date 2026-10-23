@@ -126,3 +126,37 @@ func TestHubGCPProjectID_SchemaAcceptsKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, errs, "a non-string server.hub.gcp_project_id must not validate")
 }
+
+// writeHubGCPProjectLegacyHome writes settings.yaml (settingsYAML) and a
+// legacy server.yaml that sets hub.gcpProjectId, and returns the global dir.
+func writeHubGCPProjectLegacyHome(t *testing.T, settingsYAML string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_SERVER_HUB_GCPPROJECTID", "")
+	globalDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "server.yaml"), []byte("hub:\n  gcpProjectId: legacy-project\n"), 0o644))
+	return globalDir
+}
+
+// settings.yaml with a server block replaces server.yaml as a whole, not
+// key by key: a legacy hub.gcpProjectId is not read when the server block
+// has no gcp_project_id.
+func TestHubGCPProjectID_ServerBlockIgnoresLegacyServerYAML(t *testing.T) {
+	globalDir := writeHubGCPProjectLegacyHome(t, "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n")
+	gc, err := LoadGlobalConfig(globalDir)
+	require.NoError(t, err)
+	assert.Equal(t, 9810, gc.Hub.Port, "the settings.yaml server block is used")
+	assert.Empty(t, gc.Hub.GCPProjectID, "server.yaml is ignored as a whole")
+}
+
+// Without a server key in settings.yaml, the legacy server.yaml is read and
+// its hub.gcpProjectId applies.
+func TestHubGCPProjectID_LegacyServerYAMLWithoutServerBlock(t *testing.T) {
+	globalDir := writeHubGCPProjectLegacyHome(t, "schema_version: \"1\"\n")
+	gc, err := LoadGlobalConfig(globalDir)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-project", gc.Hub.GCPProjectID)
+}
