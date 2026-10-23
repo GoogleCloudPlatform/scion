@@ -2602,10 +2602,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// nothing unless every agent directory that exists carries that move's
 	// marker (see the check after the target is resolved).
 	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
-	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || removeBranch || projectID == "" ||
 		query.Get(api.PurgeRetainedQueryParam) == "true") {
 		span.SetStatus(codes.Error, "invalid forced move rollback delete")
-		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained", nil)
 		return
 	}
 	// purgeRetained removes the retained files of a soft-deleted agent once

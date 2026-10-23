@@ -332,7 +332,8 @@ func TestDeleteAgent_ForcedMoveRollbackNeedsMoveMarker(t *testing.T) {
 	}
 }
 
-// A forced move's rollback delete must be a project-scoped files delete.
+// A forced move's rollback delete must be a project-scoped files delete
+// that never removes a branch.
 func TestDeleteAgent_MoveReincarnationIDValidation(t *testing.T) {
 	var entries []api.AgentInfo
 	var deleted []string
@@ -341,6 +342,7 @@ func TestDeleteAgent_MoveReincarnationIDValidation(t *testing.T) {
 		"deleteFiles=false&projectId=" + scopeProjB,
 		"deleteFiles=true&localOnly=true&projectId=" + scopeProjB,
 		"deleteFiles=true",
+		"deleteFiles=true&removeBranch=true&projectId=" + scopeProjB,
 	} {
 		rec := doDelete(t, srv, "dev", q+"&"+api.MoveReincarnationIDQueryParam+"=reincarnation-1")
 		if rec.Code != http.StatusBadRequest {
