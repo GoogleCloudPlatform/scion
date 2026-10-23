@@ -329,6 +329,40 @@ describe('scion-chat-thread starred messages', () => {
     expect(row.hasAttribute('aria-checked')).toBe(false);
   });
 
+  it('sends no state request for a live message, which starts unstarred', async () => {
+    setFlag(true);
+    routeHub({ starred: [M1] });
+    const el = await mount();
+    await vi.waitFor(() => expect(starAction(el, M1)?.checked).toBe(true));
+    expect(stateCalls()).toHaveLength(1);
+
+    const M3 = '00000000-0000-4000-8000-000000000003';
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: M3,
+            conversationKey: TOPIC,
+            projectId: 'p1',
+            sender: 'user:other@example.com',
+            senderId: 'user-other',
+            msg: 'live hello',
+            type: 'chat',
+            createdAt: '2026-10-20T11:00:00Z',
+          },
+        },
+      })
+    );
+    await vi.waitFor(() =>
+      expect((el as unknown as { messages: Message[] }).messages.some((m) => m.id === M3)).toBe(
+        true
+      )
+    );
+    await new Promise((r) => setTimeout(r, 120));
+    expect(stateCalls()).toHaveLength(1);
+    expect(starAction(el, M3)).toMatchObject({ label: 'Star message', disabled: false });
+  });
+
   it('offers no star action in a DM in phase 1', async () => {
     setFlag(true);
     routeHub({});

@@ -1538,9 +1538,6 @@ export class ScionChatThread extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     this.measureSendErrorTruncation();
     this.observeSendError();
-    if (changedProperties.has('messages') || changedProperties.has('conversationKey')) {
-      this.scheduleStarLoad();
-    }
     // The typing indicator is in the list on a phone or tablet: when it
     // appears or goes, a list at the bottom stays at the bottom.
     if (
@@ -2295,6 +2292,7 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
       return true;
     } catch (err) {
@@ -2474,6 +2472,10 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages([msg]);
+      // A live message starts unstarred without a state request (one per
+      // arriving message per viewer otherwise); a star made elsewhere
+      // publishes an invalidation that corrects it.
+      if (this.starsActive) this.stars.markLive([msg.id]);
       // A payload with no real createdAt would otherwise record (or, worse,
       // "correct" a pending provisional record with) a fabricated
       // viewing-time timestamp — the recent-files record must use the
@@ -2748,6 +2750,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
+    this.scheduleStarLoad();
     this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
@@ -3366,6 +3369,8 @@ export class ScionChatThread extends LitElement {
         // non-provisional) correct it — even if the corrected time is
         // earlier.
         if (resData?.id) {
+          // The sent message's server ID: unstarred, without a request.
+          if (this.starsActive) this.stars.markLive([resData.id]);
           this.recordRecentFiles({ ...optimisticMsg, id: resData.id }, resData.attachments ?? [], {
             provisional: true,
             scopeGeneration: recentFilesGeneration,
@@ -4541,6 +4546,7 @@ export class ScionChatThread extends LitElement {
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
     } catch (err) {
       console.error('Failed to fetch around message:', err);
@@ -4832,7 +4838,8 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Fetch the star state of the loaded messages not yet known, once per
-   * batch of loaded messages (a history page, an older page, a jump).
+   * history load (the first page, an older page, an around jump, a
+   * catch-up backfill). Live appends are not fetched (markLive).
    */
   private scheduleStarLoad(): void {
     if (!this.starsActive) return;
@@ -4959,6 +4966,8 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
+    // Star states whose request failed are retried when a menu opens.
+    if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
     this.contextMenuAsSheet = shouldUseMenuSheet();

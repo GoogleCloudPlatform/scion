@@ -188,9 +188,15 @@ const MAX_TRACKED = 2000;
  * Per-conversation star state of loaded messages, for the indicator and
  * the Star/Unstar toggle, plus change notification for star lists.
  *
- * - `load(ids)` fetches the state of IDs not yet known, in batches of
- *   STAR_STATE_BATCH. A failed fetch leaves them unknown (never inferred
- *   unstarred).
+ * - `load(ids)` fetches the state of IDs not yet known (one history
+ *   page), in batches of STAR_STATE_BATCH. A failed batch leaves its IDs
+ *   unknown (never inferred unstarred), the other batches still run, and
+ *   the failed IDs are retried by the next `invalidate()` or
+ *   `retryFailed()`.
+ * - `markLive(ids)` records messages that just arrived live (an SSE
+ *   append, a sent message's server ID) as unstarred without a request:
+ *   a new message has no star yet, and a star made elsewhere publishes an
+ *   invalidation that corrects it.
  * - `setStarred` sends the desired state, one request in flight per
  *   message, optimistic with a pending flag; a failure restores the prior
  *   state and rethrows.
@@ -218,6 +224,8 @@ export class ChatStarsController extends EventTarget {
   private invalidations = 0;
   /** IDs whose state answer was stale, refetched by the next refresh. */
   private readonly stale = new Set<string>();
+  /** IDs whose state request failed, retried by the next refresh. */
+  private readonly failed = new Set<string>();
   /** Bumped when a local mutation starts and when it is confirmed. */
   private mutationSeq = 0;
   /** The last `mutationSeq` of each locally mutated message. */
@@ -242,6 +250,7 @@ export class ChatStarsController extends EventTarget {
     this.states.clear();
     this.pending.clear();
     this.stale.clear();
+    this.failed.clear();
     this.mutatedAt.clear();
     this.refreshAgain = false;
     this.emit('change');
@@ -269,6 +278,26 @@ export class ChatStarsController extends EventTarget {
   }
 
   /**
+   * Record messages that arrived live as unstarred, without a request.
+   * Known, pending and unstarrable IDs are left alone.
+   */
+  markLive(messageIds: readonly string[]): void {
+    let changed = false;
+    for (const id of messageIds) {
+      if (!isStarrableMessageId(id) || this.states.has(id) || this.pending.has(id)) continue;
+      this.track(id, false);
+      changed = true;
+    }
+    if (changed) this.emit('change');
+  }
+
+  /** Refetch the IDs whose state request failed (a menu open), if any. */
+  async retryFailed(): Promise<void> {
+    if (this.failed.size === 0) return;
+    await this.refresh();
+  }
+
+  /**
    * Refetch the state of every known message. Invalidations that arrive
    * while a refresh runs coalesce into one more refresh afterwards.
    */
@@ -287,8 +316,9 @@ export class ChatStarsController extends EventTarget {
     try {
       do {
         this.refreshAgain = false;
-        const ids = new Set([...this.states.keys(), ...this.stale]);
+        const ids = new Set([...this.states.keys(), ...this.stale, ...this.failed]);
         this.stale.clear();
+        this.failed.clear();
         await this.fetchStates([...ids]);
       } while (this.refreshAgain || this.stale.size > 0);
     } finally {
@@ -341,11 +371,15 @@ export class ChatStarsController extends EventTarget {
       try {
         starred = await this.api.fetchStarState(batch);
       } catch {
-        // Unknown stays unknown: never infer unstarred from a failure.
-        return;
-      } finally {
+        // Unknown stays unknown: never infer unstarred from a failure. The
+        // other batches still run; these IDs are retried by the next
+        // refresh (an invalidation, a reconnect, a menu open).
         this.inflight--;
+        if (generation !== this.generation) return;
+        for (const id of batch) this.failed.add(id);
+        continue;
       }
+      this.inflight--;
       if (generation !== this.generation) return;
       if (invalidations !== this.invalidations) {
         // An invalidation arrived while this request ran: its answer may

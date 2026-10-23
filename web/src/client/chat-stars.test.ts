@@ -232,6 +232,57 @@ describe('ChatStarsController', () => {
     expect(c.state(M1)).toBe('starred');
   });
 
+  it('keeps loading after a failed batch and retries it on the next invalidation', async () => {
+    let call = 0;
+    const fetchState = vi.fn((ids: readonly string[]) => {
+      call++;
+      if (call === 1) return Promise.reject(new Error('offline'));
+      return Promise.resolve(ids.filter((id) => id === mid(0) || id === mid(300)));
+    });
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    const ids = Array.from({ length: 450 }, (_, i) => mid(i));
+    await c.load(ids);
+    expect(fetchState).toHaveBeenCalledTimes(3);
+    expect(c.state(mid(0))).toBe('unknown'); // batch 1 failed
+    expect(c.state(mid(300))).toBe('starred'); // batch 2 still ran
+    expect(c.state(mid(449))).toBe('unstarred'); // batch 3 still ran
+
+    await c.invalidate();
+    const retried = fetchState.mock.calls.slice(3).flatMap((cl) => cl[0]);
+    expect(retried).toEqual(expect.arrayContaining([mid(0), mid(199)]));
+    expect(c.state(mid(0))).toBe('starred');
+    expect(c.state(mid(199))).toBe('unstarred');
+  });
+
+  it('retries failed IDs on retryFailed and does nothing when none failed', async () => {
+    let fail = true;
+    const fetchState = vi.fn(() =>
+      fail ? Promise.reject(new Error('offline')) : Promise.resolve([M1])
+    );
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    await c.load([M1]);
+    expect(c.state(M1)).toBe('unknown');
+    fail = false;
+    await c.retryFailed();
+    expect(c.state(M1)).toBe('starred');
+    await c.retryFailed();
+    expect(fetchState).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks live messages unstarred without a request, leaving known ones alone', async () => {
+    const fetchState = vi.fn(() => Promise.resolve([M1]));
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('t1');
+    await c.load([M1]);
+    c.markLive([M1, M2, 'local-row']);
+    expect(c.state(M1)).toBe('starred');
+    expect(c.state(M2)).toBe('unstarred');
+    expect(c.state('local-row')).toBe('unknown');
+    expect(fetchState).toHaveBeenCalledTimes(1);
+  });
+
   it('refetches the IDs of a load that was in flight during an invalidation', async () => {
     const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
     const fetchState = vi.fn(() => {
