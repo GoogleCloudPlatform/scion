@@ -17,10 +17,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -85,6 +87,15 @@ type mockAuthzStore struct {
 	projects              []store.Project                     // injectable project list for wildcard expansion tests
 	projectMemberships    map[string]*store.ProjectMembership // key: "projectID:userID"
 	listProjectsReturnNil bool                                // when true, ListProjects returns (nil, nil)
+
+	// Project paging (ptone/scion#1741). projectPageSize > 0 serves
+	// projects in pages of that size with an index cursor; it is capped by
+	// the request's Limit when that is smaller.
+	projectPageSize       int
+	listProjectsErrAfter  int  // > 0: calls after this many fail
+	stuckProjectCursor    bool // every page is the first, with the same cursor
+	listProjectsCalls     int
+	lastListProjectsLimit int
 }
 
 // sseMessageIDs returns the message ids of the events written to an SSE body.
@@ -300,15 +311,43 @@ func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*
 	return nil, nil
 }
 
-func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, _ store.ListOptions) (*store.ListResult[store.Project], error) {
+func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsCalls++
+	m.lastListProjectsLimit = opts.Limit
 	if m.listProjectsReturnNil {
 		return nil, nil
+	}
+	if m.listProjectsErrAfter > 0 && m.listProjectsCalls > m.listProjectsErrAfter {
+		return nil, errors.New("list projects failed")
 	}
 	items := m.projects
 	if items == nil {
 		items = []store.Project{}
 	}
-	return &store.ListResult[store.Project]{Items: items, TotalCount: len(items)}, nil
+	if m.projectPageSize <= 0 {
+		return &store.ListResult[store.Project]{Items: items, TotalCount: len(items)}, nil
+	}
+	size := m.projectPageSize
+	if opts.Limit > 0 && opts.Limit < size {
+		size = opts.Limit
+	}
+	start := 0
+	if opts.Cursor != "" && !m.stuckProjectCursor {
+		n, err := strconv.Atoi(opts.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		start = n
+	}
+	end := min(start+size, len(items))
+	res := &store.ListResult[store.Project]{Items: items[start:end]}
+	switch {
+	case m.stuckProjectCursor:
+		res.NextCursor = "stuck"
+	case end < len(items):
+		res.NextCursor = strconv.Itoa(end)
+	}
+	return res, nil
 }
 
 func (w *sseFlushWriter) Flush() {

@@ -226,8 +226,10 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		}
 	}
 
-	// Check project-level
-	if projectPath != "" {
+	// Check project-level. A hub-managed workspace root without a .scion
+	// entry has no project tier: its own harness-configs/ is workspace
+	// content.
+	if projectPath != "" && !isHubWorkspaceRootWithoutScion(projectPath) {
 		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
 		searched = append(searched, projectHarnessConfigDir)
 		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {

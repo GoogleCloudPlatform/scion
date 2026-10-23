@@ -25,6 +25,14 @@
  * and, for its owner or an admin, offers Move…. Rows open the artifact page.
  * Owner and project names are looked up best-effort; the ids are shown when
  * a lookup is not allowed.
+ *
+ * New artifact (ptone/scion#5477) opens the publish dialog with a project
+ * picker. The page checks whether the user may publish anywhere (global
+ * project first, stopping at the first publishable one): the button is
+ * disabled while that runs, disabled with an explanation when there is
+ * nowhere, and enabled otherwise, including when the check failed (the
+ * dialog then shows the error). A finished load in the dialog updates the
+ * button. After publishing, the user lands on the new artifact's page.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -37,7 +45,12 @@ import {
   ARTIFACTS_FLAG,
   artifactListUrl,
   artifactPagePath,
+  canPublishIn,
+  filterPublishable,
+  findGlobalProject,
+  listReadableProjects,
   type Artifact,
+  type ArtifactResponse,
   type ArtifactAccess,
   type ArtifactListItem,
   type ArtifactListResponse,
@@ -45,7 +58,10 @@ import {
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
+import { shortId } from '../../client/principal-names.js';
 import '../shared/artifact-move-dialog.js';
+import '../shared/artifact-publish-dialog.js';
 import './not-found.js';
 
 /** How each access value is shown in the Access column. */
@@ -58,6 +74,16 @@ const ACCESS_BADGES: Record<ArtifactAccess, { label: string; variant: string; ic
 /** The reference page for artifacts on the documentation site. */
 export const ARTIFACTS_DOCS_URL =
   'https://googlecloudplatform.github.io/scion/reference/artifacts/';
+
+/** Why New artifact is disabled when the user may publish nowhere. */
+export const NOWHERE_TO_PUBLISH =
+  "You can't publish in any of your projects. Ask a project owner for access.";
+
+/**
+ * Whether the user may publish somewhere: still checking, yes, no, or
+ * unknown (the check failed; the dialog shows why).
+ */
+type PublishAccess = 'checking' | 'yes' | 'no' | 'unknown';
 
 /** Delay before a search box change reloads the list. */
 const SEARCH_DEBOUNCE_MS = 300;
@@ -81,14 +107,21 @@ export class ScionPageArtifacts extends LitElement {
   @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
   @state() private names = new Map<string, string>();
+  @state() private publishAccess: PublishAccess = 'checking';
+  @state() private publishOpen = false;
 
   /** Bumped on every reload, so a slow response for old filters is dropped. */
   private generation = 0;
+  /** Bumped per publish check, so a stale result is dropped. */
+  private publishGen = 0;
+  /** Cancels the running publish check. */
+  private publishAbort: AbortController | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private requested = new Set<string>();
 
   static override styles = [
     listPageStyles,
+    ownerDeletedStyles,
     css`
       .subtitle {
         margin: -1rem 0 1.25rem;
@@ -130,6 +163,9 @@ export class ScionPageArtifacts extends LitElement {
         justify-content: center;
         margin-top: 1rem;
       }
+      .nowhere {
+        font-size: 0.875rem;
+      }
       .empty-actions {
         display: flex;
         flex-wrap: wrap;
@@ -148,11 +184,67 @@ export class ScionPageArtifacts extends LitElement {
       return;
     }
     void this.load();
+    void this.checkPublishAccess();
+  }
+
+  /** Stops the running publish check, if any; its result is dropped. */
+  private cancelPublishCheck(): void {
+    this.publishGen++;
+    this.publishAbort?.abort();
+    this.publishAbort = null;
+  }
+
+  /**
+   * Works out whether the user may publish in any project: the global
+   * project first, looked up on its own; only when it is missing or not
+   * publishable are the other projects listed and checked, stopping at the
+   * first publishable one.
+   */
+  private async checkPublishAccess(): Promise<void> {
+    this.cancelPublishCheck();
+    const gen = this.publishGen;
+    const abort = new AbortController();
+    this.publishAbort = abort;
+    const signal = abort.signal;
+    const current = (): boolean => gen === this.publishGen && this.isConnected;
+    this.publishAccess = 'checking';
+    try {
+      const global = await findGlobalProject(signal);
+      if (!current()) return;
+      if (global && (await canPublishIn(global.id, signal))) {
+        if (current()) this.publishAccess = 'yes';
+        return;
+      }
+      if (!current()) return;
+      const { projects } = await listReadableProjects({ skip: global?.id, signal });
+      if (!current()) return;
+      const found = await filterPublishable(projects, { firstOnly: true, signal });
+      if (!current()) return;
+      this.publishAccess = found.length > 0 ? 'yes' : 'no';
+    } catch {
+      if (!current()) return;
+      this.publishAccess = 'unknown';
+    } finally {
+      if (this.publishAbort === abort) this.publishAbort = null;
+    }
+  }
+
+  /** The dialog finished loading the choices: that settles the button. */
+  private onChoices(e: CustomEvent<{ count: number }>): void {
+    // Stop a page check still running: the dialog's answer is complete.
+    this.cancelPublishCheck();
+    this.publishAccess = e.detail.count > 0 ? 'yes' : 'no';
+  }
+
+  private onPublished(e: CustomEvent<ArtifactResponse>): void {
+    this.publishOpen = false;
+    navigateTo(artifactPagePath(e.detail.artifact));
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.cancelPublishCheck();
   }
 
   private get filtered(): boolean {
@@ -313,10 +405,49 @@ export class ScionPageArtifacts extends LitElement {
     return html`
       <div class="header">
         <h1>Artifacts</h1>
+        <div class="header-actions">${this.renderNewButton()}</div>
       </div>
       <p class="subtitle">Artifacts you own, shared with you, or published in your projects.</p>
       ${this.renderFilterBar()} ${this.renderBody()}
+      <scion-artifact-publish-dialog
+        chooseProject
+        ?open=${this.publishOpen}
+        @artifact-published=${(e: CustomEvent<ArtifactResponse>): void => this.onPublished(e)}
+        @artifact-publish-choices=${(e: CustomEvent<{ count: number }>): void => this.onChoices(e)}
+        @artifact-publish-closed=${(): void => {
+          this.publishOpen = false;
+        }}
+      ></scion-artifact-publish-dialog>
     `;
+  }
+
+  private renderNewButton(): TemplateResult {
+    const disabled = this.publishAccess === 'checking' || this.publishAccess === 'no';
+    const button = html`<sl-button
+      class="new-artifact"
+      size="small"
+      variant="primary"
+      ?disabled=${disabled}
+      @click=${(): void => {
+        this.publishOpen = true;
+      }}
+    >
+      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+      New artifact
+    </sl-button>`;
+    if (this.publishAccess !== 'no') return button;
+    // A disabled button gets no pointer or focus events: the wrapper takes
+    // them, so hovering or tabbing to it shows why.
+    return html`<sl-tooltip content=${NOWHERE_TO_PUBLISH}>
+      <span
+        class="nowhere-wrap"
+        role="button"
+        tabindex="0"
+        aria-disabled="true"
+        aria-label=${`New artifact: ${NOWHERE_TO_PUBLISH}`}
+        >${button}</span
+      >
+    </sl-tooltip>`;
   }
 
   private renderFilterBar(): TemplateResult {
@@ -430,6 +561,9 @@ export class ScionPageArtifacts extends LitElement {
           Artifacts are documents and reports that you and your agents publish. Ones you own, ones
           shared with you, and ones published in your projects appear here.
         </p>
+        ${this.publishAccess === 'no'
+          ? html`<p class="nowhere muted">${NOWHERE_TO_PUBLISH}</p>`
+          : nothing}
         <div class="empty-actions">
           <sl-button variant="primary" href="/projects">
             <sl-icon slot="prefix" name="folder"></sl-icon>
@@ -501,9 +635,12 @@ export class ScionPageArtifacts extends LitElement {
         <td class="hide-mobile">${this.renderProject(a)}</td>
         <td title=${formatInstant(a.updatedAt)}>${formatRelative(a.updatedAt)}</td>
         <td>
+          ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
           ${a.reviewPending
             ? html`<sl-badge variant="warning" pill>Review pending</sl-badge>`
-            : html`<span class="muted">—</span>`}
+            : a.ownerDeleted
+              ? nothing
+              : html`<span class="muted">—</span>`}
         </td>
       </tr>
     `;
@@ -543,11 +680,15 @@ export class ScionPageArtifacts extends LitElement {
     if (a.ownerKind === 'user' && a.ownerRef === this.pageData?.user?.id) {
       return html`<strong>You</strong>`;
     }
-    const name = this.names.get(`${a.ownerKind}:${a.ownerRef}`) || a.ownerRef;
+    // A deleted owner's name may no longer be found: show its short id
+    // then, struck through like the name (mock S1).
+    const known = this.names.get(`${a.ownerKind}:${a.ownerRef}`);
+    const name = known || (a.ownerDeleted ? shortId(a.ownerRef) : a.ownerRef);
+    const shown = a.ownerDeleted ? html`<span class="owner-gone">${name}</span>` : html`${name}`;
     if (a.ownerKind === 'agent') {
-      return html`${name} <span class="agent-tag">(agent)</span>`;
+      return html`${shown} <span class="agent-tag">(agent)</span>`;
     }
-    return html`${name}`;
+    return shown;
   }
 }
 

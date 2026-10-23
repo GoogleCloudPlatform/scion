@@ -19,7 +19,9 @@
  * the project, and those other projects shared with it, that the caller can
  * read, newest first, with search, a "Shared with this project" filter,
  * paging and a New artifact button. A shared row is badged and names the
- * project it comes from. A row opens the artifact's page.
+ * project it comes from; a row whose owner was deleted has the Owner
+ * deleted badge and its owner struck through. A row opens the artifact's
+ * page.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -29,8 +31,14 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { navigateTo } from '../../client/navigation.js';
 import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
-import { principalLabel, principalName, projectName } from '../../client/principal-names.js';
+import {
+  principalLabel,
+  principalName,
+  projectName,
+  shortId,
+} from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
+import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
 import './artifact-publish-dialog.js';
 
 /** Delay before a search runs, so typing does not send a request per key. */
@@ -63,6 +71,7 @@ export class ScionArtifactList extends LitElement {
   private abort: AbortController | null = null;
 
   static override styles = css`
+    ${ownerDeletedStyles}
     :host {
       display: block;
     }
@@ -306,6 +315,14 @@ export class ScionArtifactList extends LitElement {
     return principalLabel(item.ownerKind, item.ownerRef, name, this.currentUserId);
   }
 
+  /** A deleted owner: the name struck through, and the "(agent)" tag outside it (mock S1). */
+  private goneOwner(item: ArtifactListItem): TemplateResult {
+    const name = this.names.get(`${item.ownerKind}:${item.ownerRef}`) || shortId(item.ownerRef);
+    return html`<span class="owner-gone">${name}</span>${item.ownerKind === 'agent'
+        ? ' (agent)'
+        : ''}`;
+  }
+
   /** New artifact, only for a caller the list says may publish here. */
   private newButton(): TemplateResult | typeof nothing {
     if (!this.canCreate) return nothing;
@@ -363,7 +380,7 @@ export class ScionArtifactList extends LitElement {
             <th>Owner</th>
             <th>Version</th>
             <th>Updated</th>
-            <th>Review</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
@@ -397,10 +414,11 @@ export class ScionArtifactList extends LitElement {
                     : nothing}
                   ${item.key ? html`<span class="key">${item.key}</span>` : nothing}
                 </td>
-                <td>${this.owner(item)}</td>
+                <td>${item.ownerDeleted ? this.goneOwner(item) : this.owner(item)}</td>
                 <td>v${item.currentSeq}</td>
                 <td class="muted">${formatInstant(item.updatedAt)}</td>
                 <td>
+                  ${item.ownerDeleted ? ownerDeletedBadge(item.ownerKind) : nothing}
                   ${item.reviewPending
                     ? html`<sl-badge pill variant="warning">Review pending</sl-badge>`
                     : nothing}
