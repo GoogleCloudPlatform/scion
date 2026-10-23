@@ -1753,7 +1753,7 @@ them:
 | `agent_token_file` | The agent token file of an agent container, whatever kind of token it holds. It **takes precedence over `SCION_HUB_TOKEN`**: inside an agent container doctor uses the agent's identity even when `SCION_HUB_TOKEN` is set. |
 | `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
 | `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
-| `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
+| `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). Reported only when that credential is sent; otherwise the source is `transport` or `none`. For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
 | `transport` | No Hub credential was found; only the transport (proxy) credential configured in the environment, for example for IAP, is attached, when its token can be obtained. If fetching that token fails at request time, the request is sent without it. |
 | `none` | No credential was found; requests are sent without one. |
 
