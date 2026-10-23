@@ -468,7 +468,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 	}
 
 	// Compute content hash from file hashes
-	contentHash := transfer.ComputeContentHash(req.Manifest.Files)
+	contentHash := transfer.ComputeContentHashV2(req.Manifest.Files)
 
 	// Calculate total bytes transferred
 	var totalBytes int64

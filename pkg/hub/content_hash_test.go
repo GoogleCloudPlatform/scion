@@ -22,10 +22,10 @@ import (
 )
 
 // TestComputeContentHashMatchesTransfer guards against drift between the hub's
-// content-hash adapter and the canonical transfer.ComputeContentHash used by
-// the broker-side hydrator. If these two diverge, cache lookups silently break
-// (the broker computes a different key than the hub stored), which is exactly
-// the failure mode the §7.3 consolidation removes.
+// content-hash adapters and the canonical transfer implementations: templates
+// and harness-configs use transfer.ComputeContentHashV2 (ptone/scion#5658),
+// skill versions transfer.ComputeContentHashV1, which brokers recompute to
+// verify an installed skill.
 func TestComputeContentHashMatchesTransfer(t *testing.T) {
 	files := []store.TemplateFile{
 		{Path: "home/.bashrc", Size: 12, Hash: "sha256:bbb", Mode: "0644"},
@@ -39,12 +39,41 @@ func TestComputeContentHashMatchesTransfer(t *testing.T) {
 	}
 
 	got := computeContentHash(files)
-	want := transfer.ComputeContentHash(infos)
+	want := transfer.ComputeContentHashV2(infos)
 	if got != want {
-		t.Fatalf("hub computeContentHash diverged from transfer.ComputeContentHash: got %q want %q", got, want)
+		t.Fatalf("hub computeContentHash diverged from transfer.ComputeContentHashV2: got %q want %q", got, want)
 	}
 	if got == "" {
 		t.Fatalf("expected a non-empty hash for non-empty file set")
+	}
+	if got, want := computeSkillContentHash(files), transfer.ComputeContentHashV1(infos); got != want {
+		t.Fatalf("hub computeSkillContentHash diverged from transfer.ComputeContentHashV1: got %q want %q", got, want)
+	}
+}
+
+// TestComputeContentHash_RenameAndChmod covers ptone/scion#5658 at the hub
+// adapter: a rename-only or chmod-only change changes a template's or
+// harness-config's content hash, but not a skill version's (v1, pinned).
+func TestComputeContentHash_RenameAndChmod(t *testing.T) {
+	base := []store.TemplateFile{
+		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},
+		{Path: "run.sh", Hash: "sha256:bbb", Mode: "0644"},
+	}
+	renamed := []store.TemplateFile{
+		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},
+		{Path: "bin/run.sh", Hash: "sha256:bbb", Mode: "0644"},
+	}
+	chmodded := []store.TemplateFile{
+		{Path: "config.yaml", Hash: "sha256:aaa", Mode: "0644"},
+		{Path: "run.sh", Hash: "sha256:bbb", Mode: "0755"},
+	}
+	for name, next := range map[string][]store.TemplateFile{"rename": renamed, "chmod": chmodded} {
+		if computeContentHash(next) == computeContentHash(base) {
+			t.Errorf("%s only: template content hash unchanged", name)
+		}
+		if computeSkillContentHash(next) != computeSkillContentHash(base) {
+			t.Errorf("%s only: skill content hash changed; skill hashes must stay v1", name)
+		}
 	}
 }
 
@@ -67,7 +96,7 @@ func TestComputeContentHashOrderIndependent(t *testing.T) {
 }
 
 // TestComputeContentHashEmpty pins the canonical empty-input contract: an empty
-// file set hashes to the empty string (matching transfer.ComputeContentHash),
+// file set hashes to the empty string (matching transfer.ComputeContentHashV2),
 // rather than the SHA-256 of an empty byte stream that the hub's former
 // hand-rolled implementation produced.
 func TestComputeContentHashEmpty(t *testing.T) {

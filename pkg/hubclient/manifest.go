@@ -72,8 +72,12 @@ func (b *ManifestBuilder) ensureBuilder() {
 	}
 }
 
-// ComputeContentHash computes the overall content hash from file hashes.
-// Delegates to transfer.ComputeContentHash.
+// ComputeContentHash computes the content hash the Hub records for a
+// template or harness-config with these files: transfer.ComputeContentHashV2
+// over paths, normalised modes and file hashes (ptone/scion#5658). A Hub
+// before that records transfer.ComputeContentHashV1, and a row not
+// committed since keeps it, so do not compare this with a Hub ContentHash to
+// decide whether local files are in sync; compare manifests instead.
 func ComputeContentHash(files []TemplateFile) string {
 	// Convert TemplateFile to transfer.FileInfo
 	transferFiles := make([]transfer.FileInfo, len(files))
@@ -85,7 +89,7 @@ func ComputeContentHash(files []TemplateFile) string {
 			Mode: f.Mode,
 		}
 	}
-	return transfer.ComputeContentHash(transferFiles)
+	return transfer.ComputeContentHashV2(transferFiles)
 }
 
 // FileInfo contains information about a local file for upload.

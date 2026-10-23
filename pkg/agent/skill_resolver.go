@@ -828,7 +828,8 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		})
 	}
 
-	// S2: Verify bundle hash
+	// S2: Verify bundle hash. Skill hashes are transfer.ComputeContentHashV1
+	// (they are pinned; see the hub's computeSkillContentHash).
 	if skill.Hash != "" {
 		var transferFiles []transfer.FileInfo
 		for _, fe := range fileEntries {
@@ -837,7 +838,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				Hash: fe.Hash,
 			})
 		}
-		bundleHash := transfer.ComputeContentHash(transferFiles)
+		bundleHash := transfer.ComputeContentHashV1(transferFiles)
 		if bundleHash != skill.Hash {
 			msg := fmt.Sprintf("bundle hash mismatch for skill %q: expected %s, got %s",
 				skill.URI, skill.Hash, bundleHash)
