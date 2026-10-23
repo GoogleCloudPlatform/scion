@@ -168,8 +168,17 @@ RUN curl -fsSL -o /tmp/actions-runner.tgz \
 
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 # The job-started hook (entrypoint.sh exports ACTIONS_RUNNER_HOOK_JOB_STARTED to it):
-# refuses, with a hard stop, any job that is not a same-repo push or pull_request.
+# refuses, with a hard stop, any job that is not a same-repo push or pull_request of the
+# repository the runner serves. Its sha256 is pinned in the committed
+# cr-ci-job-guard.sh.sha256 (a Go test keeps the two in step) and installed read-only as
+# /etc/cr-ci/job-guard.sha256. entrypoint.sh refuses to start the runner unless the hook
+# matches it and both files and their directories are root-owned and not writable by the
+# runner; the build fails here already if they are not.
 COPY --chmod=0755 cr-ci-job-guard.sh /usr/local/bin/cr-ci-job-guard.sh
+COPY --chmod=0444 cr-ci-job-guard.sh.sha256 /etc/cr-ci/job-guard.sha256
+RUN echo "$(cat /etc/cr-ci/job-guard.sha256)  /usr/local/bin/cr-ci-job-guard.sh" | sha256sum -c - \
+ && meta=$(stat -c '%u %a' /usr/local/bin /usr/local/bin/cr-ci-job-guard.sh /etc/cr-ci /etc/cr-ci/job-guard.sha256 | tr '\n' ' ') \
+ && { [ "$meta" = "0 755 0 755 0 755 0 444 " ] || { echo "job guard files: owner/mode '$meta'" >&2; exit 1; }; }
 
 ENV HOME=/home/runner
 USER runner

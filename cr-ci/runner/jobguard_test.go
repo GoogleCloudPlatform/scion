@@ -1,6 +1,9 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +25,37 @@ func guardHookPath(t *testing.T) string {
 	return p
 }
 
+// installGuard copies the hook and its committed sha256 into root/guard-bin and
+// root/guard-etc as the image has them (0755 and 0444, directories 0755), owned by the
+// test's uid (CR_JOB_GUARD_OWNER_UID), and returns their paths.
+func installGuard(t *testing.T, root string) (hook, shaFile string) {
+	t.Helper()
+	hook = filepath.Join(root, "guard-bin", "cr-ci-job-guard.sh")
+	shaFile = filepath.Join(root, "guard-etc", "job-guard.sha256")
+	for _, f := range []struct {
+		src, dst string
+		mode     os.FileMode
+	}{{"cr-ci-job-guard.sh", hook, 0o755}, {"cr-ci-job-guard.sh.sha256", shaFile, 0o444}} {
+		b, err := os.ReadFile(f.src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(f.dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Dir(f.dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.dst, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(f.dst, f.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return hook, shaFile
+}
+
 func writePayload(t *testing.T, dir, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, "event.json")
@@ -41,15 +75,28 @@ func prPayload(head string) string {
 // code when it did, and the marker's content.
 func runGuardInGroup(t *testing.T, env map[string]string) (survived bool, hookRC string, marker string) {
 	t.Helper()
+	return runGuard(t, env, `"$HOOK_SHELL" -e "$HOOK"`)
+}
+
+// runGuard runs the hook with invoke (a shell fragment) from a stand-in worker. The
+// runner runs a hook as "bash -e <file>" (ScriptHandler.cs L213-216 with
+// ScriptHandlerHelpers.cs L19), so the hook's commands run under errexit.
+func runGuard(t *testing.T, env map[string]string, invoke string) (survived bool, hookRC string, marker string) {
+	t.Helper()
 	out := t.TempDir()
 	markerPath := filepath.Join(out, "marker")
 	script := `sleep 30 & echo $! > "$OUT/sleeper"
-"$HOOK"; echo $? > "$OUT/hook-rc"
+` + invoke + `; echo $? > "$OUT/hook-rc"
 touch "$OUT/after"
 kill "$(cat "$OUT/sleeper")"
 `
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "OUT=" + out, "HOOK=" + guardHookPath(t), "CR_JOB_GUARD_MARKER=" + markerPath, "LC_ALL=C"}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "OUT=" + out, "HOOK=" + guardHookPath(t), "HOOK_SHELL=" + bash,
+		"CR_JOB_GUARD_MARKER=" + markerPath, "CR_JOB_GUARD_REPO=" + testRepoFull, "LC_ALL=C"}
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -144,6 +191,8 @@ func TestJobGuardRefuses(t *testing.T) {
 		{"unknown event", "some_future_event", "", testRepoFull, "reason=event_not_allowed event=some_future_event"},
 		{"no event", "", "", testRepoFull, "reason=event_not_allowed event= "},
 		{"no repository", "push", "", "", "reason=repository_missing"},
+		{"another repository's push", "push", "", "other-owner/example-repo", "reason=repository_not_served event=push head= repository=other-owner/example-repo served=example-owner/example-repo"},
+		{"another repository's same-repo pull_request", "pull_request", prPayload("other-owner/other-repo"), "other-owner/other-repo", "reason=repository_not_served"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := map[string]string{"GITHUB_EVENT_NAME": tc.event, "GITHUB_REPOSITORY": tc.repo}
@@ -185,10 +234,12 @@ func TestJobGuardSanitizesMarker(t *testing.T) {
 // guardRunSh is a stub run.sh "job": it calls the job-started hook the way
 // Runner.Worker does (a child in run.sh's process group, with the job's GitHub env) and
 // then runs a "step" that would be if: always().
-func guardRunSh(event, payload string) string {
+func guardRunSh(event, payload string) string { return guardRunShRepo(event, payload, testRepoFull) }
+
+func guardRunShRepo(event, payload, repo string) string {
 	return stubRunShWith(`payload="$out/event.json"
 printf '%s' '` + payload + `' > "$payload"
-GITHUB_EVENT_NAME=` + event + ` GITHUB_REPOSITORY=` + testRepoFull + ` GITHUB_EVENT_PATH="$payload" "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
+GITHUB_EVENT_NAME=` + event + ` GITHUB_REPOSITORY=` + repo + ` GITHUB_EVENT_PATH="$payload" bash -e "$ACTIONS_RUNNER_HOOK_JOB_STARTED"
 touch "$out/always-step-ran"
 exit 0
 `)
@@ -199,13 +250,12 @@ exit 0
 // checks the claim token, ID token and JIT config never reach the output).
 func TestEntrypointJobGuardRefusal(t *testing.T) {
 	h := newSuccessHarness(t)
-	h.env["CR_JOB_GUARD_HOOK"] = guardHookPath(t)
 	h.setRunSh(guardRunSh("pull_request", prPayload("contributor/example-repo")))
 	res := h.run()
 	if res.exitCode != 5 {
 		t.Errorf("exit code = %d, want 5 (job refused); stderr:\n%s", res.exitCode, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner (reason=head_repository_differs event=pull_request head=contributor/example-repo repository=example-owner/example-repo); runner stopped before any step; exiting 5") {
+	if !strings.Contains(res.stderr, "ERROR job_guard_refused: the job-started hook refused the job assigned to this runner (reason=head_repository_differs event=pull_request head=contributor/example-repo repository=example-owner/example-repo served=example-owner/example-repo); runner stopped before any step; exiting 5") {
 		t.Errorf("stderr lacks the guard line:\n%s", res.stderr)
 	}
 	if _, err := os.Stat(filepath.Join(h.stubOut, "always-step-ran")); err == nil {
@@ -216,7 +266,6 @@ func TestEntrypointJobGuardRefusal(t *testing.T) {
 // TestEntrypointJobGuardAllows: an allowed job runs on; no guard line.
 func TestEntrypointJobGuardAllows(t *testing.T) {
 	h := newSuccessHarness(t)
-	h.env["CR_JOB_GUARD_HOOK"] = guardHookPath(t)
 	h.setRunSh(guardRunSh("push", "{}"))
 	res := h.run()
 	if res.exitCode != 0 || strings.Contains(res.stderr, "job_guard") {
@@ -247,5 +296,269 @@ exit 0
 	}
 	if d := time.Since(start); d > 30*time.Second {
 		t.Errorf("took %s", d)
+	}
+}
+
+// TestJobGuardServedRepository (R4): the hook binds GITHUB_REPOSITORY to the repository
+// the runner serves (CR_JOB_GUARD_REPO, from GH_REPO); without it, it refuses.
+func TestJobGuardServedRepository(t *testing.T) {
+	requireTools(t)
+	t.Run("served repository missing", func(t *testing.T) {
+		survived, _, marker := runGuardInGroup(t, map[string]string{
+			"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": testRepoFull, "CR_JOB_GUARD_REPO": "",
+		})
+		if survived || !strings.Contains(marker, "reason=served_repository_missing") {
+			t.Errorf("survived=%v marker=%q, want refused with served_repository_missing", survived, marker)
+		}
+	})
+	t.Run("served repository in other case", func(t *testing.T) {
+		survived, rc, marker := runGuardInGroup(t, map[string]string{
+			"GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": testRepoFull, "CR_JOB_GUARD_REPO": "Example-Owner/Example-Repo",
+		})
+		if !survived || rc != "0" || marker != "" {
+			t.Errorf("survived=%v rc=%q marker=%q, want allowed", survived, rc, marker)
+		}
+	})
+}
+
+// TestJobGuardStopsParentFromOwnGroup (R1): the stop must not depend on the hook sharing
+// the worker's process group. Run as the runner runs hooks (bash -e, here with
+// --noprofile --norc) but in a session and group of its own (setsid), the hook still
+// kills its parent, the stand-in worker, and the parent's group (the sleeper), so the
+// worker's next "step" never runs.
+func TestJobGuardStopsParentFromOwnGroup(t *testing.T) {
+	requireTools(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Fatalf("needs setsid on PATH: %v", err)
+	}
+	for _, tc := range []struct{ name, invoke string }{
+		{"own group, refused", `setsid "$HOOK_SHELL" --noprofile --norc -e "$HOOK"`},
+		{"worker's group, refused", `"$HOOK_SHELL" --noprofile --norc -e "$HOOK"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			survived, rc, marker := runGuard(t, map[string]string{
+				"GITHUB_EVENT_NAME": "pull_request_target", "GITHUB_REPOSITORY": testRepoFull,
+			}, tc.invoke)
+			if survived {
+				t.Errorf("the stand-in worker survived the refusal (hook rc %q): later steps could run", rc)
+			}
+			if !strings.Contains(marker, "reason=event_not_allowed") {
+				t.Errorf("marker %q", marker)
+			}
+		})
+	}
+}
+
+// TestJobGuardPinnedSHA (R2a): the committed sha256 pin is the hook's, and the image and
+// the entrypoint use the same fixed paths for both.
+func TestJobGuardPinnedSHA(t *testing.T) {
+	hook, err := os.ReadFile("cr-ci-job-guard.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := os.ReadFile("cr-ci-job-guard.sh.sha256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(hook)
+	if got, want := string(pin), hex.EncodeToString(sum[:])+"\n"; got != want {
+		t.Errorf("cr-ci-job-guard.sh.sha256 = %q, want %q (update it with: sha256sum cr-ci-job-guard.sh | cut -d' ' -f1 > cr-ci-job-guard.sh.sha256)", got, want)
+	}
+	if fi, err := os.Stat("cr-ci-job-guard.sh"); err != nil || fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("cr-ci-job-guard.sh must be executable in the repository (%v)", err)
+	}
+	for file, wants := range map[string][]string{
+		"Dockerfile": {
+			"COPY --chmod=0755 cr-ci-job-guard.sh /usr/local/bin/cr-ci-job-guard.sh\n",
+			"COPY --chmod=0444 cr-ci-job-guard.sh.sha256 /etc/cr-ci/job-guard.sha256\n",
+			`sha256sum -c -`,
+		},
+		"entrypoint.sh": {
+			"job_guard_hook=${CR_JOB_GUARD_HOOK:-/usr/local/bin/cr-ci-job-guard.sh}\n",
+			"job_guard_sha_file=${CR_JOB_GUARD_SHA_FILE:-/etc/cr-ci/job-guard.sha256}\n",
+			"job_guard_owner=${CR_JOB_GUARD_OWNER_UID:-0}\n",
+		},
+	} {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range wants {
+			if !strings.Contains(string(b), w) {
+				t.Errorf("%s lacks %q", file, w)
+			}
+		}
+	}
+}
+
+// TestEntrypointJobGuardIntegrity (R2a): no fail-open. The entrypoint refuses to start
+// run.sh (exit 2, before any claim) unless the hook is the pinned, protected file.
+func TestEntrypointJobGuardIntegrity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, h *harness)
+		want   string
+	}{
+		{"hook missing", func(t *testing.T, h *harness) { mustDo(t, os.Remove(h.guardHook)) },
+			"is missing or of the wrong type"},
+		{"hook not executable", func(t *testing.T, h *harness) { mustDo(t, os.Chmod(h.guardHook, 0o644)) },
+			"is not executable"},
+		{"hook sha256 mismatch", func(t *testing.T, h *harness) {
+			mustDo(t, os.Chmod(h.guardHook, 0o644))
+			f, err := os.OpenFile(h.guardHook, os.O_APPEND|os.O_WRONLY, 0)
+			mustDo(t, err)
+			_, err = f.WriteString("exit 0\n")
+			mustDo(t, err)
+			mustDo(t, f.Close())
+			mustDo(t, os.Chmod(h.guardHook, 0o755))
+		}, "(pinned at image build)"},
+		{"hook group-writable", func(t *testing.T, h *harness) { mustDo(t, os.Chmod(h.guardHook, 0o775)) },
+			"is group- or world-writable (mode 775)"},
+		{"hook world-writable", func(t *testing.T, h *harness) { mustDo(t, os.Chmod(h.guardHook, 0o757)) },
+			"is group- or world-writable (mode 757)"},
+		{"hook directory writable", func(t *testing.T, h *harness) { mustDo(t, os.Chmod(filepath.Dir(h.guardHook), 0o777)) },
+			"the directory of the job-started hook"},
+		{"hook is a symlink", func(t *testing.T, h *harness) {
+			real := h.guardHook + ".real"
+			mustDo(t, os.Rename(h.guardHook, real))
+			mustDo(t, os.Symlink(real, h.guardHook))
+		}, "is a symlink"},
+		{"hook owned by another uid", func(t *testing.T, h *harness) {
+			h.env["CR_JOB_GUARD_OWNER_UID"] = strconv.Itoa(os.Getuid() + 1)
+		}, "is owned by uid"},
+		{"sha256 file missing", func(t *testing.T, h *harness) { mustDo(t, os.Remove(h.guardSHAFile)) },
+			"the job guard sha256 file"},
+		{"sha256 file writable", func(t *testing.T, h *harness) { mustDo(t, os.Chmod(h.guardSHAFile, 0o666)) },
+			"the job guard sha256 file "},
+		{"sha256 file malformed", func(t *testing.T, h *harness) {
+			mustDo(t, os.Chmod(h.guardSHAFile, 0o644))
+			mustDo(t, os.WriteFile(h.guardSHAFile, []byte("not-a-sha\n"), 0o444))
+		}, "does not hold one sha256"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+			h := newHarness(t, cs.URL)
+			tc.mutate(t, h)
+			res := h.run()
+			expectFailure(t, h, res, 2, tc.want)
+			if !strings.Contains(res.stderr, "refusing to start the runner") {
+				t.Errorf("stderr lacks the refusal:\n%s", res.stderr)
+			}
+			if n := len(cs.recorded()) + len(h.meta.recorded()); n != 0 {
+				t.Errorf("%d claim/metadata requests, want none (token must not be spent)", n)
+			}
+		})
+	}
+	t.Run("checked in warm-up too", func(t *testing.T) {
+		h, cs := warmupHarness(t)
+		mustDo(t, os.Chmod(h.guardHook, 0o644))
+		expectFailure(t, h, h.run(), 2, "is not executable")
+		if n := len(cs.recorded()); n != 0 {
+			t.Errorf("%d claim requests, want none", n)
+		}
+	})
+}
+
+func mustDo(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEntrypointTestOverridesNeedTestMode (R2a): outside test mode (CR_TEST_MODE unset
+// or not 1) every CR_* override, the hook path included, is ignored, so the fixed image
+// paths are checked. (Production is also PID 1, which disables test mode outright.)
+func TestEntrypointTestOverridesNeedTestMode(t *testing.T) {
+	for _, mode := range []string{"", "0", "true"} {
+		t.Run("CR_TEST_MODE="+mode, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+			h := newHarness(t, cs.URL)
+			if mode == "" {
+				delete(h.env, "CR_TEST_MODE")
+			} else {
+				h.env["CR_TEST_MODE"] = mode
+			}
+			res := h.run()
+			if res.exitCode != 2 || h.stubStarted() {
+				t.Errorf("exit code %d (run.sh started: %v), want 2 and not started; stderr:\n%s", res.exitCode, h.stubStarted(), res.stderr)
+			}
+			for _, want := range []string{
+				"ignoring CR_JOB_GUARD_HOOK: test overrides take effect only in test mode",
+				"ignoring CR_JOB_GUARD_SHA_FILE",
+				"ignoring CR_JOB_GUARD_OWNER_UID",
+				"ignoring CR_SCRATCH_DIR",
+				"job guard: ",
+			} {
+				if !strings.Contains(res.stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+				}
+			}
+			if strings.Contains(res.stderr, h.guardHook) {
+				t.Errorf("the overridden hook path was used outside test mode:\n%s", res.stderr)
+			}
+			if n := len(cs.recorded()) + len(h.meta.recorded()); n != 0 {
+				t.Errorf("%d claim/metadata requests, want none", n)
+			}
+		})
+	}
+}
+
+// TestEntrypointGHRepo (R4): GH_REPO, the repository the runner serves, is required and
+// must be owner/name.
+func TestEntrypointGHRepo(t *testing.T) {
+	for _, tc := range []struct{ name, value, want string }{
+		{"missing", "", "required environment variable GH_REPO is not set"},
+		{"no owner", "example-repo", "GH_REPO must be owner/name"},
+		{"extra path", "owner/repo/x", "GH_REPO must be owner/name"},
+		{"shell characters", "owner/re$(id)", "GH_REPO must be owner/name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+			h := newHarness(t, cs.URL)
+			if tc.value == "" {
+				delete(h.env, "GH_REPO")
+			} else {
+				h.env["GH_REPO"] = tc.value
+			}
+			expectFailure(t, h, h.run(), 2, tc.want)
+			if n := len(cs.recorded()); n != 0 {
+				t.Errorf("%d claim requests, want none", n)
+			}
+		})
+	}
+}
+
+// TestEntrypointJobGuardRepositoryBinding (R4): a job of a repository other than GH_REPO
+// is refused (hard stop, exit 5), even a same-repo push there.
+func TestEntrypointJobGuardRepositoryBinding(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(guardRunShRepo("push", "{}", "other-owner/other-repo"))
+	res := h.run()
+	if res.exitCode != 5 || !strings.Contains(res.stderr, "reason=repository_not_served event=push head= repository=other-owner/other-repo served=example-owner/example-repo") {
+		t.Errorf("exit code %d, want 5 with repository_not_served; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(h.stubOut, "always-step-ran")); err == nil {
+		t.Error("a step after the refused hook ran")
+	}
+}
+
+// TestEntrypointJobGuardEnvFixed (R2a): values for the hook's settings in the
+// entrypoint's own environment are replaced: run.sh (and so Runner.Worker) gets the
+// verified hook path and GH_REPO.
+func TestEntrypointJobGuardEnvFixed(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] = "/bin/true"
+	h.env["CR_JOB_GUARD_REPO"] = "other-owner/other-repo"
+	h.env["CR_JOB_GUARD_MARKER"] = filepath.Join(t.TempDir(), "elsewhere")
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code %d; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	env := h.stubFile("env")
+	for _, want := range []string{"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook, "CR_JOB_GUARD_REPO=" + testRepoFull} {
+		if !strings.Contains(env+"\n", want+"\n") {
+			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
+		}
 	}
 }

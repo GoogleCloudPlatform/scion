@@ -24,8 +24,8 @@
 # shell memory.
 #
 # Warm-up: RUNNER_WARMUP=1 (deploy-job.sh --warm-up) runs only the checks in
-# sections 1-3 (HOME, /scratch, HOME links, run.sh present) and exits 0 before any
-# claim; none of the env below is needed then.
+# sections 1-3 (HOME, the job guard files, /scratch, HOME links, run.sh present) and
+# exits 0 before any claim; none of the required env below is needed then.
 #
 # Optional env (set on the job by deploy-job.sh from config.env):
 #   RUNNER_BUILD_CACHE_IN_RAM  true: keep ~/.cache (Go build cache, analysis cache) in
@@ -38,10 +38,14 @@
 #   MEDIATOR_URL        https origin of the mediator, no trailing slash
 #   GH_JOB_ID           GitHub workflow job ID (logging only)
 #   RUNNER_NAME         cr-job-<GH_JOB_ID> (logging only)
+#   GH_REPO             owner/name of the repository the runner serves; the job guard
+#                       refuses any job from another repository
 #
 # Exit codes:
-#   2  configuration error: missing or invalid env (HOME included), /scratch missing or
-#      not writable, a HOME link (~/work, ~/.cache, ~/go, ~/.npm) that is not the expected symlink
+#   2  configuration error: missing or invalid env (HOME included), the job-started hook
+#      not the pinned, root-owned, read-only file (section 1, "Job guard"), /scratch
+#      missing or not writable, a HOME link (~/work, ~/.cache, ~/go, ~/.npm) that is not
+#      the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
@@ -54,8 +58,9 @@
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
-# Overrides, for the offline test harness (runner/entrypoint_test.go) only;
-# production leaves them unset:
+# Overrides, for the offline test harness (runner/entrypoint_test.go) only. They take
+# effect only in test mode, CR_TEST_MODE=1 with this script not PID 1, which production
+# (always PID 1) cannot enable; otherwise they are logged and ignored (section 1):
 #   CR_SCRATCH_DIR           scratch mount point          (default /scratch)
 #   CR_MOUNTINFO             mount table to check against (default /proc/self/mountinfo)
 #   CR_RUNNER_DIR            directory holding run.sh     (default /home/runner/actions-runner)
@@ -68,6 +73,9 @@
 #   CR_RAM_CACHE_DIR         RAM target of /scratch/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
 #                            (default /tmp/cr-ci-build-cache)
 #   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
+#   CR_JOB_GUARD_HOOK        the job-started hook   (default /usr/local/bin/cr-ci-job-guard.sh)
+#   CR_JOB_GUARD_SHA_FILE    its pinned sha256      (default /etc/cr-ci/job-guard.sha256)
+#   CR_JOB_GUARD_OWNER_UID   required owner of both (default 0, root)
 # The harness also puts stub `stat` and `sleep` commands first on PATH.
 set -euo pipefail
 
@@ -76,14 +84,6 @@ readonly EXIT_CONFIG=2
 readonly EXIT_CLAIM=3
 readonly EXIT_IDLE_RACE=4
 readonly EXIT_JOB_REFUSED=5
-
-scratch=${CR_SCRATCH_DIR:-/scratch}
-mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
-runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
-backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
-metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
-expected_home=${CR_EXPECTED_HOME:-/home/runner}
-ram_cache_dir=${CR_RAM_CACHE_DIR:-/tmp/cr-ci-build-cache}
 
 log() { printf 'cr-ci-entrypoint: %s\n' "$*" >&2; }
 die() {
@@ -121,6 +121,46 @@ exit_if_signalled() {
   fi
 }
 
+# Test mode: the CR_* overrides listed in the header take effect only when CR_TEST_MODE=1
+# AND this script is not PID 1. In production it is always PID 1 (the image's exec-form
+# ENTRYPOINT on Cloud Run), so production cannot enable test mode even if CR_TEST_MODE
+# were set; outside test mode every override is ignored (logged and unset), and the
+# defaults (the fixed paths in the image) apply. Nothing a workflow does can set any of
+# them: this script's environment is the Cloud Run Job execution's (deploy-job.sh and the
+# mediator's overrides), and it has finished its checks and exported the job guard's
+# settings before run.sh, and so any job, exists.
+readonly TEST_OVERRIDES=(CR_SCRATCH_DIR CR_MOUNTINFO CR_RUNNER_DIR CR_CLAIM_BACKOFF_SECONDS
+  CR_EXPECTED_HOME CR_METADATA_URL CR_FIFO_TMPDIR CR_RAM_CACHE_DIR CR_WATCHER_GRACE_SECONDS
+  CR_JOB_GUARD_HOOK CR_JOB_GUARD_SHA_FILE CR_JOB_GUARD_OWNER_UID)
+test_mode=0
+if [[ ${CR_TEST_MODE:-} == 1 && $$ -ne 1 ]]; then
+  test_mode=1
+else
+  for var in "${TEST_OVERRIDES[@]}"; do
+    if [[ -n ${!var+set} ]]; then
+      log "warning: ignoring $var: test overrides take effect only in test mode"
+      unset "$var"
+    fi
+  done
+fi
+unset CR_TEST_MODE
+readonly test_mode
+
+scratch=${CR_SCRATCH_DIR:-/scratch}
+mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
+runner_dir=${CR_RUNNER_DIR:-/home/runner/actions-runner}
+backoff=${CR_CLAIM_BACKOFF_SECONDS:-1}
+metadata_base=${CR_METADATA_URL:-http://metadata.google.internal}
+expected_home=${CR_EXPECTED_HOME:-/home/runner}
+ram_cache_dir=${CR_RAM_CACHE_DIR:-/tmp/cr-ci-build-cache}
+fifo_tmpdir=${CR_FIFO_TMPDIR:-/tmp}
+watcher_grace=${CR_WATCHER_GRACE_SECONDS:-5}
+# The job-started hook and its pinned sha256 (written at image build, Dockerfile), both
+# owned by root and not writable by the runner (section 1, "Job guard").
+job_guard_hook=${CR_JOB_GUARD_HOOK:-/usr/local/bin/cr-ci-job-guard.sh}
+job_guard_sha_file=${CR_JOB_GUARD_SHA_FILE:-/etc/cr-ci/job-guard.sha256}
+job_guard_owner=${CR_JOB_GUARD_OWNER_UID:-0}
+
 # --- 1. Required env ----------------------------------------------------------
 
 # Warm-up mode (deploy-job.sh --warm-up): an execution with RUNNER_WARMUP=1 and no
@@ -142,13 +182,64 @@ esac
 if ((warmup)); then
   required_vars=(HOME)
 else
-  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME HOME)
+  required_vars=(RUNNER_CLAIM_TOKEN MEDIATOR_URL GH_JOB_ID RUNNER_NAME GH_REPO HOME)
 fi
 for var in "${required_vars[@]}"; do
   if [[ -z ${!var:-} ]]; then
     die "$EXIT_CONFIG" "required environment variable $var is not set"
   fi
 done
+# GH_REPO: the repository (owner/name) this runner is launched to serve. The job guard
+# refuses any job from another repository (section 5, "Job guard").
+if ((!warmup)) && [[ ! $GH_REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
+  die "$EXIT_CONFIG" "GH_REPO must be owner/name, got '$GH_REPO'"
+fi
+
+# --- Job guard: the job-started hook must be the one pinned in the image ----------
+# Fail closed: if Runner.Worker cannot run the hook (missing, not executable), its
+# pre-job step only fails, and the job's always()/failure() steps still run. So run.sh
+# is not started (exit 2, before any claim, in warm-up too) unless the hook, its sha256
+# file and the directories holding them are owned by root (in production) and not
+# writable by this uid, the hook is a regular executable file (not a symlink), and its
+# sha256 equals the value pinned at image build. The runner itself must not run as
+# root, which would make all of them writable.
+my_uid=$(id -u)
+# require_protected <path> <what> <-f|-d>: owned by job_guard_owner, no group or other
+# write bit, not writable by this uid (in production: also, this uid is not the owner).
+require_protected() {
+  local path=$1 what=$2 kind=$3 meta owner mode
+  [[ -L $path ]] && die "$EXIT_CONFIG" "job guard: $what $path is a symlink; refusing to start the runner"
+  test "$kind" "$path" || die "$EXIT_CONFIG" "job guard: $what $path is missing or of the wrong type; refusing to start the runner"
+  meta=$(stat -c '%u %a' -- "$path") || die "$EXIT_CONFIG" "job guard: cannot stat $what $path; refusing to start the runner"
+  read -r owner mode <<<"$meta"
+  [[ $owner == "$job_guard_owner" ]] ||
+    die "$EXIT_CONFIG" "job guard: $what $path is owned by uid $owner, want $job_guard_owner; refusing to start the runner"
+  ((8#$mode & 8#022)) &&
+    die "$EXIT_CONFIG" "job guard: $what $path is group- or world-writable (mode $mode); refusing to start the runner"
+  if [[ $owner != "$my_uid" && -w $path ]]; then
+    die "$EXIT_CONFIG" "job guard: $what $path is writable by uid $my_uid; refusing to start the runner"
+  fi
+  return 0
+}
+if ((!test_mode)) && [[ $my_uid == "$job_guard_owner" ]]; then
+  die "$EXIT_CONFIG" "job guard: the runner runs as uid $my_uid, the owner of the job-started hook; refusing to start the runner"
+fi
+require_protected "$(dirname -- "$job_guard_hook")" "the directory of the job-started hook" -d
+require_protected "$job_guard_hook" "the job-started hook" -f
+require_protected "$(dirname -- "$job_guard_sha_file")" "the directory of the job guard sha256 file" -d
+require_protected "$job_guard_sha_file" "the job guard sha256 file" -f
+[[ -x $job_guard_hook ]] ||
+  die "$EXIT_CONFIG" "job guard: the job-started hook $job_guard_hook is not executable; refusing to start the runner"
+job_guard_want=$(<"$job_guard_sha_file") ||
+  die "$EXIT_CONFIG" "job guard: cannot read $job_guard_sha_file; refusing to start the runner"
+[[ $job_guard_want =~ ^[0-9a-f]{64}$ ]] ||
+  die "$EXIT_CONFIG" "job guard: $job_guard_sha_file does not hold one sha256 (64 lowercase hex characters); refusing to start the runner"
+job_guard_got=$(sha256sum -- "$job_guard_hook") ||
+  die "$EXIT_CONFIG" "job guard: cannot hash $job_guard_hook; refusing to start the runner"
+job_guard_got=${job_guard_got%% *}
+[[ $job_guard_got == "$job_guard_want" ]] ||
+  die "$EXIT_CONFIG" "job guard: the sha256 of $job_guard_hook is $job_guard_got, want $job_guard_want (pinned at image build); refusing to start the runner"
+log "job guard: $job_guard_hook matches its pinned sha256"
 
 if ((warmup)); then
   : # no claim env to check
@@ -329,7 +420,7 @@ fi
 
 # The runner-output FIFOs (section 5) are created before the claim, so a failure here
 # still exits 2 with the single-use token unspent.
-fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
+fifo_dir=$(mktemp -d "$fifo_tmpdir/cr-ci-entrypoint.XXXXXX") ||
   die "$EXIT_CONFIG" "cannot create a private temp directory"
 out_fifo="$fifo_dir/runner-output"
 done_fifo="$fifo_dir/watcher-done"
@@ -524,11 +615,14 @@ watcher_pid=$!
 
 # The job-started hook (cr-ci-job-guard.sh): Runner.Worker runs it before any step of an
 # assigned job (it reads ACTIONS_RUNNER_HOOK_JOB_STARTED from its own environment, which
-# it inherits from run.sh; a workflow cannot change it). A job that is not a same-repo
-# push or pull_request is refused with a hard stop: the hook writes the marker and
-# SIGKILLs run.sh's process group (section 5, "Job guard").
-export ACTIONS_RUNNER_HOOK_JOB_STARTED="${CR_JOB_GUARD_HOOK:-/usr/local/bin/cr-ci-job-guard.sh}"
-export CR_JOB_GUARD_MARKER="$guard_marker"
+# it inherits from run.sh; a workflow cannot change it). A job from a repository other
+# than GH_REPO, or one that is not a same-repo push or pull_request, is refused with a
+# hard stop: the hook writes the marker and SIGKILLs Runner.Worker and run.sh's process
+# group (section 5, "Job guard").
+# Read-only and exported: the verified hook path (section 1), the marker, and the
+# repository this runner serves (GH_REPO), which the hook binds GITHUB_REPOSITORY to.
+readonly ACTIONS_RUNNER_HOOK_JOB_STARTED="$job_guard_hook" CR_JOB_GUARD_MARKER="$guard_marker" CR_JOB_GUARD_REPO="$GH_REPO"
+export ACTIONS_RUNNER_HOOK_JOB_STARTED CR_JOB_GUARD_MARKER CR_JOB_GUARD_REPO
 
 log "starting run.sh (ephemeral JIT runner)"
 set -m
@@ -606,7 +700,7 @@ kill "$guard_pid" 2>/dev/null || true
 
 # Let the watcher drain the last lines (bounded: a process left holding the pipe
 # open must not keep the execution alive).
-read -r -t "${CR_WATCHER_GRACE_SECONDS:-5}" -u "$done_fd" _ || log "warning: runner output watcher did not finish in time"
+read -r -t "$watcher_grace" -u "$done_fd" _ || log "warning: runner output watcher did not finish in time"
 listener_code=""
 [[ -s $listener_code_file ]] && listener_code=$(<"$listener_code_file")
 idle_stopped=0
