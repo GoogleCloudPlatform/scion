@@ -29,7 +29,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 	"golang.org/x/sys/unix"
 )
 
@@ -249,6 +249,33 @@ type ProvisionInput struct {
 	// credential (GitTokenCredentialHelper). The token is not added to the
 	// clone URL, the command line or any file.
 	CloneWithToken bool
+
+	// CloneToken, when non-empty, is the git token for the clone, given to
+	// the clone command alone: its environment gets GITHUB_TOKEN set to it
+	// plus the same credential helper CloneWithToken uses, and clone errors
+	// are redacted with it. The calling process's environment is not read
+	// or changed. The hub sets it when it provisions a project's shared
+	// workspace at create (ptone/scion#5813); it takes precedence over
+	// CloneWithToken.
+	CloneToken string
+
+	// CloneTokenRemote, when set with CloneToken, binds the token to the
+	// project's recorded git remote: the clone gets the token only when
+	// GitClone.URL is https and its normalized host and owner/repo equal this
+	// remote, and then only for that host (credential.https://<host>.helper,
+	// constant helper text, the token only in the clone command's
+	// environment). Any other URL is cloned without a token. The hub sets it
+	// to the project's GitRemote for its clone at create.
+	CloneTokenRemote string
+
+	// HostGitHardened runs the clone as host-side git on a project-supplied
+	// URL: with HostCloneGitArgs ahead of the subcommand and
+	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
+	// ssh and git transports can be used (no local path, file://, ext:: or
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub
+	// sets it when it clones a project's shared workspace at create; the
+	// caller also checks the URL first (CheckHostCloneURL).
+	HostGitHardened bool
 
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
@@ -2823,7 +2850,11 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
-	args := []string{"clone"}
+	var args []string
+	if in.HostGitHardened {
+		args = append(args, HostCloneGitArgs()...)
+	}
+	args = append(args, "clone")
 
 	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
 	depth := 1
@@ -2836,18 +2867,38 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if gc.Branch != "" {
 		args = append(args, "--branch", gc.Branch)
 	}
-	args = append(args, gc.URL, in.Resolved.HostPath)
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args = append(args, "--", gc.URL, in.Resolved.HostPath)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if in.CloneWithToken {
+	if in.HostGitHardened {
+		cmd.Env = append(cmd.Env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
+	}
+	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
+	tokenHost := ""
+	if in.CloneToken != "" {
+		bound := in.CloneTokenRemote == ""
+		if !bound {
+			tokenHost, bound = cloneTokenHost(in.CloneTokenRemote, gc.URL)
+		}
+		if bound {
+			withToken, token = true, in.CloneToken
+			cmd.Env = append(cmd.Env, GitTokenEnv+"="+in.CloneToken)
+		}
+	}
+	switch {
+	case withToken && tokenHost != "":
+		cmd.Env = append(cmd.Env, hostScopedTokenHelperEnv(cmd.Env, tokenHost)...)
+	case withToken:
 		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
 	}
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
+	return cloneError(gc.URL, string(output), err, withToken, token)
 }
 
 // redactedCredential replaces a credential value in clone error output.
@@ -2930,8 +2981,9 @@ func cloneError(rawURL, output string, runErr error, withToken bool, token strin
 
 // redactCloneURL returns rawURL without userinfo, query string or fragment,
 // any of which can carry a token. For an scp-style URL ("user@host:path")
-// the user is dropped and host and path are kept. An unparseable URL is
-// never echoed.
+// the user is dropped and host and path are kept. A URL that does not
+// parse, or holds an '@' the shared user info rule cannot place
+// (urlredact.HostAndPath), is never echoed.
 func redactCloneURL(rawURL string) string {
 	if !strings.Contains(rawURL, "://") {
 		// scp-style "user@host:path", or a local path: keep host and path,
@@ -2943,13 +2995,10 @@ func redactCloneURL(rawURL string) string {
 			return rawURL
 		}
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	u, ok := urlredact.HostAndPath(rawURL)
+	if !ok {
 		return "<unparseable clone URL>"
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
 	return u.String()
 }
 
@@ -2970,26 +3019,14 @@ func scpUserEnd(rawURL string) int {
 }
 
 // sanitizeCloneOutput removes rawURL's credentials, query string and
-// fragment from text (git's own output can echo the URL).
+// fragment from text (git's own output can echo the URL), by the shared
+// rule (urlredact.RedactURLIn): every rendering of rawURL is shown as
+// redactCloneURL shows it.
 func sanitizeCloneOutput(text, rawURL string) string {
 	if rawURL == "" || text == "" {
 		return text
 	}
-	out := strings.ReplaceAll(text, rawURL, redactCloneURL(rawURL))
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return out
-	}
-	if u.User != nil && u.User.String() != "" {
-		out = strings.ReplaceAll(out, u.User.String()+"@", "")
-	}
-	if u.RawQuery != "" {
-		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
-	}
-	if u.Fragment != "" {
-		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
-	}
-	return out
+	return urlredact.RedactURLIn(text, rawURL, redactCloneURL(rawURL), urlredact.Mask)
 }
 
 // moveDirContentsUp moves every entry from src into dest, leaving src with

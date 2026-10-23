@@ -261,16 +261,31 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		return nil, err
 	}
 
-	rowLocks := s.usesRowLocks()
-
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			// Already inside a caller's transaction (store.WithTx): run on
+			// it so the update commits or rolls back with the caller's work.
+			return s.updateAccessConstraint(ctx, s.client, uid, c, expectedRevision)
+		}
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	updated, err := s.updateAccessConstraint(ctx, tx.Client(), uid, c, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *AccessConstraintStore) updateAccessConstraint(ctx context.Context, client *ent.Client, uid uuid.UUID, c *store.AccessConstraint, expectedRevision int64) (*store.AccessConstraint, error) {
+	rowLocks := s.usesRowLocks()
 
 	// Read existing constraint inside transaction for optimistic concurrency.
-	q := tx.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
+	q := client.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
 	if rowLocks {
 		q = q.ForUpdate()
 	}
@@ -285,11 +300,11 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	}
 
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx.Client(), c); err != nil {
+	if err := s.validateReferences(ctx, client, c); err != nil {
 		return nil, err
 	}
 
-	builder := tx.AccessConstraint.UpdateOneID(uid).
+	builder := client.AccessConstraint.UpdateOneID(uid).
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
@@ -337,10 +352,6 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	updated, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
 	return entAccessConstraintToStore(updated), nil

@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -485,12 +486,24 @@ type ServerConfig struct {
 	Mode string
 
 	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces. When Backend is "nfs",
-	// "cloudrun-volume" or "gke-shared-volume", hubManagedProjectPath returns
-	// a path on the configured durable mount instead of the node-local home
-	// directory.
-	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
+	// hub-managed project workspaces; the hub builds its workspace Layout
+	// from it (workspaceLayout). With Backend "nfs", "cloudrun-volume" or
+	// "gke-shared-volume" the hub serves the same projects/<uuid>/workspace
+	// tree agents mount. Nil or Backend=="" / "local" keeps the local,
+	// slug-keyed layout (~/.scion/projects/<slug>).
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
+
+	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
+	// once at startup from the global settings file through the same
+	// env-free loader the brokers use (config.LoadHubSharedDirStorage);
+	// never re-read per request, never from the DB or project settings.
+	// With WorkspaceStorageConfig it decides where the hub's shared-dir
+	// browser resolves shared dirs (sharedDirLayout).
+	SharedDirStorageConfig *config.V1SharedDirStorageConfig
+	// SharedDirStorageError is set when the settings file plausibly
+	// configures server.shared_dir_storage but could not be loaded; shared-dir
+	// resolution then fails closed rather than using the local layout.
+	SharedDirStorageError error
 
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
@@ -1708,6 +1721,10 @@ type Server struct {
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
+	// projectConfigIdentity records shared-backend projects whose
+	// <ProjectRoot>/.scion/project-id names another project
+	// (project_config_identity health check).
+	projectConfigIdentity projectConfigIdentityState
 
 	// startupLayer1 holds the startup values ApplySnapshot reverts to when
 	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
@@ -2191,6 +2208,10 @@ type Server struct {
 	// dbMetrics/dispatchMetrics.
 	reaperMetrics reapermetrics.Recorder
 
+	// eventStreamMetrics counts scion.hub.events.published on the event
+	// publisher (event_streams.go); nil until SetEventStreamMetrics.
+	eventStreamMetrics ssemetrics.Recorder
+
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
 
@@ -2271,11 +2292,6 @@ type Server struct {
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
-
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
-	// workspace upload into a hub workspace when set (tests only). Guarded
-	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
-	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
@@ -2368,10 +2384,9 @@ type Server struct {
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
 
-	// warnedEphemeralProjects holds the project slugs already reported as being
-	// served from ephemeral local storage, keeping that warning to one line per
-	// slug on a request path. See warnEphemeralProjectPath.
-	warnedEphemeralProjects sync.Map
+	// storageMigrationNotice caches the dry-run plan of the project storage
+	// migration behind the Files tab notice (workspace_migration_notice.go).
+	storageMigrationNotice storageMigrationNoticeCache
 
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
@@ -2468,6 +2483,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
+	}
+	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
+		slog.Warn(warning)
 	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
@@ -4730,7 +4748,11 @@ func (s *Server) SetGCPProjectID(projectID string) {
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
 	s.events = ep
+	rec := s.eventStreamMetrics
 	s.mu.Unlock()
+	if p, ok := ep.(publishMetricsSetter); ok && rec != nil {
+		p.SetPublishMetrics(rec)
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
@@ -5216,7 +5238,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	}
 	stopRunID := agent.RunID
 	if agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for suspend, record work in an ephemeral workspace that
 		// the suspend discards, so the next start reports it. There is
 		// no response to carry a warning (ptone/scion#4387).
@@ -6584,6 +6605,15 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// project ID as the workspace project identity of hub-cloned projects
 	// created with a locally generated one.
 	s.startClonedProjectIdentityAlignment(ctx)
+
+	// Ensure project-id and project-slug in every shared-backend project's
+	// configuration (<ProjectRoot>/.scion), in the background (never
+	// blocks start or readiness).
+	s.startProjectConfigIdentityEnsure(ctx)
+
+	// Plan the project storage migration in the background so the Files
+	// tab notice is known early (never blocks start or readiness).
+	s.startStorageMigrationNoticePlan(ctx)
 
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.

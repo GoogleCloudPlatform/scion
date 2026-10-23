@@ -175,6 +175,7 @@ export function buildFixture() {
           'web.agent_edit': true,
           'web.chat_scheduled_send': false,
           'web.gcs_links': false,
+          'web.sse_hidden_tab_close': false,
         },
       },
     },

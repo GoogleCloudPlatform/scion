@@ -16,8 +16,12 @@
 // is shown: masked on its own when it can be told apart from the host and
 // path, and otherwise the whole URL after its scheme. pkg/config,
 // pkg/apiclient, the log text sanitizer (pkg/util/logging) and the hub
-// commands all use it, so a URL is shown the same way everywhere. It
-// imports only the standard library, so any package can use it.
+// commands all use it, so a URL is shown the same way everywhere. The
+// redactors that show a URL by its host and path only (the hub endpoint in
+// pkg/tunnelclient, clone URLs in pkg/runtimebroker and pkg/provision,
+// fetched URLs in pkg/artifacts/remotefetch, template sources in cmd) use
+// HostAndPath and RedactURLIn. It imports only the standard library, so any
+// package can use it.
 package urlredact
 
 import (

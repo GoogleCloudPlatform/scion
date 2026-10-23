@@ -54,12 +54,11 @@ const (
 )
 
 // brokerCopyOfHubWorkspace reports whether projectPath is a hub-managed
-// workspace that this broker populated from a hub workspace upload for
-// projectID, and that no hub keeps as its own on this host:
+// workspace that this broker populated from a workspace upload for
+// projectID:
 //   - projectPath, with symlinks resolved, is <globalDir>/projects/<slug>
 //     with only <globalDir> resolved, and that entry is a directory, not a
 //     symlink;
-//   - no hub workspace record <globalDir>/hub-workspaces/<slug> exists;
 //   - the broker workspace record <globalDir>/broker-workspaces/<slug>
 //     holds exactly projectID.
 //
@@ -82,14 +81,6 @@ func brokerCopyOfHubWorkspace(projectPath, slug, projectID string) bool {
 	}
 	got, err := filepath.EvalSymlinks(projectPath)
 	if err != nil || filepath.Clean(got) != want {
-		return false
-	}
-
-	hubRecord, err := config.HubWorkspaceRecordPath(slug)
-	if err != nil {
-		return false
-	}
-	if _, err := os.Lstat(hubRecord); !os.IsNotExist(err) {
 		return false
 	}
 
@@ -340,20 +331,12 @@ func (s *Server) alignHubManagedProjectIdentity(ctx context.Context, agentID, pr
 
 // recordBrokerWorkspaceCopy writes the broker workspace record
 // (<globalDir>/broker-workspaces/<slug>, holding projectID) after a
-// successful download of a hub workspace upload. It is written only when
-// the hub-managed project path did not exist when the create request
-// arrived (existedBefore false), and never while a hub workspace record
-// exists for slug. A directory that existed before keeps whatever record it
-// already carries.
+// successful download of a workspace upload. It is written only when the
+// project path did not exist when the create request arrived
+// (existedBefore false). A directory that existed before keeps whatever
+// record it already carries.
 func recordBrokerWorkspaceCopy(slug, projectID string, existedBefore bool) error {
 	if slug == "" || projectID == "" {
-		return nil
-	}
-	hubRecord, err := config.HubWorkspaceRecordPath(slug)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Lstat(hubRecord); !os.IsNotExist(err) {
 		return nil
 	}
 	if existedBefore {
@@ -366,17 +349,6 @@ func recordBrokerWorkspaceCopy(slug, projectID string, existedBefore bool) error
 		return err
 	}
 	return config.WriteWorkspaceRecord(brokerRecord, projectID)
-}
-
-// hubWorkspaceRecordExists reports whether a hub workspace record exists for
-// slug. Errors other than absence count as existing.
-func hubWorkspaceRecordExists(slug string) bool {
-	hubRecord, err := config.HubWorkspaceRecordPath(slug)
-	if err != nil {
-		return true
-	}
-	_, err = os.Lstat(hubRecord)
-	return !os.IsNotExist(err)
 }
 
 // identityErrorAttrs returns log attributes describing err without any

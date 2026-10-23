@@ -57,6 +57,7 @@ func setupNFSStaticStructuralSymlink(t *testing.T, symlinkPid bool) (srv *Server
 	hostBase := setNFSSharedDirStorageGlobalSettings(t)
 
 	srv, _ = testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
 	outside = newOutsideTree(t)
 	project := createTestGitProject(t, srv, "Static Structural Symlink", "github.com/test/static-structural-symlink")
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
