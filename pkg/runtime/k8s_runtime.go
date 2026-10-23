@@ -2620,7 +2620,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: withWorkspaceAgentsAnnotation(withHomeStorageAnnotation(config.Annotations, nfsHome), agentsExcluded),
+			Annotations: withScionAnnotation(withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome), k8sWorkspaceAgentsAnnotation, "true", agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -4948,20 +4948,22 @@ func k8sAgentsMaskPodVolume() corev1.Volume {
 	}
 }
 
-// withWorkspaceAgentsAnnotation returns annotations with
-// k8sWorkspaceAgentsAnnotation set when excluded is true and removed
-// otherwise. The input map is not modified.
-func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool) map[string]string {
-	if _, has := annotations[k8sWorkspaceAgentsAnnotation]; !excluded && !has {
+// withScionAnnotation returns annotations with key set to value when set
+// is true and key removed otherwise. buildPod uses it for the annotations
+// it owns (k8sHomeStorageAnnotation, k8sWorkspaceAgentsAnnotation), so a
+// caller-supplied value never survives. The input map is not modified; it
+// is returned as is when no change is needed.
+func withScionAnnotation(annotations map[string]string, key, value string, set bool) map[string]string {
+	if _, has := annotations[key]; !set && !has {
 		return annotations
 	}
 	out := make(map[string]string, len(annotations)+1)
 	for k, v := range annotations {
 		out[k] = v
 	}
-	delete(out, k8sWorkspaceAgentsAnnotation)
-	if excluded {
-		out[k8sWorkspaceAgentsAnnotation] = "true"
+	delete(out, key)
+	if set {
+		out[key] = value
 	}
 	return out
 }
