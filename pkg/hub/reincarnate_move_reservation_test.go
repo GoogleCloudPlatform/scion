@@ -164,12 +164,14 @@ func TestReconcileFailedMove_NoReservationCreatesOne(t *testing.T) {
 }
 
 // A failed read of the agent's reservation is logged and falls back to
-// release and re-assert, so the agent still ends with its reservation on
-// the source.
+// release and re-assert, so the reservation still moves to the source: it
+// starts on the target here, where skipping the move would leave it.
 func TestReconcileFailedMove_ReadErrorFallsBack(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	prepareMoveWorkerFixture(t, f)
 	rec := failedMoveRecord(t, f)
+	f.srv.releaseBrokerQuota(context.Background(), withBroker(f.agent, f.src.ID))
+	reserveBrokerSlot(t, f.s, f.dst, f.agent.ID)
 	logs := &syncBuffer{}
 	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
 	w, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *reservationReadStore {
@@ -179,7 +181,49 @@ func TestReconcileFailedMove_ReadErrorFallsBack(t *testing.T) {
 
 	f.srv.reconcileFailedMove(context.Background(), rec.ID)
 
-	require.Positive(t, w.reads.Load())
-	assert.Contains(t, logs.String(), "reading the agent's broker reservation failed")
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
+	assert.GreaterOrEqual(t, w.reads.Load(), int32(2), "want the failed read and then the re-assert's own read")
+	assert.Contains(t, logs.String(), "reading the agent's broker reservation failed; moving it anyway")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "want the reservation moved to the source despite the read error")
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID), "want no reservation left on the target")
+}
+
+// limitDefReadStore fails GetLimitDefinitionByName once (the first armed
+// call) with readErr.
+type limitDefReadStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	readErr error
+	reads   atomic.Int32
+}
+
+func (l *limitDefReadStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	if l.fault.Active() {
+		if l.reads.Add(1) == 1 {
+			return nil, l.readErr
+		}
+	}
+	return l.Store.GetLimitDefinitionByName(ctx, name)
+}
+
+// A failed read of the limit definition is logged and falls back the same
+// way: the reservation moves from the target to the source.
+func TestReconcileFailedMove_LimitReadErrorFallsBack(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	rec := failedMoveRecord(t, f)
+	f.srv.releaseBrokerQuota(context.Background(), withBroker(f.agent, f.src.ID))
+	reserveBrokerSlot(t, f.s, f.dst, f.agent.ID)
+	logs := &syncBuffer{}
+	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	w, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *limitDefReadStore {
+		return &limitDefReadStore{Store: inner, fault: sw, readErr: errors.New("injected limit read failure")}
+	})
+	fault.Arm()
+
+	f.srv.reconcileFailedMove(context.Background(), rec.ID)
+
+	assert.GreaterOrEqual(t, w.reads.Load(), int32(2), "want the failed read and then the re-assert's own read")
+	assert.Contains(t, logs.String(), "reading the broker limit failed; moving the reservation anyway")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "want the reservation moved to the source despite the read error")
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID), "want no reservation left on the target")
 }
