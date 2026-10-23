@@ -59,26 +59,37 @@ func TestUnrecordedEdgeDeniesSAAssign(t *testing.T) {
 	assertUnrecordedDeny(t, check(unrecorded))
 }
 
-// gcp_service_account.use: Decide for the exact SA token scope.
+// gcp_service_account.use: Decide for the exact SA token scope. Step 10 for
+// this permission is the account's parent ceiling, which reads the agent's
+// recorded assignment rather than its delegation chain. A legacy agent (an
+// unrecorded edge, from before assignments were recorded) has no recorded
+// assignment, so it is denied for missing provenance even though its
+// delegator is a super admin.
 func TestUnrecordedEdgeDeniesGCPServiceAccountUse(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	saX := tid("unrec-use-sa")
 	agentID, projectID := tid("unrec-use-agent"), tid("unrec-use-project")
-	setBackfillCompleted(t, s)
+	seedUseParentProof(t, s, agentID, projectID, saX)
+	_, err := s.DeactivateAgentServiceAccountAssignments(ctx, agentID,
+		store.Deactivation{Cause: store.EdgeDeactivationSACleared, OpID: "op-legacy"})
+	require.NoError(t, err)
 	adminID := tid("unrec-use-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
 
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
-	assertUnrecordedDeny(t, authz.Decide(ctx, AuthzRequest{
+	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
 		Credential: credentialContextForIdentity(agent),
 		Resource:   gcpUseResource(saX),
 		Action:     ActionUse,
 		Permission: permissions.PermissionGCPServiceAccountUse,
-	}))
+	})
+	require.False(t, d.Allowed, "reason %q", d.Reason)
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+	require.Equal(t, DenyCauseCeilingProvenanceMissing, d.DenyCause, "reason %q", d.Reason)
 }
 
 // secret.use and project.secret_read: Decide, and the runtime project-secret

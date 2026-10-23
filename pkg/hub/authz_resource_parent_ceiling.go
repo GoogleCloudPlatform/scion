@@ -33,9 +33,12 @@ import (
 // assignment is not enough, and a configured default grants nothing.
 //
 // The evaluator here is an authority proof only. It does not check GCP IAM
-// actAs, write anything, or emit a decision audit record; the caller
-// composes it with the actAs check and records the decision with permission
-// gcp_service_account.use and Proof.Permission as the parent proof.
+// actAs, write anything, or emit a decision audit record. Decide runs it as
+// step 10 for gcp_service_account.use (applyResourceParentCeiling), so the
+// one audited decision has permission gcp_service_account.use and names
+// Proof.Permission as the parent proof. The GCP token mint handlers compose
+// that decision with the mode-aware actAs check on the recorded source
+// (authorizeAgentGCPMint, handlers_gcp_identity_mint_authority.go).
 
 const (
 	gcpServiceAccountUsePermission    = "gcp_service_account.use"
@@ -363,4 +366,52 @@ func (a *AuthzService) parentCeilingSourceIdentity(ctx context.Context, row stor
 		}}, "", ""
 	}
 	return nil, DenyCauseCeilingOrphaned, "recorded source is inconsistent"
+}
+
+// evaluateResourceParentCeiling runs the evaluator for mapping m. Only the
+// reviewed mappings have an evaluator; any other mapping denies with
+// ceiling_error, so adding a table row without an evaluator cannot allow.
+func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agentID string, resource Resource) ParentCeilingDecision {
+	proof := ParentProof{Permission: m.ParentPermission}
+	if resource.Type != m.ResourceType {
+		return parentCeilingDeny(DenyCauseCeilingError, "resource does not match the parent ceiling", proof)
+	}
+	switch m.DecisionPermission {
+	case gcpServiceAccountUsePermission:
+		return a.EvaluateServiceAccountParentCeiling(ctx, agentID, resource.ID)
+	default:
+		return parentCeilingDeny(DenyCauseCeilingError, "no evaluator for the parent ceiling", proof)
+	}
+}
+
+// applyResourceParentCeiling is Decide's step 10 for a permission with a
+// resource parent ceiling. decision must be allowed on entry. On allow the
+// reason names the parent proof and the decision is always audited, so the
+// record of the use decision carries the parent permission and the recorded
+// source; on deny the evaluator's cause and neutral reason replace the
+// decision's. The proof is attached either way (Decision.parentProof).
+func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agentID string, resource Resource, decision Decision) Decision {
+	pc := a.evaluateResourceParentCeiling(ctx, m, agentID, resource)
+	proof := pc.Proof
+	decision.parentProof = &proof
+	if !pc.Allowed {
+		decision.Allowed = false
+		decision.Reason = "parent ceiling: " + pc.Reason
+		decision.DeniedBy = DeniedByDelegationCeiling
+		decision.DenyCause = pc.DenyCause
+		return decision
+	}
+	decision.AlwaysAudit = true
+	decision.Reason = parentProofReason(decision.Reason, proof)
+	return decision
+}
+
+// parentProofReason appends the parent proof to an allow reason.
+func parentProofReason(reason string, p ParentProof) string {
+	note := fmt.Sprintf("parent proof: %s held by %s:%s (%s), assignment %s",
+		p.Permission, p.SourcePrincipal.Kind, p.SourcePrincipal.ID, p.SourceCredentialKind, p.AssignmentID)
+	if reason == "" {
+		return note
+	}
+	return reason + " (" + note + ")"
 }

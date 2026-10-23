@@ -786,10 +786,13 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 	}
 }
 
-// TestSAParentCeiling_NotCalledFromTokenHandlers pins that the evaluator is
-// not wired into a handler: the GCP token endpoints compose it with the
-// actAs check in a later change, which removes this test.
-func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
+// TestSAParentCeiling_ReachedOnlyThroughDecide pins that no file but
+// authz_resource_parent_ceiling.go names the evaluator: Decide reaches it
+// through step 10 (applyResourceParentCeiling), and the GCP token endpoints
+// reach it only through Decide(gcp_service_account.use) in
+// authorizeAgentGCPMint, so the audited use decision and the mint can never
+// apply different parent rules.
+func TestSAParentCeiling_ReachedOnlyThroughDecide(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// scanned through guardScanSubdirs; guards EvaluateServiceAccountParentCeiling callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal
