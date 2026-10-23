@@ -4570,8 +4570,10 @@ export class ScionChatThread extends LitElement {
         });
       })
       .catch(() => {
-        // A render that throws rejects updateComplete, so the first write never
-        // comes: stand the anchor down rather than leave the bottom pins off.
+        // A render that throws rejects updateComplete, and a throw inside the
+        // .then body (for example from requestAnimationFrame) lands here too.
+        // Either way the first write never comes: stand the anchor down rather
+        // than leave the bottom pins off.
         if (this.fetchId === openToken) this.deactivateUnreadAnchor();
       });
   }

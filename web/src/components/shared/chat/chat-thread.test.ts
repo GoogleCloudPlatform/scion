@@ -3934,6 +3934,47 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       delete (el as unknown as Record<string, unknown>).updateComplete;
     }
   });
+
+  it("a failed render of a superseded open leaves the next open's anchor alone", async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+    );
+
+    type Internal = {
+      fetchId: number;
+      _unreadAnchorActive: boolean;
+      _unreadAnchorPending: boolean;
+      scrollToUnreadDivider(): void;
+      deactivateUnreadAnchor(): void;
+    };
+    const internal = el as unknown as Internal;
+    let rejectRender: (err: Error) => void = () => {};
+    const render = new Promise<boolean>((_resolve, reject) => (rejectRender = reject));
+    Object.defineProperty(el, 'updateComplete', { configurable: true, get: () => render });
+    try {
+      internal.scrollToUnreadDivider();
+
+      // A thread switch lands before that render settles, and the new open
+      // arms its own anchor.
+      internal.fetchId++;
+      internal._unreadAnchorActive = true;
+      internal._unreadAnchorPending = true;
+
+      rejectRender(new Error('render failed'));
+      await render.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(internal._unreadAnchorActive).toBe(true);
+      expect(internal._unreadAnchorPending).toBe(true);
+    } finally {
+      delete (el as unknown as Record<string, unknown>).updateComplete;
+      internal.deactivateUnreadAnchor();
+    }
+  });
 });
 
 describe('scion-chat-thread search result navigation', () => {
