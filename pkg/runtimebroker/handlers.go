@@ -8853,7 +8853,9 @@ func hubManagedProjectHasAgent(scionDir, agentName string) bool {
 // loopback address (localhost, 127.0.0.1, [::1], etc.). This is used to
 // decide whether the ContainerHubEndpoint bridge address should be
 // substituted — containers can reach external hosts directly but need a
-// bridge address to reach services on the host's loopback interface.
+// bridge address to reach services on the host's loopback interface. It is
+// also the rule for whether the broker's own hub connection may send the dev
+// token (DevAuthHubOptions); it matches the CLI's rule, hubsync.IsLocalhostEndpoint.
 func isLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {

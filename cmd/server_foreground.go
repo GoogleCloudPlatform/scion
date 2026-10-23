@@ -4112,7 +4112,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 		return startFlatRuntimeBrokerHost(ctx, flatHostParams{
 			cfg: cfg, hubSrv: hubSrv, webSrv: webSrv, store: s, instances: flatInstances,
-			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc, devAuthToken: devAuthToken,
+			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc,
 			settings: brokerSettings, globalDir: globalDir, autoProvide: autoProvide,
 			requestLogger: requestLogger, messageLogger: messageLogger, wg: wg, errCh: errCh,
 			shutdownContext: shutdownContext,
@@ -4331,7 +4331,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubEndpointForRH != "",
-		HubToken:             devAuthToken,
 		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
 		WorkstationMode:      !hostedMode,
 		TemplateCacheDir:     templateCacheDir,
