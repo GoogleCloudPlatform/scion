@@ -412,14 +412,11 @@ func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-
-	assert.NotNil(t, resp.Agent)
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should be assigned to the explicitly selected broker")
+	// The explicitly selected broker is remote and has no checkout of the
+	// hub-managed project, so the create is refused (ptone/scion#5813);
+	// broker resolution, and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the broker was auto-linked as a provider
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
@@ -479,12 +476,11 @@ func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 		"projectId": project.ID,
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
-		"Agent should use the auto-provided default broker")
+	// The auto-provided default broker is remote and has no checkout of the
+	// hub-managed project: the create resolves to it and is then refused
+	// (ptone/scion#5813).
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Cleanup hub-managed project filesystem
 	workspacePath, err := localProjectPath(project.Slug)
@@ -967,7 +963,11 @@ func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	// The broker is remote and has no checkout of the hub-managed project,
+	// so the create itself is refused (ptone/scion#5813); broker resolution,
+	// and so the auto-link, runs before that refusal.
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime broker cannot reach")
 
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
