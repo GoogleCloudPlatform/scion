@@ -33,12 +33,13 @@ import (
 // (its run could not be begun, or the hub is shutting down) left no
 // container, so a reincarnation treats it as definitive.
 
-// startNotSentErrs are the two hub-side refusals, wrapped as the
-// dispatcher and its callers wrap them.
+// startNotSentErrs are the two hub-side refusals as the dispatcher returns
+// them: a run not begun wraps its cause, and the shutdown gate's error is
+// returned bare.
 func startNotSentErrs() map[string]error {
 	return map[string]error{
 		"run not begun":     fmt.Errorf("%w: %w", errStartRunNotBegun, errors.New("store unavailable")),
-		"hub shutting down": fmt.Errorf("resolve broker: %w", ErrHubShuttingDown),
+		"hub shutting down": ErrHubShuttingDown,
 	}
 }
 
@@ -74,7 +75,8 @@ func TestReincarnateMove_StartNotSentRollsBack(t *testing.T) {
 
 // A forced (recreate) move whose target start the hub refused before
 // sending rolls back to the source and removes the target's files, as for
-// a definitive start failure.
+// a definitive start failure. No run was recorded on the target, so the
+// files delete resolves the agent by name (no run ID).
 func TestReincarnateForceMove_StartNotSentRollsBack(t *testing.T) {
 	for name, startErr := range startNotSentErrs() {
 		t.Run(name, func(t *testing.T) {
@@ -87,7 +89,7 @@ func TestReincarnateForceMove_StartNotSentRollsBack(t *testing.T) {
 
 			r, a := startForceMove(t, f)
 			assert.NotEqual(t, sourceCleanupSkippedAmbiguousStart, r.SourceCleanup, "want a rollback, not an ambiguous start")
-			assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting, before.AppliedConfig.Task)
+			assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateStarting, before.AppliedConfig.Task)
 		})
 	}
 }

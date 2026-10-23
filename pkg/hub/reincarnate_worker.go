@@ -1002,8 +1002,11 @@ const reincarnationRerenderTimeout = 5 * time.Minute
 // resolves the broker). A run not begun because a delete holds the row
 // (store.ErrDeleteInProgress) stays ambiguous, as in startDidNotHappen: the
 // delete owns the agent row then, so no rollback or re-render may write it.
+// During a hub shutdown the rollback's own dispatches (the target delete,
+// the re-render) are best effort and normally refused by the same gate;
+// the agent row is still rolled back or failed consistently.
 func reincarnationStartLeftNoContainer(err error) bool {
-	if (errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) || errors.Is(err, ErrHubShuttingDown) {
+	if startRunNotBegunOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
 		return true
 	}
 	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
