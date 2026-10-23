@@ -49,7 +49,10 @@ async function setUp(page: Page, testInfo: TestInfo): Promise<void> {
 /** Mocks a history and a read pointer for each unread thread (or none). */
 async function mockUnread(page: Page, withUnread: boolean): Promise<void> {
   await page.route(/\/api\/v1\/chat\/conversations\/([^/?]+)\/messages/, (route) => {
-    const match = route.request().url().match(/\/conversations\/([^/?]+)\/messages/);
+    const match = route
+      .request()
+      .url()
+      .match(/\/conversations\/([^/?]+)\/messages/);
     const threadId = match ? decodeURIComponent(match[1]) : '';
     const items = UNREAD_THREADS.has(threadId) ? buildMessages(threadId, PROJECT_A.id) : [];
     void route.fulfill({ json: { items, messages: items } });
@@ -59,7 +62,10 @@ async function mockUnread(page: Page, withUnread: boolean): Promise<void> {
       void route.fulfill({ json: {} });
       return;
     }
-    const match = route.request().url().match(/\/conversations\/([^/?]+)\/read$/);
+    const match = route
+      .request()
+      .url()
+      .match(/\/conversations\/([^/?]+)\/read$/);
     const threadId = match ? decodeURIComponent(match[1]) : '';
     void route.fulfill({
       json:
@@ -148,15 +154,15 @@ test.describe('open at the unread divider', () => {
     await expect(input).toBeFocused();
     await input.fill(`${SWITCHER_THREAD_ID} discussion`);
     await page
-      .locator('scion-quick-palette [role="option"]', { hasText: `${SWITCHER_THREAD_ID} discussion` })
+      .locator('scion-quick-palette [role="option"]', {
+        hasText: `${SWITCHER_THREAD_ID} discussion`,
+      })
       .first()
       .click();
     await expectOpenedAtDivider(page, SWITCHER_THREAD_ID);
   });
 
-  test('a conversation without unread messages opens at the bottom', async ({
-    page,
-  }, testInfo) => {
+  test('a conversation without unread messages opens at the bottom', async ({ page }, testInfo) => {
     await setUp(page, testInfo);
     await openChatRail(page, (p) => mockUnread(p, false));
     await expandSpace(page);

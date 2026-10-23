@@ -806,6 +806,12 @@ export class ScionChatThread extends LitElement {
   /** True while the open-time anchor to the unread divider is still in effect. */
   private _unreadAnchorActive = false;
 
+  /** True from `scrollToUnreadDivider` until its deferred first anchor write.
+   *  A 'scroll' event dispatched in that gap was queued by an earlier write
+   *  (the bottom pin while the history rendered), not by the user reacting to
+   *  the anchor, so it must not cancel the anchor before it is applied. */
+  private _unreadAnchorPending = false;
+
   /** Message count captured when the anchor was applied, to tell a late layout
    *  shift of existing content (re-apply) apart from a new message arriving
    *  (stop — never re-anchor on live activity). */
@@ -3807,8 +3813,11 @@ export class ScionChatThread extends LitElement {
     // scroll landing in the very same frame as our write is still detected:
     // `_applyingUnreadAnchor` is true for that whole frame, but the resulting
     // scrollTop then disagrees with the value we just wrote.
+    // Before the first anchor write there is nothing to take over from: a
+    // scroll event then is the one the history render's bottom pin queued.
     if (
       this._unreadAnchorActive &&
+      !this._unreadAnchorPending &&
       (!this._applyingUnreadAnchor || el.scrollTop !== this._unreadAnchorWrittenScrollTop)
     ) {
       this.deactivateUnreadAnchor();
@@ -4537,6 +4546,7 @@ export class ScionChatThread extends LitElement {
    */
   private scrollToUnreadDivider(): void {
     this._unreadAnchorActive = true;
+    this._unreadAnchorPending = true;
     this._unreadAnchorMessageCount = this.messages.length;
     // Captured as a local, not stored back onto `this`: `fetchId` only bumps
     // on a thread switch, so if this open is superseded before this deferred
@@ -4553,6 +4563,7 @@ export class ScionChatThread extends LitElement {
       this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
         this._unreadAnchorInitialRaf = null;
         if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+        this._unreadAnchorPending = false;
         this.applyUnreadAnchor();
         this.observeUnreadAnchorLayout(openToken);
       });
@@ -4650,6 +4661,7 @@ export class ScionChatThread extends LitElement {
   /** Stop correcting the unread-divider anchor and tear down its watchers. */
   private deactivateUnreadAnchor(): void {
     this._unreadAnchorActive = false;
+    this._unreadAnchorPending = false;
     this._applyingUnreadAnchor = false;
     if (this._unreadAnchorResizeObserver) {
       this._unreadAnchorResizeObserver.disconnect();

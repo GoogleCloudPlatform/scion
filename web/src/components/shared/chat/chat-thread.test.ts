@@ -3865,6 +3865,45 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       restore();
     }
   });
+
+  /**
+   * ptone/scion#5964: in a browser, the bottom pin written while the history
+   * rendered queues a 'scroll' event that is dispatched in the next frame,
+   * before animation-frame callbacks. When the read state arrived first, that
+   * event landed after the open had chosen the unread anchor but before its
+   * deferred first write, was taken for the user scrolling away, and cancelled
+   * the anchor: the thread stayed at the bottom with the divider out of view.
+   */
+  it('a scroll event queued before the first anchor write does not cancel the anchor', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const { callbacks: rafCallbacks, restore } = installRafStub();
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      // The deferred first anchor write is still pending.
+      await vi.waitFor(() => expect(rafCallbacks.size).toBe(1));
+      const container = scrollContainer(el);
+
+      // The earlier bottom pin's scroll event arrives first.
+      container.scrollTop = SCROLL_HEIGHT;
+      container.dispatchEvent(new Event('scroll'));
+      expect((el as unknown as { _unreadAnchorActive: boolean })._unreadAnchorActive).toBe(true);
+
+      // Then the frame's animation callbacks run.
+      for (const [handle, cb] of [...rafCallbacks]) {
+        rafCallbacks.delete(handle);
+        cb(0);
+      }
+
+      expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX);
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe('scion-chat-thread search result navigation', () => {
