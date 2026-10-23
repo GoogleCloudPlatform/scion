@@ -329,6 +329,37 @@ func TestProvision_MoveMarkerOnHubProjectStateDir(t *testing.T) {
 	assert.Contains(t, paths, hubDir)
 }
 
+// In a linked (split-storage) layout with a project-id marker (project A)
+// and a different Hub project ID (B), a forced move's shared-workspace
+// provision creates and marks two directories: its state directory under
+// B's root and its home's parent under A's external agents root. The
+// guarded delete's check, given B, names both and passes
+// (ptone/scion#5955).
+func TestProvision_MoveMarkerOnLinkedLayoutHubProjectStateDir(t *testing.T) {
+	const hubProjectID = "5955dddd-eeee-4fff-8000-111111111111"
+	agentName := "linked-move"
+	scionDir, _, agentHome := setupSplitStorageFailedProvision(t, agentName)
+	markerID, err := config.ReadProjectID(scionDir)
+	require.NoError(t, err)
+	require.NotEqual(t, markerID, hubProjectID, "setup: the Hub project ID differs from the marker's")
+	ctx := withMoveReincarnationID(api.ContextWithHubProjectID(api.ContextWithSharedWorkspace(context.Background()), hubProjectID), testMoveID)
+	_, _, _, err = ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", t.TempDir())
+	require.NoError(t, err)
+
+	hubDir, err := config.AgentDirForProject(scionDir, agentName, true, hubProjectID)
+	require.NoError(t, err)
+	homeParent := filepath.Dir(agentHome)
+	require.NotEqual(t, hubDir, homeParent, "the Hub-derived and marker-derived directories differ")
+	assertMarker(t, hubDir, testMoveID)
+	assertMarker(t, homeParent, testMoveID)
+
+	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
+	paths, err := mgr.CheckMoveMarkers(context.Background(), scionDir, "", hubProjectID, agentName, "", testMoveID)
+	require.NoError(t, err, "the move's own directories pass the guarded delete's check")
+	assert.Contains(t, paths, hubDir)
+	assert.Contains(t, paths, homeParent)
+}
+
 // The leaf helper still reports that it created the agent's directory on
 // the export when a later directory then fails, so the start can mark it.
 func TestEnsureNFSAgentWorkspaceLeafClaim_ReportsCreatedOnLaterError(t *testing.T) {
