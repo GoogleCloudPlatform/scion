@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -549,4 +550,192 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})
 	}
+}
+
+// errInjectedStarFault is the failure faultStarStore injects; its text must
+// never reach a response body.
+var errInjectedStarFault = errors.New("injected star store fault: do-not-disclose")
+
+// faultStarStore is a chat store that opts in to MessageStarStore and can
+// fail chosen calls, and that can serve extra topics the real store does
+// not have (a thread whose conversation record is missing).
+type faultStarStore struct {
+	WebChatStore
+	MessageStarStore
+	failAdd, failList, failState, failGetTopic bool
+	extraTopics                                map[string]*WebChatTopic
+}
+
+func newFaultStarStore(f *starFixture) *faultStarStore {
+	return &faultStarStore{WebChatStore: f.wcs, MessageStarStore: f.stars, extraTopics: map[string]*WebChatTopic{}}
+}
+
+func (s *faultStarStore) GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error) {
+	if s.failGetTopic {
+		return nil, errInjectedStarFault
+	}
+	if t, ok := s.extraTopics[topicID]; ok {
+		return t, nil
+	}
+	return s.WebChatStore.GetTopic(ctx, topicID)
+}
+
+func (s *faultStarStore) AddMessageStar(ctx context.Context, userID string, target StarTarget) (StarRecord, bool, error) {
+	if s.failAdd {
+		return StarRecord{}, false, errInjectedStarFault
+	}
+	return s.MessageStarStore.AddMessageStar(ctx, userID, target)
+}
+
+func (s *faultStarStore) ListMessageStarCandidates(ctx context.Context, f StarFilter) (StarCandidatePage, error) {
+	if s.failList {
+		return StarCandidatePage{}, errInjectedStarFault
+	}
+	return s.MessageStarStore.ListMessageStarCandidates(ctx, f)
+}
+
+func (s *faultStarStore) ListStarredMessageIDs(ctx context.Context, userID string, messageIDs []string) ([]StarredMessageRef, error) {
+	if s.failState {
+		return nil, errInjectedStarFault
+	}
+	return s.MessageStarStore.ListStarredMessageIDs(ctx, userID, messageIDs)
+}
+
+// assertStar500 checks a store or lookup failure is a 500 that discloses
+// nothing about the failure, never a 404 or an empty result.
+func assertStar500(t *testing.T, rec *httptest.ResponseRecorder, what string) {
+	t.Helper()
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "%s: %s", what, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "do-not-disclose", what)
+	assert.NotContains(t, rec.Body.String(), "injected", what)
+}
+
+func TestChatStars_StoreAndLookupFailuresAre500(t *testing.T) {
+	f := newStarFixture(t, true)
+	msg := f.threadMsg(t, f.topicA, f.projA, "fault", time.Now())
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	fs := newFaultStarStore(f)
+	f.srv.SetWebChatStore(fs)
+	require.NotNil(t, messageStarStoreFrom(fs), "the double opts in")
+
+	fs.failList = true
+	assertStar500(t, f.session(t, f.admin, http.MethodGet, starListPath(f.topicA), nil), "list")
+	fs.failList = false
+
+	fs.failState = true
+	assertStar500(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil), "state")
+	fs.failState = false
+
+	fs.failAdd = true
+	other := f.threadMsg(t, f.topicA, f.projA, "fault add", time.Now())
+	assertStar500(t, f.put(t, f.admin, other, f.topicA), "add")
+	fs.failAdd = false
+
+	// A failed topic lookup (the resolver's lookup-error branch) is a 500
+	// on every route that resolves the conversation, including state for
+	// an existing star.
+	fs.failGetTopic = true
+	assertStar500(t, f.session(t, f.admin, http.MethodGet, starListPath(f.topicA), nil), "list, topic lookup")
+	assertStar500(t, f.put(t, f.admin, other, f.topicA), "add, topic lookup")
+	assertStar500(t, f.session(t, f.admin, http.MethodGet, starPath(msg), nil), "detail, topic lookup")
+	assertStar500(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil), "state, topic lookup")
+	fs.failGetTopic = false
+
+	assert.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil)))
+}
+
+// TestChatStars_StateTreatsUnresolvedConversationAsUnreadable: with the
+// read switch on, one starred thread whose conversation record is missing
+// (drift; the resolver's 409) is left out of the state answer instead of
+// failing it for every other conversation. The single-conversation routes
+// keep answering the resolver's 409.
+func TestChatStars_StateTreatsUnresolvedConversationAsUnreadable(t *testing.T) {
+	f := newStarFixture(t, true)
+	ctx := context.Background()
+	a1 := f.threadMsg(t, f.topicA, f.projA, "a1", time.Now())
+	decodeStarPut(t, f.put(t, f.admin, a1, f.topicA))
+
+	// A thread the chat store knows but that has no conversation record,
+	// with a starred message stored directly under the legacy selector.
+	drift := uuid.NewString()
+	fs := newFaultStarStore(f)
+	fs.extraTopics[drift] = &WebChatTopic{ID: drift, ProjectID: f.projA, Name: "drifted"}
+	driftMsg := uuid.NewString()
+	require.NoError(t, f.s.CreateMessage(ctx, &store.Message{
+		ID: driftMsg, ProjectID: f.projA, Sender: "user:" + f.admin + "@test.com", SenderID: f.admin, Recipient: "chat",
+		Msg: "drifted", Type: "chat", Channel: "web", ThreadID: drift, CreatedAt: time.Now().UTC(),
+	}))
+	_, _, err := f.stars.AddMessageStar(ctx, f.admin, StarTarget{MessageID: driftMsg, ProjectID: f.projA,
+		Selector: StarSelector{ConversationKey: drift, Channel: "web", ThreadID: drift}})
+	require.NoError(t, err)
+	f.srv.SetWebChatStore(fs)
+
+	assert.Equal(t, []string{a1}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(driftMsg, a1), nil)),
+		"the drifted conversation is not readable; the others still answer")
+	rec := f.session(t, f.admin, http.MethodGet, starListPath(drift), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeConversationNotResolved)
+}
+
+// projectGoneAfterFirstLookup answers GetProject normally once, then as
+// deleted: a project removed after the read check of a request.
+type projectGoneAfterFirstLookup struct {
+	store.Store
+	calls int
+}
+
+func (s *projectGoneAfterFirstLookup) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	s.calls++
+	if s.calls > 1 {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetProject(ctx, id)
+}
+
+// TestChatStars_HydrationReusesTheAuthorizedProject: the list and detail
+// build their items from the project the read check loaded, so a project
+// deleted after that check does not turn into a 500.
+func TestChatStars_HydrationReusesTheAuthorizedProject(t *testing.T) {
+	f := newStarFixture(t, true)
+	msg := f.threadMsg(t, f.topicA, f.projA, "hydrate", time.Now())
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	orig := f.srv.store
+	t.Cleanup(func() { f.srv.store = orig })
+
+	for _, path := range []string{starListPath(f.topicA), starPath(msg)} {
+		spy := &projectGoneAfterFirstLookup{Store: orig}
+		f.srv.store = spy
+		rec := f.session(t, f.admin, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Inbox A", path)
+		assert.Equal(t, 1, spy.calls, "%s: one project lookup per request", path)
+	}
+}
+
+// TestChatReadError_WriteHistoryIsTotal: every resolver error kind has a
+// history answer; a never-used DM is an empty page and a status-less
+// failure is a 500 (never WriteHeader(0)).
+func TestChatReadError_WriteHistoryIsTotal(t *testing.T) {
+	cases := []struct {
+		err  *chatReadError
+		want int
+	}{
+		{&chatReadError{kind: chatReadNotFound}, http.StatusNotFound},
+		{&chatReadError{kind: chatReadNotFound, err: errInjectedStarFault}, http.StatusNotFound},
+		{&chatReadError{kind: chatReadUnauthenticated}, http.StatusUnauthorized},
+		{&chatReadError{kind: chatReadAbsent}, http.StatusOK},
+		{&chatReadError{kind: chatReadFailure, status: http.StatusConflict, code: ErrCodeConversationNotResolved, message: "x"}, http.StatusConflict},
+		{&chatReadError{kind: chatReadFailure}, http.StatusInternalServerError},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		require.NotPanics(t, func() { c.err.writeHistory(rec) }, c.err.Error())
+		assert.Equal(t, c.want, rec.Code, c.err.Error())
+	}
+	rec := httptest.NewRecorder()
+	(&chatReadError{kind: chatReadAbsent}).writeHistory(rec)
+	var page chatHistoryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	assert.NotNil(t, page.Messages)
+	assert.Empty(t, page.Messages)
 }

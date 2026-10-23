@@ -2913,7 +2913,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		// A missing thread, and one whose project the caller may not read,
 		// both answer "Thread not found"; the resolver logs the denial.
 		var rerr *chatReadError
-		if topic, rerr = s.authorizeChatThreadRead(r, wcs, key); rerr != nil {
+		if topic, _, rerr = s.authorizeChatThreadRead(r, wcs, key); rerr != nil {
 			rerr.writeHistory(w)
 			return
 		}
@@ -2933,10 +2933,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// thread-ID match chosen by the read switch (resolveChatReadTarget).
 	target, rerr := s.resolveChatReadTarget(ctx, wcs, key, topic, GetIdentityFromContext(ctx))
 	if rerr != nil {
-		if rerr.kind == chatReadAbsent {
-			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
-			return
-		}
+		// A never-used DM (chatReadAbsent) is an empty page.
 		rerr.writeHistory(w)
 		return
 	}

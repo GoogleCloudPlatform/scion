@@ -78,14 +78,22 @@ func (e *chatReadError) Error() string {
 
 // writeHistory writes e the way native history always answered it: a
 // missing or unreadable thread (including a failed lookup) is "Thread not
-// found". chatReadAbsent is handled by the caller (an empty page).
+// found", and a never-used DM (chatReadAbsent) is an empty page. It
+// answers every kind, so a status-less error is a 500, never
+// WriteHeader(0).
 func (e *chatReadError) writeHistory(w http.ResponseWriter) {
 	switch e.kind {
 	case chatReadNotFound:
 		NotFound(w, "Thread")
 	case chatReadUnauthenticated:
 		Unauthorized(w)
+	case chatReadAbsent:
+		writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 	default:
+		if e.status == 0 {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to look up conversation", nil)
+			return
+		}
 		writeError(w, e.status, e.code, e.message, nil)
 	}
 }
@@ -96,6 +104,9 @@ type chatReadTarget struct {
 	IsDM bool
 	// Topic is the thread's topic (nil for a DM).
 	Topic *WebChatTopic
+	// Project is the thread's project as loaded by the read check (nil
+	// for a DM, and when the caller did not set it).
+	Project *store.Project
 	// Filter selects the conversation's history messages: Channel plus
 	// ConversationID (read switch on) or ThreadID (off).
 	Filter store.MessageFilter
@@ -130,19 +141,22 @@ func (t chatReadTarget) containsMessage(msg *store.Message) bool {
 	return true
 }
 
-// authorizeChatThreadRead returns the topic of the thread key when the
-// caller may read its project. A missing topic, a failed project lookup
-// and a denial are chatReadNotFound; the denial is logged as history
-// always logged it. It never writes a response.
-func (s *Server) authorizeChatThreadRead(r *http.Request, wcs WebChatStore, key string) (*WebChatTopic, *chatReadError) {
+// authorizeChatThreadRead returns the topic of the thread key and its
+// project when the caller may read that project. A missing topic, a
+// failed project lookup and a denial are chatReadNotFound; the denial is
+// logged as history always logged it. It never writes a response. Callers
+// reuse the returned project rather than loading it again, so a project
+// deleted after this check cannot turn into a lookup failure later in the
+// same request.
+func (s *Server) authorizeChatThreadRead(r *http.Request, wcs WebChatStore, key string) (*WebChatTopic, *store.Project, *chatReadError) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	topic, err := wcs.GetTopic(ctx, key)
 	if err != nil {
-		return nil, &chatReadError{kind: chatReadNotFound, err: err}
+		return nil, nil, &chatReadError{kind: chatReadNotFound, err: err}
 	}
 	if topic == nil {
-		return nil, &chatReadError{kind: chatReadNotFound}
+		return nil, nil, &chatReadError{kind: chatReadNotFound}
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
@@ -151,23 +165,23 @@ func (s *Server) authorizeChatThreadRead(r *http.Request, wcs WebChatStore, key 
 		if !errors.Is(err, store.ErrNotFound) {
 			rerr.err = err
 		}
-		return nil, rerr
+		return nil, nil, rerr
 	}
 	// A caller who may not read the project gets the same answer as for a
 	// missing thread (authorizeRead's rule).
 	if identity == nil {
-		return nil, &chatReadError{kind: chatReadUnauthenticated}
+		return nil, nil, &chatReadError{kind: chatReadUnauthenticated}
 	}
 	if s.authzService == nil {
-		return nil, &chatReadError{kind: chatReadNotFound}
+		return nil, nil, &chatReadError{kind: chatReadNotFound}
 	}
 	resource := projectResource(project)
 	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
-		return nil, &chatReadError{kind: chatReadNotFound}
+		return nil, nil, &chatReadError{kind: chatReadNotFound}
 	}
-	return topic, nil
+	return topic, project, nil
 }
 
 // chatHistoryChannel is the channel history is limited to for identity:

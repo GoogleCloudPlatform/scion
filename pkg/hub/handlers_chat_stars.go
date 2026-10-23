@@ -268,7 +268,7 @@ func (s *Server) resolveStarConversation(w http.ResponseWriter, r *http.Request,
 		writeStarNotFound(w)
 		return chatReadTarget{}, false
 	}
-	topic, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
+	topic, project, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
 	if rerr != nil {
 		writeStarReadError(w, rerr)
 		return chatReadTarget{}, false
@@ -290,6 +290,7 @@ func (s *Server) resolveStarConversation(w http.ResponseWriter, r *http.Request,
 		writeStarReadError(w, rerr)
 		return chatReadTarget{}, false
 	}
+	target.Project = project
 	return target, true
 }
 
@@ -589,13 +590,20 @@ type starStateDecision struct {
 // decideStarState decides read access to one conversation for the state
 // route without writing a response: a refusal is allowed=false, a failed
 // lookup is an error.
+//
+// The state route answers for many conversations at once, so one
+// conversation whose read target cannot be resolved (read-switch drift: a
+// thread with no conversation record, the resolver's 409) is treated as
+// not readable and logged, rather than failing the whole batch; only a
+// real lookup failure (a 500) fails the request. The single-conversation
+// routes (list, add, detail) keep answering the resolver's error.
 func (s *Server) decideStarState(r *http.Request, call starCall, key string) (starStateDecision, *chatReadError) {
 	type decision = starStateDecision
 	ctx := r.Context()
 	if strings.HasPrefix(key, "dm:") {
 		return decision{}, nil // phase 1: threads only
 	}
-	topic, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
+	topic, _, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
 	if rerr != nil {
 		if rerr.kind == chatReadNotFound && rerr.err == nil {
 			return decision{}, nil
@@ -613,6 +621,11 @@ func (s *Server) decideStarState(r *http.Request, call starCall, key string) (st
 	}
 	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, topic, GetIdentityFromContext(ctx))
 	if rerr != nil {
+		if rerr.kind == chatReadFailure && rerr.status != http.StatusInternalServerError {
+			slog.Warn("chat stars: state treats a conversation as not readable: read target unresolved",
+				"conversation_key", key, "code", rerr.code)
+			return decision{}, nil
+		}
 		return decision{}, rerr
 	}
 	return decision{target: target, allowed: true}, nil
@@ -657,11 +670,12 @@ func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, target 
 	if target.Topic != nil {
 		projectID = target.Topic.ProjectID
 		conversationName = target.Topic.Name
-		project, err := s.store.GetProject(ctx, projectID)
-		if err != nil {
-			return nil, err
+		// The project the read check loaded (resolveStarConversation): no
+		// second lookup a concurrent delete could fail.
+		if target.Project == nil {
+			return nil, errors.New("chat stars: read target has no project")
 		}
-		projectName = project.Name
+		projectName = target.Project.Name
 	}
 
 	for _, rec := range recs {

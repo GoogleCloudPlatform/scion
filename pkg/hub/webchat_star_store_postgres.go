@@ -217,6 +217,11 @@ func (s *pgWebChatStore) ListMessageStarCandidates(ctx context.Context, f StarFi
 		"NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)",
 	}
 	if f.After != nil {
+		// The message_id tie-break (here and in ORDER BY) compares TEXT
+		// under the database collation, while SQLite compares bytes. The
+		// two orders agree because message_id is always a canonical
+		// lowercase UUID (hex digits and hyphens; the handlers canonicalize
+		// every ID), and the shared store contract relies on that byte order.
 		at := a.add(f.After.StarredAt.UTC().Truncate(starTimePrecision))
 		id := a.add(f.After.MessageID)
 		conds = append(conds, "(st.starred_at < "+at+"::timestamptz OR (st.starred_at = "+at+"::timestamptz AND st.message_id < "+id+"::text))")
