@@ -286,6 +286,8 @@ To ensure that newly created projects have an immediate space for agent file tra
 
 - **Auto-Provisioning Toggle**: This behavior is controlled by the `project_defaults.default_scratchpad` setting in the Hub's operational settings (default is **`ON` / `true`**).
 - **Inbound Message Attachments**: In isolated workspace modes, Scion automatically routes agent message attachments through the default `scratchpad` shared volume to prevent silent delivery failures.
+- **Attachment copies expire**: Copies of attachments under the scratchpad's `.attachments/` directory are removed after `messaging.attachment_inbox_retention_days` (default 7 days). This covers chat attachments, `scion message --attach` files, chat plugin downloads and terminal drag-and-drop uploads. Downloading an attachment from chat history is not affected.
+- **Direct-message attachments on the workstation**: The workstation server stores chat attachments locally, without artifact inbox delivery. Every chat attachment, including one in a direct message, is therefore copied into the project's scratchpad, where the project's other agents can read it.
 
 ### Managing Shared Directories
 
