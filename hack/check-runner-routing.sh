@@ -156,8 +156,18 @@ selftest() {
   else
     echo "selftest FAILED: good fixtures reported:"; printf '%s\n' "$out"; fail=1
   fi
+  # Fixtures are part of the test: a missing good dir fails above (check_dir finds no
+  # workflow), and no bad-* dir, or one without its want file, fails here, so a
+  # broken fixture set cannot pass by skipping (an unmatched glob is left literal).
+  local nbad=0
   for d in "$td"/bad-*/; do
+    [ -d "$d" ] || continue
     d=${d%/}
+    nbad=$((nbad + 1))
+    if [ ! -r "$d/want" ]; then
+      echo "selftest FAILED: ${d##*/} has no want file"; fail=1
+      continue
+    fi
     want=$(<"$d/want")
     rc=0; out=$(check_dir "$d" 2>&1) || rc=$?
     if [ "$rc" -eq 1 ] && grep -qF -- "$want" <<<"$out"; then
@@ -166,6 +176,9 @@ selftest() {
       echo "selftest FAILED: ${d##*/} (exit $rc) did not report: $want"; printf '%s\n' "$out"; fail=1
     fi
   done
+  if [ "$nbad" -eq 0 ]; then
+    echo "selftest FAILED: no bad-* fixtures in $td"; fail=1
+  fi
   return "$fail"
 }
 

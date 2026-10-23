@@ -183,9 +183,13 @@ runs:
           fi
         }
         check HOME "$HOME" /home/runner
-        check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work
-        check "HOME/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache
-        check "HOME/go link" "$(readlink "$HOME/go")" /scratch/go
+        # Compare resolved paths (readlink -f) on both sides: a relative or chained link
+        # still has to land where /scratch's directory does. /scratch/.cache may itself
+        # be a link (the RAM build cache), so resolve the expected side too. A real
+        # directory in place of a link resolves to itself and fails.
+        check "work folder /home/runner/work" "$(readlink -f /home/runner/work)" "$(readlink -f /scratch/_work)"
+        check "HOME/.cache" "$(readlink -f "$HOME/.cache")" "$(readlink -f /scratch/.cache)"
+        check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
         check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
         check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
         check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
