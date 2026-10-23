@@ -200,6 +200,7 @@ func attachAutoProvideBroker(t *testing.T, f *projectAgentAuthzFixture) {
 		ProjectID:  f.project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	f.project.DefaultRuntimeBrokerID = broker.ID
@@ -3405,10 +3406,14 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))

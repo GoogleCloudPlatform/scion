@@ -77,10 +77,14 @@ func addProjectOnBroker(t *testing.T, s store.Store, slug string, broker *store.
 		Slug: slug,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
