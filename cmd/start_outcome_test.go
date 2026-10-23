@@ -91,15 +91,21 @@ func (h *startOutcomeHub) serve(t *testing.T) *httptest.Server {
 }
 
 // setupStartOutcomeTest sets the package state the hub start path reads
-// and returns a HubContext for server with a short client timeout.
+// and returns a HubContext for server with a short client timeout. The
+// create request and the env submit have their own, longer timeout
+// (hubCreateRequestTimeout); it is shortened to the same 300ms here, so
+// these tests still exercise a timed-out create or submit.
 func setupStartOutcomeTest(t *testing.T, serverURL, projectID string) *HubContext {
 	t.Helper()
 	origNonInteractive, origAutoConfirm, origOutputFormat := nonInteractive, autoConfirm, outputFormat
 	origLookup := startOutcomeLookupTimeout
+	origCreateTimeout := hubCreateRequestTimeout
 	t.Cleanup(func() {
 		nonInteractive, autoConfirm, outputFormat = origNonInteractive, origAutoConfirm, origOutputFormat
 		startOutcomeLookupTimeout = origLookup
+		hubCreateRequestTimeout = origCreateTimeout
 	})
+	hubCreateRequestTimeout = 300 * time.Millisecond
 	nonInteractive = true
 	autoConfirm = true
 	outputFormat = "json"

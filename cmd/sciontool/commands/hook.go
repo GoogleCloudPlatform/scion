@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -61,6 +62,7 @@ Examples:
   sciontool hook task_completed "Implemented feature X"`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		if len(args) > 0 {
 			// Handle subcommands: ask_user, task_completed
 			switch args[0] {
@@ -112,6 +114,7 @@ var askUserCmd = &cobra.Command{
 	Short: "Signal that the agent is waiting for user input",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Input requested"
 		if len(args) > 0 {
 			message = args[0]
@@ -126,12 +129,30 @@ var taskCompletedCmd = &cobra.Command{
 	Short: "Signal that the agent has completed its task",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		defer recoverHookPanic()
 		message := "Task completed"
 		if len(args) > 0 {
 			message = args[0]
 		}
 		runTaskCompleted(message)
 	},
+}
+
+// hookExit exits the process. Tests replace it.
+var hookExit = os.Exit
+
+// recoverHookPanic, deferred at the top of a hook command's Run, turns a
+// panic into a logged error and exit code 1. An unrecovered panic exits
+// with code 2, which some harnesses read as a hook result with its own
+// meaning (Copilot, for example, then adds the hook's stdout to the model
+// context). A runtime fatal error cannot be recovered and still exits 2.
+func recoverHookPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	log.Error("Hook panicked: %v\n%s", r, debug.Stack())
+	hookExit(1)
 }
 
 // runHookFromStdin processes hook events from stdin.

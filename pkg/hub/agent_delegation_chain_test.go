@@ -411,7 +411,9 @@ func TestAgentDelegation_OneRecordPerCheckAndNoReasonInResponses(t *testing.T) {
 			allows = append(allows, r)
 		}
 	}
-	require.Len(t, agentDelegationAdmittedRoutes, 1, "a new admitted route needs its own record and no-reason checks here")
+	// project.read has the same checks in
+	// TestAgentDelegatedProjectRead_OneRecordPerCheckAndNoReason.
+	require.Len(t, agentDelegationAdmittedRoutes, 2, "a new admitted route needs its own record and no-reason checks")
 	require.Len(t, allows, 1, "one record for the delegated agent.read check")
 	assert.Equal(t, "agent_delegation:"+grant.ID, allows[0].MatchedGrant)
 	assert.Equal(t, f.agentA.ID, allows[0].PrincipalID)

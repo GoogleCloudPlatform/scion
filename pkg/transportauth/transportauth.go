@@ -358,3 +358,22 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	applyToken(req.Header, tok, t.mode)
 	return t.base.RoundTrip(req)
 }
+
+// hubOnlyRoundTripper has the method set of apiclient.HubOnlyRoundTripper
+// (apiclient's tests import this package, so it cannot import apiclient). The
+// assertion below keeps the RoundTripper that Wrap returns recognisable to
+// apiclient.Transport.AuthenticatedHTTPClient.
+type hubOnlyRoundTripper interface {
+	http.RoundTripper
+	HubOnlyBase() http.RoundTripper
+}
+
+var _ hubOnlyRoundTripper = (*roundTripper)(nil)
+
+// HubOnlyBase returns the transport below this layer. The transport token is
+// meant only for the hub, so a client that also sends requests to other
+// hosts (apiclient.Transport.AuthenticatedHTTPClient, for signed transfer
+// URLs) sends those requests through HubOnlyBase instead.
+func (t *roundTripper) HubOnlyBase() http.RoundTripper {
+	return t.base
+}

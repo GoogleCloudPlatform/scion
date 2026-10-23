@@ -40,6 +40,7 @@ func TestIsReadinessEvent(t *testing.T) {
 		{Name: EventSessionStart, Data: EventData{Source: "clear"}},
 		{Name: EventSessionStart, Data: EventData{Source: "compact"}},
 		{Name: EventSessionStart, Data: EventData{Source: "Clear"}},
+		{Name: EventSessionStart, Data: EventData{Source: "reload"}},
 		{Name: EventPreStart}, {Name: EventPostStart}, {Name: EventPreStop},
 		{Name: EventSessionEnd}, {Name: EventSubagentEnd}, {Name: "SessionStart"},
 	}
@@ -74,6 +75,8 @@ func TestClassifySessionStart(t *testing.T) {
 		{"compact", SessionInPlace},
 		{"Clear", SessionInPlace},
 		{" COMPACT\n", SessionInPlace},
+		{"reload", SessionInPlace},
+		{"Reload", SessionInPlace},
 		{"Startup", SessionNew},
 	}
 	for _, tt := range tests {

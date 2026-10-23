@@ -511,6 +511,14 @@ const HarnessInputsRecordDirName = "harness-inputs"
 // TestHarnessInputsRecordOutsideScionMounts.
 const HarnessSecretsRecordDirName = "harness-secrets"
 
+// RerenderRecordFileName is the broker-side file, inside an agent's
+// directory next to scion-agent.json, where the start-time re-render of
+// provision-rendered files (pkg/agent's rerender record) keeps a
+// fingerprint of what it last rendered. It sits outside every container
+// mount scion computes for the agent; see pkg/runtime's
+// TestHarnessInputsRecordOutsideScionMounts.
+const RerenderRecordFileName = "rerender-record.json"
+
 // ImageProvenanceFileName is the broker-side file, inside an agent's
 // directory next to scion-agent.json, where ProvisionAgent records each image
 // input it saw (pkg/agent's image provenance). It sits outside every

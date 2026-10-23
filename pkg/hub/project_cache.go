@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -403,4 +405,131 @@ func (s *Server) hasProjectCache(slug string) bool {
 	}
 	info, err := os.Stat(cachePath)
 	return err == nil && info.IsDir()
+}
+
+// syncExcludePatterns defines directory/file prefixes excluded from the
+// linked-project cache file counts (walkFilteredDir).
+// These are matched against the first path component.
+var syncExcludePatterns = []string{
+	".git",
+	".scion",
+	"node_modules",
+}
+
+// syncExcludeExtensions defines file extensions excluded from the
+// linked-project cache file counts.
+var syncExcludeExtensions = []string{
+	".env",
+}
+
+// walkFilteredDir walks a directory, calling fn for each non-excluded file.
+func walkFilteredDir(root string, fn func(relPath string, info os.FileInfo)) error {
+	return walkFilteredDirRecursive(root, "", fn)
+}
+
+func walkFilteredDirRecursive(root, prefix string, fn func(relPath string, info os.FileInfo)) error {
+	fullDir := root
+	if prefix != "" {
+		fullDir = root + "/" + prefix
+	}
+
+	entries, err := os.ReadDir(fullDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		relPath := name
+		if prefix != "" {
+			relPath = prefix + "/" + name
+		}
+
+		if isExcluded(relPath) {
+			continue
+		}
+
+		if entry.IsDir() {
+			_ = walkFilteredDirRecursive(root, relPath, fn)
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		fn(relPath, info)
+	}
+	return nil
+}
+
+// isExcluded returns true if a path should be left out of the cache file counts.
+// name is a slash-separated path relative to the workspace root (may have a leading /).
+func isExcluded(name string) bool {
+	// Normalize: strip leading slash
+	clean := strings.TrimPrefix(path.Clean(name), "/")
+	if clean == "" || clean == "." {
+		return false
+	}
+
+	// Get the top-level component
+	topLevel := clean
+	if idx := strings.IndexByte(clean, '/'); idx >= 0 {
+		topLevel = clean[:idx]
+	}
+
+	// Check directory prefix exclusions
+	for _, pattern := range syncExcludePatterns {
+		if topLevel == pattern {
+			return true
+		}
+	}
+
+	// Check extension exclusions (on the full filename, not just top-level)
+	baseName := path.Base(clean)
+	for _, ext := range syncExcludeExtensions {
+		if strings.HasSuffix(baseName, ext) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ProjectSyncStatusResponse is the response for the sync status endpoint.
+type ProjectSyncStatusResponse struct {
+	ProjectID  string                   `json:"projectId"`
+	States     []store.ProjectSyncState `json:"states"`
+	TotalFiles int                      `json:"totalFiles"`
+	TotalBytes int64                    `json:"totalBytes"`
+}
+
+// handleProjectSyncStatus returns the sync status for a project.
+func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	ctx := r.Context()
+
+	states, err := s.store.ListProjectSyncStates(ctx, project.ID)
+	if err != nil {
+		InternalError(w)
+		return
+	}
+
+	var totalFiles int
+	var totalBytes int64
+	for _, st := range states {
+		totalFiles += st.FileCount
+		totalBytes += st.TotalBytes
+	}
+
+	writeJSON(w, http.StatusOK, ProjectSyncStatusResponse{
+		ProjectID:  project.ID,
+		States:     states,
+		TotalFiles: totalFiles,
+		TotalBytes: totalBytes,
+	})
 }

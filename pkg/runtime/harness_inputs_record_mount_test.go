@@ -29,7 +29,8 @@ import (
 // records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName;
 // <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName; and the
 // broker-side image provenance file <agent dir>/image-provenance.json,
-// config.ImageProvenanceFileName) are outside
+// config.ImageProvenanceFileName; and the rerender record
+// <agent dir>/rerender-record.json, config.RerenderRecordFileName) are outside
 // every container mount scion computes for the agent, in every runtime mode,
 // using the real mount builders. Author-configured volumes are excluded: they
 // are a separately tracked capability.
@@ -49,11 +50,12 @@ func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 
 // controlPlaneRecordNames are the agent-dir entries that must never be
 // visible inside the container: the harness inputs and secrets record
-// directories and the image provenance file.
+// directories, the image provenance file and the rerender record.
 var controlPlaneRecordNames = []string{
 	config.HarnessInputsRecordDirName,
 	config.HarnessSecretsRecordDirName,
 	config.ImageProvenanceFileName,
+	config.RerenderRecordFileName,
 }
 
 // pathWithin reports whether p is base or below it.
@@ -120,6 +122,19 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	// the /workspace mount and must be shadowed by the agents tmpfs.
 	modes = append(modes, mode{"shared workspace, in-project agent dir (restart resolution)", inProject,
 		withPaths(filepath.Join(external, "home"), root, root, nil)})
+	// The Apple runtime gets the same layouts with its own mask flags: in
+	// the full-repo-root fallback, /repo-root/.scion is masked with
+	// --tmpfs, since the --mount form is dropped for Apple.
+	apple := func(cfg RunConfig) RunConfig {
+		cfg.RuntimeName = appleContainerRuntimeName
+		return cfg
+	}
+	modes = append(modes,
+		mode{"apple: worktree outside the repo (full repo root mounted)", inProject,
+			apple(withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(base, ".scion_worktrees", "repo", "a"), nil))},
+		mode{"apple: shared workspace (repo root)", external,
+			apple(withPaths(filepath.Join(external, "home"), root, root, nil))},
+	)
 	for _, m := range modes {
 		for _, recordName := range controlPlaneRecordNames {
 			t.Run(m.name+"/"+recordName, func(t *testing.T) {
@@ -138,6 +153,11 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs: %v", err)
 	}
+	if cfg.RuntimeName == appleContainerRuntimeName {
+		// The Apple runtime drops the flags it does not support before
+		// the run; check what it actually passes.
+		args = stripUnsupportedAppleFlags(args)
+	}
 	var tmpfs []string
 	type bind struct{ src, dst string }
 	var binds []bind
@@ -148,6 +168,8 @@ func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 			if len(parts) >= 2 {
 				binds = append(binds, bind{parts[0], parts[1]})
 			}
+		case "--tmpfs":
+			tmpfs = append(tmpfs, args[i+1])
 		case "--mount":
 			spec := args[i+1]
 			if strings.Contains(spec, "type=tmpfs") {
@@ -247,8 +269,9 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 }
 
 // In the shared-workspace layout the in-project agents root is shadowed with
-// a tmpfs when <workspace>/.scion is a directory, and no mask is added when
-// .scion is a project marker file.
+// a tmpfs when <workspace>/.scion/agents is a directory (the read-only
+// .scion mount above it means the mount point must already exist), and no
+// mask is added when .scion is a project marker file.
 func TestSharedWorkspaceAgentsMask(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	hasMask := func(args []string) bool {
@@ -260,7 +283,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		return false
 	}
 	root := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".scion", "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := minimalRunConfig()
@@ -273,7 +296,7 @@ func TestSharedWorkspaceAgentsMask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasMask(args) {
-		t.Error("shared workspace with a .scion directory: expected the agents tmpfs mask")
+		t.Error("shared workspace with a .scion/agents directory: expected the agents tmpfs mask")
 	}
 
 	markerRoot := filepath.Join(t.TempDir(), "repo")
