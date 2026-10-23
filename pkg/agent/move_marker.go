@@ -137,11 +137,10 @@ func checkMoveMarker(dir, id string) error {
 // checked like the others. An empty ID names no such directory, as for the
 // delete.
 //
-// sharerKey is the key the same delete uses for the agent's worktree and
-// sharer registry entry (DeleteHubAgentFiles): on a hub-managed broker the
-// hub agent ID the agent was provisioned under, and "" (meaning agentName)
-// in local mode. The worktree and registration checks cover every key the
-// delete acts on (sharerKeys), so the check and the delete cannot diverge.
+// sharerKey is the key the same delete is given (DeleteHubAgentFiles);
+// empty means agentName. The worktree and registration checks cover every
+// key the delete acts on (sharerKeys), so the check and the delete cannot
+// diverge.
 func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error) {
 	if moveID == "" {
 		return nil, fmt.Errorf("%w: no move reincarnation ID", ErrMoveMarkerMismatch)
