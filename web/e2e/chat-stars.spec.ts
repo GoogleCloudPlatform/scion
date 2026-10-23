@@ -99,7 +99,7 @@ const MENU_SHEET_MAX_WIDTH_PX = 768;
 function menuItem(page: Page, label: string): Locator {
   const width = page.viewportSize()?.width ?? Number.MAX_SAFE_INTEGER;
   return width <= MENU_SHEET_MAX_WIDTH_PX
-    ? page.locator('scion-chat-thread scion-action-sheet .item', { hasText: label })
+    ? page.locator('scion-chat-thread scion-action-sheet[open] .item', { hasText: label })
     : page.locator('.context-menu-item', { hasText: label });
 }
 
