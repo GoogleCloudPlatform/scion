@@ -500,3 +500,91 @@ func TestGuardRelinkToAnotherHubAsNewAgent(t *testing.T) {
 		t.Errorf("relocated_refused = %d, want 3", l.RelocatedRefusedTotal)
 	}
 }
+
+// Same-hub project re-link (supported, analytics continuous): the home is
+// moved to a new project ID, so new observations carry a new namespace,
+// while the outbox's epoch, seq and counters continue. Old final lines and
+// their keys are untouched (no reattribution); the guard stays neutral
+// (the resolve equals the pin). WP4 keys the counter stream by epoch, with
+// the namespace as a label (design v1.4 section B).
+func TestGuardSameHubProjectRelinkContinuity(t *testing.T) {
+	o := testOutbox(t)
+	_, _ = o.PinHubID("hub-A")
+	nsOld, nsNew := usageProducerNamespace("p-old", "a"), usageProducerNamespace("p-new", "a")
+	old := draftFor("a", "rid1:before", outboxTestTS)
+	old.ProducerNamespace, old.ProjectID = nsOld, "p-old"
+	mustAppend(t, o, old, AppendWritten)
+	o.maxPending = 1 // force one counted overflow before the move
+	over := draftFor("a", "rid1:overflow", outboxTestTS)
+	over.ProducerNamespace, over.ProjectID = nsOld, "p-old"
+	mustAppend(t, o, over, AppendOverflow)
+	o.maxPending = analyticsOutboxMaxPending
+	c := &capture{}
+	NewAnalyticsDrainer(o, c.send, trustedHub("hub-A")).RunOnce(context.Background())
+	if len(c.lines) != 1 {
+		t.Fatalf("before the move: sent %d", len(c.lines))
+	}
+	oldLine := c.lines[0]
+	before := ledger(t, o)
+
+	// The re-link moves the project config dir (home included).
+	movedDir := filepath.Join(t.TempDir(), "moved", "outbox")
+	if err := os.MkdirAll(filepath.Dir(movedDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(o.Dir(), movedDir); err != nil {
+		t.Fatal(err)
+	}
+	m, err := OpenAnalyticsOutbox(movedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := ledger(t, m)
+	if after.Epoch != before.Epoch || after.LastSeq != before.LastSeq || after.OverflowTotal != 1 || after.PinnedHubID != "hub-A" {
+		t.Fatalf("epoch/seq/counters must survive the move: before %+v after %+v", before, after)
+	}
+
+	nw := draftFor("a", "rid1:after", outboxTestTS)
+	nw.ProducerNamespace, nw.ProjectID = nsNew, "p-new"
+	ev := mustAppend(t, m, nw, AppendWritten)
+	if ev.ProducerEpoch != before.Epoch || ev.ProducerSeq != before.LastSeq+1 {
+		t.Errorf("seq must continue in the same epoch: %s/%d", ev.ProducerEpoch, ev.ProducerSeq)
+	}
+	c2 := &capture{}
+	d := NewAnalyticsDrainer(m, c2.send, trustedHub("hub-A"))
+	d.RunOnce(context.Background())
+	if d.VerifiedHubID() != "hub-A" || len(c2.lines) != 1 {
+		t.Fatalf("same hub must verify and finalize: verified %q, sent %d", d.VerifiedHubID(), len(c2.lines))
+	}
+	got := decodeUsage(t, c2.lines[0])
+	if got.ProducerNamespace != nsNew || got.ProjectID != "p-new" || got.HubID != "hub-A" {
+		t.Errorf("new observation = ns %q project %q hub %q", got.ProducerNamespace, got.ProjectID, got.HubID)
+	}
+	prev := decodeUsage(t, oldLine)
+	if prev.ProducerNamespace != nsOld || prev.EventID == got.EventID {
+		t.Errorf("old key must stay distinct and unchanged: %s/%s vs %s/%s", prev.ProducerNamespace, prev.EventID, got.ProducerNamespace, got.EventID)
+	}
+	if l := ledger(t, m); l.RelocatedHubID != "" || l.HubMismatchTotal != 0 || l.OverflowTotal != 1 {
+		t.Errorf("same-hub move must not look like a relocation: %+v", l)
+	}
+}
+
+// Cross-namespace duplicate seq (WP4 continuity defect, epoch-wide scope):
+// a copied home where one copy's observations carry another namespace
+// still allocates from the shared epoch, so distinct keys
+// (namespace, event_id) claim the same (epoch, seq). This is evidence of a
+// continuity conflict, not proof of its cause.
+func TestGuardCrossNamespaceDuplicateSeq(t *testing.T) {
+	orig := testOutbox(t)
+	cp := copyOutbox(t, orig)
+	e1 := mustAppend(t, orig, draftFor("a", "rid1:one", outboxTestTS), AppendWritten)
+	other := draftFor("a", "rid1:two", outboxTestTS)
+	other.ProducerNamespace, other.ProjectID = usageProducerNamespace("p-other", "a"), "p-other"
+	e2 := mustAppend(t, cp, other, AppendWritten)
+	if e1.ProducerEpoch != e2.ProducerEpoch || e1.ProducerSeq != e2.ProducerSeq {
+		t.Fatalf("want the same (epoch, seq): %s/%d vs %s/%d", e1.ProducerEpoch, e1.ProducerSeq, e2.ProducerEpoch, e2.ProducerSeq)
+	}
+	if e1.ProducerNamespace == e2.ProducerNamespace || e1.EventID == e2.EventID {
+		t.Errorf("want distinct keys: (%s,%s) vs (%s,%s)", e1.ProducerNamespace, e1.EventID, e2.ProducerNamespace, e2.EventID)
+	}
+}
