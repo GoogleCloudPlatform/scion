@@ -723,12 +723,14 @@ func referencesIdent(node ast.Node, names ...string) bool {
 
 // TestHubDelivery_ConstructorCallSites pins, by AST scan, where a
 // hubDeliveryIdentity can be produced: newHubDeliveryIdentity is called only
-// from authz_delivery_credential.go and its test, and no other production
-// file builds the type as a composite literal or with new.
+// from authz_delivery_credential.go and the hub_delivery tests, and no other
+// production file builds the type as a composite literal or with new.
 func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"authz_delivery_credential.go":      true,
 		"authz_delivery_credential_test.go": true,
+		"authz_delivery_admission_test.go":  true,
+		"authz_delivery_gate_test.go":       true,
 	}
 	calls := 0
 	for name, file := range hubPackageSyntax(t) {
