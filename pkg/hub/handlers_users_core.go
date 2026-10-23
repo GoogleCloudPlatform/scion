@@ -1507,9 +1507,10 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 		return fmt.Errorf("delete group memberships: %w", err)
 	}
 
-	// Deactivate every edge with the user as the delegator: after the
-	// check passed, only edges whose delegate is gone, or one a concurrent
-	// write reactivated after the check read.
+	// Deactivate every edge with the user as the delegator that is active
+	// when the sweep runs: after the check passed, only edges that do not
+	// block, or one reactivated after the check read but before the sweep
+	// (deactivateUserDelegatorEdgesTx).
 	if err := deactivateUserDelegatorEdgesTx(ctx, tx, userID); err != nil {
 		return err
 	}

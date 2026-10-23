@@ -273,7 +273,8 @@ const (
 	ErrCodeLastOwner = "last_owner"
 
 	// ErrCodeUserDeleteBlocked is returned with 409 when a user cannot be
-	// deleted because agents or active delegations depend on the user. details.agents and details.edges list them (each capped) and
+	// deleted because agents or active delegations depend on the user.
+	// details.agents and details.edges list them (each capped) and
 	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
 	// returns the same lists without attempting the delete.
 	ErrCodeUserDeleteBlocked = "user_delete_blocked"
