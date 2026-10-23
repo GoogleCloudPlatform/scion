@@ -4588,6 +4588,7 @@ type AgentMutation struct {
 	task_summary               *string
 	message                    *string
 	applied_config             *string
+	pending_config             *string
 	harness_config             *string
 	ancestry                   *[]string
 	appendancestry             []string
@@ -6531,6 +6532,55 @@ func (m *AgentMutation) AppliedConfigCleared() bool {
 func (m *AgentMutation) ResetAppliedConfig() {
 	m.applied_config = nil
 	delete(m.clearedFields, agent.FieldAppliedConfig)
+}
+
+// SetPendingConfig sets the "pending_config" field.
+func (m *AgentMutation) SetPendingConfig(s string) {
+	m.pending_config = &s
+}
+
+// PendingConfig returns the value of the "pending_config" field in the mutation.
+func (m *AgentMutation) PendingConfig() (r string, exists bool) {
+	v := m.pending_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingConfig returns the old "pending_config" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPendingConfig(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingConfig: %w", err)
+	}
+	return oldValue.PendingConfig, nil
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (m *AgentMutation) ClearPendingConfig() {
+	m.pending_config = nil
+	m.clearedFields[agent.FieldPendingConfig] = struct{}{}
+}
+
+// PendingConfigCleared returns if the "pending_config" field was cleared in this mutation.
+func (m *AgentMutation) PendingConfigCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPendingConfig]
+	return ok
+}
+
+// ResetPendingConfig resets all changes to the "pending_config" field.
+func (m *AgentMutation) ResetPendingConfig() {
+	m.pending_config = nil
+	delete(m.clearedFields, agent.FieldPendingConfig)
 }
 
 // SetHarnessConfig sets the "harness_config" field.
@@ -9513,7 +9563,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 92)
+	fields := make([]string, 0, 93)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9624,6 +9674,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.applied_config != nil {
 		fields = append(fields, agent.FieldAppliedConfig)
+	}
+	if m.pending_config != nil {
+		fields = append(fields, agent.FieldPendingConfig)
 	}
 	if m.harness_config != nil {
 		fields = append(fields, agent.FieldHarnessConfig)
@@ -9872,6 +9925,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case agent.FieldAppliedConfig:
 		return m.AppliedConfig()
+	case agent.FieldPendingConfig:
+		return m.PendingConfig()
 	case agent.FieldHarnessConfig:
 		return m.HarnessConfig()
 	case agent.FieldAncestry:
@@ -10065,6 +10120,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldMessage(ctx)
 	case agent.FieldAppliedConfig:
 		return m.OldAppliedConfig(ctx)
+	case agent.FieldPendingConfig:
+		return m.OldPendingConfig(ctx)
 	case agent.FieldHarnessConfig:
 		return m.OldHarnessConfig(ctx)
 	case agent.FieldAncestry:
@@ -10442,6 +10499,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAppliedConfig(v)
+		return nil
+	case agent.FieldPendingConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingConfig(v)
 		return nil
 	case agent.FieldHarnessConfig:
 		v, ok := value.(string)
@@ -11026,6 +11090,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldAppliedConfig) {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.FieldCleared(agent.FieldPendingConfig) {
+		fields = append(fields, agent.FieldPendingConfig)
+	}
 	if m.FieldCleared(agent.FieldHarnessConfig) {
 		fields = append(fields, agent.FieldHarnessConfig)
 	}
@@ -11261,6 +11328,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ClearAppliedConfig()
+		return nil
+	case agent.FieldPendingConfig:
+		m.ClearPendingConfig()
 		return nil
 	case agent.FieldHarnessConfig:
 		m.ClearHarnessConfig()
@@ -11521,6 +11591,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ResetAppliedConfig()
+		return nil
+	case agent.FieldPendingConfig:
+		m.ResetPendingConfig()
 		return nil
 	case agent.FieldHarnessConfig:
 		m.ResetHarnessConfig()

@@ -112,6 +112,12 @@ type Agent struct {
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
 
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
