@@ -84,8 +84,23 @@ async function setExperiment(token: string, value: boolean | null): Promise<void
   expect(res.status, JSON.stringify(res.body)).toBe(200);
 }
 
+/** The message row: the id is on the <scion-chat-message> element itself. */
 function msgLocator(page: Page, id: string): Locator {
   return page.locator(`#msg-${id}`);
+}
+
+/**
+ * The width at or under which the chat opens a message's menu as the bottom action sheet
+ * instead of the popup (MENU_SHEET_MAX_WIDTH_PX in components/shared/chat/context-menu.ts).
+ */
+const MENU_SHEET_MAX_WIDTH_PX = 768;
+
+/** A message-menu item: a row of the action sheet on a phone-width page, else of the popup. */
+function menuItem(page: Page, label: string): Locator {
+  const width = page.viewportSize()?.width ?? Number.MAX_SAFE_INTEGER;
+  return width <= MENU_SHEET_MAX_WIDTH_PX
+    ? page.locator('scion-chat-thread scion-action-sheet .item', { hasText: label })
+    : page.locator('.context-menu-item', { hasText: label });
 }
 
 function indicator(page: Page, id: string): Locator {
@@ -93,8 +108,8 @@ function indicator(page: Page, id: string): Locator {
 }
 
 async function openMenuItem(page: Page, id: string, label: string): Promise<void> {
-  await msgLocator(page, id).locator('scion-chat-message').click({ button: 'right' });
-  const item = page.locator('.context-menu-item', { hasText: label });
+  await msgLocator(page, id).click({ button: 'right' });
+  const item = menuItem(page, label);
   await expect(item).toBeVisible();
   await item.click();
 }
@@ -261,8 +276,8 @@ test.describe('Starred messages (phase 1)', () => {
       await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 20_000 });
       await expect(page.locator('scion-chat-starred-list')).toHaveCount(0);
       await page.locator('scion-chat-message').last().click({ button: 'right' });
-      await expect(page.locator('.context-menu-item', { hasText: 'Copy link' })).toBeVisible();
-      await expect(page.locator('.context-menu-item', { hasText: 'Star message' })).toHaveCount(0);
+      await expect(menuItem(page, 'Copy link')).toBeVisible();
+      await expect(menuItem(page, 'Star message')).toHaveCount(0);
     } finally {
       await setExperiment(env.devToken, true);
     }
