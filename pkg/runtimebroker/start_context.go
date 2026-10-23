@@ -586,7 +586,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
 	//      above — on the start/resume path the hub mints the agent JWT into
 	//      resolvedEnv, so it is already present here and must be kept.
-	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only.
+	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only, and only
+	//      for the co-located hub: decided after the hub endpoint below (see
+	//      colocatedHubDevToken) and passed to the agent manager outside env.
 	// The dev-token fallback must NOT clobber a token resolved from the hub:
 	// resume mints a valid JWT into resolvedEnv, and overwriting it with the
 	// broker's dev token caused 401s ("compact JWS format must have three parts").
@@ -603,14 +605,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
 		}
-	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
-		env["SCION_AUTH_TOKEN"] = devToken
-		// Bootstrap: NOT in argv (same diversion as AgentToken path above).
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from broker env", "agent_id", in.AgentID, "length", len(devToken))
-		}
 	}
+	hubIssuedToken := env["SCION_AUTH_TOKEN"] != ""
 
 	// 4. Hub endpoint
 	// The hub endpoint (its container-bridge rewrite and the cloudrun-family
@@ -672,6 +668,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	var trustedHubEndpoint string
 	if hubEndpointTrusted {
 		trustedHubEndpoint = hubEndpoint
+	}
+
+	// The broker's own dev token (step 3's last resort) is offered only to an
+	// agent with no hub-issued token whose dispatch is bound to the
+	// co-located hub and whose endpoint is operator-derived. It does not go
+	// into env: the agent manager applies it only if the agent's final
+	// endpoint is still trustedHubEndpoint (pkg/agent/run.go).
+	var colocatedDevToken string
+	if !hubIssuedToken {
+		colocatedDevToken = s.colocatedHubDevToken(ctx, in.HTTPRequest, hubConn, trustedHubEndpoint)
+		if colocatedDevToken != "" && s.config.Debug {
+			s.agentLifecycleLog.Debug("co-located hub dev token offered", "agent_id", in.AgentID)
+		}
+		if colocatedDevToken == "" && trustedHubEndpoint != "" && os.Getenv("SCION_AUTH_TOKEN") != "" {
+			// Names no value. Tells an operator why an agent that would once
+			// have received this process's token starts without a hub credential.
+			s.agentLifecycleLog.Info("broker token not passed to agent: dispatch is not from the co-located hub", "agent_id", in.AgentID)
+		}
 	}
 
 	// Colocated bridge override: when the hub and broker are on the same
@@ -851,6 +865,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
+		// Applied by the agent manager only for an unchanged endpoint.
+		ColocatedHubDevToken: colocatedDevToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
@@ -2540,6 +2556,19 @@ func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, 
 		return false
 	}
 	return config.UseHostCredentials(globalDir)
+}
+
+// colocatedHubDevToken returns the dev token this broker process holds
+// (SCION_AUTH_TOKEN, which the workstation server sets to its dev token) when
+// the dispatch is bound to the co-located hub (dispatchFromColocatedHub) and
+// trustedHubEndpoint, the operator-derived endpoint the agent is given, is
+// set. Otherwise it returns "": a dispatch from any other hub, an unbound
+// request, or a creator-supplied endpoint never gets the host's dev token.
+func (s *Server) colocatedHubDevToken(ctx context.Context, r *http.Request, hubConn *HubConnection, trustedHubEndpoint string) string {
+	if trustedHubEndpoint == "" || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
+		return ""
+	}
+	return os.Getenv("SCION_AUTH_TOKEN")
 }
 
 // dispatchFromColocatedHub reports whether this dispatch is bound to the hub
