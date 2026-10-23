@@ -52,6 +52,7 @@ type movedRef struct {
 	repo  string   // module-relative path, "pkg/hub/x.go"
 	elems []string // repo split at "/"
 	dst   string   // module-relative path after the move
+	dir   string   // last element of the source directory ("hub")
 }
 
 // outsideRef is one reference found by outsideRefFindings.
@@ -75,12 +76,14 @@ type outsideRef struct {
 // source package's staying files included), hack/**/*.sh, the root Makefile
 // and .github/workflows/*.yml. Directories named .design, docs-site,
 // node_modules or vendor, and other dot directories, are skipped, and so are
-// Markdown files. In Go files only string literals count (go/ast BasicLit),
+// Markdown files; testdata directories are scanned (a fixture that names a
+// moved path is reported). In Go files only string literals count (go/ast BasicLit),
 // so comments do not: a literal that contains a moved file's repo path, a
 // call whose consecutive string arguments are the trailing elements of that
 // path (filepath.Join("pkg", "hub", "x.go"); at least the directory and the
 // file name), or a literal that contains the file name as a whole path
-// element ("x.go", "x.go:fn", "../hub/x.go"). Other files match by text, the
+// element, alone or after the source directory's name ("x.go", "x.go:fn",
+// "../hub/x.go"; not "src/x.go"). Other files match by text, the
 // same forms on any line.
 //
 // Each reference is HIGH (an error under -strict) unless the line above it
@@ -92,7 +95,7 @@ func (a *analysis) outsideRefFindings() {
 	add := func(name string) {
 		repo := a.rel(filepath.Join(a.cfg.SrcDir, name))
 		skip[repo] = true
-		moved = append(moved, &movedRef{base: name, repo: repo, elems: strings.Split(repo, "/"), dst: path.Join(dstRel, name)})
+		moved = append(moved, &movedRef{base: name, repo: repo, elems: strings.Split(repo, "/"), dst: path.Join(dstRel, name), dir: filepath.Base(a.cfg.SrcDir)})
 	}
 	for _, f := range a.files {
 		if f.Moved {
@@ -276,7 +279,7 @@ func (a *analysis) goOutsideRefs(rel string, src []byte, cand []*movedRef) (refs
 			switch {
 			case containsPathElem(v, m.repo):
 				form = refRepoPath
-			case containsPathElem(v, m.base):
+			case containsBaseRef(v, m.base, m.dir):
 				form = refBase
 			default:
 				continue
@@ -310,7 +313,7 @@ func textOutsideRefs(rel string, src []byte, cand []*movedRef, goComments bool) 
 			switch {
 			case containsPathElem(line, m.repo):
 				form = refRepoPath
-			case containsPathElem(line, m.base):
+			case containsBaseRef(line, m.base, m.dir):
 				form = refBase
 			default:
 				continue
@@ -370,6 +373,36 @@ func containsPathElem(s, p string) bool {
 		end := j + len(p)
 		if (j == 0 || !isFileNameByte(s[j-1])) && (end == len(s) || !isIdentByte(s[end])) {
 			return true
+		}
+		i = j + 1
+	}
+	return false
+}
+
+// containsBaseRef reports whether s names base as a file of the source
+// directory: base at a path element boundary (see containsPathElem) that is
+// either not preceded by a directory ("x.go", "x.go:fn") or preceded by one
+// whose last element is dir ("../hub/x.go"). A different directory
+// ("src/x.go", "$fixture_dir/x.go") names another file of the same name.
+func containsBaseRef(s, base, dir string) bool {
+	for i := 0; i+len(base) <= len(s); {
+		j := strings.Index(s[i:], base)
+		if j < 0 {
+			return false
+		}
+		j += i
+		end := j + len(base)
+		if (j == 0 || !isFileNameByte(s[j-1])) && (end == len(s) || !isIdentByte(s[end])) {
+			if j == 0 || s[j-1] != '/' {
+				return true
+			}
+			k := j - 1
+			for k > 0 && s[k-1] != '/' && isFileNameByte(s[k-1]) {
+				k--
+			}
+			if s[k:j-1] == dir {
+				return true
+			}
 		}
 		i = j + 1
 	}

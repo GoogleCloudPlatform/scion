@@ -682,9 +682,17 @@ func TestOutsideRefs(t *testing.T) {
 		"Makefile":                 "check:\n\t@grep -q maintenance_executors.go pkg/hub/*.go\n",
 		".github/workflows/ci.yml": "jobs:\n  check:\n    steps:\n      - run: test -f pkg/hub/maintenance_executors.go\n",
 		"scripts/other.sh":         "echo pkg/hub/maintenance_executors.go\n",
-		"docs/notes.md":            "pkg/hub/maintenance_executors.go\n",
-		".design/x.go":             "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
-		"docs-site/x.go":           "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		// A base-name-only call argument (not path elements), an unparsable Go file (matched as text;
+		// testdata is scanned), skipped vendor and node_modules directories, and a base name after
+		// another directory (another file of the same name).
+		"pkg/hub/stay2_test.go":               "package hub\n\nimport \"os\"\n\nvar movedSrc, _ = os.ReadFile(\"maintenance_executors.go\")\n",
+		"pkg/util/logging/testdata/broken.go": "package broken\n\nfunc {\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"pkg/util/vendor/x.go":                "package vendor\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"web/node_modules/x/x.go":             "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"pkg/other/other.go":                  "package other\n\nvar f = []string{\"src/maintenance_executors.go\", \"$fixture_dir/maintenance_executors.go\"}\n",
+		"docs/notes.md":                       "pkg/hub/maintenance_executors.go\n",
+		".design/x.go":                        "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
+		"docs-site/x.go":                      "package x\n\nvar f = \"pkg/hub/maintenance_executors.go\"\n",
 	})
 	cfg := func(strict bool, out *bytes.Buffer) *Config {
 		return &Config{
@@ -704,12 +712,15 @@ func TestOutsideRefs(t *testing.T) {
 		`hack/check-guard.sh:2: line "exempt=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path: after the move it no longer matches the file - ` + dst,
 		`Makefile:2: line "@grep -q maintenance_executors.go pkg/hub/*.go" names moved pkg/hub/maintenance_executors.go by its base name`,
 		`.github/workflows/ci.yml:4: line "- run: test -f pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path`,
+		`pkg/hub/stay2_test.go:5: Go string literal "maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its base name`,
+		`pkg/util/logging/testdata/broken.go:4: line "var f = \"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path`,
 	}
 	info := []string{
 		`pkg/hub/stay_test.go:6: Go string literal "pkg/hub/maintenance_executors.go" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "the history table keeps the old path on purpose."`,
 		`hack/check-guard.sh:4: line "fixture=\"pkg/hub/maintenance_executors.go\"" names moved pkg/hub/maintenance_executors.go by its repo path; ref-ok: "fixture path for the guard's self-test."`,
 	}
-	absent := []string{"catalog.go:6", "premaintenance", ".gox", "scripts/other.sh", "notes.md", ".design/", "docs-site/", "pkg/hub/maintenance_executors.go:4: Go string literal"}
+	absent := []string{"catalog.go:6", "premaintenance", ".gox", "scripts/other.sh", "notes.md", ".design/", "docs-site/", "pkg/hub/maintenance_executors.go:4: Go string literal",
+		"vendor/x.go", "node_modules/", "pkg/other/"}
 
 	// Without -strict the references are HIGH findings and the plan stands.
 	var buf bytes.Buffer
@@ -730,10 +741,10 @@ func TestOutsideRefs(t *testing.T) {
 			t.Errorf("unexpected %q:\n%s", w, out)
 		}
 	}
-	// Exactly the expected sites: 8 HIGH lines (one per line of code, the
+	// Exactly the expected sites: 10 HIGH lines (one per line of code, the
 	// catalog entry's two literals included) and 2 INFO lines.
-	if got := strings.Count(out, "after the move it no longer matches the file"); got != 8 {
-		t.Errorf("got %d HIGH outside references, want 8:\n%s", got, out)
+	if got := strings.Count(out, "after the move it no longer matches the file"); got != 10 {
+		t.Errorf("got %d HIGH outside references, want 10:\n%s", got, out)
 	}
 	if got := strings.Count(out, "; ref-ok: "); got != 2 {
 		t.Errorf("got %d accepted outside references, want 2:\n%s", got, out)
@@ -745,11 +756,35 @@ func TestOutsideRefs(t *testing.T) {
 		t.Fatalf("want errPlan under -strict, got %v\n%s", err, buf.String())
 	}
 	out = buf.String()
-	if got := strings.Count(out, ": -strict: outside reference to a moved file: "); got != 8 {
-		t.Errorf("got %d -strict outside-reference errors, want 8:\n%s", got, out)
+	if got := strings.Count(out, ": -strict: outside reference to a moved file: "); got != 10 {
+		t.Errorf("got %d -strict outside-reference errors, want 10:\n%s", got, out)
 	}
 	if !strings.Contains(out, "pkg/hub/authzop/catalog.go:7: -strict: outside reference to a moved file: ") {
 		t.Errorf("missing the catalog error:\n%s", out)
+	}
+}
+
+func TestContainsBaseRef(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		want bool
+	}{
+		{"x.go", true},
+		{"x.go:fn:callee", true},
+		{"../../hub/x.go", true},
+		{"hub/x.go", true},
+		{"src/x.go", false},
+		{"$fixture_dir/x.go", false},
+		{"pkg/hub/sub/x.go", false},
+		{"./x.go", false},
+		{"subhub/x.go", false},
+		{"src/x.go hub/x.go", true},
+		{"src/x.go, x.go", true},
+		{"fix.go", false},
+	} {
+		if got := containsBaseRef(tc.s, "x.go", "hub"); got != tc.want {
+			t.Errorf("containsBaseRef(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
 }
 

@@ -578,14 +578,17 @@ pkgmove scans the module for each moved file (and each moved file asset):
   path, at least the directory and the file name
   (`filepath.Join("pkg", "hub", "x.go")`, `filepath.Join("..", "hub", "x.go")`),
   is a *path elements* reference; any other literal that contains the file
-  name as a whole path element (`"x.go"`, `"../hub/x.go"`, `"x.go:fn"`, not
-  `"fix.go"`) is a *base name* reference. A file that does not parse is
-  matched as text.
+  name as a whole path element, alone or after the source directory's name
+  (`"x.go"`, `"../hub/x.go"`, `"x.go:fn"`; not `"fix.go"`, and not
+  `"src/x.go"`, which names another file of the same name) is a *base name*
+  reference. A file that does not parse is matched as text.
 - **Text files:** `hack/**/*.sh`, the root `Makefile` and
   `.github/workflows/*.yml` (and `.yaml`), matched line by line for the repo
-  path or the base name, comments included.
+  path or the base name (same rule), comments included.
 - **Skipped:** directories named `.design`, `docs-site`, `node_modules` or
   `vendor`, other dot directories except `.github`, and Markdown files.
+  `testdata` directories are scanned: a fixture that names a moved path is
+  reported (accept it with `pkgmove:ref-ok` if it is meant to stay).
 
 Each reference is a HIGH, an ERROR under `-strict`, naming the file:line, the
 form and the matched text. Fix it in the move's prep (or in the move PR):
