@@ -106,7 +106,7 @@ func TestAgentManagerStop_CloudRun_AgentName(t *testing.T) {
 	}
 	mgr := &AgentManager{Runtime: rt}
 
-	if err := mgr.Stop(context.Background(), "dev", "", ""); err != nil {
+	if err := mgr.Stop(context.Background(), "dev", "", "", ""); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
 	if len(fake.stopped) != 1 || fake.stopped[0] != instance {

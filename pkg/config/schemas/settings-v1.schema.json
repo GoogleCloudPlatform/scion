@@ -597,6 +597,29 @@
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
         },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods started on the runtime this entry describes, for example a sandbox class such as gvisor. A profile on this entry that sets one wins."
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1167,6 +1190,29 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
+        },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods whose runtime choice used this profile, over the runtime entry's values. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods whose runtime choice used this profile, over the runtime entry's values. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods whose runtime choice used this profile, for example a sandbox class such as gvisor. Wins over the runtime entry's value."
         },
         "shared_dir_storage_backend": {
           "type": "string",

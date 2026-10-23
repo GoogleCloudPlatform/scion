@@ -230,6 +230,11 @@ type DownloadURLInfo struct {
 	URL  string `json:"url"`
 	Size int64  `json:"size"`
 	Hash string `json:"hash,omitempty"`
+	// Mode is the file's normalised mode, "0755" (executable) or "0644",
+	// so a client can write the file with its executable bit
+	// (ptone/scion#5652). Hubs before that do not send it; clients treat
+	// a missing mode as "0644".
+	Mode string `json:"mode,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.

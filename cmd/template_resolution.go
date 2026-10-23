@@ -286,8 +286,9 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 	localHash := computeLocalContentHash(files)
 
-	// If hashes match, no action needed
-	if localHash == hubTemplate.ContentHash {
+	// If hashes match and no executable bit differs, no action needed. The
+	// content hash does not cover modes (ptone/scion#5652).
+	if localHash == hubTemplate.ContentHash && len(modeOnlyChangesInManifest(files, hubTemplate.Files)) == 0 {
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
 			TemplateName: hubTemplate.Name,

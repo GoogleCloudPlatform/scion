@@ -172,6 +172,18 @@ them (an ancestry user, a project owner, or a super-admin) can add them.
 `none` agents never post to group conversations, and agents or other users
 cannot add them. A refused post or add returns 403 `message_denied`.
 
+Group conversations can hold agent participant rows written before these
+rules. The optional `group-participant-mode-cleanup` maintenance migration
+marks as left the active agent rows in group conversations whose agent is
+in `none`, `lineage` or `branch` mode (or an unrecognized mode), or is
+deleted or missing. Older rows do not record who added them, so `lineage`
+and `branch` rows a human added are removed as well. Only `lineage` and
+`branch` agents can be added back this way, by a human allowed to message
+them: `scion conversation join conv:<conversation-id> agent <agent-id>`; a
+`none` mode agent cannot. The migration only reports
+until it is run with `{"params":{"apply":"true"}}` (`apply` must be the
+string `"true"`; a boolean `true` is ignored).
+
 ### System to Agent
 
 | Source | Target mode | Result |

@@ -142,7 +142,7 @@ func BuildProfileReferencesDetailed(globalDir, colocatedBrokerID string, in Prof
 					profile = disk
 				case SavedProfileUnreadable:
 					// What start's runtime selection uses: the
-					// provisioned profile, else "" (GetSavedProfile).
+					// provisioned profile, else "".
 					unreadable++
 					profile = disk
 				default:
