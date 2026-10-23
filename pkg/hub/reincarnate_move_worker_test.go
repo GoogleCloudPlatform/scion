@@ -64,7 +64,26 @@ func waitForMoveSourceCleanup(t *testing.T, s store.Store, reincarnationID strin
 	return r
 }
 
-// startMove sends a real move as the agent itself and waits for the worker.
+// waitForMoveSettled is waitForReincarnationSettled for a move: it also
+// waits for the record's source cleanup outcome. That outcome is the
+// worker's last write on every path where it won the record's terminal
+// CAS: cleanUpMoveSource after a completed move, the ambiguous-start skip,
+// and reconcileFailedMove after a failed one, which records it only after
+// releasing and restoring the source's broker reservation. A test that
+// counts reservations as soon as the record and agent row settle would
+// otherwise read the count between that release and the restore. A
+// record that is not a move (no source broker) returns at once.
+func waitForMoveSettled(t *testing.T, s store.Store, agentID string) *store.AgentReincarnation {
+	t.Helper()
+	r := waitForReincarnationSettled(t, s, agentID)
+	if r.SourceBrokerID == "" {
+		return r
+	}
+	return waitForMoveSourceCleanup(t, s, r.ID)
+}
+
+// startMove sends a real move as the agent itself and waits for the worker,
+// up to its last write (waitForMoveSettled).
 func startMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *store.Agent) {
 	t.Helper()
 	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "moving on", TargetBroker: f.dst.ID})
@@ -73,7 +92,7 @@ func startMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *store.
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, f.src.ID, resp.SourceBrokerID)
 	assert.Equal(t, f.dst.ID, resp.TargetBrokerID)
-	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	r := waitForMoveSettled(t, f.s, f.agent.ID)
 	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
 	require.NoError(t, err)
 	return r, a
