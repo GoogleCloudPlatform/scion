@@ -2491,9 +2491,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
