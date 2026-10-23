@@ -277,7 +277,17 @@ func TestOperationalSettings_RefreshResyncsAfterStoreReset(t *testing.T) {
 	rs.mu.Unlock()
 	changed, err := ops.Refresh(ctx)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"lifecycle", "quotas"}, changed, "every section is reported changed")
+	// Every section of the restored read is reported changed (the test
+	// store's migrations also leave non-operational marker rows there),
+	// plus quotas, which the reset evicted.
+	want := []string{"quotas"}
+	for _, row := range backup {
+		if row.Section != "_meta" && row.Section != store.HubSettingsRevisionSection {
+			want = append(want, row.Section)
+		}
+	}
+	require.Contains(t, want, "lifecycle")
+	assert.ElementsMatch(t, want, changed, "every section is reported changed")
 	assert.Equal(t, backupRev, ops.SettingsRevision(), "the revision follows the store back")
 	afterReset := ops.Snapshot()
 	assert.True(t, afterReset.AutoSuspendStalled, "the restored value is cached")
