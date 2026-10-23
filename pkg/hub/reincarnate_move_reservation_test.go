@@ -47,8 +47,8 @@ func failedMoveRecord(t *testing.T, f *moveFixture) *store.AgentReincarnation {
 	return rec
 }
 
-// activeReservation returns the agent's active broker reservation.
-func activeReservation(t *testing.T, s store.Store, agentID string) *store.UsageReservation {
+// agentBrokerReservation returns the agent's active broker reservation.
+func agentBrokerReservation(t *testing.T, s store.Store, agentID string) *store.UsageReservation {
 	t.Helper()
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
@@ -87,11 +87,11 @@ func TestReconcileFailedMove_ReservationOnSourceWritesNothing(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	prepareMoveWorkerFixture(t, f)
 	rec := failedMoveRecord(t, f)
-	before := activeReservation(t, f.s, f.agent.ID)
+	before := agentBrokerReservation(t, f.s, f.agent.ID)
 
 	f.srv.reconcileFailedMove(context.Background(), rec.ID)
 
-	after := activeReservation(t, f.s, f.agent.ID)
+	after := agentBrokerReservation(t, f.s, f.agent.ID)
 	assert.Equal(t, before.ID, after.ID, "want the same reservation kept: the reconcile released and re-created it")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
@@ -131,7 +131,7 @@ func TestReconcileFailedMove_SourceAtCapNeverGoesOver(t *testing.T) {
 	require.Positive(t, w.reads.Load(), "setup: the reconcile read the agent's reservation")
 	assert.Zero(t, admitted.Load(), "want no start admitted on the full source during the reconcile")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "want the source at its cap of 1, not over it")
-	assert.Equal(t, f.src.ID, activeReservation(t, f.s, f.agent.ID).ScopeID)
+	assert.Equal(t, f.src.ID, agentBrokerReservation(t, f.s, f.agent.ID).ScopeID)
 }
 
 // The reservation is still on the target (the rollback could not move it):
@@ -160,7 +160,7 @@ func TestReconcileFailedMove_NoReservationCreatesOne(t *testing.T) {
 	f.srv.reconcileFailedMove(context.Background(), rec.ID)
 
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
-	assert.Equal(t, f.src.ID, activeReservation(t, f.s, f.agent.ID).ScopeID)
+	assert.Equal(t, f.src.ID, agentBrokerReservation(t, f.s, f.agent.ID).ScopeID)
 }
 
 // A failed read of the agent's reservation is logged and falls back to
