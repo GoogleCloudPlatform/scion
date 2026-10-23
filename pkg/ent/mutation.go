@@ -60190,6 +60190,8 @@ type NotificationMutation struct {
 	dispatch_attempts    *int
 	adddispatch_attempts *int
 	dispatch_outcome     *string
+	dispatch_reason      *string
+	next_attempt_at      *time.Time
 	created              *time.Time
 	clearedFields        map[string]struct{}
 	done                 bool
@@ -60717,6 +60719,91 @@ func (m *NotificationMutation) ResetDispatchOutcome() {
 	m.dispatch_outcome = nil
 }
 
+// SetDispatchReason sets the "dispatch_reason" field.
+func (m *NotificationMutation) SetDispatchReason(s string) {
+	m.dispatch_reason = &s
+}
+
+// DispatchReason returns the value of the "dispatch_reason" field in the mutation.
+func (m *NotificationMutation) DispatchReason() (r string, exists bool) {
+	v := m.dispatch_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchReason returns the old "dispatch_reason" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldDispatchReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchReason: %w", err)
+	}
+	return oldValue.DispatchReason, nil
+}
+
+// ResetDispatchReason resets all changes to the "dispatch_reason" field.
+func (m *NotificationMutation) ResetDispatchReason() {
+	m.dispatch_reason = nil
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (m *NotificationMutation) SetNextAttemptAt(t time.Time) {
+	m.next_attempt_at = &t
+}
+
+// NextAttemptAt returns the value of the "next_attempt_at" field in the mutation.
+func (m *NotificationMutation) NextAttemptAt() (r time.Time, exists bool) {
+	v := m.next_attempt_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNextAttemptAt returns the old "next_attempt_at" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldNextAttemptAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNextAttemptAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNextAttemptAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNextAttemptAt: %w", err)
+	}
+	return oldValue.NextAttemptAt, nil
+}
+
+// ClearNextAttemptAt clears the value of the "next_attempt_at" field.
+func (m *NotificationMutation) ClearNextAttemptAt() {
+	m.next_attempt_at = nil
+	m.clearedFields[notification.FieldNextAttemptAt] = struct{}{}
+}
+
+// NextAttemptAtCleared returns if the "next_attempt_at" field was cleared in this mutation.
+func (m *NotificationMutation) NextAttemptAtCleared() bool {
+	_, ok := m.clearedFields[notification.FieldNextAttemptAt]
+	return ok
+}
+
+// ResetNextAttemptAt resets all changes to the "next_attempt_at" field.
+func (m *NotificationMutation) ResetNextAttemptAt() {
+	m.next_attempt_at = nil
+	delete(m.clearedFields, notification.FieldNextAttemptAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -60787,7 +60874,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 14)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -60820,6 +60907,12 @@ func (m *NotificationMutation) Fields() []string {
 	}
 	if m.dispatch_outcome != nil {
 		fields = append(fields, notification.FieldDispatchOutcome)
+	}
+	if m.dispatch_reason != nil {
+		fields = append(fields, notification.FieldDispatchReason)
+	}
+	if m.next_attempt_at != nil {
+		fields = append(fields, notification.FieldNextAttemptAt)
 	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
@@ -60854,6 +60947,10 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchAttempts()
 	case notification.FieldDispatchOutcome:
 		return m.DispatchOutcome()
+	case notification.FieldDispatchReason:
+		return m.DispatchReason()
+	case notification.FieldNextAttemptAt:
+		return m.NextAttemptAt()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -60887,6 +60984,10 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDispatchAttempts(ctx)
 	case notification.FieldDispatchOutcome:
 		return m.OldDispatchOutcome(ctx)
+	case notification.FieldDispatchReason:
+		return m.OldDispatchReason(ctx)
+	case notification.FieldNextAttemptAt:
+		return m.OldNextAttemptAt(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -60975,6 +61076,20 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDispatchOutcome(v)
 		return nil
+	case notification.FieldDispatchReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchReason(v)
+		return nil
+	case notification.FieldNextAttemptAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNextAttemptAt(v)
+		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -61026,7 +61141,11 @@ func (m *NotificationMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *NotificationMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(notification.FieldNextAttemptAt) {
+		fields = append(fields, notification.FieldNextAttemptAt)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -61039,6 +61158,11 @@ func (m *NotificationMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *NotificationMutation) ClearField(name string) error {
+	switch name {
+	case notification.FieldNextAttemptAt:
+		m.ClearNextAttemptAt()
+		return nil
+	}
 	return fmt.Errorf("unknown Notification nullable field %s", name)
 }
 
@@ -61078,6 +61202,12 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldDispatchOutcome:
 		m.ResetDispatchOutcome()
+		return nil
+	case notification.FieldDispatchReason:
+		m.ResetDispatchReason()
+		return nil
+	case notification.FieldNextAttemptAt:
+		m.ResetNextAttemptAt()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()

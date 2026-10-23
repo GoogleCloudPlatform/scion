@@ -250,6 +250,33 @@ type ProvisionInput struct {
 	// clone URL, the command line or any file.
 	CloneWithToken bool
 
+	// CloneToken, when non-empty, is the git token for the clone, given to
+	// the clone command alone: its environment gets GITHUB_TOKEN set to it
+	// plus the same credential helper CloneWithToken uses, and clone errors
+	// are redacted with it. The calling process's environment is not read
+	// or changed. The hub sets it when it provisions a project's shared
+	// workspace at create (ptone/scion#5813); it takes precedence over
+	// CloneWithToken.
+	CloneToken string
+
+	// CloneTokenRemote, when set with CloneToken, binds the token to the
+	// project's recorded git remote: the clone gets the token only when
+	// GitClone.URL is https and its normalized host and owner/repo equal this
+	// remote, and then only for that host (credential.https://<host>.helper,
+	// constant helper text, the token only in the clone command's
+	// environment). Any other URL is cloned without a token. The hub sets it
+	// to the project's GitRemote for its clone at create.
+	CloneTokenRemote string
+
+	// HostGitHardened runs the clone as host-side git on a project-supplied
+	// URL: with HostCloneGitArgs ahead of the subcommand and
+	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
+	// ssh and git transports can be used (no local path, file://, ext:: or
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub
+	// sets it when it clones a project's shared workspace at create; the
+	// caller also checks the URL first (CheckHostCloneURL).
+	HostGitHardened bool
+
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
 	NFSUID int
@@ -2815,7 +2842,11 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
-	args := []string{"clone"}
+	var args []string
+	if in.HostGitHardened {
+		args = append(args, HostCloneGitArgs()...)
+	}
+	args = append(args, "clone")
 
 	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
 	depth := 1
@@ -2828,19 +2859,43 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if gc.Branch != "" {
 		args = append(args, "--branch", gc.Branch)
 	}
-	args = append(args, gc.URL, in.Resolved.HostPath)
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args = append(args, "--", gc.URL, in.Resolved.HostPath)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	// Skip the LFS smudge on the clone's checkout, so git-lfs never contacts an
-	// endpoint named in the cloned tracked .lfsconfig with the host's
-	// credentials; agents fetch LFS objects in-container. This path also runs
-	// in the Kubernetes init container (via `sciontool provision`).
+	// Base host-side git environment: GIT_* scrubbed and the scoped-credential
+	// variable dropped (HostGitEnv), interactive prompts off, and the LFS smudge
+	// skipped so git-lfs never contacts an endpoint named in the cloned tracked
+	// .lfsconfig with the host's credentials (agents fetch LFS objects
+	// in-container). This path also runs in the Kubernetes init container (via
+	// `sciontool provision`). http.followRedirects=false and the protocol allow
+	// list are applied as fixed args by HostCloneGitArgs when HostGitHardened.
 	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
-	if in.CloneWithToken {
+	if in.HostGitHardened {
+		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
+	}
+	// Decide which token, if any, is offered. A project-supplied CloneToken is
+	// bound to its recorded remote: with a CloneTokenRemote it is used only when
+	// the clone URL resolves to that remote's host and owner/repo
+	// (cloneTokenHost), and is refused on any mismatch. The binding comes from the
+	// project record (CloneTokenRemote), never from the clone URL or a label.
+	withToken, token := in.CloneWithToken, os.Getenv(GitTokenEnv)
+	if in.CloneToken != "" {
+		bound := in.CloneTokenRemote == ""
+		if !bound {
+			_, bound = cloneTokenHost(in.CloneTokenRemote, gc.URL)
+		}
+		if bound {
+			withToken, token = true, in.CloneToken
+		}
+	}
+	if withToken {
 		// Host-scoped credential helper: the token is offered only to the clone
-		// URL's host, never to any other endpoint. For a non-http(s) URL the
-		// token is ignored (git uses its own transport auth).
-		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, os.Getenv(GitTokenEnv)); ok {
+		// URL's host, carried in the environment and never in argv/URL/config; the
+		// helper first clears any inherited unscoped credential.helper. For a
+		// non-http(s) URL the token is ignored (git uses its own transport auth).
+		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
 			env = scoped
 		}
 	}
@@ -2849,7 +2904,7 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
+	return cloneError(gc.URL, string(output), err, withToken, token)
 }
 
 // redactedCredential replaces a credential value in clone error output.

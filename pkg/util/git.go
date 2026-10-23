@@ -580,22 +580,29 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 // path (e.g. one sourced from stored/discovered state rather than freshly
 // created here) must not have it silently honored.
 //
-// repoRoot is the repository the worktree belongs to, as the caller knows
-// it. When the caller does not know it (empty), the repository the
-// worktree's .git file names is used only if that repository's own worktree
-// registry lists path (registeredRepoOf); otherwise no git record is
-// removed and no branch is deleted.
+// repoRoot and branch come from the caller, never from the worktree: no git
+// command runs inside the worktree, and its own metadata files (the .git
+// pointer, the admin directory's commondir and HEAD) never choose which
+// repository is changed or which branch is deleted. repoRoot is the main
+// repository the worktree belongs to; when it is empty, or is not a main
+// repository (see BaseRepoGitCommand), the worktree entry and the branch
+// are left alone. branch is the branch to delete; when it is empty no
+// branch is deleted. The branch is deleted only when the worktree's admin
+// directory in repoRoot shows the worktree checked out on exactly that
+// branch (worktreeOnBranch), and only through DeleteBranchIn.
 //
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
 // container-internal paths), this function:
-//  1. Looks up the worktree's branch in repoRoot's worktree registry while
-//     the worktree exists (only when deleteBranch is set).
+//  1. Checks, while the worktree exists, whether it is on branch in repoRoot.
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
 //  3. Removes the now-stale record of this worktree only
 //     (RemoveWorktreeEntryIn), never a repository-wide prune.
-func RemoveWorktree(base, path, repoRoot string, deleteBranch bool) (bool, error) {
+//  4. Deletes branch, if step 1 matched.
+//
+// It reports whether the branch was deleted.
+func RemoveWorktree(base, path, repoRoot, branch string) (bool, error) {
 	// Every failure from here through the containment check is a pre-removal
 	// validation failure, not a removal-mechanics failure — none of them have
 	// proven path safe to act on, so all of them wrap ErrPathNotContained
@@ -626,16 +633,23 @@ func RemoveWorktree(base, path, repoRoot string, deleteBranch bool) (bool, error
 		return false, fmt.Errorf("RemoveWorktree: %q does not resolve under %q: %w", path, base, ErrPathNotContained)
 	}
 
-	// The repository and the branch come from the caller and from git's
-	// own worktree registry in that repository, never from the worktree's
-	// .git file, which the agent using the worktree can rewrite.
-	if repoRoot == "" {
-		repoRoot = registeredRepoOf(resolvedPath)
+	if repoRoot != "" {
+		if _, err := baseRepoGitDir(repoRoot); err != nil {
+			slog.Warn("remove worktree: not a main repository; leaving its worktree entry and branch alone",
+				"path", resolvedPath, "repo_root", repoRoot, "error", err)
+			repoRoot = ""
+		}
 	}
-	var branchName string
-	branchDeleted := false
-	if deleteBranch && repoRoot != "" {
-		branchName = worktreeBranchIn(repoRoot, resolvedPath)
+
+	// Read before the directory (which holds the .git pointer) is removed.
+	onBranch := false
+	if repoRoot != "" && branch != "" {
+		var reason string
+		onBranch, reason = worktreeOnBranch(resolvedPath, repoRoot, branch)
+		if !onBranch {
+			slog.Warn("remove worktree: worktree is not on the expected branch of the repository; the branch is not deleted",
+				"path", resolvedPath, "repo_root", repoRoot, "branch", branch, "reason", reason)
+		}
 	}
 
 	// Remove the worktree directory ourselves using RemoveAllSafe, which
@@ -666,19 +680,131 @@ func RemoveWorktree(base, path, repoRoot string, deleteBranch bool) (bool, error
 		}
 	}
 
-	if deleteBranch && branchName != "" && repoRoot != "" {
-		// Now delete the branch from the main repo
-		Debugf("RemoveWorktree: deleting branch %s", branchName)
-		branchDeleteStart := time.Now()
-		cmd := hostGit("-C", repoRoot, "branch", "-D", branchName)
-		if err := cmd.Run(); err == nil {
-			branchDeleted = true
-			Debugf("RemoveWorktree: branch delete completed in %v", time.Since(branchDeleteStart))
-		} else {
-			Debugf("RemoveWorktree: branch delete failed in %v: %v", time.Since(branchDeleteStart), err)
-		}
+	if !onBranch {
+		return false, nil
 	}
-	return branchDeleted, nil
+	Debugf("RemoveWorktree: deleting branch %s", branch)
+	branchDeleteStart := time.Now()
+	deleted := DeleteBranchIn(repoRoot, branch)
+	Debugf("RemoveWorktree: branch delete (deleted: %v) completed in %v", deleted, time.Since(branchDeleteStart))
+	return deleted, nil
+}
+
+// worktreeOnBranch reports whether the worktree at path is a linked
+// worktree of the main repository at repoRoot checked out on branch, reading
+// the files git would read but without running git in the worktree. Each
+// file is read with readSmallRegularFile: a symlink, a FIFO or other special
+// file, or content over smallGitFileMax bytes fails the check. All of these
+// must hold:
+//   - path/.git is a "gitdir:" file naming a directory directly under
+//     repoRoot/.git/worktrees (compared with symlinks resolved);
+//   - that admin directory's commondir file names repoRoot/.git;
+//   - its HEAD file is exactly "ref: refs/heads/<branch>".
+//
+// The reason names the first check that failed.
+func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
+	data, err := readSmallRegularFile(filepath.Join(path, ".git"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read worktree .git file: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	gitdir, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok || strings.ContainsAny(line, "\n") {
+		return false, "worktree .git is not a single gitdir line"
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(path, gitdir)
+	}
+	adminDir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return false, fmt.Sprintf("resolve worktree gitdir: %v", err)
+	}
+	commonDir, err := filepath.EvalSymlinks(filepath.Join(repoRoot, ".git"))
+	if err != nil {
+		return false, fmt.Sprintf("resolve repository .git: %v", err)
+	}
+	if filepath.Dir(adminDir) != filepath.Join(commonDir, "worktrees") {
+		return false, "worktree gitdir is not an admin directory of the repository"
+	}
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "commondir"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read commondir: %v", err)
+	}
+	named := strings.TrimSpace(string(data))
+	if !filepath.IsAbs(named) {
+		named = filepath.Join(adminDir, named)
+	}
+	if resolved, err := filepath.EvalSymlinks(named); err != nil || resolved != commonDir {
+		return false, "commondir does not name the repository"
+	}
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "HEAD"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read HEAD: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "ref: refs/heads/"+branch {
+		return false, "HEAD is not the expected branch"
+	}
+	return true, ""
+}
+
+// baseRepoGitTimeout bounds each git command RemoveWorktreeEntryIn and
+// DeleteBranchIn run, so a repository file that makes git wait (for
+// example a FIFO) cannot hold the caller forever.
+var baseRepoGitTimeout = 2 * time.Minute
+
+// baseRepoGitDir returns repoRoot's .git directory once repoRoot is shown to
+// be a main repository: an absolute path whose .git is a directory (not a
+// gitdir file) without a commondir file. It returns an error otherwise.
+func baseRepoGitDir(repoRoot string) (string, error) {
+	if repoRoot == "" || !filepath.IsAbs(repoRoot) {
+		return "", fmt.Errorf("repository root %q must be an absolute path", repoRoot)
+	}
+	gitDir := filepath.Join(repoRoot, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil {
+		return "", fmt.Errorf("repository root %q: %w", repoRoot, err)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("repository root %q: .git is not a directory", repoRoot)
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		return "", fmt.Errorf("repository root %q: .git has a commondir file", repoRoot)
+	}
+	return gitDir, nil
+}
+
+// BaseRepoGitCommand returns a git command that acts on the main repository
+// at repoRoot and nothing else. GIT_DIR and GIT_COMMON_DIR are pinned to
+// repoRoot/.git, so git does not discover the repository from the current
+// directory or follow any worktree's metadata; GIT_* variables inherited
+// from the process are dropped (other than GIT_CONFIG_NOSYSTEM and
+// GIT_CONFIG_GLOBAL) and LC_ALL=C is set; core.hooksPath points at an empty
+// location (os.DevNull), so hook files in the repository are not run; and
+// the file-system monitor is off. It returns an error, and no command, when
+// repoRoot is not a main repository (baseRepoGitDir).
+//
+// git still reads the repository's own configuration. core.hooksPath does
+// not cover hooks defined in configuration (hook.<name>.command with
+// hook.<name>.event, directly or through include.path), so such a hook in
+// the repository's configuration still runs for the commands built here
+// (for example reference-transaction on branch -D). Making the repository
+// configuration read-only from agent containers is a follow-up.
+func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	gitDir, err := baseRepoGitDir(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	// Host-side git on the base repository runs with the fixed settings and the
+	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
+	// hooks, no fsmonitor, no credential helper and no embedded credential, with
+	// the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than by anything the
+	// worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir, "LC_ALL=C")
+	return cmd, nil
 }
 
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
@@ -712,12 +838,10 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if repoRoot == "" || path == "" {
 		return nil
 	}
-	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		// The worktree directory is gone when git runs, so no work tree
-		// file is read: the fixed host settings are enough.
-		cmd := exec.CommandContext(ctx, "git", append(append(HostGitArgs(), "-C", repoRoot), args...)...)
-		cmd.Env = HostGitEnv(os.Environ())
-		return cmd, nil
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	return RemoveWorktreeEntry(ctx, path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return BaseRepoGitCommand(ctx, repoRoot, args...)
 	})
 }
 
@@ -861,10 +985,21 @@ func resolveMissingPath(path string) (resolved string, state resolveState, err e
 	return filepath.Join(append([]string{resolvedDir}, tail...)...), resolvedWithin, nil
 }
 
-// DeleteBranchIn deletes a git branch from the specified repository root.
-// Returns true if the branch was deleted, false otherwise.
+// DeleteBranchIn deletes a git branch from the main repository at repoRoot,
+// through BaseRepoGitCommand (repository pinned, hook files not run; see
+// there for configuration-defined hooks) with "--" before
+// the branch name. A branch name that is empty or starts with "-" is
+// refused. Returns true if the branch was deleted, false otherwise.
 func DeleteBranchIn(repoRoot, branchName string) bool {
-	cmd := hostGit("-C", repoRoot, "branch", "-D", branchName)
+	if branchName == "" || strings.HasPrefix(branchName, "-") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	cmd, err := BaseRepoGitCommand(ctx, repoRoot, "branch", "-D", "--", branchName)
+	if err != nil {
+		return false
+	}
 	return cmd.Run() == nil
 }
 
@@ -907,66 +1042,6 @@ func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 		}
 	}
 	return "", nil
-}
-
-// registeredRepoOf returns the main worktree of the repository that the
-// worktree at path belongs to according to its .git file, but only when
-// that repository's worktree registry lists path; "" otherwise.
-func registeredRepoOf(path string) string {
-	out, err := hostGit("-C", path, "rev-parse", "--git-common-dir").Output()
-	if err != nil {
-		return ""
-	}
-	commonDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(path, commonDir)
-	}
-	repo := filepath.Dir(filepath.Clean(commonDir))
-	if ok, err := IsRegisteredWorktree(repo, path); err != nil || !ok {
-		return ""
-	}
-	return repo
-}
-
-// worktreeBranchIn returns the branch git's worktree registry in the
-// repository at repoRoot records for the worktree at path (matched by
-// resolved path), or "" when it has none, the worktree is not registered
-// there, or git fails.
-func worktreeBranchIn(repoRoot, path string) string {
-	want, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		want = filepath.Clean(path)
-	}
-	output, err := hostGit("-C", repoRoot, "worktree", "list", "--porcelain").Output()
-	if err != nil {
-		return ""
-	}
-	for _, block := range splitPorcelainRecords(string(output)) {
-		var wtPath, branch string
-		for _, line := range strings.Split(block, "\n") {
-			if strings.HasPrefix(line, "worktree ") {
-				wtPath = strings.TrimPrefix(line, "worktree ")
-				if strings.HasPrefix(wtPath, "\"") {
-					if unquoted, err := strconv.Unquote(wtPath); err == nil {
-						wtPath = unquoted
-					}
-				}
-			} else if strings.HasPrefix(line, "branch ") {
-				branch = strings.TrimPrefix(line, "branch ")
-			}
-		}
-		if wtPath == "" || branch == "" {
-			continue
-		}
-		got, err := filepath.EvalSymlinks(wtPath)
-		if err != nil {
-			got = filepath.Clean(wtPath)
-		}
-		if got == want {
-			return strings.TrimPrefix(branch, "refs/heads/")
-		}
-	}
-	return ""
 }
 
 // IsRegisteredWorktree reports whether path is one of the worktrees git
@@ -1933,6 +2008,20 @@ func EnsureGitIgnoresFile(dir, name string) error {
 		return fmt.Errorf("the repository at %s un-ignores %s; the rule in %s has no effect", dir, name, excludePath)
 	}
 	return nil
+}
+
+// smallGitFileMax caps how much of a small git metadata file (HEAD, a .git
+// pointer file, commondir) is read. Used by readSmallRegularFile callers.
+const smallGitFileMax = 4096
+
+// ReadSmallRegularFile reads the file at path when it is a regular file of at
+// most limit bytes, rejecting anything else. On unix it opens with O_NOFOLLOW
+// and O_NONBLOCK, so a symlink or FIFO at the path cannot redirect or block the
+// read; on other platforms it rejects a symlink with an Lstat check before
+// opening. It is exported for callers outside this package that read small,
+// broker-owned metadata files.
+func ReadSmallRegularFile(path string, limit int64) ([]byte, error) {
+	return readSmallRegularFile(path, limit)
 }
 
 // hardenedGitCommand returns a git command that reads no system or global
