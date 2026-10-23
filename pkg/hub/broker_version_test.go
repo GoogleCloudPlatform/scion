@@ -169,30 +169,41 @@ func TestBrokerVersion_NoSingleHubVersion(t *testing.T) {
 	}
 }
 
-// hubInstancesFailStore fails every hub-instance registry read and counts
-// the reads.
-type hubInstancesFailStore struct {
+// hubInstancesProbeStore counts the hub-instance registry reads made while
+// its switch is armed, and fails them when fail is set. Installed right after
+// the server is built (installStoreFault), never by reassigning srv.store.
+type hubInstancesProbeStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	fail  bool
-	reads *int
+	reads int
 }
 
-func (f hubInstancesFailStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
-	*f.reads++
+func (f *hubInstancesProbeStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
+	if !f.fault.Active() {
+		return f.Store.ListHubInstances(ctx, window)
+	}
+	f.reads++
 	if f.fail {
 		return nil, time.Time{}, errors.New("registry unavailable")
 	}
 	return f.Store.ListHubInstances(ctx, window)
 }
 
+func newHubInstancesProbe(t *testing.T, fail bool) (*Server, store.Store, *hubInstancesProbeStore, *storeFaultSwitch) {
+	t.Helper()
+	return testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *hubInstancesProbeStore {
+		return &hubInstancesProbeStore{Store: inner, fault: f, fail: fail}
+	})
+}
+
 // A failed registry read never fails the list or get (200, hubVersion "",
 // every broker unknown) and leaves every summary broker unknown.
 func TestBrokerVersion_RegistryReadFailure(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, _, fault := newHubInstancesProbe(t, true)
 	setHubFleet(t, s, "v1.2.0")
 	createSummaryBroker(t, s, versionTestBroker("ver-regfail", "v1.2.0"))
-	reads := 0
-	srv.store = hubInstancesFailStore{Store: srv.store, fail: true, reads: &reads}
+	fault.Arm()
 
 	list := listBrokersForVersion(t, srv, "")
 	assert.Equal(t, "", list.HubVersion)
@@ -214,14 +225,13 @@ func TestBrokerVersion_RegistryReadFailure(t *testing.T) {
 // The summary reads the hub-instance registry once: the brokers'
 // version_status and hub.version come from the same rows.
 func TestHealthSummary_OneRegistryRead(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, probe, fault := newHubInstancesProbe(t, false)
 	setHubFleet(t, s, "v1.2.0")
 	createSummaryBroker(t, s, versionTestBroker("ver-one-read", "v1.2.0"))
-	reads := 0
-	srv.store = hubInstancesFailStore{Store: srv.store, reads: &reads}
+	fault.Arm()
 
 	resp, _ := getHealthSummary(t, srv)
-	assert.Equal(t, 1, reads, "one ListHubInstances per summary")
+	assert.Equal(t, 1, probe.reads, "one ListHubInstances per summary")
 	assert.Equal(t, "v1.2.0", resp.Hub.Version)
 	require.Len(t, resp.Brokers.Items, 1)
 	assert.Equal(t, "match", resp.Brokers.Items[0].VersionStatus)
