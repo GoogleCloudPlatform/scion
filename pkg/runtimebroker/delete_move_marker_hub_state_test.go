@@ -235,6 +235,9 @@ func TestDeleteAgent_ForcedMoveRollback_NonCanonicalMarkerHubDirRefused(t *testi
 	if err := os.MkdirAll(hubDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if sameDirPath(t, hubDir, agentDir) {
+		t.Skip("case-insensitive filesystem: the hub-project state dir is the agent dir")
+	}
 	if err := os.WriteFile(filepath.Join(hubDir, "scion-agent.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +271,9 @@ func TestDeleteAgent_ForcedMoveRollback_NonCanonicalMarkerHubDirRefused(t *testi
 	}
 	if strings.Contains(out, "paths=[]") || !strings.Contains(out, hubDir) {
 		t.Errorf("the refusal does not name the checked hub-project state dir %s: %s", hubDir, out)
+	}
+	if !strings.Contains(out, hubDir+" is marked by another move") {
+		t.Errorf("the refusal is not for the hub-project state dir %s marked by another move: %s", hubDir, out)
 	}
 	if !strings.Contains(out, agent.ErrMoveMarkerMismatch.Error()) {
 		t.Errorf("the refusal is not the move-marker mismatch: %s", out)
