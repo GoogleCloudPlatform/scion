@@ -43,7 +43,6 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { isLocalizationEnabled, t } from '../../i18n/index.js';
 import { LocaleController } from '../../i18n/controller.js';
-import './language-select.js';
 
 import type { Project, User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';

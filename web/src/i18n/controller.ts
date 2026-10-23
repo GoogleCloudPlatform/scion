@@ -15,7 +15,7 @@
  */
 
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
-import { LOCALE_CHANGED_EVENT } from './index.js';
+import { LOCALE_CHANGED_EVENT } from './events.js';
 
 /** Re-render translated components; clean up when a route unmounts them. */
 export class LocaleController implements ReactiveController {

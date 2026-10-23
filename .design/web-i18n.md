@@ -21,14 +21,17 @@ commands, terminal output, logs, and agent-generated content are never translate
 ## Implementation
 
 `web/src/i18n/locales.ts` registers each locale's BCP 47 code, native name,
-direction, accepted aliases and message-catalog loader. `index.ts` owns an isolated
-i18next instance, the active locale, preference persistence, and document metadata.
+direction, accepted aliases and message-catalog loader. `index.ts` exposes a source-rendering facade; the opt-in `runtime.ts` owns the
+active locale, preference persistence and document metadata, using an isolated
+i18next instance from `engine.ts`.
 The default-off shell uses the English source catalog without loading the engine.
-After opt-in, boot loads the engine and all registered catalogs through local Vite
+After opt-in, boot loads the runtime, language selector, engine and all registered catalogs through local Vite
 chunks before rendering. A shared promise prevents duplicate loads; an initialization
 generation prevents an older load from overriding a newer disable/reinitialization.
 A failed load leaves the page in English with the selector disabled. Subsequent
 language switching is synchronous because the catalogs are already available.
+Vite keeps non-English Shoelace translations in separate locale chunks; otherwise
+its shared vendor chunk would load those translations even while the experiment is off.
 
 i18next provides interpolation, CLDR plural forms and source-language fallback.
 It was chosen over a bespoke dictionary engine to avoid encoding English/Chinese
