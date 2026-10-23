@@ -104,7 +104,7 @@ func (e *userDeleteBlockedError) Error() string {
 const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first, including agents started by those agents or by the user's schedules"
 
 // userHasDelegationsDeleteMessage is the message when only edges block: the
-// user delegates to agents (or users) that exist.
+// user delegates to agents that exist.
 const userHasDelegationsDeleteMessage = "cannot delete a user who has active delegations — delete the agents the user delegates to first"
 
 // writeUserDeleteBlockedError writes the 409 user_delete_blocked response
@@ -172,10 +172,11 @@ func checkUserDeleteBlockersTx(ctx context.Context, tx store.Store, userID strin
 // in the agent list.
 //
 // Edges are the active delegation edges with the user as the delegator
-// whose delegate is not one of those agents (each agent is listed once) and
-// exists: an agent that is not soft-deleted, or a user. An edge to a
-// delegate that is gone grants nothing and nothing could be deleted to clear
-// it, so it does not block; the delete deactivates it
+// whose delegate is an agent that exists and is not soft-deleted, and is not
+// one of those agents (each agent is listed once). An edge to an agent that
+// is gone grants nothing and nothing could be deleted to clear it, and an
+// edge to a user (no production path creates one) could be cleared only by
+// deleting that other user, so neither blocks; the delete deactivates them
 // (deactivateUserDelegatorEdgesTx). Agent delegation grants the user issued
 // do not block: their use-time checks deny a deleted issuer.
 func listUserDeleteBlockers(ctx context.Context, st store.Store, userID string) (*userDeleteBlockers, error) {
@@ -224,11 +225,11 @@ func listUserDeleteBlockers(ctx context.Context, st store.Store, userID string) 
 		if e.DelegateType == store.DelegationPrincipalAgent && seen[e.DelegateID] {
 			continue
 		}
-		live, err := delegateExists(ctx, st, e.DelegateType, e.DelegateID)
+		blocks, err := delegateBlocks(ctx, st, e.DelegateType, e.DelegateID)
 		if err != nil {
 			return nil, err
 		}
-		if !live {
+		if !blocks {
 			continue
 		}
 		edges = append(edges, delegatorEdgeRef{ID: e.ID, DelegateType: e.DelegateType, DelegateID: e.DelegateID, ScopeType: e.ScopeType, ScopeID: e.ScopeID})
@@ -246,37 +247,32 @@ func listUserDeleteBlockers(ctx context.Context, st store.Store, userID string) 
 	return b, nil
 }
 
-// delegateExists reports whether the delegate of an edge exists: an
-// agent that is not soft-deleted, or a user.
-func delegateExists(ctx context.Context, st store.Store, delegateType, delegateID string) (bool, error) {
-	var err error
-	switch delegateType {
-	case store.DelegationPrincipalAgent:
-		var a *store.Agent
-		if a, err = st.GetAgent(ctx, delegateID); err == nil {
-			return a.DeletedAt.IsZero(), nil
-		}
-	case store.DelegationPrincipalUser:
-		if _, err = st.GetUser(ctx, delegateID); err == nil {
-			return true, nil
-		}
-	default:
-		// An unknown delegate type cannot be checked; count it.
-		return true, nil
+// delegateBlocks reports whether the delegate of an edge makes the edge a
+// blocker: an agent that exists and is not soft-deleted. An edge whose
+// delegate is not an agent never blocks.
+func delegateBlocks(ctx context.Context, st store.Store, delegateType, delegateID string) (bool, error) {
+	if delegateType != store.DelegationPrincipalAgent {
+		return false, nil
 	}
+	a, err := st.GetAgent(ctx, delegateID)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}
-	return false, fmt.Errorf("look up delegate %s %s: %w", delegateType, delegateID, err)
+	if err != nil {
+		return false, fmt.Errorf("look up delegate agent %s: %w", delegateID, err)
+	}
+	return a.DeletedAt.IsZero(), nil
 }
 
 // deactivateUserDelegatorEdgesTx deactivates every active delegation edge
 // with userID as the delegator, recording cause delegator_deleted under one
 // new operation ID (the store records the time). A user delete calls it
 // inside its transaction after checkUserDeleteBlockersTx passed, so it
-// normally finds only edges whose delegate is gone. Under the exclusive user-row lock it also catches an
-// edge a concurrent write reactivated after the check read, so no active
-// edge survives the user it names.
+// normally finds only edges that do not block (to an agent that is gone, or
+// to a user). It deactivates every edge that is active when the sweep runs,
+// including one reactivated after the check read but before the sweep. A
+// restore whose delegator is not the guard user does not take this lock;
+// serializing it is later-phase work.
 func deactivateUserDelegatorEdgesTx(ctx context.Context, tx store.Store, userID string) error {
 	d := store.Deactivation{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: uuid.NewString()}
 	if _, err := tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, userID, d); err != nil {

@@ -712,7 +712,7 @@ var identityOperations = []OperationSpec{
 		// last_owner: the user is the last active owner of a project.
 		// user_delete_blocked: the user has agents (owned, descendants,
 		// or started by their schedules) or active delegations to agents
-		// or users that exist.
+		// that exist.
 		// conflict: last super-admin, self-delete, or the user's role
 		// bindings changed concurrently during the delete.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict},
