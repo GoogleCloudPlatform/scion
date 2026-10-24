@@ -285,41 +285,6 @@ func TestWorkspaceStorageURI(t *testing.T) {
 	}
 }
 
-func TestProjectWorkspaceStoragePath(t *testing.T) {
-	tests := []struct {
-		name      string
-		hubID     string
-		projectID string
-		want      string
-	}{
-		{
-			name:      "basic project path",
-			projectID: "project-abc",
-			want:      "workspaces/project-abc/grove-workspace",
-		},
-		{
-			name:      "with UUID project ID",
-			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
-		},
-		{
-			name:      "hub-scoped project path",
-			hubID:     "my-hub",
-			projectID: "project-abc",
-			want:      "hubs/my-hub/workspaces/project-abc/grove-workspace",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ProjectWorkspaceStoragePath(tt.hubID, tt.projectID)
-			if got != tt.want {
-				t.Errorf("ProjectWorkspaceStoragePath() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDirPrefix(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"hubs/h/templates/global/foo", "hubs/h/templates/global/foo/"},

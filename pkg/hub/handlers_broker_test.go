@@ -110,10 +110,14 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	// Link broker as a provider to the project and set as default
+	// The broker serves the hub-managed project from its own checkout, so
+	// a dispatch reaches the broker authorization these tests check instead
+	// of the workspace-storage refusal (ptone/scion#5813).
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     broker.Status,
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
@@ -394,10 +398,14 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Register broker as provider
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout; a remote broker without one is refused at create
+	// (ptone/scion#5813).
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
@@ -409,7 +417,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 			"runtimeBrokerId": tid("broker_id_123"),
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
@@ -423,7 +431,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 			"runtimeBrokerId": "My Laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
@@ -437,7 +445,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 			"runtimeBrokerId": "my-laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))

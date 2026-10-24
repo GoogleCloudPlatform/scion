@@ -20,7 +20,15 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
-| `GOLANGCI_LINT_VERSION` / `GOLANGCI_LINT_SHA256` | golangci-lint, `golangci-lint-<v>-linux-amd64.tar.gz` | `golangci-lint-<v>-checksums.txt` on <https://github.com/golangci/golangci-lint/releases> (keep it in step with the version CI pins) |
+
+golangci-lint is not a download: the `golangci-lint` stage builds it with
+[`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
+(`golangci-lint/VERSIONS`: module checksums and the patch sha256) and go-tools#1839
+patch that CI's lint job uses, so the image's binary is the one CI runs
+(`golangci-lint version` reports `2.15.0-scion-gotools1839`). The stage builds with
+the image's Go and fetches source from the Go module proxy, so the image build
+needs network access to proxy.golang.org (Cloud Build has it). Bump it in
+`golangci-lint/` (its README), not here.
 
 Every download is checked with `sha256sum -c`, and a mismatch fails the build.
 To override a pin, pass the version **and** its checksum with `--build-arg`,
@@ -199,13 +207,30 @@ this, in order:
      A SIGTERM or SIGINT that arrives before `run.sh` runs (during the checks or the
      claim) stops the script at the next checkpoint with 128+n (143 or 130), without
      starting the runner; `/reconcile` reaps the unused registration.
+   - **Idle timeout.** If no `Running job:` line from the runner listener has appeared
+     within `RUNNER_IDLE_TIMEOUT_SECONDS` (default 600; `deploy-job.sh` sets it from
+     `RUNNER_IDLE_TIMEOUT`) of the container start, the entrypoint logs
+     `idle timeout: ...`, sends SIGTERM to `run.sh` (the same graceful path as a
+     cancel) and exits **0**, logging `idle_timeout: runner stopped ...`. GitHub may give
+     any queued job with the label to an idle runner, and that job only gets the rest
+     of the execution's task timeout; the idle timeout makes that at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`. A job whose `Running job:` line the
+     entrypoint has read before the deadline is never touched. **Remaining race:** the
+     check and the SIGTERM are not atomic, so a job that GitHub assigns in the moment
+     between them (or whose line is still in the pipe) is cancelled by the SIGTERM.
+     The entrypoint then sees both markers, logs `ERROR idle_timeout_raced_job` and
+     exits **4**, so the execution fails visibly instead of passing for an idle stop;
+     re-run the cancelled job. The timer is a `read -t` on a FIFO in a subshell, killed when
+     `run.sh` exits.
 
-   The output goes through two FIFOs in a private temp dir under `/tmp`, small and
+   The output goes through FIFOs in a private temp dir under `/tmp`, small and
    on the root filesystem, never on `/scratch`. A watcher process that does not
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
-Exit codes: the runner's (above) once `run.sh` has started. Before that, **2** for a configuration error (env,
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
+**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
@@ -291,5 +316,6 @@ covers:
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
   mediator.
 
-Lint the script with `shellcheck -x runner/entrypoint.sh` and
-`bash -n runner/entrypoint.sh`.
+Lint the script with `bash -n runner/entrypoint.sh` and both shellcheck runs in
+[scripts/README.md, "Static checks"](../scripts/README.md#static-checks)
+(upstream CI's 0.9.0 invocation and 0.11.0 `--norc -x`).

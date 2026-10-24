@@ -286,9 +286,10 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 	localHash := computeLocalContentHash(files)
 
-	// If hashes match and no executable bit differs, no action needed. The
-	// content hash does not cover modes (ptone/scion#5652).
-	if localHash == hubTemplate.ContentHash && len(modeOnlyChangesInManifest(files, hubTemplate.Files)) == 0 {
+	// If the local files are the Hub's (paths, contents and executable
+	// bits), no action needed. Manifests are compared, not content hashes,
+	// which differ in version between Hubs (ptone/scion#5658).
+	if localMatchesHub(files, hubTemplate.Files, hubTemplate.ContentHash) {
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
 			TemplateName: hubTemplate.Name,
@@ -580,13 +581,17 @@ func detectHarnessType(tpl *config.Template) (string, error) {
 	return "", nil
 }
 
-// computeLocalContentHash computes the content hash for local files.
+// computeLocalContentHash computes the v2 content hash of local files
+// (paths, modes and contents), the hash a Hub with the hub.content_hash_v2
+// experiment on records (ptone/scion#5658). It is for display: whether
+// local files match the Hub's is decided by localMatchesHub.
 func computeLocalContentHash(files []hubclient.FileInfo) string {
 	templateFiles := make([]hubclient.TemplateFile, len(files))
 	for i, f := range files {
 		templateFiles[i] = hubclient.TemplateFile{
 			Path: f.Path,
 			Hash: f.Hash,
+			Mode: f.Mode,
 		}
 	}
 	return hubclient.ComputeContentHash(templateFiles)

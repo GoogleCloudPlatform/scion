@@ -634,6 +634,16 @@ func (s *Server) dispatchStandingCheck(ctx context.Context, agent *store.Agent) 
 	return s.agentStanding(ctx, agent.ID)
 }
 
+// heldLookupFaultDMError is the refusal of a send whose target's hold
+// could not be read: a lookup fault refuses.
+func heldLookupFaultDMError() *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeInternalError,
+		Message:    "could not verify the target agent's status",
+		HTTPStatus: http.StatusInternalServerError,
+	}
+}
+
 // heldTargetDMError is the refusal for a message to a held agent: the same
 // code and status as a suspended target.
 func heldTargetDMError(agent *store.Agent) *AgentDMError {

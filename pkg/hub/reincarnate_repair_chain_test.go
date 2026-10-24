@@ -54,6 +54,9 @@ type repairFixture struct {
 func newRepairFixture(t *testing.T) *repairFixture {
 	t.Helper()
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+	// The fixture broker is remote: it serves the hub-managed project from
+	// its own checkout (ptone/scion#5813).
+	giveProviderCheckout(t, s, project.ID, broker.ID)
 	userID := tid("repair-user-" + t.Name())
 	email := tidSlugSafe(t.Name()) + "@repair.test"
 	createDCUser(t, s, userID, email, project.ID, store.ProjectRoleOwner)

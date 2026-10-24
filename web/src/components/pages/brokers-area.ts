@@ -40,7 +40,7 @@ import {
   type BrokerHealthInfo,
 } from '../../shared/broker-area-filters.js';
 import { stateManager } from '../../client/state.js';
-import { extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
 import { listPageStyles, brokerTypeBadgeStyles } from '../shared/resource-styles.js';
@@ -175,7 +175,7 @@ export class ScionPageBrokersArea extends LitElement {
     this.loading = true;
     this.error = null;
     try {
-      const response = await fetch('/api/v1/runtime-brokers', { credentials: 'include' });
+      const response = await apiFetch('/api/v1/runtime-brokers', { authErrors: 'caller' });
       if (!response.ok) {
         throw new Error(
           await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
@@ -203,7 +203,7 @@ export class ScionPageBrokersArea extends LitElement {
     const canReadHealth = hasAnyPermission(status, [HEALTH_READ_PERMISSION]);
     if (!canReadHealth) return;
     try {
-      const res = await fetch('/api/v1/admin/health/summary', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/admin/health/summary', { authErrors: 'caller' });
       // A 401/403, or any other failure, leaves the Health column hidden.
       if (!res.ok) return;
       const body = (await res.json()) as HealthSummaryRows;

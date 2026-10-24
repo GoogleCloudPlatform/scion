@@ -350,6 +350,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	var fuseMounts []string
 	var gcsVolumes []gcsVolumeInfo
 
+	// volumeErr is the first configured volume refused below; it fails the
+	// whole call once the volumes have been processed.
+	var volumeErr error
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
 
@@ -378,6 +381,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 
 		src := expandPath(v.Source, false)
+		if _, exists := volumeMap[tgt]; exists {
+			// Already mounted (for example the workspace, checked on its
+			// own path); registerMount below would not add this one.
+			return
+		}
+		// Agents' own directories under ~/.scion/project-configs hold state
+		// the host relies on; no configured volume may mount them
+		// (checkVolumeSource).
+		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
 		registerMount(src, tgt, v.ReadOnly, false)
 	}
@@ -508,16 +525,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 				}
 				if ok {
 					registerMount(src, tgt, true, true)
-					if isDir(src) {
-						if config.RuntimeName != appleContainerRuntimeName {
-							if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-								runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-									"agent", config.Name, "error", err)
-							}
-						}
-						if isDir(filepath.Join(src, "agents")) {
-							sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
-						}
+					if err := ensureAgentsMaskPoint(config, src); err != nil {
+						return nil, err
+					}
+					if isDir(filepath.Join(src, "agents")) {
+						sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 					}
 				}
 			}
@@ -560,11 +572,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
-					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-							"agent", config.Name, "error", err)
-					}
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
 				}
 			}
 			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
@@ -598,11 +607,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
-					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
-						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
-							"agent", config.Name, "error", err)
-					}
+				if err := ensureAgentsMaskPoint(config, src); err != nil {
+					return nil, err
 				}
 				if isDir(filepath.Join(src, "agents")) {
 					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
@@ -624,6 +630,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 	for _, tgt := range dedupedOrder {
 		addVolume(dedupedVolumes[tgt])
+	}
+	if volumeErr != nil {
+		return nil, volumeErr
 	}
 
 	// If workdir was not set by the RepoRoot/Workspace logic above, check if we have an explicit
@@ -705,6 +714,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (ptone/scion#3155), never template or user env.
 			continue
 		}
+		if parts[0] == MetadataInterceptionEnvVar {
+			// Runtime-owned: set below from config.MetadataInterception.
+			continue
+		}
 		if len(parts) == 2 {
 			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
 		} else if !util.IsAgentRefusedHostEnvName(e) {
@@ -728,7 +741,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -817,6 +830,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// equivalent --tmpfs flag. Kubernetes keeps the path out of its pods
 	// itself (k8sWorkspaceAgentsExcluded).
 	if sharedWorkspaceAgentsMask != "" {
+		// Create <workspace>/.scion/agents on the host first, owned by the
+		// broker, so the runtime mounts the tmpfs over an existing directory
+		// rather than creating the mount point through the bind and leaving a
+		// root-owned directory in the user's checkout. The tmpfs then hides
+		// whatever is there.
+		if config.Workspace != "" {
+			_ = os.MkdirAll(filepath.Join(config.Workspace, filepath.FromSlash(sharedWorkspaceAgentsDir)), 0o755)
+		}
 		if config.RuntimeName == appleContainerRuntimeName {
 			addArg("--tmpfs", sharedWorkspaceAgentsMask)
 		} else {
@@ -824,9 +845,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add NET_ADMIN capability for iptables-based metadata server interception
+	// Add NET_ADMIN capability for iptables-based metadata server interception,
+	// and tell sciontool whether that interception is required. The marker
+	// always comes from config.MetadataInterception, never from config.Env, a
+	// secret or the template fallback (all of which skip this key), so it
+	// cannot disagree with the capability. The Apple runtime drops --cap-add
+	// (stripUnsupportedAppleFlags), so it never reports the interception as
+	// required.
 	if config.MetadataInterception {
 		addArg("--cap-add", "NET_ADMIN")
+	}
+	if config.MetadataInterception && config.RuntimeName != appleContainerRuntimeName {
+		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionRequired)
+	} else {
+		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionOff)
 	}
 
 	// Add extra /etc/hosts entries (e.g. for host.docker.internal on Linux)
@@ -951,12 +983,13 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 	if err != nil {
 		return false
 	}
-	// `git rev-parse --git-common-dir` (how RepoRoot is ultimately derived,
-	// see pkg/agent/run.go's detectRepoRoot) returns a resolved (symlink-free)
-	// path, while os.UserHomeDir() may itself be reached through a symlink
-	// (e.g. /home -> /var/home). Resolve both sides the same way before
-	// comparing so a symlinked home directory doesn't cause a hub-native base
-	// to be misclassified as linked (and so miss the mount narrowing).
+	// RepoRoot is symlink-resolved by Start and again in buildCommonRunArgs
+	// before this call, whatever its source, and this function resolves
+	// repoAbs itself; os.UserHomeDir() may instead be reached through a
+	// symlink (e.g. /home -> /var/home). Resolve both sides the same way
+	// before comparing so a symlinked home directory doesn't cause a
+	// hub-native base to be misclassified as linked (and so miss the mount
+	// narrowing).
 	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
 		repoAbs = resolved
 	}
@@ -998,6 +1031,13 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // never legitimately needs to write them (identity and credentials are
 // supplied via $HOME/.gitconfig, not .git/config, and there is no
 // in-container `git config --local` write).
+//
+// objects/ stays writable on purpose (in-container commit) and is shared
+// across the project's agents, so this read-only narrowing (here and in
+// narrowSharerRegistryMounts) is not, on its own, complete hardening of the
+// shared store (ptone/scion#4611). The durable fix is a read-only shared
+// store as an alternate plus a writable per-container
+// store.
 //
 // Each subpath is mounted read-only only if it currently exists, so a
 // freshly-cloned base without a config.worktree (the common case —
@@ -2013,6 +2053,20 @@ func nfsOwnerIDs(uid, gid int) (int, int) {
 // fsGroup). Mirrored in
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
+
+// MetadataInterceptionEnvVar tells sciontool inside a Docker/Podman agent
+// whether the in-container GCP metadata interception is required
+// (MetadataInterceptionRequired) or not (MetadataInterceptionOff). It is set
+// only by buildCommonRunArgs, from RunConfig.MetadataInterception, the same
+// field that grants NET_ADMIN; template, user and secret values are dropped.
+// Mirrored in pkg/sciontool/metadata (InterceptionEnvVar).
+const MetadataInterceptionEnvVar = "SCION_METADATA_INTERCEPTION"
+
+// Values of MetadataInterceptionEnvVar.
+const (
+	MetadataInterceptionRequired = "required"
+	MetadataInterceptionOff      = "off"
+)
 
 // sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
 // or nil when the agent mounts no nfs shared dir.

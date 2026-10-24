@@ -1518,13 +1518,13 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		if local != nil && hub != nil {
-			// Both exist - compare hashes
+			// Both exist - compare manifests (the hashes are reported
+			// only; see localMatchesHub)
 			files, err := hubclient.CollectFiles(local.Path, nil)
 			if err == nil {
-				localHash := computeLocalContentHash(files)
-				entry.LocalHash = localHash
+				entry.LocalHash = computeLocalContentHash(files)
 				entry.HubHash = hub.ContentHash
-				if localHash == hub.ContentHash && len(modeOnlyChangesInManifest(files, hub.Files)) == 0 {
+				if localMatchesHub(files, hub.Files, hub.ContentHash) {
 					entry.Status = "synced"
 				} else {
 					entry.Status = "out of date"

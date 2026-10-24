@@ -53,6 +53,7 @@ func newUsageBroker(t *testing.T, s store.Store, ownerID, projectID string, link
 			ProjectID:  projectID,
 			BrokerID:   b.ID,
 			BrokerName: b.Name,
+			LocalPath:  fixtureProviderCheckout(t),
 			Status:     store.BrokerStatusOnline,
 			LinkedBy:   *linkedBy,
 		}))

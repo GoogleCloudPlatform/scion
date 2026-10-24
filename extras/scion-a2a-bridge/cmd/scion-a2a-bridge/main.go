@@ -586,6 +586,9 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	// Constraint 3: DurableRequestHandler wraps the SDK handler for
 	// ownership-enforcing durable subscribe that bypasses localManager.Resubscribe.
 	durableHandler := bridge.NewDurableRequestHandler(sdkRequestHandler, pgTaskStore, store, notifier)
+	// Federated users: access is re-checked with the hub before a reply is
+	// streamed on a resubscribe.
+	durableHandler.SetBridge(b)
 
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
 		durableHandler,

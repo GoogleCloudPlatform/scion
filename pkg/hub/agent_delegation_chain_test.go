@@ -412,8 +412,10 @@ func TestAgentDelegation_OneRecordPerCheckAndNoReasonInResponses(t *testing.T) {
 		}
 	}
 	// project.read has the same checks in
-	// TestAgentDelegatedProjectRead_OneRecordPerCheckAndNoReason.
-	require.Len(t, agentDelegationAdmittedRoutes, 2, "a new admitted route needs its own record and no-reason checks")
+	// TestAgentDelegatedProjectRead_OneRecordPerCheckAndNoReason, and the
+	// message and attach routes in
+	// TestAgentDelegatedMessageAndAttach_OneRecordPerCheckAndNoReason.
+	require.Len(t, agentDelegationAdmittedRoutes, 5, "a new admitted route needs its own record and no-reason checks")
 	require.Len(t, allows, 1, "one record for the delegated agent.read check")
 	assert.Equal(t, "agent_delegation:"+grant.ID, allows[0].MatchedGrant)
 	assert.Equal(t, f.agentA.ID, allows[0].PrincipalID)
@@ -486,6 +488,11 @@ type adtFaults struct {
 	// a handler's checks and its write.
 	beforeGrantLock func(ctx context.Context, tx store.Store, id string) error
 	afterGrantLock  func(g *store.AgentDelegationGrant)
+	// expireCredential makes every delegated credential row read outside a
+	// transaction look expired, as it does once its lifetime has passed.
+	expireCredential bool
+	// createMessage fails every message write outside a transaction.
+	createMessage error
 }
 
 // adtFaultStore is the switch-gated store wrapper the agent delegation
@@ -532,6 +539,23 @@ func (s *adtFaultStore) GetAgentDelegationGrant(ctx context.Context, id string) 
 		return nil, f.grant
 	}
 	return s.Store.GetAgentDelegationGrant(ctx, id)
+}
+
+func (s *adtFaultStore) GetAgentDelegatedCredentialByKeyHash(ctx context.Context, keyHash string) (*store.AgentDelegatedCredential, error) {
+	cred, err := s.Store.GetAgentDelegatedCredentialByKeyHash(ctx, keyHash)
+	if f := s.active(); err == nil && f != nil && f.expireCredential {
+		expired := *cred
+		expired.ExpiresAt = time.Now().Add(-time.Second)
+		return &expired, nil
+	}
+	return cred, err
+}
+
+func (s *adtFaultStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	if f := s.active(); f != nil && f.createMessage != nil {
+		return f.createMessage
+	}
+	return s.Store.CreateMessage(ctx, m)
 }
 
 // adtFaultTx is the transaction-scoped side of adtFaultStore.

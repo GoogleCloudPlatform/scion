@@ -79,6 +79,171 @@ func (gs *GovernanceService) createAccessConstraintWithAudit(
 	return result, event, nil
 }
 
+// updateAccessConstraintWithAudit applies a boundary update and its single
+// history row in one transaction, mirroring createAccessConstraintWithAudit.
+// A store, builder, or history failure rolls back both. The event is
+// history-only: it is never dispatched to a log sink.
+func (gs *GovernanceService) updateAccessConstraintWithAudit(
+	ctx context.Context,
+	req CommitRequest,
+	classification string,
+) (*CommitResult, error) {
+	var result *CommitResult
+	err := gs.store.WithTx(ctx, func(tx store.Store) error {
+		before, err := tx.GetAccessConstraint(ctx, req.ConstraintID)
+		if err != nil {
+			return err
+		}
+		updated, err := tx.UpdateAccessConstraint(ctx, req.Draft, req.BaseRevision)
+		if err != nil {
+			return err
+		}
+		// The store bumps the revision by exactly one. If the row changed
+		// between this transaction's read and the store's locked read, the
+		// recorded before revision would be untrue: refuse it as a conflict.
+		if updated.Revision != before.Revision+1 {
+			return store.ErrRevisionConflict
+		}
+		beforeRevision := before.Revision
+		afterRevision := updated.Revision
+		candidate, err := buildAccessConstraintHistoryEvent(ctx, accessConstraintHistoryEventInput{
+			Action:         auditevent.AccessBoundaryUpdate,
+			Actor:          req.Actor,
+			Request:        req.AuditRequest,
+			Constraint:     updated,
+			BeforeRevision: &beforeRevision,
+			AfterRevision:  &afterRevision,
+			Classification: classification,
+			PreviewID:      req.PreviewID,
+			DraftHash:      req.DraftHash,
+		})
+		if err != nil {
+			return fmt.Errorf("build audit event: %w", err)
+		}
+		history, err := accessConstraintHistoryFromEvent(candidate)
+		if err != nil {
+			return fmt.Errorf("map audit history: %w", err)
+		}
+		if err := tx.AppendConstraintHistoryTx(ctx, history); err != nil {
+			return fmt.Errorf("append audit history: %w", err)
+		}
+		result = &CommitResult{
+			Constraint:     updated,
+			Operation:      "update",
+			Classification: classification,
+			AuditID:        candidate.EventID,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// accessConstraintHistoryEventInput is the trusted input for one
+// history-only access-boundary event (update or recovery).
+type accessConstraintHistoryEventInput struct {
+	Action         auditevent.AccessBoundaryHistoryAction
+	Actor          PrincipalContext
+	Request        *auditevent.RequestRef
+	Constraint     *store.AccessConstraint
+	BeforeRevision *int64
+	AfterRevision  *int64
+	Classification string
+	PreviewID      string
+	DraftHash      string
+}
+
+// buildAccessConstraintHistoryEvent builds the validated history-only event
+// whose row accessConstraintHistoryFromEvent maps. Correlation comes from the
+// audit operation on ctx (auditevent.OperationFromContext).
+func buildAccessConstraintHistoryEvent(ctx context.Context, input accessConstraintHistoryEventInput) (auditevent.EnvelopeV1, error) {
+	identity, err := accessConstraintAuditIdentities(ctx, input.Actor, input.Constraint)
+	if err != nil {
+		return auditevent.EnvelopeV1{}, err
+	}
+	return auditevent.BuildAccessBoundaryHistory(ctx, input.Action, auditevent.AccessBoundaryHistoryInput{
+		Request:        input.Request,
+		Principal:      identity.principal,
+		Executor:       identity.executor,
+		Credential:     identity.credential,
+		ConstraintID:   input.Constraint.ID,
+		Scope:          identity.scope,
+		ProjectID:      identity.projectID,
+		BeforeRevision: input.BeforeRevision,
+		AfterRevision:  input.AfterRevision,
+		Classification: auditevent.BoundaryClassification(input.Classification),
+		PreviewID:      input.PreviewID,
+		DraftHash:      input.DraftHash,
+	})
+}
+
+// buildAccessConstraintDeleteEvent builds the structured-log event for a
+// committed delete. deleted is the constraint state read before the delete.
+// The payload carries only the classification and the deleted revision: no
+// name, subject, purpose, or email.
+func buildAccessConstraintDeleteEvent(
+	ctx context.Context,
+	req CommitRequest,
+	deleted *store.AccessConstraint,
+	classification string,
+) (auditevent.EnvelopeV1, error) {
+	identity, err := accessConstraintAuditIdentities(ctx, req.Actor, deleted)
+	if err != nil {
+		return auditevent.EnvelopeV1{}, err
+	}
+	beforeRevision := deleted.Revision
+	return auditevent.BuildAccessBoundaryDelete(ctx, auditevent.AccessBoundaryDeleteInput{
+		Request:        req.AuditRequest,
+		Principal:      identity.principal,
+		Executor:       identity.executor,
+		Credential:     identity.credential,
+		ConstraintID:   deleted.ID,
+		Scope:          identity.scope,
+		ProjectID:      identity.projectID,
+		BeforeRevision: &beforeRevision,
+		Classification: auditevent.BoundaryClassification(classification),
+	})
+}
+
+// accessConstraintAuditIdentitySet holds the envelope leaves shared by every
+// access-boundary event: who acted, with what credential, on which scope.
+type accessConstraintAuditIdentitySet struct {
+	principal  auditevent.IdentityRef
+	executor   *auditevent.IdentityRef
+	credential *auditevent.CredentialRef
+	scope      auditevent.ResourceScope
+	projectID  string
+}
+
+func accessConstraintAuditIdentities(ctx context.Context, actor PrincipalContext, constraint *store.AccessConstraint) (accessConstraintAuditIdentitySet, error) {
+	scope, projectID, err := accessConstraintAuditScope(constraint)
+	if err != nil {
+		return accessConstraintAuditIdentitySet{}, err
+	}
+	principal, err := accessConstraintAuditIdentity(actor.Kind, actor.ID)
+	if err != nil {
+		return accessConstraintAuditIdentitySet{}, err
+	}
+	credential, err := accessConstraintAuditCredential(ctx)
+	if err != nil {
+		return accessConstraintAuditIdentitySet{}, err
+	}
+	var executor *auditevent.IdentityRef
+	if current, ok := ExecutorContextFromContext(ctx); ok && !current.IsZero() {
+		identity := auditevent.IdentityRef{Kind: auditevent.IdentitySystem, ID: current.ID}
+		executor = &identity
+	}
+	return accessConstraintAuditIdentitySet{
+		principal:  principal,
+		executor:   executor,
+		credential: credential,
+		scope:      scope,
+		projectID:  projectID,
+	}, nil
+}
+
 func buildAccessConstraintCreateEvent(
 	ctx context.Context,
 	req CommitRequest,

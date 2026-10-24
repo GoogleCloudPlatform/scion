@@ -83,12 +83,8 @@ func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []str
 	}
 	var refs []string
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/apierr
-	// recursive walk already includes pkg/hub/apierr (walks the whole module).
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// recursive walk already includes pkg/hub/internal/principal (walks the whole module).
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (walks the whole module; no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: SkipDir only for module-level directories (.git, node_modules, web, docs-site, extras, vendor, .scion and the caller's pkg/store, pkg/ent), none under pkg/hub, so it covers every directory below pkg/hub.
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -295,12 +291,8 @@ func agentUpsertCalls(t *testing.T) []string {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/apierr
-	// recursive walk already includes pkg/hub/apierr (walks the whole module).
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// recursive walk already includes pkg/hub/internal/principal (walks the whole module).
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (walks the whole module; no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: SkipDir only for module-level directories (.git, node_modules, web, docs-site, extras, vendor, .scion, pkg/ent), none under pkg/hub, so it covers every directory below pkg/hub.
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
