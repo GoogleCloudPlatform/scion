@@ -398,6 +398,11 @@ type CreateAgentRequest struct {
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
 
+	// PreviousProjectIDs are earlier IDs of the agent's project, sent by the
+	// Hub, that a git project's agent may be carried over from after a
+	// re-link (see relinkSharedProjectIdentity). An older Hub sends none.
+	PreviousProjectIDs []string `json:"previousProjectIds,omitempty"`
+
 	// ProvisionCredentials carries project-scope secrets for use by core provision
 	// logic (skill resolution, URI variable substitution, credential helpers).
 	// These are NEVER forwarded to the agent container environment or harness scripts.
