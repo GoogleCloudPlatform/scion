@@ -52,6 +52,14 @@ func TestCompositeStore_CRUDParity(t *testing.T) {
 	storetest.RunStoreSuite(t, compositeFactory)
 }
 
+// TestCompositeStore_SecretEncryption runs the secret encryption
+// conformance suite (payload scan, ciphertext-only replacement, policy and
+// migration records, policy fence; ptone/scion#1530 §6) on whichever
+// backend compositeFactory selects.
+func TestCompositeStore_SecretEncryption(t *testing.T) {
+	storetest.SecretEncryptionConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_UsageReservation runs the usage reservation
 // conformance check (GetActiveReservation and the typed active-reservation
 // violation) against the CompositeStore on whichever backend

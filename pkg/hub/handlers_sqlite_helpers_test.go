@@ -5312,7 +5312,9 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
-	if d.runStore != nil {
+	// A start the hub refused before sending (its run not begun, or the hub
+	// shutting down) records no run, as in production.
+	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
 		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
@@ -6100,6 +6102,20 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
 	s.updateRuntimeBrokerCalls++
 	return s.Store.UpdateRuntimeBroker(ctx, broker)
+}
+
+// RefreshRuntimeBrokerState is the heartbeat's broker write; a refresh that
+// reports a change and is stored counts as one broker row write.
+func (s *countingBrokerLoadStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(*store.RuntimeBroker) bool) error {
+	wrote := false
+	err := s.Store.RefreshRuntimeBrokerState(ctx, id, func(b *store.RuntimeBroker) bool {
+		wrote = refresh(b)
+		return wrote
+	})
+	if err == nil && wrote {
+		s.updateRuntimeBrokerCalls++
+	}
+	return err
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

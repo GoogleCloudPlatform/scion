@@ -384,6 +384,8 @@ type analyticsState struct {
 	native         *UsageAnalytics
 	drainer        *AnalyticsDrainer
 	disabledReason string
+	// send counts drainer send retries for WP3 diagnostics (health.go).
+	send *countingSend
 
 	// outboxDir and owner locate the outbox under the AGENT home and name
 	// its owner (Pipeline.SetAnalyticsOutbox); resolver overrides the hub
@@ -447,7 +449,8 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		resolver = NewHealthzHubIDResolver(analyticsHubEndpoint(), nil)
 	}
 	a.native = NewUsageAnalytics(outbox, telemetrycontract.UsageSourceNative)
-	a.drainer = NewAnalyticsDrainer(outbox, gcp.SendAnalytics, resolver)
+	a.send = newCountingSend(gcp.SendAnalytics)
+	a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
 	a.drainer.Start(ctx)
 	a.disabledReason = ""
 }

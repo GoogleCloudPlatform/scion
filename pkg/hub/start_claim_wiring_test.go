@@ -380,11 +380,16 @@ func TestStartClaimWiring_BackstopLeavesLegacyStoppedIntent(t *testing.T) {
 func TestStartClaimWiring_RestartStatusWriteFailureIsNotAFailedStart(t *testing.T) {
 	f, _, _ := newClaimFixture(t)
 	a := f.addAgent("restarting-live", "running", "working")
+	// The fixture and addAgent only write through the raw store, before any
+	// audited setup.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) failRunningStatusStore {
+		return failRunningStatusStore{Store: inner, agentID: a.ID, fault: sw}
+	})
 	ctx := context.Background()
 	setBrokerAgentCeiling(t, f.s, 5)
 	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
-	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	fault.Arm()
 	code, _ := lifecycle(t, f, a.ID, "restart")
 	assert.NotEqual(t, http.StatusBadGateway, code, "not answered as a failed dispatch")
 	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)

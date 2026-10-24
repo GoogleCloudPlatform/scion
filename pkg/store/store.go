@@ -202,12 +202,15 @@ type Store interface {
 	// ptone/scion#2483 §2.3), as ONE transaction: it reads the agent
 	// (row-locked where supported), evaluates pred, and when it holds
 	// either applies set (DeletionFinalizeSoft, with UpdateAgentDeletion's
-	// semantics, Derive included) or removes the agent row and its cascade
-	// (DeletionFinalizeHard, as DeleteAgent). Then, still inside the
-	// transaction and just before commit, it calls hook (when non-nil) with
-	// a transaction-scoped Store, the agent (the post-write row for soft,
-	// the pre-delete row for hard) and the mode; a non-nil hook error rolls
-	// the whole finalize back and is returned. Returns affected=0 with a nil
+	// semantics, Derive included, except that soft mode alone also accepts
+	// DeletionFields.SoftFinishRunID and SoftFinishPreviousRunIDs) or
+	// removes the agent row and its cascade (DeletionFinalizeHard, as
+	// DeleteAgent; a set carrying those run fields is refused with
+	// ErrInvalidInput). Then, still inside the transaction and just before
+	// commit, it calls hook (when non-nil) with a transaction-scoped Store,
+	// the agent (the post-write row for soft, the pre-delete row for hard)
+	// and the mode; a non-nil hook error rolls the whole finalize back and
+	// is returned. Returns affected=0 with a nil
 	// error when the predicate did not hold or the agent does not exist.
 	// Must not be called from inside WithTx.
 	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
@@ -442,6 +445,9 @@ type Store interface {
 
 	// Secret operations
 	SecretStore
+
+	// Secret encryption policy and migration records
+	SecretEncryptionStore
 
 	// Group operations (Hub Permissions System)
 	GroupStore
@@ -1704,6 +1710,19 @@ type RuntimeBrokerStore interface {
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
 
+	// RefreshRuntimeBrokerState is the heartbeat's write. It reads the
+	// broker, calls refresh on that copy and, when refresh reports a
+	// change, writes only Capabilities, WorkspaceStorage, DefaultProfile,
+	// Health and Profiles, as a compare-and-set on the row's version. A
+	// concurrent write between the read and the write makes it retry with
+	// a fresh read, so refresh may run more than once and must change only
+	// those fields; changes it makes to any other field are not stored.
+	// Every other column keeps whatever a concurrent writer stored. On a
+	// flat row Profiles and DefaultProfile are stored empty, as
+	// UpdateRuntimeBroker does. Returns ErrNotFound if the broker doesn't
+	// exist and ErrVersionConflict when the retries run out.
+	RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(broker *RuntimeBroker) (changed bool)) error
+
 	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
 	// broker, but only if the row's created_by is currently empty. Returns
 	// applied=false (not an error) when the row already has a non-empty
@@ -1896,6 +1915,12 @@ type BrokerDispatchStore interface {
 	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
 	// have not been dispatched within the expected window.
 	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
+
+	// ListStuckPendingMessageIDs returns the IDs of up to limit messages that
+	// CountStuckPendingMessages counts, oldest first, so the sweep can name
+	// them in its log line (ptone/scion#4827). A non-positive limit returns
+	// no IDs.
+	ListStuckPendingMessageIDs(ctx context.Context, before time.Time, limit int) ([]string, error)
 
 	// ExpireStuckPendingMessages transitions messages stuck in pending state
 	// past the given cutoff to failed, recording the reason. Returns the
@@ -2473,6 +2498,64 @@ type SecretStore interface {
 	// whose createdBy is in the given set of ancestor IDs.
 	// Note: EncryptedValue is NOT populated in the returned secrets.
 	ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]Secret, error)
+
+	// ScanSecretPayloads is the privileged, paginated payload scan of the
+	// encryption migration and the startup audit (ptone/scion#1530 §6).
+	// It returns up to limit rows (1..MaxSecretPayloadScan, otherwise
+	// ErrInvalidInput) of every scope and scope ID with ID > afterID, in
+	// ascending ID order; afterID "" starts at the beginning. Rows carry
+	// EncryptedValue: callers must never log or return it.
+	ScanSecretPayloads(ctx context.Context, afterID string, limit int) ([]SecretPayload, error)
+
+	// ReplaceSecretCiphertext replaces only the EncryptedValue of the row
+	// with this ID, and only while its Version equals expectedVersion and
+	// its EncryptedValue equals expectedCiphertext byte for byte. Version,
+	// timestamps, ID, SecretRef and all other metadata are preserved, so a
+	// re-encryption is never seen as a credential change. It returns
+	// applied=false (no error) when the row is gone or either check fails.
+	// The replacement passes the encryption policy fence like every other
+	// payload write.
+	ReplaceSecretCiphertext(ctx context.Context, id string, expectedVersion int, expectedCiphertext, replacement string) (applied bool, err error)
+}
+
+// MaxSecretPayloadScan is the largest ScanSecretPayloads page.
+const MaxSecretPayloadScan = 500
+
+// SecretEncryptionStore holds the database encryption policy and the
+// encryption migration records (ptone/scion#1530 §6). Neither table holds
+// key material.
+//
+// Policy fence: once the policy row exists (in any state), every
+// payload-changing secret write (CreateSecret, UpdateSecret, UpsertSecret,
+// UpdateSecretValueIfVersion, ReplaceSecretCiphertext) accepts only an
+// enc:v2: value under one of AllowedWriteKIDs, or an empty value with a
+// non-empty SecretRef, and otherwise returns ErrEncryptionPolicyMismatch
+// without writing. Metadata-only writes and deletes are not fenced.
+type SecretEncryptionStore interface {
+	// GetEncryptionPolicy returns the policy, or ErrNotFound when no
+	// policy exists (the fence is off).
+	GetEncryptionPolicy(ctx context.Context) (*EncryptionPolicy, error)
+
+	// UpdateEncryptionPolicy stores next only while the current
+	// generation equals expectedGeneration (0: no policy yet, which
+	// creates it). next.Generation must be expectedGeneration+1 and next
+	// must be valid, otherwise ErrInvalidInput. It returns applied=false
+	// (no error) when the generation has moved on. The transition holds
+	// an exclusive lock on the policy row where the database supports it.
+	UpdateEncryptionPolicy(ctx context.Context, expectedGeneration int64, next EncryptionPolicy) (applied bool, err error)
+
+	// CreateEncryptionMigration stores a new migration record; ErrAlreadyExists
+	// if its ID is taken.
+	CreateEncryptionMigration(ctx context.Context, m *EncryptionMigration) error
+
+	// GetEncryptionMigration returns the migration record, or ErrNotFound.
+	GetEncryptionMigration(ctx context.Context, id string) (*EncryptionMigration, error)
+
+	// UpdateEncryptionMigration replaces the mutable fields of the record
+	// (state, cursor, counts, plaintext admission) only while its state is
+	// expectedState; applied=false otherwise. A verified record never
+	// keeps plaintext admission.
+	UpdateEncryptionMigration(ctx context.Context, m *EncryptionMigration, expectedState EncryptionMigrationState) (applied bool, err error)
 }
 
 // SecretFilter defines criteria for filtering secrets.

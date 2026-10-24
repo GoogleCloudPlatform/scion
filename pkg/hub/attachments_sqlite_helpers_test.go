@@ -59,8 +59,9 @@ func agentAttachmentServer(t *testing.T) (*Server, store.Store, *store.Project, 
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	// sharedDirHostPath falls back to the conventional project-configs layout
-	// under the home directory when no co-located broker reports a path.
+	// A hub-managed project's scratchpad resolves, on the local Layout, to
+	// the project-configs layout under the global dir (the project record
+	// path, resolveHubProjectSharedDirPath).
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	sharedDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)

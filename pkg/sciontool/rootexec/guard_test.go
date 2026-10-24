@@ -119,7 +119,7 @@ var execSiteAllowlist = map[execSite]string{
 	{
 		File: "cmd/sciontool/commands/init.go",
 		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)`,
+		Call: `exec.Command("git", "-C", workspacePath, "remote", "add", "origin", cloneURLNoCredential)`,
 	}: reasonCloneCredential,
 	{
 		File: "cmd/sciontool/commands/init.go",
@@ -139,7 +139,7 @@ var execSiteAllowlist = map[execSite]string{
 	{
 		File: "cmd/sciontool/commands/init.go",
 		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", buildAuthenticatedURL(cloneURL, ""))`,
+		Call: `exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", normalizeCloneURL(cloneURL))`,
 	}: reasonCloneCredential,
 	{
 		File: "cmd/sciontool/commands/init.go",

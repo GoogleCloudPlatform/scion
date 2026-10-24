@@ -131,12 +131,8 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		// Isolation and read access are both enforced by
 		// handleProjectSharedDirRoutes before this leaf is ever reached; this
 		// case has no check of its own left to duplicate that gate.
-		dirs := project.SharedDirs
-		if dirs == nil {
-			dirs = []api.SharedDir{}
-		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"sharedDirs": dirs,
+			"sharedDirs": sharedDirListEntries(project.SharedDirs),
 		})
 
 	case http.MethodPost:
@@ -191,6 +187,26 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+// sharedDirListEntry is one shared dir in the GET /shared-dirs response: the
+// declaration plus Target, the container path agents mount it at, computed by
+// the layout authority (projectfs.SharedDirMount; ptone/scion#5827), so
+// clients (terminal drag-drop) never build that path themselves. Target is
+// response-only: it is never stored and never read from a request.
+type sharedDirListEntry struct {
+	api.SharedDir
+	Target string `json:"target"`
+}
+
+// sharedDirListEntries returns the GET /shared-dirs entries of dirs, never
+// nil.
+func sharedDirListEntries(dirs []api.SharedDir) []sharedDirListEntry {
+	out := make([]sharedDirListEntry, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, sharedDirListEntry{SharedDir: d, Target: projectfs.SharedDirMount(d, "").Target})
+	}
+	return out
 }
 
 // handleProjectSharedDirByName handles DELETE on /api/v1/projects/{projectId}/shared-dirs/{name}.

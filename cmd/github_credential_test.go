@@ -111,7 +111,7 @@ func TestRemoteFetchCredential_NonGitHubReadsNothing(t *testing.T) {
 // Authorization header and the sparse-checkout credential.
 func stubGitHubFetch(t *testing.T, marker, body string) func() (tarballAuth, checkoutToken string) {
 	t.Helper()
-	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errors.New("ls-remote disabled in test")
 	}))
 	var tarballAuth, checkoutToken string

@@ -438,6 +438,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check pkg/hub Scan Coverage
+        run: |
+          set +e
+          ./hack/check-scan-coverage.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-scan-coverage.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=pkg/hub scan coverage::A pkg/hub source-scanning test enumerates files without a scan-covers claim that holds for every pkg/hub area. Route the scan through globGuardScanDirs or readGuardScanDirs and add a guardScanSubdirs claim, add a pkg/hub/... claim to a recursive walk, or exempt a call that reads no pkg/hub sources (hack/check-scan-coverage.sh). Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same

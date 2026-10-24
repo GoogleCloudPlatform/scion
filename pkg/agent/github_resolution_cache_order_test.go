@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -133,8 +132,8 @@ func TestGitHubSkillResolver_RawDownloadNotFoundIsNotRemembered(t *testing.T) {
 	mux.HandleFunc("/repos/acme/tools/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/tools/contents/skills/lagging", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/acme/tools/git/trees/"+testCommitSHA+":skills/lagging", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/lagging/SKILL.md", Type: "file", Size: 4},
 		})
 	})

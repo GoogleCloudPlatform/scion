@@ -46,6 +46,11 @@ type ManifestBuilder struct {
 	// ExcludePatterns are glob patterns to exclude.
 	// Supports simple globs and ** patterns.
 	ExcludePatterns []string
+
+	// OnSkip, when set, is called with the slash-separated relative path of
+	// each entry that is not collected because it is not a regular file
+	// (symlinks, sockets, FIFOs, devices). Excluded paths are not reported.
+	OnSkip func(relPath string)
 }
 
 // NewManifestBuilder creates a new manifest builder with default exclude patterns.
@@ -73,7 +78,7 @@ func (b *ManifestBuilder) Build() (*Manifest, error) {
 
 	return &Manifest{
 		Version:     "1.0",
-		ContentHash: ComputeContentHash(files),
+		ContentHash: ComputeContentHashV2(files),
 		Files:       files,
 	}, nil
 }
@@ -112,6 +117,9 @@ func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 		// Only regular files can be transferred. Opening a FIFO can block,
 		// and symlinks, sockets and devices are not transferable file content.
 		if !d.Type().IsRegular() {
+			if b.OnSkip != nil && !d.IsDir() {
+				b.OnSkip(relPath)
+			}
 			return nil
 		}
 
@@ -196,7 +204,7 @@ func CollectFiles(basePath string, excludePatterns []string) ([]FileInfo, error)
 func BuildManifest(files []FileInfo) *Manifest {
 	return &Manifest{
 		Version:     "1.0",
-		ContentHash: ComputeContentHash(files),
+		ContentHash: ComputeContentHashV2(files),
 		Files:       files,
 	}
 }

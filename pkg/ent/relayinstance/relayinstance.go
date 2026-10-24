@@ -24,6 +24,8 @@ const (
 	FieldLastSeen = "last_seen"
 	// FieldDraining holds the string denoting the draining field in the database.
 	FieldDraining = "draining"
+	// FieldFeatures holds the string denoting the features field in the database.
+	FieldFeatures = "features"
 	// EdgeSessions holds the string denoting the sessions edge name in mutations.
 	EdgeSessions = "sessions"
 	// ConduitSessionFieldID holds the string denoting the ID field of the ConduitSession.
@@ -48,6 +50,7 @@ var Columns = []string{
 	FieldStartedAt,
 	FieldLastSeen,
 	FieldDraining,
+	FieldFeatures,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -105,6 +108,11 @@ func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
 // ByDraining orders the results by the draining field.
 func ByDraining(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDraining, opts...).ToFunc()
+}
+
+// ByFeatures orders the results by the features field.
+func ByFeatures(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFeatures, opts...).ToFunc()
 }
 
 // BySessionsCount orders the results by sessions count.

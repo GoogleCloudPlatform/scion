@@ -388,7 +388,7 @@ func TestRelationshipProjectAccess_StagePlacement(t *testing.T) {
 		decision: Decision{Allowed: true},
 	}
 	var rejectedBy string
-	_, ok := f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, "agent.attach", nil, c, access,
+	_, ok := f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, ActionAttach, "agent.attach", nil, c, access,
 		func(kind, _ string) { rejectedBy = kind })
 	assert.False(t, ok)
 	assert.Equal(t, RelationshipRejectProjectAccess, rejectedBy)
@@ -397,7 +397,7 @@ func TestRelationshipProjectAccess_StagePlacement(t *testing.T) {
 	// A permission outside the relationship policy is rejected at stage 1,
 	// before the project-access stage reads anything.
 	before := f.counting.calls(userID)
-	_, ok = f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, "project.delete", nil, c, access,
+	_, ok = f.srv.authzService.runRelationshipStages(ctx, principal, "user", res, ActionDelete, "project.delete", nil, c, access,
 		func(kind, _ string) { rejectedBy = kind })
 	assert.False(t, ok)
 	assert.Equal(t, RelationshipRejectPolicy, rejectedBy)
