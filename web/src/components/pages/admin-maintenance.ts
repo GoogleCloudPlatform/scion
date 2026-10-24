@@ -29,6 +29,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { waitForHubRestart } from '../../client/hub-restart.js';
+import { withTimeout } from '../../client/with-timeout.js';
 import { stateManager } from '../../client/state.js';
 import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -230,16 +231,26 @@ interface TrackedUpdate {
   lastStatus: string;
 }
 
+/** How long hubErrorEnvelope waits for an error body. */
+const ERROR_BODY_TIMEOUT_MS = 5_000;
+
 /**
  * The hub's own error envelope ({error: {code, message}}) of a failed
  * response, or null when the body is something else, such as a reverse
- * proxy's 502 page while the hub is down.
+ * proxy's 502 page while the hub is down, or when it does not arrive
+ * within timeoutMs.
  */
 export async function hubErrorEnvelope(
-  res: Response
+  res: Response,
+  timeoutMs = ERROR_BODY_TIMEOUT_MS
 ): Promise<{ code: string; message: string } | null> {
   try {
-    const body = (await res.json()) as { error?: { code?: unknown; message?: unknown } };
+    // Bounded: a body that stalls after the headers counts as not the
+    // hub's envelope, so the caller does not hang on it.
+    const body = (await withTimeout(res.json() as Promise<unknown>, timeoutMs)) as
+      | { error?: { code?: unknown; message?: unknown } }
+      | null
+      | undefined;
     const err = body?.error;
     if (err && typeof err === 'object' && typeof err.code === 'string' && err.code) {
       const message = typeof err.message === 'string' && err.message ? err.message : err.code;
@@ -2484,7 +2495,10 @@ export class ScionPageAdminMaintenance extends LitElement {
       const res = await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
       const refusal = res.ok ? null : await hubErrorEnvelope(res);
       if (refusal) {
-        showToast(`Restart refused: ${refusal.message}`, 'warning');
+        // apiFetch already shows the access-denied toast for a 403.
+        if (res.status !== 403) {
+          showToast(`Restart refused: ${refusal.message}`, 'warning');
+        }
         this.restartLoading = false;
         return;
       }

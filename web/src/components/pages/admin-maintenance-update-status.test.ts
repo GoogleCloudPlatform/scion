@@ -1057,6 +1057,32 @@ describe('Restart Hub', () => {
     expect(showToast).toHaveBeenCalledWith('Server restarted successfully.', 'success');
   });
 
+  it('still waits on a 502 with a JSON body that is not the hub envelope', async () => {
+    vi.mocked(waitForHubRestart).mockResolvedValue({
+      ok: true,
+      observed: { version: 'v1', uptime: '2s', uptimeSeconds: 2 },
+    });
+    el = await mount({ restart: { status: 502, body: { message: 'Bad Gateway' } } });
+    await restartHub(el);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a 403 to the access-denied toast and does not wait', async () => {
+    el = await mount({
+      restart: {
+        status: 403,
+        body: { error: { code: 'forbidden', message: 'Access denied' } },
+      },
+    });
+    await restartHub(el);
+
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+    const toasts = vi.mocked(showToast).mock.calls.map((c) => String(c[0]));
+    expect(toasts.some((t) => t.startsWith('Restart refused'))).toBe(false);
+    expect((el as unknown as { restartLoading: boolean }).restartLoading).toBe(false);
+  });
+
   it('still waits on a reverse proxy 502 page', async () => {
     vi.mocked(waitForHubRestart).mockResolvedValue({
       ok: true,
