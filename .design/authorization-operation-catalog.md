@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 355
+**Operations:** 356
 
 ## Table of Contents
 
@@ -361,6 +361,7 @@
 - [agent.delegation.credential.revoke](#agentdelegationcredentialrevoke) — Revoke one delegated credential exchanged from an agent delegation grant
 - [agent.delegation.list](#agentdelegationlist) — List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
 - [agent.delegation.read](#agentdelegationread) — Read one agent delegation grant; a grant outside the caller's authority answers as missing
+- [agent.delegation.revoke_all](#agentdelegationrevoke_all) — Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
 
 ---
 
@@ -13514,6 +13515,53 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
 - `pkg/hub:TestAgentDelegationManagement_NoSecretFieldsInResponses`
+
+---
+
+## agent.delegation.revoke_all
+
+**Domain:** agent.delegation
+
+**Description:** Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/delegations/revoke-all` |
+| http_route | POST | `/api/v1/agents/{id}/delegations/revoke-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `agent.delegation.revoke_all`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Session only. On /users/me/delegations/revoke-all, the caller's own issued grants. On /agents/{id}/delegations/revoke-all, per grant: the issuer; the agent's current owner; holders of agent.delegation.revoke_all on the hub (hub admins), for any grant; holders of it on project P, for project(P)-bounded grants only. A dev session counts only as hub authority. Grants outside the caller's authority are skipped and reported, never revoked. Delegated credentials, agent tokens and user access tokens are refused
+
+### Audit
+
+- **Event Type:** `agent_delegation_grant_revoke`
+- **Context Fields:** actor_id, grant_id
+- **Before Fields:** grant_id, revoke_reason, revoked_credential_ids
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_not_admitted`, `audit_failed`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentDelegationRevokeAll_CallerGrants`
+- `pkg/hub:TestAgentDelegationRevokeAll_AgentGrantsSkipsOutsideAuthority`
 
 ---
 
