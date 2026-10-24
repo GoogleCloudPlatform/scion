@@ -14,7 +14,7 @@ These flags are available on all commands:
 - `--format <string>`: Output format (`json` or `plain`).
 - `--hub <url|name>`: Hub API endpoint URL, or the nickname of a Hub in the hub list (`scion hub list`). Overrides `SCION_HUB_ENDPOINT`. An unknown nickname is an error that lists the registered names. Under `scion server` and `scion runtime-broker` a nickname is resolved too, but nothing else comes from the hub list there (no current Hub and no current project). Inside agents nicknames are not resolved, so a URL is needed there. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
 - `--hub-profile <name>`: Use a target-hub profile (overrides `SCION_HUB_PROFILE`). See `scion hub profile` and [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
-- `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
+- `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal. Sending local environment values on `scion start` or `scion resume` without a terminal also needs `--send-env` (see [Environment values from the local environment](#environment-values-from-the-local-environment)).
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, so it also answers Yes to every confirmation; errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output for this command. Agents it starts are not affected; use `--agent-log-level` on `scion start` or `scion resume` to debug an agent.
 - `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
@@ -151,6 +151,7 @@ warning that names them.
     - `--no-wait`: Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
     - `--wait-timeout <duration>`: How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
     - `--wait-ready`: After the agent is running, also wait until its harness accepts input (its activity is no longer `initializing`, shown as "starting"). `--wait-timeout`, if set, bounds the whole wait; otherwise the readiness wait is limited to 2 minutes. Prints `Agent '<name>' is ready.` when it is; JSON output adds `"ready": true|false` to `details`. If the agent is not ready in time the command exits with status 3 and the agent is left running. Cannot be combined with `--no-wait`.
+    - `--send-env`: Allow sending values from your local environment that the Hub asks for to provision the agent (see [Environment values from the local environment](#environment-values-from-the-local-environment)). Required when no confirmation prompt can be shown.
 
 `start` waits for the agent to reach `running` when the Hub
 launches it asynchronously, after a workspace upload, or with `--attach`.
@@ -206,6 +207,18 @@ task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
 name. With `--format json`, `--attach` after a workspace upload attaches without
 printing the JSON result.
+
+#### Environment values from the local environment
+
+When the template, Hub and broker do not supply a variable the agent needs, the Hub asks the CLI
+for it, and the CLI looks for it in its local environment. In an interactive terminal, `scion start`
+lists the keys it found and asks `Send N environment variable(s) to use in provisioning this agent?`
+before sending them. On an interactive terminal, `--yes` is an explicit answer: it confirms the
+send without showing the prompt, and `--send-env` is not needed. When no prompt can be shown (stdin
+is not a terminal, `--non-interactive`, `cli.interactive_disabled`, or agent mode), the CLI sends local
+environment values only with `--send-env`. Without it, the command fails without sending anything,
+names the keys (never their values) and the flag, and removes the agent the Hub provisioned. To avoid
+sending local values at all, store them on the Hub with `scion hub secret set` or `scion hub env set`.
 
 #### Long tasks and task files
 
@@ -338,6 +351,7 @@ session.
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
     - `--no-wait`, `--wait-timeout <duration>`: Same as for [`scion start`](#scion-start-or-run).
+    - `--send-env`: Same as for [`scion start`](#scion-start-or-run).
     - `--agent-log-level <spec>`: Same as for [`scion start`](#scion-start-or-run). Resume reuses the existing agent, so the flag is not applied and `scion resume` prints a warning; the value saved when the agent was created stays in effect.
 
 ### `scion attach`
