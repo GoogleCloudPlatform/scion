@@ -281,9 +281,8 @@ func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 }
 
 // TestHubDelegationConfirm_DefaultRefusesWithoutTerminal: the real
-// confirmation refuses without --yes when stdin is not a terminal (as in CI
-// and in gate windows, which run with stdin from /dev/null) and accepts with
-// the shared flag. On a terminal the real prompt would wait for an answer,
+// confirmation refuses without --yes when stdin is not a terminal (as in CI,
+// which runs with stdin from /dev/null) and accepts with the shared flag. On a terminal the real prompt would wait for an answer,
 // so the test does not run there.
 func TestHubDelegationConfirm_DefaultRefusesWithoutTerminal(t *testing.T) {
 	if util.IsTerminal() {
