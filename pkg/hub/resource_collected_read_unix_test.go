@@ -56,7 +56,13 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 		})
 
 		t.Run(site.name+"/in-root entry", func(t *testing.T) {
-			dir, root, files := collectForRead(t, map[string]string{"home/.bashrc": content, "copy": content})
+			// The link target is written after collection, so no collected
+			// file shares the entry's hash and the site has to read the
+			// entry itself (uploadDirBlobs reads one file per hash).
+			dir, root, files := collectForRead(t, map[string]string{"home/.bashrc": content, "other": "other\n"})
+			if err := os.WriteFile(filepath.Join(dir, "copy"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			entry := filepath.Join(dir, "home", ".bashrc")
 			if err := os.Remove(entry); err != nil {
 				t.Fatal(err)
@@ -65,9 +71,14 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			stor := newCollectedReadStorage(t)
-			if err := site.upload(context.Background(), stor, root, files); err == nil {
+			err := site.upload(context.Background(), stor, root, files)
+			if err == nil {
 				t.Fatalf("%s: upload through an in-root link swapped in after collection succeeded", site.name)
 			}
+			if !strings.Contains(err.Error(), "no longer a regular file") {
+				t.Errorf("%s: error %q does not say the entry is no longer a regular file", site.name, err)
+			}
+			assertNotStored(t, stor, site, collectedEntry(t, files, "home/.bashrc"))
 		})
 
 		t.Run(site.name+"/parent", func(t *testing.T) {
