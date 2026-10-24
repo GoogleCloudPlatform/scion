@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,4 +101,45 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 			assertNotStored(t, stor, site, collectedEntry(t, files, "home/.bashrc"))
 		})
 	}
+
+	// uploadDirBlobs writes one blob per content hash and reads one file
+	// per hash. When the swapped entry shares its hash with another
+	// collected file, the entry is never opened: the upload succeeds and
+	// stores exactly the collected bytes. The link target here has other
+	// content, so opening it would fail the hash check.
+	t.Run("uploadDirBlobs/swapped entry sharing a collected hash is not opened", func(t *testing.T) {
+		site := collectedReadSites[0]
+		if site.name != "uploadDirBlobs" {
+			t.Fatalf("collectedReadSites[0] is %s, want uploadDirBlobs", site.name)
+		}
+		dir, root, files := collectForRead(t, map[string]string{"home/.bashrc": content, "copy": content})
+		outside := filepath.Join(t.TempDir(), "bashrc")
+		if err := os.WriteFile(outside, []byte("other content\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		entry := filepath.Join(dir, "home", ".bashrc")
+		if err := os.Remove(entry); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, entry); err != nil {
+			t.Fatal(err)
+		}
+		stor := newCollectedReadStorage(t)
+		if err := site.upload(context.Background(), stor, root, files); err != nil {
+			t.Fatalf("upload: %v", err)
+		}
+		fi := collectedEntry(t, files, "home/.bashrc")
+		rc, _, err := stor.Download(context.Background(), site.object(fi))
+		if err != nil {
+			t.Fatalf("download the blob of home/.bashrc: %v", err)
+		}
+		defer func() { _ = rc.Close() }()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != content {
+			t.Errorf("stored blob = %q, want the collected content %q", got, content)
+		}
+	})
 }
