@@ -36,10 +36,13 @@ import (
 
 // TestHubDelivery_Stage4ParityForOtherPrincipals pins relationship stage 4
 // (relationshipSourceStage) for every principal type other than
-// hubDeliveryIdentity. The expected outcomes are literals recorded before
-// the hub_delivery stage-4 arm existed, and the test passes unchanged after
-// it: stage 4 for these principals is the owner-activity check followed by
-// the owner's delegation-chain check, exactly as before.
+// hubDeliveryIdentity. The expected outcomes are the outcomes of the
+// owner-activity check followed by the owner's delegation-chain check
+// (relationshipSourceActive, relationshipSourceDelegationHolds), written as
+// literals derived by reading that code; they were not recorded by running
+// the test before the hub_delivery stage-4 arm existed. The test runs the
+// branch of relationshipSourceStage that every principal other than
+// hubDeliveryIdentity takes, which the hub_delivery arm leaves unchanged.
 func TestHubDelivery_Stage4ParityForOtherPrincipals(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
@@ -168,6 +171,33 @@ func withBoundedCeiling(ids ...string) func(e *store.DelegationEdge) {
 	}
 }
 
+// hdDevLocalAgent seeds the local development user (an active super-admin,
+// as the workstation server seeds it), stores agent id in alpha with
+// ancestry [DevUserID], and gives it the edge a dev-auth create writes: a
+// recorded principal edge from user:DevUserID with dev_local provenance.
+// mutate adjusts the edge before it is written. Dev auth stays as the
+// caller sets it.
+func hdDevLocalAgent(t *testing.T, f *goldenFixture, id string, mutate func(e *store.DelegationEdge)) {
+	t.Helper()
+	seedDevUser(context.Background(), f.store, DevUserConfig{})
+	u, err := f.store.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	require.Equal(t, store.UserStatusActive, u.Status)
+	hdAgent(t, f.store, id, f.projectAlpha.ID, []string{DevUserID})
+	hdEdge(t, f.store, store.DelegationPrincipalUser, DevUserID, id, f.projectAlpha.ID, func(e *store.DelegationEdge) {
+		e.SourceCredentialKind = store.SourceCredentialDevLocal
+		if mutate != nil {
+			mutate(e)
+		}
+	})
+}
+
+// withDevLocalSchedulerProvenance makes the edge a scheduler edge written
+// under a revision the local development user authorized.
+func withDevLocalSchedulerProvenance(e *store.DelegationEdge) {
+	e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, DevUserID, store.InitiatorCredentialKindDevLocal)
+}
+
 // hdIdentity builds the hub_delivery credential for agentID through the
 // production constructor.
 func hdIdentity(t *testing.T, a *AuthzService, agentID string) *hubDeliveryIdentity {
@@ -175,6 +205,22 @@ func hdIdentity(t *testing.T, a *AuthzService, agentID string) *hubDeliveryIdent
 	h, err := a.newHubDeliveryIdentity(context.Background(), agentID)
 	require.NoError(t, err)
 	return h
+}
+
+// hdSchedulerInconsistent builds C in alpha with ancestry [project owner]
+// whose only edge, from the project owner, is a scheduler edge consistent in
+// every field except SourceAuthorizationRevision = 0 (malformed state,
+// deny-only: every scheduler edge a writer records has a revision of 1 or
+// more).
+func hdSchedulerInconsistent(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
+	t.Helper()
+	c := tid("hd-adm-sched-inconsistent")
+	hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+	hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID, func(e *store.DelegationEdge) {
+		e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, f.projectOwnerID, store.InitiatorCredentialKindSession)
+		e.SourceAuthorizationRevision = 0
+	})
+	return f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}
 }
 
 type hdCeilingResult struct {
@@ -273,12 +319,53 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 		assert.True(t, hasDecisionStep(r.explain, "delegation_ceiling_delivery_root"))
 	})
 
+	// The workstation path: on a single machine every agent is created
+	// through dev auth, so its edge is a dev_local edge from
+	// user:DevUserID. With dev auth on and the seeded local development
+	// user, the walk and the provenance root admit it. Positive controls
+	// for the dev_local deny rows below.
+	devLocalAllowed := map[string]func(e *store.DelegationEdge){
+		"dev_local_principal/allowed":           nil,
+		"dev_local_scheduler_initiator/allowed": withDevLocalSchedulerProvenance,
+	}
+	for name, mutate := range devLocalAllowed {
+		t.Run(name, func(t *testing.T) {
+			f := newGoldenFixture(t)
+			f.authz.setDevLocalAuthorityEnabled(true)
+			c := tid("hd-adm-" + name)
+			hdDevLocalAgent(t, f, c, mutate)
+			for _, perm := range []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver"} {
+				r := hdDirect(t, f.authz, hdIdentity(t, f.authz, c), Resource{Type: permissionResource(t, perm), ID: tid("hd-adm-dev-res-" + perm)}, perm)
+				assert.True(t, r.allowed, "%s: %q", perm, r.reason)
+				assert.Equal(t, "delivery ceiling passed", r.reason)
+				assert.Equal(t, DenyCause(""), r.cause)
+				assert.Equal(t, 1, countDecisionSteps(r.explain, "delegation_ceiling_delivery_hop"), "explain: %+v", r.explain)
+				assert.True(t, hasDecisionStep(r.explain, "delegation_ceiling_delivery_root"))
+			}
+		})
+	}
+
+	// The premise of no_self_operation_exception: no deliver permission is
+	// a self operation, so the walk's selfTarget=false and a regression to
+	// true agree for every deliver permission. Pinning the premise makes a
+	// change to selfOperationSet that adds a deliver permission a test
+	// failure here.
+	t.Run("no_self_operation_exception/premise", func(t *testing.T) {
+		require.NotEmpty(t, hubDeliveryPermissionIDs)
+		for id := range hubDeliveryPermissionIDs {
+			assert.False(t, selfOperationSet[id], "%s must not be a self operation", id)
+		}
+	})
+
 	type denyRow struct {
 		name       string
 		setup      func(t *testing.T, f *goldenFixture) (a *AuthzService, h *hubDeliveryIdentity, res Resource)
 		wantReason string // exact, or a prefix when wantPrefix
-		wantPrefix bool
-		wantCause  DenyCause
+		// wantReasonFor, when set, gives the exact reason for rows whose
+		// reason names a fixture ID.
+		wantReasonFor func(f *goldenFixture) string
+		wantPrefix    bool
+		wantCause     DenyCause
 	}
 	// single builds C in alpha with ancestry [delegator] and one edge from
 	// delegator, adjusted by mutate. An empty delegatorID is the project
@@ -331,9 +418,21 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			wantReason: "delivery resource is in a different project", wantCause: DenyCauseCeilingProvenanceMissing,
 		},
 		{
-			name: "missing_edge",
+			// The golden fixture deletes the backfill marker: the
+			// pre-backfill state, where the ordinary walk has an allowance.
+			name: "missing_edge/backfill_absent",
 			setup: func(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
 				c := tid("hd-adm-missing-edge")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+				return f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}
+			},
+			wantReason: "no active delegation edge", wantCause: DenyCauseCeilingProvenanceMissing,
+		},
+		{
+			name: "missing_edge/backfill_present",
+			setup: func(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
+				markEdgeBackfillComplete(t, f.store)
+				c := tid("hd-adm-missing-edge-bf")
 				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
 				return f.authz, hdIdentity(t, f.authz, c), Resource{Type: "secret", ID: f.secretID}
 			},
@@ -457,7 +556,8 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				setUserStatus(t, f.store, f.memberAlphaID, store.UserStatusSuspended)
 				return a, h, res
 			},
-			wantReason: "is suspended", wantPrefix: false, wantCause: DenyCauseCeilingDelegatorLacksPermission,
+			wantReasonFor: func(f *goldenFixture) string { return "delegator " + f.memberAlphaID + " is suspended" },
+			wantCause:     DenyCauseCeilingDelegatorLacksPermission,
 		},
 		{
 			// No super-admin shortcut: a suspended super-admin delegator is
@@ -468,7 +568,8 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				setUserStatus(t, f.store, f.superAdminID, store.UserStatusSuspended)
 				return a, h, res
 			},
-			wantReason: "is suspended", wantCause: DenyCauseCeilingDelegatorLacksPermission,
+			wantReasonFor: func(f *goldenFixture) string { return "delegator " + f.superAdminID + " is suspended" },
+			wantCause:     DenyCauseCeilingDelegatorLacksPermission,
 		},
 		{
 			// Malformed state (deny-only): a delegator type outside
@@ -522,7 +623,10 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
 				return f.authz
 			}),
-			wantReason: "is not live", wantCause: DenyCauseCeilingOrphaned,
+			wantReasonFor: func(*goldenFixture) string {
+				return "delegator agent " + tid("hd-adm-inner-deleted-a") + " is not live"
+			},
+			wantCause: DenyCauseCeilingOrphaned,
 		},
 		{
 			name: "two_hop/outer_delegator_suspended",
@@ -530,14 +634,18 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusSuspended)
 				return f.authz
 			}),
-			wantReason: "is suspended", wantCause: DenyCauseCeilingDelegatorLacksPermission,
+			wantReasonFor: func(f *goldenFixture) string { return "delegator " + f.projectOwnerID + " is suspended" },
+			wantCause:     DenyCauseCeilingDelegatorLacksPermission,
 		},
 		{
 			name: "two_hop/delegator_agent_not_found",
 			setup: twoHop("agent-not-found", func(t *testing.T, f *goldenFixture, a, c string) *AuthzService {
 				return failingWith(f, func(m *materialFailingStore) { m.getAgentErr = store.ErrNotFound })
 			}),
-			wantReason: "is not live", wantCause: DenyCauseCeilingOrphaned,
+			wantReasonFor: func(*goldenFixture) string {
+				return "delegator agent " + tid("hd-adm-agent-not-found-a") + " is not live"
+			},
+			wantCause: DenyCauseCeilingOrphaned,
 		},
 		{
 			name: "lookup_error/edges",
@@ -606,6 +714,18 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			}),
 			wantReason: "delivery provenance root denied: ", wantPrefix: true, wantCause: DenyCauseForProvenanceError(ErrProvenanceMismatch),
 		},
+		{
+			// Malformed state (deny-only): C's only edge is a scheduler
+			// edge consistent in every field except
+			// SourceAuthorizationRevision = 0. The walk's per-hop checks
+			// pass (principal ceiling, version 1, live delegator, no
+			// local-development initiator); ResolveProvenanceRoot's
+			// scheduler-edge check denies. The cause is B.3's mapping of
+			// ErrProvenanceMismatch, which is ceiling_orphaned.
+			name:       "scheduler_edge_inconsistent",
+			setup:      hdSchedulerInconsistent,
+			wantReason: "delivery provenance root denied: ", wantPrefix: true, wantCause: DenyCauseForProvenanceError(ErrProvenanceMismatch),
+		},
 	}
 
 	for _, row := range rows {
@@ -615,10 +735,10 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			r := hdDirect(t, a, h, res, secretPerm)
 			assert.False(t, r.allowed, "reason %q", r.reason)
 			switch {
+			case row.wantReasonFor != nil:
+				assert.Equal(t, row.wantReasonFor(f), r.reason)
 			case row.wantPrefix:
 				assert.True(t, strings.HasPrefix(r.reason, row.wantReason), "reason %q", r.reason)
-			case strings.HasPrefix(row.wantReason, "is "):
-				assert.Contains(t, r.reason, row.wantReason)
 			default:
 				assert.Equal(t, row.wantReason, r.reason)
 			}
@@ -637,6 +757,8 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, f *goldenFixture) string // returns the target agent
+		// authz, when set, is the service both walks run on.
+		authz func(f *goldenFixture) *AuthzService
 		want  DenyCause
 	}{
 		{
@@ -677,14 +799,36 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 			},
 			want: DenyCauseCeilingOrphaned,
 		},
+		{
+			// The delegator agent's row is absent (GetAgent answers
+			// not-found for it only), as after a hard delete.
+			name: "agent_not_found",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				a, c := tid("hd-live-agent-not-found-a"), tid("hd-live-agent-not-found-c")
+				hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.superAdminID})
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.superAdminID, a})
+				hdEdge(t, f.store, store.DelegationPrincipalUser, f.superAdminID, a, f.projectAlpha.ID, nil)
+				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, nil)
+				return c
+			},
+			authz: func(f *goldenFixture) *AuthzService {
+				return NewAuthzService(&materialFailingStore{Store: f.store, getAgentNotFoundID: tid("hd-live-agent-not-found-a")}, slog.Default())
+			},
+			want: DenyCauseCeilingOrphaned,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGoldenFixture(t)
 			c := tc.setup(t, f)
 			res := Resource{Type: "secret", ID: f.secretID}
+			h := hdIdentity(t, f.authz, c)
+			authz := f.authz
+			if tc.authz != nil {
+				authz = tc.authz(f)
+			}
 
-			r := hdDirect(t, f.authz, hdIdentity(t, f.authz, c), res, "secret.deliver")
+			r := hdDirect(t, authz, h, res, "secret.deliver")
 			assert.False(t, r.allowed, r.reason)
 			assert.Equal(t, tc.want, r.cause, "hub_delivery: %q", r.reason)
 
@@ -695,7 +839,7 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 				Resource:  res, Action: ActionDeliver, Permission: "secret.deliver",
 			}
 			var ordinary DenyCause
-			allowed, reason, err := f.authz.checkDelegationCeiling(context.Background(), req, "secret.deliver", c, nil, &ordinary)
+			allowed, reason, err := authz.checkDelegationCeiling(context.Background(), req, "secret.deliver", c, nil, &ordinary)
 			require.NoError(t, err)
 			assert.False(t, allowed, reason)
 			assert.Equal(t, ordinary, r.cause, "the two walks must agree: ordinary %q, hub_delivery %q", reason, r.reason)
@@ -704,12 +848,35 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 }
 
 // TestHubDelivery_AuthorityCacheNotShared pins that the admission walk
-// never reads a delegator-authority result cached by the ordinary walk in
-// the same request: after an ordinary-proof admit through an active
+// never reads or writes the delegator-authority cache of the ordinary walk
+// in the same request.
+//
+// Ordinary first: after an ordinary-proof admit through an active
 // super-admin delegator fills the request cache, the delegator is
 // suspended, and a delivery walk on the same edge in the same request
 // context denies from the live store record.
+//
+// Delivery first: an admitted delivery walk leaves the authority cache
+// empty.
 func TestHubDelivery_AuthorityCacheNotShared(t *testing.T) {
+	t.Run("delivery_first", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		ctx := contextWithDelegationCeilingCache(context.Background())
+		c := tid("hd-cache-agent-delivery-first")
+		hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+		hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID, nil)
+		h := hdIdentity(t, f.authz, c)
+		req := AuthzRequest{
+			Principal: PrincipalContext{Kind: PrincipalKindAgent, ID: c, Identity: h},
+			Resource:  Resource{Type: "secret", ID: f.secretID}, Action: ActionDeliver, Permission: "secret.deliver",
+		}
+		require.Empty(t, getDelegationCeilingCache(ctx).authority)
+		allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, "secret.deliver", c, nil, nil)
+		require.NoError(t, err)
+		require.True(t, allowed, "the delivery walk admits through the active project owner: %q", reason)
+		assert.Empty(t, getDelegationCeilingCache(ctx).authority, "the delivery walk wrote no delegator authority")
+	})
+
 	f := newGoldenFixture(t)
 	ctx := contextWithDelegationCeilingCache(context.Background())
 	c := tid("hd-cache-agent")
@@ -739,7 +906,7 @@ func TestHubDelivery_AuthorityCacheNotShared(t *testing.T) {
 	allowed, reason, err = f.authz.checkDelegationCeiling(ctx, hdReq, "secret.deliver", c, nil, &cause)
 	require.NoError(t, err)
 	assert.False(t, allowed)
-	assert.Contains(t, reason, "is suspended")
+	assert.Equal(t, "delegator "+f.superAdminID+" is suspended", reason)
 	assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, cause)
 }
 
@@ -823,10 +990,11 @@ func TestHubDelivery_Stage4SourceHoldsDirect(t *testing.T) {
 			src: src(f.projectOwnerID), wantDetail: "delivery source appears more than once in the target's ancestry",
 		},
 		{
-			// The RQ-1b agent-owned source arm is not enabled (P-2,
-			// ptone/scion#2228): an owner at ancestry position 1 or later
-			// is refused before any store read, so even a store that
-			// fails every read gives this detail.
+			// The agent-owned source arm is not enabled; it waits on the
+			// open decision on agent-shared user-scope rows
+			// (ptone/scion#2228). An owner at ancestry position 1 or
+			// later is refused before any store read, so even a store
+			// that fails every read gives this detail.
 			name: "agent_source_refused", authz: allFailing,
 			h:          literal(tid("hd-s4-agent-src-child"), []string{f.projectOwnerID, tid("hd-s4-agent-src-parent")}),
 			src:        src(tid("hd-s4-agent-src-parent")),
@@ -836,8 +1004,8 @@ func TestHubDelivery_Stage4SourceHoldsDirect(t *testing.T) {
 			name: "user_source/not_live", h: literal(tid("hd-s4-ghost-child"), []string{tid("hd-s4-ghost-user")}),
 			src: src(tid("hd-s4-ghost-user")), wantDetail: "delivery source user " + tid("hd-s4-ghost-user") + " is not live",
 		},
-		{name: "lookup_error/agent_probe", authz: allFailing, h: h, src: src(f.projectOwnerID),
-			wantDetail: "delivery source check failed (fail-closed): injected agent failure"},
+		{name: "lookup_error/agent_probe", authz: NewAuthzService(&materialFailingStore{Store: f.store, getAgentErr: errors.New("injected agent failure")}, slog.Default()),
+			h: h, src: src(f.projectOwnerID), wantDetail: "delivery source check failed (fail-closed): injected agent failure"},
 		{name: "lookup_error/user", authz: NewAuthzService(&materialFailingStore{Store: f.store, getUserErr: errors.New("injected user failure")}, slog.Default()),
 			h: h, src: src(f.projectOwnerID), wantDetail: "delivery source check failed (fail-closed): injected user failure"},
 	}
@@ -906,16 +1074,57 @@ func assertNoDeliveryCeilingStep(t *testing.T, d Decision) {
 	}
 }
 
+// hdWithStore points a at store m for the rest of the test. Decide-level
+// fault rows use it instead of a fresh AuthzService, so the server's own
+// configuration (the progeny adapters among it) stays in place.
+func hdWithStore(t *testing.T, a *AuthzService, m store.Store) *AuthzService {
+	t.Helper()
+	orig := a.store
+	a.store = m
+	t.Cleanup(func() { a.store = orig })
+	return a
+}
+
+// hdDevSecret stores a user-scope secret owned by the local development
+// user, opted in to progeny delivery, and returns it as a resource.
+func hdDevSecret(t *testing.T, f *goldenFixture) Resource {
+	t.Helper()
+	id := tid("hd-dev-user-secret")
+	require.NoError(t, f.store.CreateSecret(context.Background(), &store.Secret{
+		ID: id, Key: "hd_dev_user_secret", Scope: "user", ScopeID: DevUserID, AllowProgeny: true, CreatedBy: DevUserID,
+	}))
+	return Resource{Type: "secret", ID: id}
+}
+
 // TestHubDelivery_DecideRows runs hub_delivery requests through Decide on
-// the golden fixture's opted-in user secret. Rows where an earlier
-// relationship stage catches the fault assert that stage (Step 9 replaces
-// the reason, and step 10 never runs); the rest assert the step-10 deny.
+// the golden fixture's opted-in user secret (or, for the local development
+// rows, a secret of the local development user).
+//
+//   - Allowed rows assert the admit and the step-10 trace.
+//   - Rows the step-10 walk denies assert its reason and cause.
+//   - The other rows are the Decide companions of the Direct rows in
+//     TestHubDelivery_Step10Admission whose fault an earlier relationship
+//     stage catches. They assert that stage and its detail (Step 9 replaces
+//     the reason, and step 10 never runs).
 func TestHubDelivery_DecideRows(t *testing.T) {
+	const (
+		noSource     = "execution agent has no authoritative source user"
+		notActive    = "execution source user is not active"
+		lookupFailed = "execution agent lookup failed"
+	)
 	type row struct {
 		name  string
 		setup func(t *testing.T, f *goldenFixture) string // returns the target agent
-		// Exactly one of wantStage (a relationship reject kind) or
-		// wantCause (a step-10 deny) is set.
+		// afterMint, when set, runs after the credential is built.
+		afterMint func(t *testing.T, f *goldenFixture, c string)
+		// faults, when set, gives the fault store Decide runs on; the
+		// credential is built before it applies.
+		faults func(f *goldenFixture, c string) *materialFailingStore
+		// resource, when set, replaces the golden opted-in secret.
+		resource func(t *testing.T, f *goldenFixture) Resource
+		// Exactly one of wantHops (an admit), wantStage (a relationship
+		// reject kind) or wantCause (a step-10 deny) is set.
+		wantHops   int
 		wantStage  string
 		wantDetail string
 		wantCause  DenyCause
@@ -929,7 +1138,72 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 			return c
 		}
 	}
+	// twoHopA names the inner delegator agent of twoHop(name).
+	twoHopA := func(name string) string { return tid("hd-decide-2hop-" + name + "-a") }
+	// twoHop builds U -> A (principal) -> C, U = f.projectOwnerID; C's edge
+	// is bounded with secret.deliver unless inner is set. after runs last.
+	twoHop := func(name string, inner func(e *store.DelegationEdge), after func(t *testing.T, f *goldenFixture, a string)) func(t *testing.T, f *goldenFixture) string {
+		return func(t *testing.T, f *goldenFixture) string {
+			a, c := twoHopA(name), tid("hd-decide-2hop-"+name+"-c")
+			hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.projectOwnerID})
+			hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID, a})
+			hdEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, a, f.projectAlpha.ID, nil)
+			if inner == nil {
+				inner = withBoundedCeiling("secret.deliver")
+			}
+			hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, inner)
+			if after != nil {
+				after(t, f, a)
+			}
+			return c
+		}
+	}
+	devLocal := func(name string, enabled bool, mutate func(e *store.DelegationEdge)) func(t *testing.T, f *goldenFixture) string {
+		return func(t *testing.T, f *goldenFixture) string {
+			f.authz.setDevLocalAuthorityEnabled(enabled)
+			c := tid("hd-decide-" + name)
+			hdDevLocalAgent(t, f, c, mutate)
+			return c
+		}
+	}
+	softDelete := func(t *testing.T, f *goldenFixture, id string) {
+		t.Helper()
+		ag, err := f.store.GetAgent(context.Background(), id)
+		require.NoError(t, err)
+		ag.DeletedAt = time.Now()
+		require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
+	}
+	overrideEdges := func(edges func(f *goldenFixture, c string) []*store.DelegationEdge) func(f *goldenFixture, c string) *materialFailingStore {
+		return func(f *goldenFixture, c string) *materialFailingStore {
+			return &materialFailingStore{Store: f.store, delegationEdgesOverride: edges(f, c)}
+		}
+	}
+	recordedEdge := func(id, delegatorType, delegatorID, c, projectID string) *store.DelegationEdge {
+		return &store.DelegationEdge{
+			ID: id, DelegatorType: delegatorType, DelegatorID: delegatorID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: c,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, Active: true,
+			AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: 1, SourcePrincipalKind: delegatorType, SourcePrincipalID: delegatorID, SourceCredentialKind: store.SourceCredentialSession},
+			EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}
+	}
+
 	rows := []row{
+		// Allowed.
+		{name: "allowed/single_hop_principal", setup: withEdge("allowed", nil), wantHops: 1},
+		{name: "allowed/two_hop", setup: twoHop("allowed", nil, nil), wantHops: 2},
+		{
+			// The workstation path, with dev auth on (positive control for
+			// dev_local_dev_auth_off).
+			name: "allowed/dev_local_principal", setup: devLocal("dev-allowed", true, nil),
+			resource: hdDevSecret, wantHops: 1,
+		},
+		{
+			name: "allowed/dev_local_scheduler_initiator", setup: devLocal("dev-sched-allowed", true, withDevLocalSchedulerProvenance),
+			resource: hdDevSecret, wantHops: 1,
+		},
+
+		// Step 10 denies.
 		{
 			name:       "bounded_without_permission",
 			setup:      withEdge("bounded-no-perm", withBoundedCeiling("agent.read")),
@@ -937,14 +1211,106 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 			wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling",
 		},
 		{
-			name: "missing_edge",
+			// Stage 2b's resolver does not apply the dev auth check, so the
+			// walk is the first to deny.
+			name: "dev_local_dev_auth_off", setup: devLocal("dev-off", false, nil), resource: hdDevSecret,
+			wantCause: DenyCauseCeilingSourceNotAllowed, wantReason: "delegation ceiling: " + reasonDevLocalDisabled,
+		},
+		{
+			// A pre-provenance edge: stage 2b's resolver accepts the legacy
+			// hop; the walk requires recorded provenance.
+			name: "unknown_provenance_version",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				c := tid("hd-decide-unrecorded-v0")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+				createDCEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, store.DelegationPrincipalAgent, c,
+					store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
+				return c
+			},
+			wantCause: DenyCauseCeilingUnrecorded, wantReason: "delegation ceiling: secret.deliver requires recorded provenance",
+		},
+		{
+			// Malformed state (deny-only).
+			name: "unrecorded_ceiling_version_1",
+			setup: withEdge("unrecorded-v1", func(e *store.DelegationEdge) {
+				e.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}
+			}),
+			wantCause: DenyCauseCeilingUnrecorded, wantReason: "delegation ceiling: secret.deliver requires recorded provenance",
+		},
+		{
+			name:      "two_hop/inner_bounded_without_permission",
+			setup:     twoHop("inner-no-perm", withBoundedCeiling("agent.read"), nil),
+			wantCause: DenyCauseCeilingEffectExceeded, wantReason: "delegation ceiling: secret.deliver is outside the frozen effect ceiling",
+		},
+
+		// Stage 2b (execution project) denies first.
+		{
+			name: "missing_edge/backfill_absent",
 			setup: func(t *testing.T, f *goldenFixture) string {
 				c := tid("hd-decide-missing")
 				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
 				return c
 			},
-			wantStage:  RelationshipRejectExecutionProject,
-			wantDetail: "execution agent has no authoritative source user",
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name: "missing_edge/backfill_present",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				markEdgeBackfillComplete(t, f.store)
+				c := tid("hd-decide-missing-bf")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+				return c
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only).
+			name:      "inactive_edge_only",
+			setup:     withEdge("inactive-edge", func(e *store.DelegationEdge) { e.Active = false }),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only): two active edges for one
+			// delegate and scope.
+			name:  "two_active_edges",
+			setup: withEdge("two-edges", nil),
+			faults: overrideEdges(func(f *goldenFixture, c string) []*store.DelegationEdge {
+				return []*store.DelegationEdge{
+					recordedEdge(tid("hd-decide-dup-1"), store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID),
+					recordedEdge(tid("hd-decide-dup-2"), store.DelegationPrincipalUser, f.projectOwnerID, c, f.projectAlpha.ID),
+				}
+			}),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name: "migration_sentinel",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				c := tid("hd-decide-sentinel")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+				createDCEdge(t, f.store, store.DelegationPrincipalUser, migrationDelegatorID, store.DelegationPrincipalAgent, c,
+					store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
+				return c
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only).
+			name: "dev_local_wrong_delegator",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				f.authz.setDevLocalAuthorityEnabled(true)
+				return withEdge("dev-wrong", func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialDevLocal })(t, f)
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name: "delegator_user_missing",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				c, ghost := tid("hd-decide-user-missing"), tid("hd-decide-ghost-user")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{ghost})
+				hdEdge(t, f.store, store.DelegationPrincipalUser, ghost, c, f.projectAlpha.ID, nil)
+				return c
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
 		},
 		{
 			name: "delegator_user_suspended",
@@ -953,8 +1319,76 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 				setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusSuspended)
 				return c
 			},
-			wantStage:  RelationshipRejectExecutionProject,
-			wantDetail: "execution source user is not active",
+			wantStage: RelationshipRejectExecutionProject, wantDetail: notActive,
+		},
+		{
+			name: "delegator_super_admin_suspended",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				c := tid("hd-decide-superadmin-suspended")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.superAdminID})
+				hdEdge(t, f.store, store.DelegationPrincipalUser, f.superAdminID, c, f.projectAlpha.ID, nil)
+				setUserStatus(t, f.store, f.superAdminID, store.UserStatusSuspended)
+				return c
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: notActive,
+		},
+		{
+			name: "cycle",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				c := tid("hd-decide-cycle")
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.projectOwnerID})
+				hdEdge(t, f.store, store.DelegationPrincipalAgent, c, c, f.projectAlpha.ID, nil)
+				return c
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only).
+			name:      "two_hop/inner_delegator_deleted",
+			setup:     twoHop("inner-deleted", nil, func(t *testing.T, f *goldenFixture, a string) { softDelete(t, f, a) }),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name: "two_hop/outer_delegator_suspended",
+			setup: twoHop("outer-suspended", nil, func(t *testing.T, f *goldenFixture, _ string) {
+				setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusSuspended)
+			}),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: notActive,
+		},
+		{
+			name:  "two_hop/delegator_agent_not_found",
+			setup: twoHop("agent-not-found", nil, nil),
+			faults: func(f *goldenFixture, _ string) *materialFailingStore {
+				return &materialFailingStore{Store: f.store, getAgentNotFoundID: twoHopA("agent-not-found")}
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name:  "lookup_error/edges",
+			setup: withEdge("edge-err", nil),
+			faults: func(f *goldenFixture, _ string) *materialFailingStore {
+				return &materialFailingStore{Store: f.store, getDelegationEdgesForDelegateErr: errors.New("injected edge failure")}
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			name:  "lookup_error/delegator_agent",
+			setup: twoHop("agent-err", nil, nil),
+			faults: func(f *goldenFixture, _ string) *materialFailingStore {
+				return &materialFailingStore{Store: f.store, getAgentErr: errors.New("injected agent failure"), getAgentErrID: twoHopA("agent-err")}
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// The Direct row's fault is the target's own load in
+			// ResolveProvenanceRoot; through Decide, stage 2b loads the
+			// target first.
+			name:  "lookup_error/provenance_root",
+			setup: withEdge("root-err", nil),
+			faults: func(f *goldenFixture, c string) *materialFailingStore {
+				return &materialFailingStore{Store: f.store, getAgentErr: errors.New("injected agent failure"), getAgentErrID: c}
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: lookupFailed,
 		},
 		{
 			name: "root_not_admitted",
@@ -970,6 +1404,40 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 			wantStage:  RelationshipRejectExecutionProject,
 			wantDetail: "execution source user lacks admission to the agent's project",
 		},
+		{
+			// Malformed state (deny-only): the target is soft-deleted after
+			// the credential was built.
+			name:      "target_deleted_after_mint",
+			setup:     withEdge("target-deleted", nil),
+			afterMint: softDelete,
+			wantStage: RelationshipRejectExecutionProject, wantDetail: "execution agent is deleted",
+		},
+		{
+			// Malformed state (deny-only).
+			name:      "delegator_type_mismatch",
+			setup:     withEdge("type-mismatch", func(e *store.DelegationEdge) { e.SourcePrincipalKind = store.DelegationPrincipalAgent }),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only).
+			name: "scheduler_edge_inconsistent",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				_, h, _ := hdSchedulerInconsistent(t, f)
+				return h.ID()
+			},
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
+		{
+			// Malformed state (deny-only): a delegator type outside
+			// {user, agent}.
+			name:  "unsupported_delegator_type",
+			setup: withEdge("unsupported-type", nil),
+			faults: overrideEdges(func(f *goldenFixture, c string) []*store.DelegationEdge {
+				e := recordedEdge(tid("hd-decide-group-edge"), "group", tid("hd-decide-group"), c, f.projectAlpha.ID)
+				return []*store.DelegationEdge{e}
+			}),
+			wantStage: RelationshipRejectExecutionProject, wantDetail: noSource,
+		},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -977,24 +1445,65 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 			withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
 			c := r.setup(t, f)
 			h := hdIdentity(t, f.authz, c)
-			d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
-			assert.False(t, d.Allowed, "reason %q", d.Reason)
-			if r.wantStage != "" {
+			if r.afterMint != nil {
+				r.afterMint(t, f, c)
+			}
+			authz := f.authz
+			if r.faults != nil {
+				authz = hdWithStore(t, f.authz, r.faults(f, c))
+			}
+			res := Resource{Type: "secret", ID: f.secretID}
+			if r.resource != nil {
+				res = r.resource(t, f)
+			}
+			d := decidePerm(authz, h, res, ActionDeliver, "secret.deliver", true)
+			switch {
+			case r.wantHops > 0:
+				require.True(t, d.Allowed, "reason %q", d.Reason)
+				assert.Equal(t, ScopeTypeRelationship, d.Scope)
+				assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted)
+				assert.Equal(t, r.wantHops, countDecisionSteps(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "trace: %+v", d.ExplainTrace)
+				assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"), "trace: %+v", d.ExplainTrace)
+			case r.wantStage != "":
+				assert.False(t, d.Allowed, "reason %q", d.Reason)
 				assert.Equal(t, "relationship grant restricted by "+r.wantStage, d.Reason)
 				assert.Equal(t, DenyCause(""), d.DenyCause)
-				res := relationshipResult(t, d, RelationshipRuleProgeny)
-				assert.Equal(t, r.wantStage, res.RejectedBy)
-				assert.Equal(t, r.wantDetail, res.Detail)
+				rr := relationshipResult(t, d, RelationshipRuleProgeny)
+				assert.Equal(t, r.wantStage, rr.RejectedBy)
+				assert.Equal(t, r.wantDetail, rr.Detail)
 				assertNoDeliveryCeilingStep(t, d)
-				return
+			default:
+				assert.False(t, d.Allowed, "reason %q", d.Reason)
+				assert.Equal(t, r.wantReason, d.Reason)
+				assert.Equal(t, r.wantCause, d.DenyCause)
+				assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+				assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "the item grant passed; step 10 denied")
+				assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_denied"), "trace: %+v", d.ExplainTrace)
 			}
-			assert.Equal(t, r.wantReason, d.Reason)
-			assert.Equal(t, r.wantCause, d.DenyCause)
-			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
-			assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "the item grant passed; step 10 denied")
-			assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_denied"), "trace: %+v", d.ExplainTrace)
 		})
 	}
+
+	// A lookup error at the walk's delegator read. GetUser fails only when
+	// called from the walk's liveness check, so every earlier user read
+	// (stage 2b's resolver and admission, stage 4's source check) passes:
+	// a single fault. The guard asserts the injection fired exactly once
+	// and that earlier stages did read users.
+	t.Run("lookup_error/delegator_user", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		c := withEdge("user-err", nil)(t, f)
+		h := hdIdentity(t, f.authz, c)
+		m := &materialFailingStore{Store: f.store, getUserErr: errors.New("injected user failure"), getUserErrCaller: "hubDeliveryDelegatorLiveness"}
+		authz := hdWithStore(t, f.authz, m)
+		d := decidePerm(authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, "delivery ceiling check failed (fail-closed): injected user failure", d.Reason)
+		assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+		assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "every relationship stage passed")
+		assert.Equal(t, 1, m.getUserErrCallerFired, "exactly one injected failure")
+		assert.Greater(t, m.getUserCalls, m.getUserErrCallerFired, "earlier stages read users from the store")
+	})
 }
 
 // TestHubDelivery_Stage4AgentSource runs the stage-4 source rules through
@@ -1005,8 +1514,8 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 // The item rows are stored at the store layer. The user-owned row has the
 // shape the user secret handler writes. The agent-authored row (CreatedBy
 // = A's bare ID, user scope, opted in) is a shape no production handler
-// writes; it is the RQ-1b contract path, which stays refused until the P-2
-// ruling (ptone/scion#2228).
+// writes; it is the agent-owned source path, which stays refused until the
+// open decision on agent-shared user-scope rows is made (ptone/scion#2228).
 func TestHubDelivery_Stage4AgentSource(t *testing.T) {
 	f := newChainFixture(t, "hd-s4-chain")
 	ctx := context.Background()
@@ -1036,6 +1545,7 @@ func TestHubDelivery_Stage4AgentSource(t *testing.T) {
 	}
 
 	t.Run("positive/owner_differs_from_root", func(t *testing.T) {
+		require.Equal(t, a.ID, c.OwnerID, "C's owner is its creator agent A, not the root user")
 		d := decide(userRow)
 		require.True(t, d.Allowed, "reason %q", d.Reason)
 		assert.Equal(t, ScopeTypeRelationship, d.Scope)
@@ -1068,4 +1578,194 @@ func TestHubDelivery_Stage4AgentSource(t *testing.T) {
 			assertNoDeliveryCeilingStep(t, d)
 		})
 	}
+}
+
+// TestHubDelivery_AgentCreatedChain runs hub_delivery requests through
+// Decide on delegation chains in which agents create agents. Agents and
+// edges are written by the production create paths, except where a row
+// says legacy-state seeding: an agent row and edge in the shape written
+// before provenance was recorded. The item is the creator's user-scope
+// secret, opted in to progeny delivery, so stage 4 takes the user-source
+// branch (position 0).
+func TestHubDelivery_AgentCreatedChain(t *testing.T) {
+	// userSecret stores the creator's opted-in user secret.
+	userSecret := func(t *testing.T, f *chainFixture, name string) Resource {
+		t.Helper()
+		id := tid(name + "-secret")
+		require.NoError(t, f.store.CreateSecret(context.Background(), &store.Secret{
+			ID: id, Key: strings.ReplaceAll(name, "-", "_") + "_secret", Scope: "user", ScopeID: f.creator.ID,
+			AllowProgeny: true, CreatedBy: f.creator.ID,
+		}))
+		return Resource{Type: "secret", ID: id}
+	}
+	const effectExceeded = "delegation ceiling: secret.deliver is outside the frozen effect ceiling"
+	// assertDeniedAtFirstHop asserts a step-10 effect-ceiling deny at the
+	// target's own hop, after every relationship stage passed.
+	assertDeniedAtFirstHop := func(t *testing.T, d Decision) {
+		t.Helper()
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, effectExceeded, d.Reason)
+		assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause)
+		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+		assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "stage 2b and stage 4 passed; step 10 denied")
+		assert.Equal(t, 1, countDecisionSteps(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "denied at the target's hop: %+v", d.ExplainTrace)
+		assert.False(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"))
+	}
+
+	// U's session creates A; A's token creates B; B's token creates C.
+	// Every agent-created edge carries the deliver permissions.
+	t.Run("multi_hop", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-multi")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		a, _ := f.sessionParent(t, "hd-acc-multi-a")
+		b, bEdge := f.childOf(t, a, "hd-acc-multi-b")
+		c, cEdge := f.childOf(t, b, "hd-acc-multi-c")
+		require.Equal(t, []string{f.creator.ID, a.ID, b.ID}, c.Ancestry)
+		require.Contains(t, deliverOf(bEdge.PermissionIDs), "secret.deliver")
+		require.Contains(t, deliverOf(cEdge.PermissionIDs), "secret.deliver")
+
+		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-multi"), ActionDeliver, "secret.deliver", true)
+		require.True(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, ScopeTypeRelationship, d.Scope)
+		assert.Equal(t, 3, countDecisionSteps(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "one hop step per edge: %+v", d.ExplainTrace)
+		assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"))
+	})
+
+	// U's UAT creates A: A's edge is bounded by the UAT's selectors, none
+	// of which covers a deliver permission. A's token then creates C, whose
+	// edge carries A's coverage and no deliver permission. Stage 2b's
+	// resolver is structural and passes; step 10 denies at C's hop.
+	t.Run("uat_parent_empty_subset", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-uat")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		// A's token carries agent:create through the dev-auth mint
+		// override (a role below full mints as full, filtered by the
+		// chain ceiling), which the workstation server applies; set it
+		// here so the row does not depend on the test server's default.
+		authz.mintDevAuthOverride = true
+		f.setProjectAnnotation(t, projectSettingDefaultAgentRole, string(AgentRoleFull))
+		rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "hd-acc-uat-a"})
+		a, aEdge := f.createdAgent(t, rec, "hd-acc-uat-a")
+		require.Equal(t, store.EffectCeilingBounded, aEdge.Kind)
+		require.Contains(t, aEdge.PermissionIDs, "agent.create", "the UAT holds agent:create")
+		require.Empty(t, deliverOf(aEdge.PermissionIDs), "no UAT selector covers a deliver permission")
+
+		c, cEdge := f.childOf(t, a, "hd-acc-uat-c")
+		require.Equal(t, []string{f.creator.ID, a.ID}, c.Ancestry)
+		require.Equal(t, store.EffectCeilingBounded, cEdge.Kind)
+		require.Empty(t, deliverOf(cEdge.PermissionIDs), "A's chain allows no deliver permission, so C's edge carries none")
+
+		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-uat"), ActionDeliver, "secret.deliver", true)
+		assertDeniedAtFirstHop(t, d)
+	})
+
+	// Legacy-state seeding: A has the pre-provenance shape (ancestry [U]
+	// and a zero-value edge user:U -> A). A's token creates C. Stage 2b's
+	// resolver accepts the legacy hop and stage 4 holds for the user
+	// source; step 10 still denies, at C's hop, whose edge carries no
+	// deliver permission. This is where the two walks differ: the
+	// structural resolver admits an unrecorded hop, the admission walk
+	// never does.
+	t.Run("unrecorded_parent", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-unrec")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		a := createFixtureAgent(t, f.bypassAgentsFixture, "hd-acc-unrec-a", []string{f.creator.ID}, AgentRoleFull)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.creator.ID, a.ID, f.proj.ID)
+
+		c, cEdge := f.childOf(t, a, "hd-acc-unrec-c")
+		require.Equal(t, []string{f.creator.ID, a.ID}, c.Ancestry)
+		require.Equal(t, store.EffectCeilingBounded, cEdge.Kind)
+		require.Empty(t, deliverOf(cEdge.PermissionIDs), "an unrecorded parent hop gives C no deliver permission")
+
+		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-unrec"), ActionDeliver, "secret.deliver", true)
+		assertDeniedAtFirstHop(t, d)
+	})
+
+	// Legacy-state seeding: A has the pre-provenance shape with no edge.
+	// Before the edge backfill completes, A's create of C is refused at
+	// C's dispatch mint (ceiling_orphaned) and leaves no agent row, as
+	// TestAgentCreateDeliverIDs_MissingParentEdge pins. A's own delivery
+	// credential is denied: directly by the walk (no edge), and through
+	// Decide by stage 2b (no authoritative source user).
+	t.Run("missing_parent_edge", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-missing")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		a := createFixtureAgent(t, f.bypassAgentsFixture, "hd-acc-missing-a", []string{f.creator.ID}, AgentRoleFull)
+		require.Empty(t, activeEdgesFor(t, f.store, a.ID))
+
+		rec := f.createAsParent(t, f.agentToken(t, a.ID), CreateAgentRequest{Name: "hd-acc-missing-c"})
+		assert.Equal(t, agentTokenDenialMessage(DenyCauseCeilingOrphaned, false), assertCeilingDenial(t, rec))
+		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "hd-acc-missing-c")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row for C")
+
+		res := userSecret(t, f, "hd-acc-missing")
+		h := hdIdentity(t, authz, a.ID)
+		r := hdDirect(t, authz, h, res, "secret.deliver")
+		assert.False(t, r.allowed)
+		assert.Equal(t, "no active delegation edge", r.reason)
+		assert.Equal(t, DenyCauseCeilingProvenanceMissing, r.cause)
+
+		d := decidePerm(authz, h, res, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, "relationship grant restricted by "+RelationshipRejectExecutionProject, d.Reason)
+		rr := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectExecutionProject, rr.RejectedBy)
+		assert.Equal(t, "execution agent has no authoritative source user", rr.Detail)
+		assertNoDeliveryCeilingStep(t, d)
+	})
+
+	// A authors a dispatch_agent schedule; the fire creates C. A scheduled
+	// child's ancestry stays empty, so no progeny item can match it: the
+	// request is denied before step 10. The row pins that existing
+	// property; the deliver permissions on the fire's edge are pinned by
+	// the scheduled-create tests.
+	t.Run("scheduled_agent", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-sched")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		ctx := context.Background()
+		a, _ := f.sessionParent(t, "hd-acc-sched-a")
+		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: tid("hd-acc-sched-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
+			Payload: `{"agentName":"hd-acc-sched-c","task":"t"}`, CreatedBy: a.ID,
+		}, a.ID)))
+		c, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "hd-acc-sched-c")
+		require.NoError(t, err)
+		require.Empty(t, c.Ancestry, "a scheduled child records no ancestry")
+
+		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-sched"), ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		require.NotNil(t, d.Provenance)
+		for _, rr := range d.Provenance.Relationships {
+			assert.False(t, rr.Accepted, "no relationship candidate holds: %+v", rr)
+		}
+		assertNoDeliveryCeilingStep(t, d)
+	})
+
+	// On the two-hop fixture of the allowed control: a non-deliver
+	// permission under hub_delivery is denied at Step 0b, and C's own
+	// agent token asking for secret.deliver is denied at the Step 0
+	// delivery gate.
+	t.Run("non_deliver_control", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-control")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		a, _ := f.sessionParent(t, "hd-acc-control-a")
+		c, _ := f.childOf(t, a, "hd-acc-control-c")
+		res := userSecret(t, f, "hd-acc-control")
+		h := hdIdentity(t, authz, c.ID)
+
+		d := decidePerm(authz, h, res, ActionDeliver, "secret.deliver", true)
+		require.True(t, d.Allowed, "positive control: reason %q", d.Reason)
+
+		assertStep0bDenied(t, decidePerm(authz, h, res, ActionRead, "secret.read", true),
+			"delivery credential is limited to deliver permissions", "secret.read")
+
+		jwt := f.agentIdentityFor(t, f.agentToken(t, c.ID))
+		assertDeliveryGateDenied(t, decidePerm(authz, jwt, res, ActionDeliver, "secret.deliver", true), "agent_jwt")
+	})
 }
