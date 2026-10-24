@@ -39,12 +39,27 @@ import (
 // version.Short() (the tag, or the short commit), not the raw ldflags
 // version, which is empty on every untagged build (ptone/scion#5972). In a
 // test binary version.Version is empty and version.Short() is not, so these
-// assertions tell the two apart.
+// assertions tell the two apart. pinBuildCommit fixes the commit, so the
+// expected token is a known value rather than "unknown".
+
+// pinnedBuildToken is version.Short() for pinBuildCommit's commit.
+const pinnedBuildToken = "0a1b2c3d"
+
+// pinBuildCommit sets version.Commit to a fixed 40-character commit for the
+// test and restores it afterwards.
+func pinBuildCommit(t *testing.T) {
+	t.Helper()
+	prevCommit, prevVersion := version.Commit, version.Version
+	version.Commit, version.Version = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567", ""
+	t.Cleanup(func() { version.Commit, version.Version = prevCommit, prevVersion })
+	require.Equal(t, pinnedBuildToken, version.Short())
+}
 
 // TestCompleteJoinAndPersist_SendsBuildToken: the join request carries
 // version.Short().
 func TestCompleteJoinAndPersist_SendsBuildToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	pinBuildCommit(t)
 	const brokerID = "11111111-2222-3333-4444-555555555555"
 	var sent hubclient.JoinBrokerRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,15 +82,14 @@ func TestCompleteJoinAndPersist_SendsBuildToken(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res)
-	require.NotEmpty(t, version.Short())
-	assert.Equal(t, version.Short(), sent.Version, "the join sends the build token")
-	assert.NotEmpty(t, sent.Version, "never the raw, possibly empty, ldflags version")
+	assert.Equal(t, pinnedBuildToken, sent.Version, "the join sends the build token")
 }
 
 // TestBrokerRegisterInstance_SendsBuildToken: 'scion broker register
 // --instance' hands registration version.Short().
 func TestBrokerRegisterInstance_SendsBuildToken(t *testing.T) {
 	setupRegisterInstanceTest(t, "http://hub.example:8080")
+	pinBuildCommit(t)
 	brokerRegisterInstance = "remote-docker"
 	orig := registerFlatInstance
 	t.Cleanup(func() { registerFlatInstance = orig })
@@ -88,6 +102,5 @@ func TestBrokerRegisterInstance_SendsBuildToken(t *testing.T) {
 
 	require.NoError(t, runBrokerRegister(brokerRegisterCmd, nil))
 	require.NotNil(t, got, "registration was not called")
-	assert.Equal(t, version.Short(), got.Version)
-	assert.NotEmpty(t, got.Version)
+	assert.Equal(t, pinnedBuildToken, got.Version)
 }

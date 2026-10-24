@@ -29,9 +29,12 @@ import (
 // build token as the hub (version.Short()), not a placeholder, so the hub
 // can compare them (ptone/scion#5972).
 func TestServer_VersionIsBuildToken(t *testing.T) {
+	prevCommit, prevVersion := version.Commit, version.Version
+	version.Commit, version.Version = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567", ""
+	t.Cleanup(func() { version.Commit, version.Version = prevCommit, prevVersion })
 	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
-	if srv.version != version.Short() {
-		t.Fatalf("Server.version = %q, want version.Short() %q", srv.version, version.Short())
+	if srv.version != "0a1b2c3d" {
+		t.Fatalf("Server.version = %q, want the pinned commit's build token %q", srv.version, "0a1b2c3d")
 	}
 }
 
