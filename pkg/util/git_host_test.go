@@ -29,7 +29,6 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -1358,7 +1357,7 @@ func TestCreateWorktree_PointerScanDoesNotHangOnFIFOSymlink(t *testing.T) {
 	writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
 	// A FIFO outside the repo, and a tracked symlink pointing at it.
 	fifo := filepath.Join(t.TempDir(), "fifo")
-	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+	if err := mkfifoForTest(fifo, 0o644); err != nil {
 		t.Skipf("mkfifo unsupported: %v", err)
 	}
 	if err := os.Symlink(fifo, filepath.Join(repo, "link.bin")); err != nil {
@@ -1584,7 +1583,7 @@ func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
 			switch target {
 			case "fifo":
 				dst = filepath.Join(t.TempDir(), "fifo")
-				if err := syscall.Mkfifo(dst, 0o644); err != nil {
+				if err := mkfifoForTest(dst, 0o644); err != nil {
 					t.Skipf("mkfifo unsupported: %v", err)
 				}
 			case "devzero":

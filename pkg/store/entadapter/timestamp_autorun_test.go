@@ -312,6 +312,7 @@ func TestRemoveStaleSnapshotTemp(t *testing.T) {
 
 	mem, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	mem.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = mem.Close() })
 	removed, _, err = RemoveStaleSnapshotTemp(ctx, mem, "pre-test", age, time.Now())
 	require.NoError(t, err)

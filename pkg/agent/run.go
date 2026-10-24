@@ -2113,6 +2113,9 @@ authDone:
 			sharingMode = store.SharingModeWorktreePerAgent
 		}
 		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
+		// Only nfs is applied below; say once if a Kubernetes agent's
+		// gke-shared-volume workspace falls back to emptyDir (ptone/scion#1075).
+		warnK8sWorkspaceBackendDropped(m.Runtime.Name(), settings.Server.WorkspaceStorage, nil)
 		if backend.Name() == "nfs" {
 			// A broker only warns about invalid workspace_storage at
 			// startup, so check the ids here, before any leaf directory
