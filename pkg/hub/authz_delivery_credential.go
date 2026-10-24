@@ -225,8 +225,8 @@ func (a *AuthzService) checkHubDeliveryCeiling(
 }
 
 // hubDeliveryAdmission is the step-10 admission walk for a hub_delivery
-// request that passed every gate condition (ptone/scion#2228 part 2b; the
-// RQ-1 ruling). It does not require any delegator to hold the deliver
+// request that passed every gate condition (ptone/scion#2228 part 2b). It
+// does not require any delegator to hold the deliver
 // permission through a role. Instead, in order:
 //
 //   - the resource must not be in another project than the credential's
@@ -286,8 +286,12 @@ func (a *AuthzService) hubDeliveryAdmission(
 		}
 		return deny("delivery provenance root denied: "+err.Error(), c)
 	}
+	// ResolveProvenanceRoot evaluates admission against the stored agent's
+	// project, the scope of the target's own edge (root.Edge.ScopeID). The
+	// step names that project rather than the credential's, so the trace
+	// shows what was evaluated even if the two ever differed.
 	addStep("delegation_ceiling_delivery_root",
-		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, h.projectID, permissionID))
+		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, root.Edge.ScopeID, permissionID))
 	return true, "delivery ceiling passed", nil
 }
 
@@ -341,8 +345,9 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 }
 
 // hubDeliveryChainWalk walks the delegation chain upward from startAgentID
-// in project scopeProjectID and applies the per-hop checks of the RQ-1
-// ruling to every hop, for the exact permissionID. It returns whether
+// in project scopeProjectID and applies the delivery admission per-hop
+// checks (ptone/scion#2228 part 2b) to every hop, for the exact
+// permissionID. It returns whether
 // every hop passed, the deny reason and the deny cause. It never returns an
 // error: a lookup error is a deny with cause ceiling_error. It shares only
 // the edge-data cache with the ordinary walk (getCachedDelegationEdges); it
@@ -470,7 +475,7 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 }
 
 // hubDeliverySourceHolds is relationship stage 4 for a hub_delivery
-// principal (ptone/scion#2228 part 2b; the RQ-1b ruling): it decides
+// principal (ptone/scion#2228 part 2b): it decides
 // whether the sharing source's owner may supply the item. It replaces the
 // owner-activity and owner-delegation checks other principals get
 // (relationshipSourceStage), which type the owner by probing the store and
@@ -488,11 +493,15 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 //   - S4: a user source must exist and be active.
 //
 // An agent source (position 1 or later) is refused. Admitting one is the
-// RQ-1b agent-owned source arm, which waits on the P-2 ruling
+// agent-owned source arm, which waits on an open product decision
 // (ptone/scion#2228): an agent creator differs from the owner of the
-// user-scope row it shares, and P-2 decides whether that sharing needs the
-// owner's authorization. Until then no agent-owned source is delivered.
+// user-scope row it shares, and whether that sharing needs the owner's
+// authorization is not yet decided. Until then no agent-owned source is
+// delivered.
 func (a *AuthzService) hubDeliverySourceHolds(ctx context.Context, h *hubDeliveryIdentity, src *SharingSource, resource Resource, action Action, permissionID string) (bool, string) {
+	// resource is unused by the user-source checks. It is kept in the
+	// signature for the agent-owned source arm, which evaluates the
+	// source agent's chain for this resource once that arm is decided.
 	_ = resource
 	// S1: the step-10 gate texts.
 	if h == nil {
@@ -532,8 +541,9 @@ func (a *AuthzService) hubDeliverySourceHolds(ctx context.Context, h *hubDeliver
 		return false, "delivery source appears more than once in the target's ancestry"
 	}
 	if pos > 0 {
-		// The RQ-1b agent-owned source arm is not enabled: it waits on the
-		// P-2 ruling (ptone/scion#2228). Deny before any store read.
+		// The agent-owned source arm is not enabled: it waits on the open
+		// decision on agent-shared user-scope rows (ptone/scion#2228). Deny
+		// before any store read.
 		return false, "delivery source is an agent; agent-owned sources are not admitted"
 	}
 
