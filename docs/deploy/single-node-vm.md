@@ -242,15 +242,22 @@ command:
    `ExecStart=/opt/scion/current/scion ...`;
 6. edits `settings.yaml` in place: adds
    `server.maintenance.install_root: "/opt/scion"` and applies the update
-   policy rule below. Comments and all other keys are left as they are;
+   policy rule below. Comments and all other keys are left as they are.
+   The edited file is parsed (with the VM's PyYAML) and compared with the
+   original before it replaces it. If the file has a shape the script
+   cannot edit safely (for example a flow-style `maintenance: {...}`), it
+   changes nothing, stops, and tells you to set the two keys by hand;
 7. runs `systemctl daemon-reload`, restarts the Hub, and waits for
    `/healthz`.
 
 It is safe to re-run. On a converted VM the layout step does nothing, the
 settings edit changes only what is out of date, and the unit is re-rendered
 and the Hub restarted. If the installed binary's version cannot be read,
-the command stops before the unit is changed. In that case, run a full
-`deploy.sh --version <tag>` instead. A normal re-run of `deploy.sh` also
+or the binary cannot be copied completely (for example, the disk is
+full), the command stops before `current`, `/usr/local/bin/scion` or the
+unit change. For an unreadable version, run a full
+`deploy.sh --version <tag>` instead. For a failed copy, free disk space and
+re-run. A normal re-run of `deploy.sh` also
 converts the VM: it keeps the old binary as the `previous` release and
 installs the requested version as `current`.
 

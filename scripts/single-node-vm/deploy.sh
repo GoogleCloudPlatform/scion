@@ -393,14 +393,14 @@ config_prompt() {
   fi
 }
 
-# SHA-256 of empty input. A SHA256SUMS entry with this hash describes an
-# empty upload, so the install commands refuse it even though the (empty)
-# download would "verify".
 # The versioned install root on the VM (design D1). Fixed: the systemd unit
 # template hard-codes ExecStart=/opt/scion/current/scion, and the hub reads
 # the same path from server.maintenance.install_root.
 readonly INSTALL_ROOT="/opt/scion"
 
+# SHA-256 of empty input. A SHA256SUMS entry with this hash describes an
+# empty upload, so the install commands refuse it even though the (empty)
+# download would "verify".
 readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 # install_layout_command ARGS... -- prints remote shell text that writes
@@ -1688,6 +1688,13 @@ if [[ "$KEEP_CURRENT_RELEASE" == "true" && ${#CHAT_PLUGINS[@]} -eq 0 ]]; then
   :
 elif [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
   echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
+elif [[ "$KEEP_CURRENT_RELEASE" == "true" && "$SHA256SUMS_PREFLIGHT_RC" -eq 22 ]]; then
+  # The operator did not pick this release: it is the one the VM runs, kept
+  # because --version was not given. Its chat plugins come from the same
+  # release, which may no longer be published.
+  err "The installed release ${VERSION} is no longer published on GitHub (nightlies are kept for 14 days), so its chat plugins cannot be downloaded."
+  echo "  Pass --version <tag> to install a current release; the scion binary and the chat plugins then both come from that release." >&2
+  exit 1
 elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
   # curl -f maps any HTTP error response to exit 22; anything else (DNS
   # failure, TLS error, connection refused/timed out, ...) is a
@@ -2689,7 +2696,19 @@ SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
 if [[ "$KEEP_CURRENT_RELEASE" != "true" ]]; then
   CURRENT_RELEASE="$(read_current_release "$ZONE")"
   if [[ -n "$CURRENT_RELEASE" && "$VERSION_FROM_CLI" != "true" ]]; then
+    if [[ "$CURRENT_RELEASE" == git-* ]]; then
+      err "${INSTANCE_NAME} runs a git build (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE}), not a release."
+      echo "  Pass --version <release tag> to choose the release to install." >&2
+      exit 1
+    fi
     warn "${INSTANCE_NAME} already runs ${CURRENT_RELEASE} (${INSTALL_ROOT}/current); keeping it instead of switching to the auto-detected ${VERSION}. Pass --version to install a different release."
+    # Everything after this point (chat plugins, the image build and its
+    # marker, the summary) must use the kept release, not the auto-detected
+    # one, or the hub would run release A with plugins and images from B.
+    # The plugin install commands verify against the kept release's own
+    # SHA256SUMS, and fail closed if it is no longer published.
+    VERSION="$CURRENT_RELEASE"
+    RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
     KEEP_CURRENT_RELEASE=true
   elif [[ -n "$CURRENT_RELEASE" ]]; then
     case "$(release_order "$VERSION" "$CURRENT_RELEASE")" in

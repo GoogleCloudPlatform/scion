@@ -49,6 +49,40 @@ layout_config_json() {
 EOF
 }
 
+# _layout_repo_root / _layout_go -- the repository root (resolving the
+# tier dir through symlinks) and the Go toolchain, for the hub-parser
+# helpers in tests/lib.
+_layout_repo_root() {
+  (cd "$(dirname "$(readlink -f "${TIER_DIR}/deploy.sh")")/../.." && pwd)
+}
+_layout_go() {
+  command -v go || { [[ -x /usr/local/go/bin/go ]] && echo /usr/local/go/bin/go; }
+}
+
+# LAYOUT_YAML_TO_JSON -- scion-layout.sh's settings parser for these tests:
+# the hub's own koanf YAML parser (tests/lib/settings-yaml-to-json.go),
+# which, like the hub, rejects duplicate keys. On the VM the default is
+# python3 + PyYAML.
+LAYOUT_YAML_TO_JSON="cd '$(_layout_repo_root)' && '$(_layout_go)' run -buildvcs=false scripts/single-node-vm/tests/lib/settings-yaml-to-json.go"
+
+# _settings_json FILE -- FILE parsed by the hub's parser, as JSON (fails
+# with the parser's error if it does not parse).
+_settings_json() {
+  bash -c "$LAYOUT_YAML_TO_JSON" < "$1"
+}
+
+# _go_written_yaml JSON -- JSON re-encoded as YAML by gopkg.in/yaml.v3, the
+# encoder the hub uses when it rewrites settings.yaml (4-space indent).
+_go_written_yaml() {
+  printf '%s' "$1" | (cd "$(_layout_repo_root)" && "$(_layout_go)" run -buildvcs=false \
+    scripts/single-node-vm/tests/lib/settings-json-to-yaml.go)
+}
+
+# _json_eq A B -- "true" when JSON texts A and B are equal as data.
+_json_eq() {
+  "$PYTHON" -c 'import json, sys; print("true" if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else "false")' "$1" "$2"
+}
+
 # _layout_new_host -- a fresh fake host under one mktemp dir: LH_ROOT (the
 # install root, not yet created), LH_BIN (the CLI path's parent dir
 # exists), LH_DIR (everything, for cleanup).
@@ -63,7 +97,7 @@ _layout_new_host() {
 # unprivileged (no chown). Sets LAYOUT_RC and LAYOUT_OUT.
 _layout() {
   LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    bash "$LAYOUT_SH" "$@" 2>&1)"
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash "$LAYOUT_SH" "$@" 2>&1)"
   LAYOUT_RC=$?
 }
 
@@ -313,6 +347,8 @@ test_layout_settings_default_rewrites_auto_to_notify() {
   assert_eq "$expected" "$got" \
     "default must rewrite auto to notify, add install_root, and leave every other line untouched"
   assert_eq "640" "$(stat -c %a "${LH_DIR}/settings.yaml")" "the file mode must be preserved"
+  assert_eq "notify" "$(_settings_json "${LH_DIR}/settings.yaml" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["server"]["maintenance"]["update_policy"])')" \
+    "the result must parse with the hub's own YAML parser"
 
   _layout set-maintenance "${LH_DIR}/settings.yaml" default
   assert_eq "$got" "$(cat "${LH_DIR}/settings.yaml")" "a second run must not change the file"
@@ -801,7 +837,7 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
 
   local out rc first
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    bash -c "$cmd" 2>&1)"
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "the generated migrate command must succeed on an old-layout host (output: ${out})"
   assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/current")" "the installed version must be kept"
@@ -813,7 +849,7 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
   first="$(_layout_state; cat "${LH_DIR}/settings.yaml")"
 
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    bash -c "$cmd" 2>&1)"
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "a second run must succeed (output: ${out})"
   assert_eq "$first" "$(_layout_state; cat "${LH_DIR}/settings.yaml")" \
@@ -925,4 +961,226 @@ test_layout_rerun_explicit_cross_channel_version_warns() {
   # shellcheck disable=SC2016 # a literal from the generated command
   assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
     "and still be installed"
+}
+
+# =====================================================================
+# Review round 1: failure injection, Go-written settings, hardening
+# =====================================================================
+
+# _layout_cp_stub_dir DIR RC -- a PATH dir whose `cp` writes only the first
+# 10 bytes of the source and exits RC: RC=1 is a failed copy (ENOSPC),
+# RC=0 a silent short copy.
+_layout_cp_stub_dir() {
+  mkdir -p "$1"
+  cat > "$1/cp" <<EOF
+#!/usr/bin/env bash
+head -c 10 "\$1" > "\$2"
+echo "cp: error writing '\$2': No space left on device" >&2
+exit $2
+EOF
+  chmod 0755 "$1/cp"
+}
+
+# _layout_assert_untouched ORIG_COPY WHAT -- the host must still be on the
+# old layout: the CLI path is the original plain binary, no current link,
+# no release, and no staging dir left next to the root.
+_layout_assert_untouched() {
+  assert_false "$([[ -L "$LH_BIN" ]] && echo true || echo false)" "$2: the CLI path must still be the plain binary"
+  assert_true "$(cmp -s "$1" "$LH_BIN" && echo true || echo false)" "$2: the original binary must be intact"
+  assert_false "$([[ -e "$LH_ROOT/current" || -L "$LH_ROOT/current" ]] && echo true || echo false)" "$2: no current link may exist"
+  assert_eq "" "$(ls -A "$LH_ROOT/releases" 2>/dev/null)" "$2: no release may be left in releases/"
+  assert_eq "" "$(find "$(dirname "$LH_ROOT")" -maxdepth 1 -name '.scion-stage.*' 2>/dev/null)" "$2: no staging dir may be left behind"
+}
+
+test_layout_adopt_failed_copy_keeps_original_binary() {
+  local rc_mode
+  for rc_mode in 1 0; do
+    _layout_new_host
+    _fake_scion "$LH_BIN" "v0.1.0"
+    cp "$LH_BIN" "${LH_DIR}/orig"
+    _layout_cp_stub_dir "${LH_DIR}/stub" "$rc_mode"
+    LAYOUT_OUT="$(PATH="${LH_DIR}/stub:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+      SCION_INSTALL_OWNER="" bash "$LAYOUT_SH" adopt 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" \
+      "adopt must fail when the copy fails or is short (cp exit ${rc_mode}; output: ${LAYOUT_OUT})"
+    _layout_assert_untouched "${LH_DIR}/orig" "adopt with a broken copy (cp exit ${rc_mode})"
+    rm -rf "$LH_DIR"
+  done
+}
+
+test_layout_install_failed_copy_over_old_layout_keeps_original() {
+  local rc_mode
+  for rc_mode in 1 0; do
+    _layout_new_host
+    _fake_scion "$LH_BIN" "v0.1.0"
+    cp "$LH_BIN" "${LH_DIR}/orig"
+    _fake_scion "${LH_DIR}/new" "v0.2.0"
+    _layout_cp_stub_dir "${LH_DIR}/stub" "$rc_mode"
+    LAYOUT_OUT="$(PATH="${LH_DIR}/stub:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+      SCION_INSTALL_OWNER="" bash "$LAYOUT_SH" install v0.2.0 "${LH_DIR}/new" 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" \
+      "install over an old layout must fail when the copy fails or is short (cp exit ${rc_mode}; output: ${LAYOUT_OUT})"
+    _layout_assert_untouched "${LH_DIR}/orig" "install with a broken copy (cp exit ${rc_mode})"
+    rm -rf "$LH_DIR"
+  done
+}
+
+test_layout_install_leaves_no_staging_dir() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _fake_scion "${LH_DIR}/b" "nightly-20261022-rebuilt"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  # Same tag, different bytes: the old release dir is replaced.
+  cp "${LH_DIR}/b" "${LH_DIR}/a2"
+  _layout install nightly-20261022 "${LH_DIR}/a2"
+  assert_eq "0" "$LAYOUT_RC" "re-installing a tag with different bytes must succeed (output: ${LAYOUT_OUT})"
+  assert_true "$(cmp -s "${LH_DIR}/a2" "$LH_ROOT/releases/nightly-20261022/scion" && echo true || echo false)" \
+    "the release must hold the new bytes"
+  assert_eq "" "$(find "$(dirname "$LH_ROOT")" -maxdepth 1 -name '.scion-stage.*')" "no staging dir may be left behind"
+  assert_eq "nightly-20261022" "$(ls "$LH_ROOT/releases")" "no .partial/.old leftovers in releases/"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_refuses_symlinked_dirs() {
+  local victim
+  _layout_new_host
+  victim="${LH_DIR}/victim"
+  mkdir -p "$victim" "$LH_ROOT"
+  ln -s "$victim" "$LH_ROOT/releases"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked releases/ must be refused"
+  assert_contains "$LAYOUT_OUT" "is a symlink" "the refusal must say why"
+  assert_eq "" "$(ls -A "$victim")" "nothing may be written through the symlink"
+  rm -rf "$LH_DIR"
+
+  _layout_new_host
+  victim="${LH_DIR}/victim"
+  mkdir -p "$victim" "$LH_ROOT/releases"
+  ln -s "$victim" "$LH_ROOT/releases/nightly-20261023"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked release dir must be refused"
+  assert_eq "" "$(ls -A "$victim")" "nothing may be written through a planted release symlink"
+  rm -rf "$LH_DIR"
+}
+
+# Go-written settings (the admin server-config save): 4-space indent, no
+# quotes, keys sorted. The result must parse with the hub's parser and
+# differ from the original only in the two keys.
+test_layout_settings_go_written_without_maintenance_block() {
+  _layout_new_host
+  _go_written_yaml '{"schema_version":"1","server":{"hub":{"hub_name":"demo"},"storage":{"local_path":"/a"},"auth":{"mode":"proxy"}},"image_registry":"x"}' \
+    > "${LH_DIR}/settings.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_eq "0" "$LAYOUT_RC" "a Go-written file with no maintenance block must be updated (output: ${LAYOUT_OUT})"
+  local got
+  got="$(_settings_json "${LH_DIR}/settings.yaml")"
+  assert_eq "true" "$(_json_eq "$got" "{\"schema_version\":\"1\",\"image_registry\":\"x\",\"server\":{\"hub\":{\"hub_name\":\"demo\"},\"storage\":{\"local_path\":\"/a\"},\"auth\":{\"mode\":\"proxy\"},\"maintenance\":{\"install_root\":\"${LH_ROOT}\",\"update_policy\":\"notify\"}}}")" \
+    "the result must parse with the hub's parser and add exactly server.maintenance (got: ${got})"
+  assert_contains "$(cat "${LH_DIR}/settings.yaml")" $'\n    maintenance:\n        install_root:' \
+    "the new block must follow the file's 4-space indent"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_settings_go_written_with_maintenance_block() {
+  _layout_new_host
+  _go_written_yaml '{"server":{"hub":{"hub_name":"demo"},"maintenance":{"deployment_tier":"binary","release_channel":"nightly","update_policy":"auto","github_repo":"o/r"},"secrets":{"backend":"local"}}}' \
+    > "${LH_DIR}/settings.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_eq "0" "$LAYOUT_RC" "a Go-written maintenance block must be updated (output: ${LAYOUT_OUT})"
+  assert_eq "true" "$(_json_eq "$(_settings_json "${LH_DIR}/settings.yaml")" "{\"server\":{\"hub\":{\"hub_name\":\"demo\"},\"maintenance\":{\"deployment_tier\":\"binary\",\"release_channel\":\"nightly\",\"update_policy\":\"notify\",\"github_repo\":\"o/r\",\"install_root\":\"${LH_ROOT}\"},\"secrets\":{\"backend\":\"local\"}}}")" \
+    "only install_root and update_policy may change"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_settings_refuses_flow_and_scalar_maintenance() {
+  local body
+  for body in '  maintenance: {update_policy: auto}' '  maintenance: null' '  maintenance: {}'; do
+    _layout_new_host
+    printf 'server:\n  hub:\n    hub_name: x\n%s\n' "$body" > "${LH_DIR}/settings.yaml"
+    cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+    _layout set-maintenance "${LH_DIR}/settings.yaml" default
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "'${body}' must be refused"
+    assert_contains "$LAYOUT_OUT" "by hand" "the refusal for '${body}' must say what to set by hand"
+    assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" \
+      "'${body}': the file must be unchanged"
+    rm -rf "$LH_DIR"
+  done
+}
+
+test_layout_settings_ignores_nested_maintenance_key() {
+  _layout_new_host
+  printf 'server:\n  broker:\n    maintenance:\n      window: nightly\n  hub:\n    hub_name: x\n' > "${LH_DIR}/settings.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_eq "0" "$LAYOUT_RC" "a nested maintenance key must not block the edit (output: ${LAYOUT_OUT})"
+  assert_eq "true" "$(_json_eq "$(_settings_json "${LH_DIR}/settings.yaml")" "{\"server\":{\"broker\":{\"maintenance\":{\"window\":\"nightly\"}},\"hub\":{\"hub_name\":\"x\"},\"maintenance\":{\"install_root\":\"${LH_ROOT}\",\"update_policy\":\"notify\"}}}")" \
+    "server.broker.maintenance must be left alone and server.maintenance added"
+  rm -rf "$LH_DIR"
+}
+
+# A shape the line edit misreads (a quoted key) must be caught by the
+# structural check, not written: the edit would add a second maintenance
+# mapping, which the hub's parser rejects as a duplicate key.
+test_layout_settings_verifier_blocks_bad_edit() {
+  _layout_new_host
+  printf 'server:\n  "maintenance":\n    update_policy: auto\n' > "${LH_DIR}/settings.yaml"
+  cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "an edit that does not parse must be refused"
+  assert_contains "$LAYOUT_OUT" "would not parse" "the refusal must say the edit would not parse"
+  assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "the file must be unchanged"
+  assert_false "$(ls "${LH_DIR}"/settings.yaml.* >/dev/null 2>&1 && echo true || echo false)" "no temp file may be left behind"
+
+  # No parser available at all: refuse rather than write unchecked.
+  printf 'server:\n  maintenance:\n    update_policy: auto\n' > "${LH_DIR}/settings.yaml"
+  cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+  LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_LAYOUT_YAML_TO_JSON="exit 1" bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "with no working YAML parser the edit must be refused"
+  assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "the file must be unchanged"
+  rm -rf "$LH_DIR"
+}
+
+# Phase 3 fallback: the Phase 1 probe missed the layout (first readlink
+# answers empty), so deploy.sh auto-detected a release; Phase 3 sees the
+# layout and must keep current -- and use the kept tag for everything
+# after, not just the binary.
+test_layout_rerun_phase3_fallback_uses_kept_release_everywhere() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  export GCLOUD_STUB_SSH_CURRENT_LINK="releases/nightly-20261020" GCLOUD_STUB_SSH_CURRENT_LINK_SKIP=1
+  export CURL_STUB_LATEST_TAG="v9.9.9"
+  LAYOUT_DEPLOY_VERSION=none layout_deploy_through_settings \
+    "$(layout_config_json "$HUB" notify | sed 's/"chat_plugins": \[\]/"chat_plugins": ["telegram"]/')"
+  unset GCLOUD_STUB_SSH_CURRENT_LINK GCLOUD_STUB_SSH_CURRENT_LINK_SKIP CURL_STUB_LATEST_TAG
+  local log
+  log="$(gcloud_log)"
+  assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "the run must reach the settings write (log: ${DEPLOY_LOG: -400})"
+  assert_contains "$DEPLOY_LOG" "keeping it instead of switching to the auto-detected v9.9.9" \
+    "Phase 3 must keep current and say so"
+  assert_not_contains "$log" "Downloading scion binary" "the binary must not be downloaded"
+  assert_contains "$log" "releases/download/nightly-20261020/scion-plugin-telegram-linux-amd64.tar.gz" \
+    "chat plugins must come from the kept release"
+  assert_not_contains "$log" "releases/download/v9.9.9/scion-plugin" "chat plugins must not come from the auto-detected release"
+}
+
+test_layout_rerun_kept_release_aged_out_explains() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  local config_file
+  config_file="$(mktemp)"
+  layout_config_json "$HUB" notify | sed 's/"chat_plugins": \[\]/"chat_plugins": ["telegram"]/' > "$config_file"
+  GCLOUD_STUB_SSH_SUCCEEDS=true GCLOUD_STUB_SSH_CURRENT_LINK="releases/nightly-20260901" CURL_STUB_SHA256SUMS_MISSING=true \
+    run_expect_fail bash "$DEPLOY_SH" --config "$config_file"
+  rm -f "$config_file"
+  assert_true "$([[ "$RUN_EXIT_CODE" -ne 0 ]] && echo true || echo false)" "a kept release that is no longer published must stop the run"
+  assert_contains "$RUN_OUTPUT" "The installed release nightly-20260901 is no longer published on GitHub" \
+    "the error must say the kept release has aged out"
+  assert_contains "$RUN_OUTPUT" "Pass --version" "the error must say how to proceed"
+  assert_not_contains "$RUN_OUTPUT" "ALLOW_UNVERIFIED_RELEASE" "the unverified override is not the fix here"
+  assert_not_contains "$(gcloud_log)" "services enable" "it must stop before any GCP change"
 }

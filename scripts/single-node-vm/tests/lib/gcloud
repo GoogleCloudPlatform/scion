@@ -1346,7 +1346,12 @@ STUBERR
         # deploy.sh's read_current_release: the target of the VM's
         # /opt/scion/current link (e.g. "releases/nightly-20261023").
         # Empty by default -- a VM without the versioned layout yet.
-        if [[ -n "${GCLOUD_STUB_SSH_CURRENT_LINK:-}" ]]; then
+        # GCLOUD_STUB_SSH_CURRENT_LINK_SKIP=N answers empty for the first
+        # N calls (e.g. the Phase 1 probe missing the layout).
+        n_file="${GCLOUD_STUB_STATE_DIR}/current-link-calls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        if [[ -n "${GCLOUD_STUB_SSH_CURRENT_LINK:-}" && "$n" -gt "${GCLOUD_STUB_SSH_CURRENT_LINK_SKIP:-0}" ]]; then
           echo "${GCLOUD_STUB_SSH_CURRENT_LINK}"
         fi
         ;;

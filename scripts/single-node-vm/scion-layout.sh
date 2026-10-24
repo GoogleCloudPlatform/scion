@@ -19,6 +19,10 @@
 # on the operator's machine. It contains no deploy.sh state, so the test
 # suite runs it directly against a temporary root.
 #
+# Staging: a release is copied into a root-owned temp dir next to <root>
+# (<root>/../.scion-stage.*), checked, then renamed into releases/. The
+# hub's own downloads use releases/<tag>.partial/ instead.
+#
 # Layout (design D1, ptone/scion#6009):
 #   <root>/                     owner 0755
 #     releases/<tag>/scion      0755, a verified release binary
@@ -50,6 +54,10 @@
 #   SCION_BIN_LINK        CLI symlink path        (default /usr/local/bin/scion)
 #   SCION_INSTALL_OWNER   user:group owning the root (default scion:scion);
 #                         empty skips chown (tests run unprivileged)
+#   SCION_LAYOUT_YAML_TO_JSON
+#                         shell command that parses YAML on stdin to JSON,
+#                         used to verify settings edits (default: python3
+#                         with PyYAML, as shipped on the Ubuntu VM image)
 
 set -euo pipefail
 
@@ -73,11 +81,20 @@ own() {
   fi
 }
 
+# refuse_symlink PATH -- root never writes, chmods or chowns through a
+# symlink the owner could have planted inside its own tree.
+refuse_symlink() {
+  if [[ -L "$1" ]]; then
+    die "$1 is a symlink; refusing to write through it"
+  fi
+}
+
 # ensure_root -- create <root>, releases/ and snapshots/ with the right
 # owner and mode. Safe to repeat.
 ensure_root() {
   local d
   for d in "$INSTALL_ROOT" "$INSTALL_ROOT/releases" "$INSTALL_ROOT/snapshots"; do
+    refuse_symlink "$d"
     mkdir -p "$d"
     chmod 0755 "$d"
     own "$d"
@@ -94,30 +111,47 @@ swap_link() {
   mv -T "$tmp" "$INSTALL_ROOT/$name"
 }
 
-# stage_release TAG BINARY -- copy BINARY to releases/TAG/scion through
-# releases/TAG.partial/, then rename into place. An existing identical
-# release is kept as is; a differing one is replaced.
+# STAGE_DIRS -- root-owned temp dirs made by new_stage_dir, removed on exit.
+STAGE_DIRS=()
+cleanup_stage_dirs() {
+  if [[ ${#STAGE_DIRS[@]} -gt 0 ]]; then
+    rm -rf "${STAGE_DIRS[@]}"
+  fi
+}
+trap cleanup_stage_dirs EXIT
+
+# new_stage_dir -- a fresh root-owned (0700) directory next to <root>, so
+# it is on the same filesystem (rename works) but outside the tree the
+# owner can modify. Sets STAGE.
+new_stage_dir() {
+  STAGE="$(mktemp -d "$(dirname "$INSTALL_ROOT")/.scion-stage.XXXXXX")"
+  STAGE_DIRS+=("$STAGE")
+}
+
+# stage_release TAG BINARY -- install BINARY as releases/TAG/scion. The
+# copy is made and checked in a root-owned staging dir, then the finished
+# directory is renamed into releases/ in one step, so releases/TAG is
+# either absent, the old release, or the complete new one. An identical
+# existing release is kept as is; a differing one is replaced.
 stage_release() {
   local tag="$1" bin="$2"
-  local dest="$INSTALL_ROOT/releases/$tag" partial="$INSTALL_ROOT/releases/$tag.partial"
+  local dest="$INSTALL_ROOT/releases/$tag"
+  refuse_symlink "$dest"
   if [[ -f "$dest/scion" ]] && cmp -s "$bin" "$dest/scion"; then
     log "releases/$tag already installed"
     return 0
   fi
-  rm -rf "$partial"
-  mkdir -p "$partial"
-  cp "$bin" "$partial/scion"
-  chmod 0755 "$partial" "$partial/scion"
-  own "$partial" "$partial/scion"
+  new_stage_dir
+  local dir="$STAGE/release"
+  mkdir "$dir"
+  cp "$bin" "$dir/scion"
+  cmp -s "$bin" "$dir/scion" || die "copy of $bin to the staging dir is incomplete (disk full?); nothing was changed"
+  chmod 0755 "$dir" "$dir/scion"
+  own "$dir" "$dir/scion"
   if [[ -e "$dest" ]]; then
-    local old="$INSTALL_ROOT/releases/$tag.old"
-    rm -rf "$old"
-    mv -T "$dest" "$old"
-    mv -T "$partial" "$dest"
-    rm -rf "$old"
-  else
-    mv -T "$partial" "$dest"
+    mv -T "$dest" "$STAGE/old"
   fi
+  mv -T "$dir" "$dest"
   log "installed releases/$tag"
 }
 
@@ -189,17 +223,20 @@ binary_tag() {
   fi
 }
 
-# adopt_existing -- move the plain binary <bin-link> resolves to into the
-# layout. Returns 1 (after a message) when its version cannot be read.
-adopt_existing() {
-  local src tag
+# adopt_source -- the plain binary <bin-link> resolves to (fails if none).
+adopt_source() {
+  local src
   src="$(readlink -f "$BIN_LINK")"
   [[ -f "$src" ]] || die "$BIN_LINK does not resolve to a file; nothing to adopt (run a full deploy.sh with --version instead)"
-  tag="$(binary_tag "$src")"
-  if [[ -z "$tag" ]]; then
-    echo "scion-layout: could not read a release version or commit from $src (scion version --format json)" >&2
-    return 1
-  fi
+  printf '%s' "$src"
+}
+
+# adopt_as SRC TAG -- move SRC into the layout as releases/TAG and make it
+# current. Always called as a plain statement (never on the left of || or
+# in an if condition), so set -e stays in force for every step: a failed
+# copy stops the script before current or <bin-link> change.
+adopt_as() {
+  local src="$1" tag="$2"
   log "adopting $src as releases/$tag"
   ensure_root
   stage_release "$tag" "$src"
@@ -209,14 +246,20 @@ adopt_existing() {
 
 cmd_install() {
   [[ $# -eq 2 ]] || die "usage: install TAG BINARY"
-  local tag="$1" bin="$2"
+  local tag="$1" bin="$2" src old_tag
   valid_tag "$tag" || die "invalid release tag: '$tag'"
   [[ -f "$bin" ]] || die "binary not found: $bin"
   ensure_root
   if ! is_converted && [[ -e "$BIN_LINK" ]] && [[ ! -e "$INSTALL_ROOT/current" ]]; then
     # Old layout: keep the binary being replaced as a release, so previous
     # points at it. Best effort -- an unreadable version only loses that.
-    adopt_existing || echo "scion-layout: WARNING: not keeping the old $BIN_LINK as a release" >&2
+    src="$(adopt_source)"
+    old_tag="$(binary_tag "$src")"
+    if [[ -n "$old_tag" ]]; then
+      adopt_as "$src" "$old_tag"
+    else
+      echo "scion-layout: WARNING: could not read the version of $src; not keeping it as a release" >&2
+    fi
   fi
   stage_release "$tag" "$bin"
   activate "$tag"
@@ -225,20 +268,109 @@ cmd_install() {
 
 cmd_adopt() {
   [[ $# -eq 0 ]] || die "usage: adopt"
+  local src tag
   if is_converted; then
     ensure_root
     log "already converted: $BIN_LINK -> $INSTALL_ROOT/current/scion -> $(readlink "$INSTALL_ROOT/current")"
     return 0
   fi
   [[ -e "$BIN_LINK" ]] || die "$BIN_LINK not found; nothing to adopt (run a full deploy.sh with --version instead)"
-  adopt_existing || die "cannot determine the installed version; run a full deploy.sh with --version instead"
+  src="$(adopt_source)"
+  tag="$(binary_tag "$src")"
+  if [[ -z "$tag" ]]; then
+    die "could not read a release version or commit from $src (scion version --format json); run a full deploy.sh with --version instead"
+  fi
+  adopt_as "$src" "$tag"
+}
+
+# YAML_TO_JSON_PY -- the default settings parser for verify_settings_edit:
+# PyYAML (a cloud-init dependency, so present on the Ubuntu VM image) with
+# duplicate mapping keys rejected, as the hub's own YAML parser does.
+# shellcheck disable=SC2016 # Python source, not shell
+YAML_TO_JSON_PY='
+import json, sys, yaml
+class Loader(yaml.SafeLoader):
+    pass
+def mapping(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(None, None, "duplicate key %r" % (key,), key_node.start_mark)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+json.dump(yaml.load(sys.stdin, Loader=Loader), sys.stdout, default=str)
+'
+
+# EXPECT_PY -- checks that NEW (JSON) is exactly ORIG (JSON) with only
+# server.maintenance.install_root and update_policy changed as requested.
+# shellcheck disable=SC2016 # Python source, not shell
+EXPECT_PY='
+import json, sys
+orig, new, root, policy = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3], sys.argv[4]
+if not isinstance(orig, dict) or not isinstance(orig.get("server"), dict):
+    sys.exit("settings has no server mapping")
+server = dict(orig["server"])
+maint = server.get("maintenance") or {}
+if not isinstance(maint, dict):
+    sys.exit("server.maintenance is not a mapping")
+maint = dict(maint)
+maint["install_root"] = root
+current = maint.get("update_policy")
+if policy == "default":
+    maint["update_policy"] = "notify" if current in (None, "auto") else current
+else:
+    maint["update_policy"] = policy
+server["maintenance"] = maint
+expected = dict(orig)
+expected["server"] = server
+if new != expected:
+    sys.exit("edited settings differ from the intended change")
+'
+
+# settings_to_json FILE OUT -- parse a settings YAML file to JSON in OUT.
+# SCION_LAYOUT_YAML_TO_JSON (a shell command reading YAML on stdin) replaces
+# the PyYAML default; the tests point it at the hub's own koanf parser.
+settings_to_json() {
+  if [[ -n "${SCION_LAYOUT_YAML_TO_JSON:-}" ]]; then
+    bash -c "$SCION_LAYOUT_YAML_TO_JSON" < "$1" > "$2"
+  else
+    python3 -c "$YAML_TO_JSON_PY" < "$1" > "$2"
+  fi
+}
+
+# verify_settings_edit ORIG NEW POLICY -- fails unless NEW parses (no
+# duplicate keys) and equals ORIG plus exactly the intended change.
+verify_settings_edit() {
+  local orig="$1" new="$2" policy="$3" oj nj rc=0
+  oj="$(mktemp)"
+  nj="$(mktemp)"
+  settings_to_json "$orig" "$oj" 2>/dev/null || rc=1
+  if [[ "$rc" -eq 0 ]]; then
+    settings_to_json "$new" "$nj" 2>/dev/null || rc=2
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    python3 -c "$EXPECT_PY" "$oj" "$nj" "$INSTALL_ROOT" "$policy" || rc=3
+  fi
+  rm -f "$oj" "$nj"
+  case "$rc" in
+    0) return 0 ;;
+    1) echo "scion-layout: could not parse $orig as YAML (or no YAML parser: python3 with PyYAML)" >&2 ;;
+    2) echo "scion-layout: the edited settings would not parse as YAML" >&2 ;;
+    3) echo "scion-layout: the edited settings would change more than server.maintenance.install_root/update_policy" >&2 ;;
+  esac
+  return 1
 }
 
 # cmd_set_maintenance FILE POLICY -- line-based edit of the server.maintenance
-# block, so comments and every other key stay byte-for-byte as they were.
-# Works for deploy.sh's own rendering (2-space indent) and the admin
-# server-config page's rewrite (any consistent indent). Creates the
-# maintenance block under server: when it is missing.
+# block, so comments and every other key stay byte-for-byte as they were,
+# then a structural check of the result (verify_settings_edit) before the
+# file is replaced. Follows the file's own indentation (deploy.sh writes 2
+# spaces, Go's YAML encoder 4). Creates the maintenance block under
+# server: when it is missing. Refuses (file unchanged) anything it cannot
+# edit line by line: a flow-style server: or maintenance:, a scalar
+# maintenance value, or a duplicate maintenance key.
 cmd_set_maintenance() {
   [[ $# -eq 2 ]] || die "usage: set-maintenance SETTINGS_FILE POLICY"
   local file="$1" policy="$2"
@@ -247,58 +379,82 @@ cmd_set_maintenance() {
     *) die "invalid update policy: '$policy' (expected auto, notify, disabled or default)" ;;
   esac
   [[ -f "$file" ]] || die "settings file not found: $file"
-  grep -q '^server:' "$file" || die "$file has no top-level server: block; set server.maintenance.install_root by hand"
-  local tmp="$file.scion-layout.tmp"
+  local manual="set server.maintenance.install_root: \"$INSTALL_ROOT\" (and update_policy) in $file by hand"
+  local tmp="$file.scion-layout.tmp" rc=0
   awk -v root="$INSTALL_ROOT" -v policy="$policy" '
     function indent_of(s) { match(s, /^ */); return RLENGTH }
-    function emit_missing(ind,   pad) {
-      pad = sprintf("%" ind "s", "")
+    function pad(n) { return sprintf("%" n "s", "") }
+    function step() { return sci ? sci : 2 }
+    function emit_missing(ind) {
       handled = 1
-      if (!seen_root) print pad "install_root: \"" root "\""
-      if (!seen_policy) print pad "update_policy: \"" (policy == "default" ? "notify" : policy) "\""
+      if (!seen_root) print pad(ind) "install_root: \"" root "\""
+      if (!seen_policy) print pad(ind) "update_policy: \"" (policy == "default" ? "notify" : policy) "\""
     }
+    function insert_block() {
+      print pad(step()) "maintenance:"
+      emit_missing(2 * step())
+      done_maint = 1
+    }
+    bad { next }
     {
       line = $0
       blank = (line ~ /^[ \t]*(#.*)?$/)
       ind = indent_of(line)
       if (in_maint && !blank && ind <= maint_ind) {
-        emit_missing(child_ind ? child_ind : maint_ind + 2); in_maint = 0; done_maint = 1
+        emit_missing(child_ind ? child_ind : maint_ind + step()); in_maint = 0; done_maint = 1
       }
-      if (in_server && !blank && ind == 0 && line !~ /^server:/) {
-        if (!done_maint) { print "  maintenance:"; emit_missing(4); done_maint = 1 }
+      if (in_server && !blank && ind == 0) {
+        if (!done_maint) insert_block()
         in_server = 0
       }
-      if (line ~ /^server:[ \t]*$/) { in_server = 1; print; next }
-      if (in_server && !in_maint && !done_maint && line ~ /^ +maintenance:[ \t]*$/) {
-        in_maint = 1; handled = 1; maint_ind = ind; child_ind = 0; print; next
+      if (line ~ /^server:[ \t]*(#.*)?$/) {
+        if (seen_server) { bad = 1; next }
+        in_server = 1; seen_server = 1; print; next
+      }
+      if (in_server && !blank) {
+        if (!sci) sci = ind
+        if (ind == sci && line ~ /^ *maintenance:/) {
+          rest = line; sub(/^ *maintenance:[ \t]*/, "", rest); sub(/^#.*$/, "", rest)
+          if (rest != "" || done_maint) { bad = 1; next }
+          in_maint = 1; maint_ind = ind; child_ind = 0; print; next
+        }
       }
       if (in_maint && !blank) {
         if (!child_ind) child_ind = ind
         if (ind == child_ind && line ~ /^ *install_root:/) {
-          print sprintf("%" ind "s", "") "install_root: \"" root "\""; seen_root = 1; next
+          print pad(ind) "install_root: \"" root "\""; seen_root = 1; next
         }
         if (ind == child_ind && line ~ /^ *update_policy:/) {
           seen_policy = 1
           if (policy == "default") {
             v = line; sub(/^ *update_policy:[ \t]*/, "", v); sub(/[ \t]*#.*$/, "", v); gsub(/"|\047/, "", v)
-            if (v == "auto") { print sprintf("%" ind "s", "") "update_policy: \"notify\""; next }
+            if (v == "auto") { print pad(ind) "update_policy: \"notify\""; next }
             print; next
           }
-          print sprintf("%" ind "s", "") "update_policy: \"" policy "\""; next
+          print pad(ind) "update_policy: \"" policy "\""; next
         }
       }
       print
     }
     END {
-      if (in_maint) emit_missing(child_ind ? child_ind : maint_ind + 2)
-      else if (in_server && !done_maint) { print "  maintenance:"; emit_missing(4) }
+      if (bad) exit 4
+      if (in_maint) emit_missing(child_ind ? child_ind : maint_ind + step())
+      else if (in_server && !done_maint) insert_block()
       if (!handled) exit 3
     }
-  ' "$file" > "$tmp" || { rm -f "$tmp"; die "could not find a block-style server: section in $file; set server.maintenance.install_root by hand"; }
+  ' "$file" > "$tmp" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    rm -f "$tmp"
+    die "cannot edit $file line by line (no block-style server: section, or a flow-style, scalar or duplicate server/maintenance key); nothing changed. Please $manual"
+  fi
   if cmp -s "$tmp" "$file"; then
     rm -f "$tmp"
     log "$file already up to date"
     return 0
+  fi
+  if ! verify_settings_edit "$file" "$tmp" "$policy"; then
+    rm -f "$tmp"
+    die "refusing to write $file; nothing changed. Please $manual"
   fi
   chown --reference="$file" "$tmp" 2>/dev/null || true
   chmod --reference="$file" "$tmp"
