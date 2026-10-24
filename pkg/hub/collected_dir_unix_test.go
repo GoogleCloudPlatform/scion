@@ -22,6 +22,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // replaceWithLink replaces the file at p with a link to a file outside the
@@ -103,13 +106,47 @@ func TestCollectedReaderSites_LinkAtCollectionIsNotRead(t *testing.T) {
 		}
 	})
 	t.Run("bundled check skips the link", func(t *testing.T) {
+		// The link leads to a config.yaml with an unusable provisioner: a
+		// reader that followed it would fail the check.
 		dir := collectedReaderTree(t)
-		replaceWithLink(t, filepath.Join(dir, filepath.FromSlash(collectedTestBundledEntry)))
+		entry := filepath.Join(dir, filepath.FromSlash(collectedTestBundledEntry))
+		outside := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(outside, []byte(collectedTestUnusableYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(entry); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, entry); err != nil {
+			t.Fatal(err)
+		}
 		if err := (&templatePersistence{}).CheckDir(t.Context(), "t", collectTestDir(t, dir)); err != nil {
 			t.Errorf("CheckDir with the bundled config.yaml a link at collection: %v, want nil (not read)", err)
 		}
 	})
+	t.Run("commit blob fallback does not write the link", func(t *testing.T) {
+		dir := collectedReaderTree(t)
+		p := filepath.Join(dir, collectedTestBlobPath)
+		replaceWithLink(t, p)
+		cd := collectTestDir(t, dir)
+		stor := newCollectedReadStorage(t)
+		hash := transfer.HashBytes([]byte(collectedTestBlobContent))
+		blobPath := templateBlobPath("hubs/h/templates/global/t", strings.TrimPrefix(hash, transfer.HashPrefix))
+		r := &templateBlobResolver{stor: stor, opts: commitOpts{collected: cd}}
+		e := &store.TemplateFile{Path: collectedTestBlobPath, Size: int64(len(collectedTestBlobContent)), Hash: hash}
+		found, err := r.fromCollected(t.Context(), e, blobPath)
+		if err != nil || found {
+			t.Fatalf("fromCollected of a link at collection = (%v, %v), want not found", found, err)
+		}
+		if exists, err := stor.Exists(t.Context(), blobPath); err != nil || exists {
+			t.Errorf("blob written for a link at collection (exists %v, err %v)", exists, err)
+		}
+	})
 }
+
+// collectedTestUnusableYAML declares a provisioner that could never provision
+// an agent (the bundled harness-config check refuses it).
+const collectedTestUnusableYAML = "harness: claude\nprovisioner:\n  type: builtin\n"
 
 func TestCollectFiles_DirectoryLinkRefused(t *testing.T) {
 	target := writeCollectedTestTree(t, map[string]string{"config.yaml": collectedTestHarnessYAML})
@@ -118,9 +155,13 @@ func TestCollectFiles_DirectoryLinkRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs := &ResourceStore{}
-	if cd, err := rs.collectFiles(link); err == nil {
+	cd, err := rs.collectFiles(link)
+	if err == nil {
 		_ = cd.root.Close()
 		t.Fatal("collectFiles of a link to a directory succeeded")
+	}
+	if !strings.Contains(err.Error(), "is a link, not a directory") {
+		t.Errorf("error %q does not say the directory is a link", err)
 	}
 }
 

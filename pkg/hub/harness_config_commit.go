@@ -242,6 +242,13 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	if err := validateManifestFilePaths(next); err != nil {
 		return err
 	}
+	if opts.collected != nil {
+		// A bootstrap or import commit needs the collected config.yaml; it
+		// is refused before any blob is written.
+		if _, ok := opts.collected.entry(harnessConfigYAMLPath); !ok {
+			return fmt.Errorf("harness-config commit: no config.yaml was collected for %q (missing, a link or not a regular file)", hc.Name)
+		}
+	}
 
 	// 1. Make the introduced blobs exist under the content base. A legacy
 	// row is its own copy source (its migration), read from its legacy
@@ -267,12 +274,6 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	}
 
 	// 2. The content check.
-	if opts.collected != nil {
-		// A bootstrap or import commit needs the collected config.yaml.
-		if _, ok := opts.collected.entry(harnessConfigYAMLPath); !ok {
-			return fmt.Errorf("harness-config commit: no config.yaml was collected for %q (missing, a link or not a regular file)", hc.Name)
-		}
-	}
 	configYAML, present, err := s.readHarnessConfigYAML(ctx, stor, base, next, opts)
 	if err != nil {
 		return fmt.Errorf("harness-config commit: %w", err)
@@ -361,8 +362,9 @@ func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage
 		if present {
 			return data, true, nil
 		}
-		// The collected directory lacks a file the manifest lists: read
-		// storage.
+		// Not reached for a commit through commitHarnessConfigFiles, which
+		// has already required the collected config.yaml; a caller without
+		// one reads storage.
 	}
 	data, err := readHarnessConfigBlob(ctx, stor, base, next, harnessConfigYAMLPath, maxHarnessConfigFileSize)
 	switch {

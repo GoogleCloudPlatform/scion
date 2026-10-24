@@ -204,6 +204,48 @@ func TestHarnessConfigImport_NameFromConfigMustMatchCollected(t *testing.T) {
 			t.Error("cfg-a was not imported")
 		}
 	})
+	t.Run("over the parse limit with the same name imports", func(t *testing.T) {
+		// The name of a config.yaml over the parse limit is re-checked by
+		// reading it in full; the harness keeps exception (a).
+		srv, s, _ := testTemplateBootstrapServer(t)
+		big := "harness: gemini-cli\nname: cfg-big\n# " + strings.Repeat("x", maxHarnessConfigFileSize) + "\n"
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": big})
+		rs := srv.harnessConfigStore("claude")
+		rs.requireConfigName()
+		if _, err := rs.Bootstrap(context.Background(), "cfg-big", dir, store.HarnessConfigScopeGlobal, "", "", true); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		if hc, ok := harnessConfigsByName(t, s)["cfg-big"]; !ok || hc.Status != store.HarnessConfigStatusActive {
+			t.Errorf("cfg-big stored %v, status %q; want active", ok, hc.Status)
+		}
+	})
+	t.Run("over the parse limit with a changed name fails", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		big := "harness: gemini-cli\nname: cfg-other\n# " + strings.Repeat("x", maxHarnessConfigFileSize) + "\n"
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": big})
+		rs := srv.harnessConfigStore("claude")
+		rs.requireConfigName()
+		_, err := rs.Bootstrap(context.Background(), "cfg-big", dir, store.HarnessConfigScopeGlobal, "", "", true)
+		if err == nil || !strings.Contains(err.Error(), `names it "cfg-other"`) {
+			t.Fatalf("bootstrap error = %v, want the name mismatch refusal naming cfg-other", err)
+		}
+		if _, ok := harnessConfigsByName(t, s)["cfg-big"]; ok {
+			t.Error("cfg-big was stored although its collected config.yaml names it cfg-other")
+		}
+	})
+	t.Run("unparseable config.yaml fails as a parse error", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: [unclosed\n"})
+		rs := srv.harnessConfigStore("claude")
+		rs.requireConfigName()
+		_, err := rs.Bootstrap(context.Background(), "cfg-a", dir, store.HarnessConfigScopeGlobal, "", "", true)
+		if err == nil || !strings.Contains(err.Error(), "does not parse") {
+			t.Fatalf("bootstrap error = %v, want the parse refusal", err)
+		}
+		if _, ok := harnessConfigsByName(t, s)["cfg-a"]; ok {
+			t.Error("cfg-a was stored although its collected config.yaml does not parse")
+		}
+	})
 	t.Run("changed name fails", func(t *testing.T) {
 		srv, s, _ := testTemplateBootstrapServer(t)
 		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\nname: cfg-b\n"})

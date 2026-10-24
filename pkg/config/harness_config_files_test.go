@@ -69,6 +69,11 @@ func TestLoadHarnessConfigFromFiles_MatchesLoadHarnessConfigDir(t *testing.T) {
 			if fromFiles.Name != fromDir.Name {
 				t.Errorf("name: files %q, dir %q", fromFiles.Name, fromDir.Name)
 			}
+			// where is the absolute directory here, as LoadHarnessConfigDir
+			// resolves it; LoadHarnessConfigFromFiles returns where as given.
+			if fromFiles.Path != fromDir.Path {
+				t.Errorf("path: files %q, dir %q", fromFiles.Path, fromDir.Path)
+			}
 			if !reflect.DeepEqual(fromFiles.Config, fromDir.Config) {
 				t.Errorf("config differs:\nfiles %+v\ndir   %+v", fromFiles.Config, fromDir.Config)
 			}

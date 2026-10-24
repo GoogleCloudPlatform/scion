@@ -227,6 +227,9 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 	if err != nil {
 		return nil, err
 	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a link, not a directory", dir)
+	}
 	if !before.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
@@ -908,19 +911,22 @@ func (p *harnessConfigPersistence) CheckDir(_ context.Context, name string, cd *
 	}
 	if p.nameFromConfig {
 		// The caller named the resource from config.yaml before collection:
-		// the collected config.yaml must still carry that name.
-		got := ""
-		if present {
-			if entry, perr := config.ParseHarnessConfigYAML(data); perr == nil {
-				got = entry.Name
+		// the collected config.yaml must still carry that name. A config.yaml
+		// over the parse limit (data is nil) is read in full, verified, for
+		// the name only, so the check holds for it too.
+		nameData := data
+		if nameData == nil {
+			if nameData, err = cd.read(harnessConfigYAMLPath); err != nil {
+				return fmt.Errorf("%s: harness config in %q not imported: %w", p.Label(), cd.base(), err)
 			}
 		}
-		if got != name {
-			return fmt.Errorf("%s: harness config in %q not imported: config.yaml names it %q, not %q as when it was read before collection", p.Label(), cd.base(), got, name)
+		entry, perr := config.ParseHarnessConfigYAML(nameData)
+		if perr != nil {
+			return fmt.Errorf("%s: harness config in %q not imported: the collected config.yaml does not parse: %w", p.Label(), cd.base(), perr)
 		}
-	}
-	if !present {
-		return nil
+		if entry.Name != name {
+			return fmt.Errorf("%s: harness config in %q not imported: config.yaml names it %q, not %q as when it was read before collection", p.Label(), cd.base(), entry.Name, name)
+		}
 	}
 	if perr := unusableProvisionerInYAML(cd.base(), data); perr != nil {
 		return fmt.Errorf("%s: harness config in %q not imported: %w", p.Label(), cd.base(), &unusableHarnessConfigError{perr: perr})

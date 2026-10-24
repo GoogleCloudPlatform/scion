@@ -82,7 +82,9 @@ var collectedReaderSites = []collectedReaderSite{
 		name:  "harness-config commit read",
 		entry: "config.yaml",
 		read: func(t *testing.T, cd *collectedDir) error {
-			_, _, err := cd.harnessConfigYAML()
+			// The commit's config.yaml read, with the collected directory.
+			next := []store.TemplateFile{{Path: "config.yaml"}}
+			_, _, err := (&Server{}).readHarnessConfigYAML(context.Background(), nil, "", next, harnessConfigCommitOpts{collected: cd})
 			return err
 		},
 	},

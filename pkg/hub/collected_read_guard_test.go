@@ -70,10 +70,16 @@ var entryPathReadFuncs = map[string]map[string]int{
 
 // entryPathJoinExceptions lists the functions ("<file>:<func>") allowed to
 // pass a directory-plus-entry-path to entryPathReadFuncs, each with its
-// reason. There are none: every reader of collected content goes through the
-// collectedDir. An entry that no longer matches a reported site is stale and
-// fails the guard.
-var entryPathJoinExceptions = map[string]string{}
+// reason. None reads collected content: every reader of collected content
+// goes through the collectedDir. An entry that no longer matches a reported
+// site is stale and fails the guard.
+var entryPathJoinExceptions = map[string]string{
+	// The request's URL path (r.URL.Path, copied to name) joined under the
+	// web assets directory: static web assets served by path, not collected
+	// resource content. The path is cleaned and dot segments are refused
+	// before the join.
+	"web.go:tryServeStaticFile": "serves static web assets by request path, not collected content",
+}
 
 // importAliases maps the names a file uses for its imports to their paths.
 func importAliases(f *ast.File) map[string]string {
@@ -109,8 +115,9 @@ func pkgCall(call *ast.CallExpr, aliases map[string]string) (string, string, boo
 
 // hasEntryPathJoin reports whether e contains a filepath.Join or path.Join
 // call one of whose arguments selects a Path field (fi.Path,
-// filepath.FromSlash(e.Path), ...).
-func hasEntryPathJoin(e ast.Expr, aliases map[string]string) bool {
+// filepath.FromSlash(e.Path), ...) or mentions a variable of pathVars (one
+// assigned such a selector in the same function).
+func hasEntryPathJoin(e ast.Expr, aliases map[string]string, pathVars map[string]bool) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -121,6 +128,9 @@ func hasEntryPathJoin(e ast.Expr, aliases map[string]string) bool {
 			for _, arg := range call.Args {
 				ast.Inspect(arg, func(m ast.Node) bool {
 					if sel, ok := m.(*ast.SelectorExpr); ok && sel.Sel.Name == "Path" {
+						found = true
+					}
+					if id, ok := m.(*ast.Ident); ok && pathVars[id.Name] {
 						found = true
 					}
 					return !found
@@ -164,13 +174,48 @@ func checkEntryPathJoinSource(fset *token.FileSet, path string, src any, excepti
 		if !ok || fn.Body == nil {
 			continue
 		}
+		// pathVars: variables assigned an expression that selects a Path field
+		// (p := fi.Path). joined: variables assigned a directory-plus-entry
+		// join.
+		pathVars := map[string]bool{}
+		selectsPath := func(e ast.Expr) bool {
+			found := false
+			ast.Inspect(e, func(m ast.Node) bool {
+				if sel, ok := m.(*ast.SelectorExpr); ok && sel.Sel.Name == "Path" {
+					found = true
+				}
+				return !found
+			})
+			return found
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch st := n.(type) {
+			case *ast.AssignStmt:
+				if len(st.Lhs) == len(st.Rhs) {
+					for i, rhs := range st.Rhs {
+						if id, ok := st.Lhs[i].(*ast.Ident); ok && selectsPath(rhs) {
+							pathVars[id.Name] = true
+						}
+					}
+				}
+			case *ast.ValueSpec:
+				if len(st.Names) == len(st.Values) {
+					for i, v := range st.Values {
+						if selectsPath(v) {
+							pathVars[st.Names[i].Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
 		joined := map[string]bool{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch st := n.(type) {
 			case *ast.AssignStmt:
 				if len(st.Lhs) == len(st.Rhs) {
 					for i, rhs := range st.Rhs {
-						if id, ok := st.Lhs[i].(*ast.Ident); ok && hasEntryPathJoin(rhs, aliases) {
+						if id, ok := st.Lhs[i].(*ast.Ident); ok && hasEntryPathJoin(rhs, aliases, pathVars) {
 							joined[id.Name] = true
 						}
 					}
@@ -178,7 +223,7 @@ func checkEntryPathJoinSource(fset *token.FileSet, path string, src any, excepti
 			case *ast.ValueSpec:
 				if len(st.Names) == len(st.Values) {
 					for i, v := range st.Values {
-						if hasEntryPathJoin(v, aliases) {
+						if hasEntryPathJoin(v, aliases, pathVars) {
 							joined[st.Names[i].Name] = true
 						}
 					}
@@ -200,7 +245,7 @@ func checkEntryPathJoinSource(fset *token.FileSet, path string, src any, excepti
 				return true
 			}
 			arg := call.Args[idx]
-			if !hasEntryPathJoin(arg, aliases) && !usesIdent(arg, joined) {
+			if !hasEntryPathJoin(arg, aliases, pathVars) && !usesIdent(arg, joined) {
 				return true
 			}
 			key := base + ":" + fn.Name.Name
@@ -223,15 +268,19 @@ func checkEntryPathJoinSource(fset *token.FileSet, path string, src any, excepti
 // file-system read, list or resolve function (entryPathReadFuncs: os.Open,
 // os.ReadFile, os.Stat, os.Lstat, os.ReadDir, filepath.WalkDir, fs.ReadFile
 // and the like) whose path argument is built from a directory and an entry's
-// Path (a filepath.Join or path.Join with a Path-selecting argument, directly
-// or through a variable assigned it in the same function). Collected entries
+// Path (a filepath.Join or path.Join with a Path-selecting argument, or with a
+// variable assigned a Path selector in the same function; directly or through
+// a variable assigned the join in the same function). Collected entries
 // are read through the collectedDir: its os.Root and
 // transfer.ReadCollectedFile. Exceptions are listed in entryPathJoinExceptions
-// with their reasons (none today); a stale exception fails.
+// with their reasons; a stale exception fails.
 //
-// Limits: the check is syntactic. A path passed through a helper in another
-// package, built by string concatenation or carried through more than one
-// variable is not seen, and neither are writes. The persistence hooks take
+// Limits: the check is syntactic and per function. Not seen: a path passed to
+// a helper (in this package or another) that takes it as a string and reads
+// it; a path built by string concatenation; a value carried through more than
+// one variable on either side of the join; code in package-level function
+// literals (var f = func() {...}), since only function declarations are
+// walked; and writes. The persistence hooks take
 // no directory path (only the collectedDir), which is the structural guard
 // for the bootstrap and import flow.
 func TestCollectedFilesReadThroughRoot(t *testing.T) {
@@ -293,6 +342,7 @@ var _ = path.Join
 		"var declaration":             `func read(d string, x FileInfo) { var p = filepath.Join(d, x.Path); _, _ = os.Open(p) }`,
 		"variable wrapped in a call":  `func read(d string, x FileInfo) { p := filepath.Join(d, x.Path); _, _ = os.Open(filepath.Clean(p)) }`,
 		"call inside a func literal":  `func read(d string, x FileInfo) { f := func() { _, _ = os.ReadFile(filepath.Join(d, x.Path)) }; f() }`,
+		"Path copied before the join": `func read(d string, x FileInfo) { p := x.Path; _, _ = os.Open(filepath.Join(d, p)) }`,
 	}
 	for name, body := range flagged {
 		t.Run("flagged/"+name, func(t *testing.T) {
