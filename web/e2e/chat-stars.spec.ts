@@ -107,10 +107,72 @@ function indicator(page: Page, id: string): Locator {
   return msgLocator(page, id).locator('[aria-label="Starred by you"]');
 }
 
-async function openMenuItem(page: Page, id: string, label: string): Promise<void> {
-  await msgLocator(page, id).click({ button: 'right' });
+/**
+ * Waits until the thread's message list has kept the same scroll position for `quietMs`. The
+ * desktop message menu is dismissed when the thread scrolls (chat-thread.ts), so a menu opened
+ * while a permalink jump is still settling can close again before the test reads it.
+ */
+async function threadScrollIdle(page: Page, quietMs = 300, timeoutMs = 15_000): Promise<void> {
+  const list = page.locator('scion-chat-thread .messages-scroll');
+  const deadline = Date.now() + timeoutMs;
+  let last = Number.NaN;
+  let stableSince = Date.now();
+  for (;;) {
+    const top = await list.evaluate((el) => el.scrollTop);
+    const now = Date.now();
+    if (top !== last) {
+      last = top;
+      stableSince = now;
+    } else if (now - stableSince >= quietMs) {
+      return;
+    }
+    if (now > deadline) throw new Error(`the thread kept scrolling for ${timeoutMs} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/** The thread list's scrollTop, or -1 when the list is not rendered. */
+async function threadScrollTop(page: Page): Promise<number> {
+  const list = page.locator('scion-chat-thread .messages-scroll');
+  if ((await list.count()) === 0) return -1;
+  return list.evaluate((el) => el.scrollTop);
+}
+
+/**
+ * Opens the message menu and clicks `label`. If the row is not visible within a second (for
+ * example a desktop popup dismissed by a late scroll), it right-clicks again, up to 15 s.
+ * Every attempt after the first is recorded as a "menu-retry" annotation and printed, with the
+ * page state at that moment (time since `loadedAt`, URL, two scrollTop samples 100 ms apart,
+ * and whether a menu was open), so a run shows whether the race happened and why.
+ */
+async function openMenuItem(
+  page: Page,
+  id: string,
+  label: string,
+  loadedAt: number
+): Promise<void> {
   const item = menuItem(page, label);
-  await expect(item).toBeVisible();
+  let attempt = 0;
+  await expect(async () => {
+    attempt++;
+    if (attempt > 1) {
+      const elapsedMs = Date.now() - loadedAt;
+      const popupRows = await page.locator('.context-menu-item').count();
+      const openSheets = await page.locator('scion-chat-thread scion-action-sheet[open]').count();
+      const scrollA = await threadScrollTop(page);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const scrollB = await threadScrollTop(page);
+      const info = test.info();
+      const description =
+        `attempt=${attempt} label="${label}" test="${info.title}" project=${info.project.name} ` +
+        `elapsed_ms=${elapsedMs} url=${page.url()} scrollTop=${scrollA},${scrollB} ` +
+        `popup_rows=${popupRows} open_sheets=${openSheets}`;
+      info.annotations.push({ type: 'menu-retry', description });
+      console.info(`[menu-retry] ${description}`);
+    }
+    await msgLocator(page, id).click({ button: 'right', timeout: 2_000 });
+    await expect(item).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
   await item.click();
 }
 
@@ -210,9 +272,17 @@ test.describe('Starred messages (phase 1)', () => {
 
     // The target is outside the latest page: open it through its permalink
     // (the existing around-message jump).
+    let loadedAt = Date.now();
     await page.goto(`${threadPath}#msg-${targetId}`, { waitUntil: 'domcontentloaded' });
     await expect(msgLocator(page, targetId)).toBeVisible({ timeout: 20_000 });
-    await openMenuItem(page, targetId, 'Star message');
+    // Let the page settle before the first menu: the legacy thread URL is rewritten to the
+    // readable one, the jump scrolls the target into view, and the list stops moving.
+    await expect(page).toHaveURL(new RegExp(`/chat/(?!space/)[^/]+/${topicId}(?:[?#].*)?$`), {
+      timeout: 20_000,
+    });
+    await expect(msgLocator(page, targetId)).toBeInViewport({ timeout: 20_000 });
+    await threadScrollIdle(page);
+    await openMenuItem(page, targetId, 'Star message', loadedAt);
     await expect(indicator(page, targetId)).toBeVisible();
 
     // Repeating PUT keeps one association and its time.
@@ -234,6 +304,7 @@ test.describe('Starred messages (phase 1)', () => {
     expect((memberState.body as { starredMessageIds: string[] }).starredMessageIds).toEqual([]);
 
     // Reload on the latest page: the target is not loaded.
+    loadedAt = Date.now();
     await page.goto(threadPath, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 20_000 });
     await expect(msgLocator(page, targetId)).toHaveCount(0);
@@ -253,7 +324,7 @@ test.describe('Starred messages (phase 1)', () => {
     await second.goto(`${threadPath}#msg-${targetId}`, { waitUntil: 'domcontentloaded' });
     await expect(indicator(second, targetId)).toBeVisible({ timeout: 20_000 });
 
-    await openMenuItem(page, targetId, 'Unstar message');
+    await openMenuItem(page, targetId, 'Unstar message', loadedAt);
     await expect(indicator(page, targetId)).toHaveCount(0);
     await expect(indicator(second, targetId)).toHaveCount(0, { timeout: 15_000 });
 
