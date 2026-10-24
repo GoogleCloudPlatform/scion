@@ -18,29 +18,36 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
 // RedactGitConfigSecrets parses a git config file and returns an equivalent
 // config with credential-bearing material removed, together with the names of
-// the keys it changed (never their values). It is used to seed a per-agent
-// private .git/config so a copy of a linked checkout's host
-// config does not carry the host user's credentials into the agent.
+// the keys it changed. The returned names are themselves redacted: a subsection
+// that carries userinfo is never included verbatim (see notedKeyName), so neither
+// the values nor the key names carry a credential. It is used to seed a per-agent
+// private .git/config so a copy of a linked checkout's host config does not carry
+// the host user's credentials into the agent.
 //
 // It strips:
 //   - every credential.* key (the git credential-helper configuration),
 //   - every http.<url>.extraheader (authorization headers),
 //   - every http.<url>.cookiefile (a path to stored session cookies),
-//   - userinfo (user[:password]) from http(s) URL values in remote.*.url /
-//     remote.*.pushurl / remote.*.lfsurl / remote.*.lfspushurl / lfs.url /
-//     lfs.pushurl / url.*.insteadof / url.*.pushinsteadof and from the
-//     subsection of a url.<base>.* or http.<base>.* entry, and
-//   - any URL-valued key, or url.<base>.*/http.<base>.* subsection header, that is
-//     URL-shaped ("://") and cannot be parsed but still carries userinfo (the key
-//     is dropped entirely, so the userinfo cannot survive in a value or header).
+//   - every sendemail.smtppass (an SMTP password),
+//   - userinfo from URL values in remote.*.url / pushurl / lfsurl / lfspushurl,
+//     lfs.url / lfs.pushurl, url.*.insteadof / pushinsteadof, http.proxy and
+//     remote.*.proxy; from url.<base>.*, http.<base>.* and lfs.<base>.* subsection
+//     headers; and from the <url> in an includeIf "hasconfig:remote.*.url:<url>"
+//     subsection (http/https/ftp/ftps userinfo removed; other schemes keep only the
+//     username; remote-helper "transport::url" forms handled recursively), and
+//   - any such URL-valued key or subsection that is URL-shaped ("://") and cannot
+//     be parsed but still carries userinfo, or whose opaque form hides userinfo
+//     (the key is dropped entirely, so the userinfo cannot survive in a value,
+//     header or key name).
 //
-// scp-style git remotes and url bases (git@host:path, with no "://") are kept
-// unchanged on both paths, matching the ssh:// carve-out.
+// scp-style git remotes and url bases (git@host:path, with no "://") and an ssh
+// URL with only a username (no password) are kept unchanged.
 //
 // The returned config is re-serialised from the parsed variables: comments are
 // not preserved, but every retained key/value (including multi-valued keys and
@@ -62,12 +69,18 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 	for _, v := range vars {
 		// credential.* — drop entirely.
 		if v.Section == "credential" {
-			note(v.Key())
+			note(notedKeyName(v))
 			continue
 		}
 		// http.<url>.extraheader / http.<url>.cookiefile — drop entirely.
 		if v.Section == "http" && (v.Name == "extraheader" || v.Name == "cookiefile") {
-			note(v.Key())
+			note(notedKeyName(v))
+			continue
+		}
+		// sendemail.smtppass (with or without an identity subsection) — a plaintext
+		// password; drop entirely.
+		if v.Section == "sendemail" && v.Name == "smtppass" {
+			note(notedKeyName(v))
 			continue
 		}
 		// Userinfo in URL-valued keys — rewrite the value, or drop the key when the
@@ -75,25 +88,39 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 		if isURLValuedKey(v) {
 			clean, changed, drop := sanitizeURLUserinfo(v.Value)
 			if drop {
-				note(v.Key())
+				note(notedKeyName(v))
 				continue
 			}
 			if changed {
-				note(v.Key())
+				note(notedKeyName(v))
 				v.Value = clean
 			}
 		}
-		// Userinfo in a url.<base>.* or http.<base>.* subsection (the base is the
-		// URL that keys the section) — rewrite the subsection, or drop the key when
-		// the base is URL-shaped, cannot be parsed, but still carries userinfo.
-		if (v.Section == "url" || v.Section == "http") && v.HasSubsection {
-			clean, changed, drop := sanitizeURLUserinfo(v.Subsection)
+		// includeIf "hasconfig:remote.*.url:<url>" — sanitize the <url> after the
+		// prefix; drop the key if that would drop.
+		const hasConfigPrefix = "hasconfig:remote.*.url:"
+		if v.Section == "includeif" && v.HasSubsection && strings.HasPrefix(v.Subsection, hasConfigPrefix) {
+			clean, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigPrefix):])
 			if drop {
-				note(v.Key())
+				note(notedKeyName(v))
 				continue
 			}
 			if changed {
-				note(v.Key())
+				note(notedKeyName(v))
+				v.Subsection = hasConfigPrefix + clean
+			}
+		}
+		// Userinfo in a url.<base>.*, http.<base>.* or lfs.<base>.* subsection (the
+		// base is the URL that keys the section) — rewrite the subsection, or drop the
+		// key when the base is URL-shaped, cannot be parsed, but still carries userinfo.
+		if (v.Section == "url" || v.Section == "http" || v.Section == "lfs") && v.HasSubsection {
+			clean, changed, drop := sanitizeURLUserinfo(v.Subsection)
+			if drop {
+				note(notedKeyName(v))
+				continue
+			}
+			if changed {
+				note(notedKeyName(v))
 				v.Subsection = clean
 			}
 		}
@@ -133,37 +160,100 @@ func isURLValuedKey(v gitConfigVar) bool {
 		return true
 	case v.Section == "url" && (v.Name == "insteadof" || v.Name == "pushinsteadof"):
 		return true
+	case v.Section == "http" && v.Name == "proxy": // http.proxy and http.<url>.proxy
+		return true
+	case v.Section == "remote" && v.Name == "proxy": // remote.<name>.proxy
+		return true
 	}
 	return false
 }
 
-// sanitizeURLUserinfo strips user[:password]@ userinfo from a git config URL,
+// helperPrefixRe matches a git remote-helper transport prefix, e.g. "http::" in
+// "http::https://host/x". It is "<transport>::" where <transport> is a scheme-like
+// token (a letter then letters/digits/+/-/.) followed by "::". A normal URL scheme
+// ("https://") has a single ":" then "//", so it does not match.
+var helperPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
+
+// sanitizeURLUserinfo strips credential-bearing userinfo from a git config URL,
 // returning the cleaned string, whether it changed, and whether the caller should
 // drop the whole key. It is shared by both callers: URL-valued keys (remote.*.url
-// and friends) and url.<base>/http.<base> subsection headers.
+// and friends) and url.<base>/http.<base>/lfs.<base> subsection headers. Applied in
+// order:
 //
-//   - A parseable http(s) URL that carries userinfo has it removed (changed).
-//   - A parseable non-http(s) URL (e.g. ssh://user@host/path) is kept unchanged;
-//     only http(s) userinfo is a credential we rewrite.
+//   - A remote-helper prefix "<transport>::<url>" is split off; the remainder is
+//     sanitized recursively and the prefix re-prepended (changed/drop propagate).
+//   - A parseable http/https/ftp/ftps URL that carries userinfo has it removed
+//     entirely (changed).
+//   - A parseable URL of any other scheme that carries a password keeps only the
+//     username (e.g. ssh://u:pw@h -> ssh://u@h, socks5 likewise), changed; with no
+//     password it is kept unchanged (e.g. ssh://u@h, scp-like ssh users).
+//   - A parseable opaque form with no authority but an "@" in the opaque part
+//     (e.g. a schemeless proxy "u:pw@proxy:8080") is dropped.
 //   - A string that will not parse but is URL-shaped ("://") and still carries
-//     userinfo before the path is dropped, so the userinfo cannot survive in a
-//     value or a section header.
-//   - A string that will not parse and is not URL-shaped (e.g. an scp-style
-//     git@host:path remote or url.<base> insteadOf base) is kept unchanged.
+//     userinfo before the path is dropped, so the userinfo cannot survive.
+//   - Anything else (e.g. an scp-style git@host:path remote or url.<base> base with
+//     no "://") is kept unchanged.
+//
+// G5 (known limit, no action): a split-authority base whose authority holds a
+// non-numeric port and no "@" (for example [url "https://alice:tok"] used only as
+// an insteadOf alias) does not parse and is kept unchanged.
 func sanitizeURLUserinfo(s string) (clean string, changed, drop bool) {
 	t := strings.TrimSpace(s)
-	u, err := url.Parse(t)
-	if err == nil {
-		if (u.Scheme != "http" && u.Scheme != "https") || u.User == nil {
+	if m := helperPrefixRe.FindString(t); m != "" {
+		rc, rchanged, rdrop := sanitizeURLUserinfo(t[len(m):])
+		switch {
+		case rdrop:
+			return "", false, true
+		case rchanged:
+			return m + rc, true, false
+		default:
 			return s, false, false
 		}
-		u.User = nil
-		return u.String(), true, false
+	}
+	u, err := url.Parse(t)
+	if err == nil {
+		if u.User != nil {
+			switch u.Scheme {
+			case "http", "https", "ftp", "ftps":
+				u.User = nil
+				return u.String(), true, false
+			default:
+				if _, hasPW := u.User.Password(); hasPW {
+					u.User = url.User(u.User.Username())
+					return u.String(), true, false
+				}
+				return s, false, false
+			}
+		}
+		if strings.Contains(u.Opaque, "@") {
+			return "", false, true
+		}
+		return s, false, false
 	}
 	if strings.Contains(t, "://") && hasUserinfoBeforePath(t) {
 		return "", false, true
 	}
 	return s, false, false
+}
+
+// notedKeyName returns a key name safe to record in the stripped list: a
+// subsection that carries userinfo is never included verbatim. The subsection is
+// run through sanitizeURLUserinfo — its cleaned form if that changed it,
+// "<redacted>" if it would be dropped — and any credential.<url> subsection is
+// always "<redacted>".
+func notedKeyName(v gitConfigVar) string {
+	if !v.HasSubsection {
+		return v.Key()
+	}
+	sub := v.Subsection
+	if v.Section == "credential" {
+		sub = "<redacted>"
+	} else if clean, changed, drop := sanitizeURLUserinfo(v.Subsection); drop {
+		sub = "<redacted>"
+	} else if changed {
+		sub = clean
+	}
+	return v.Section + "." + sub + "." + v.Name
 }
 
 // hasUserinfoBeforePath reports whether s has an "@" before the first "/" of its

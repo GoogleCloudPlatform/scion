@@ -73,18 +73,26 @@ func TestRedactGitConfigSecrets(t *testing.T) {
 		t.Errorf("url.<base> subsection userinfo not scrubbed:\n%s", outStr)
 	}
 
+	// G3: noted key names are redacted — a credential.<url> subsection is always
+	// "<redacted>", and a url.<base> base with userinfo appears in its cleaned form.
 	wantStripped := []string{
 		"credential.helper",
-		"credential.https://host.example.username",
+		"credential.<redacted>.username",
 		"http.https://host.example.extraheader",
 		"remote.origin.url",
-		"url.https://bob:pw@mirror.example/.insteadof",
+		"url.https://mirror.example/.insteadof",
 	}
 	got := append([]string(nil), stripped...)
 	sort.Strings(got)
 	sort.Strings(wantStripped)
 	if strings.Join(got, "\n") != strings.Join(wantStripped, "\n") {
 		t.Errorf("stripped keys = %v, want %v", got, wantStripped)
+	}
+	// G3: no userinfo placeholder may appear in the stripped names either.
+	for _, bad := range []string{"s3cret", "bob:pw", "alice"} {
+		if strings.Contains(strings.Join(stripped, "\n"), bad) {
+			t.Errorf("stripped names contain userinfo %q: %v", bad, stripped)
+		}
 	}
 
 	// The result re-parses (it is valid git config).
@@ -148,6 +156,12 @@ func TestRedactGitConfigSecrets_URLKeyCoverage(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("expected %q in stripped keys, got %v", want, stripped)
+		}
+	}
+	// G3: no userinfo placeholder may appear in the stripped names.
+	for _, bad := range []string{"s3cret", "bob:pw", "carol:tok", "dave:pw"} {
+		if strings.Contains(strings.Join(stripped, "\n"), bad) {
+			t.Errorf("stripped names contain userinfo %q: %v", bad, stripped)
 		}
 	}
 	if _, err := parseGitConfigFile(out); err != nil {
@@ -237,7 +251,7 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		"https://u@h/x":   {"https://h/x", true, false},
 		"https://h/x":     {"https://h/x", false, false},
 		"git@h:o/r.git":   {"git@h:o/r.git", false, false}, // scp-style, kept unchanged
-		"ssh://u@h/x":     {"ssh://u@h/x", false, false},   // not http(s), userinfo kept
+		"ssh://u@h/x":     {"ssh://u@h/x", false, false},   // ssh with no password, kept
 		// Unparseable but URL-shaped ("://") and carries userinfo (an invalid percent
 		// escape in the userinfo): drop the key so the userinfo cannot survive.
 		"https://u:p%zz@host/x": {"", false, true},
@@ -245,6 +259,20 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		"https://host/x%zz": {"https://host/x%zz", false, false},
 		// Unparseable scp-style base with userinfo but no "://": kept unchanged.
 		"git@github.com:o/r.git": {"git@github.com:o/r.git", false, false},
+		// [G1] remote-helper prefix: split, sanitize the remainder, re-prepend.
+		"http::https://u:p@h/x": {"http::https://h/x", true, false},
+		// [G1] helper prefix over an unparseable URL-shaped remainder with userinfo: drop.
+		"http::https://u:p%zz@h/x": {"", false, true},
+		// [G2] ftp/ftps: userinfo removed entirely.
+		"ftp://u:p@h/x": {"ftp://h/x", true, false},
+		"ftps://u@h/x":  {"ftps://h/x", true, false},
+		// [G2] other schemes with a password: keep only the username.
+		"ssh://u:p@h/x":       {"ssh://u@h/x", true, false},
+		"socks5://u:p@h:1080": {"socks5://u@h:1080", true, false},
+		// Opaque schemeless proxy with userinfo: dropped.
+		"u:p@proxy.example:8080": {"", false, true},
+		// Bare host:port (scheme-like, no "@"): kept unchanged.
+		"proxy.example:8080": {"proxy.example:8080", false, false},
 	}
 	for in, want := range cases {
 		got, changed, drop := sanitizeURLUserinfo(in)
@@ -309,16 +337,18 @@ func TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase(t *testing.T) {
 	}
 	outStr := string(out)
 
-	// The userinfo substring must not survive anywhere, section header included.
-	if strings.Contains(outStr, "u:p%zz") {
-		t.Errorf("redacted config still contains the userinfo substring:\n%s", outStr)
+	// The userinfo substring must not survive anywhere — the output OR the stripped
+	// key names (G3: noted key names are redacted too).
+	if strings.Contains(outStr, "u:p%zz") || strings.Contains(strings.Join(stripped, "\n"), "u:p%zz") {
+		t.Errorf("redacted config/stripped still contains the userinfo substring:\n%s\nstripped=%v", outStr, stripped)
 	}
 
-	// Both dropped keys must be recorded in stripped (the Apple refusal keys on a
-	// non-empty stripped list).
+	// Both dropped keys must be recorded in stripped with the subsection REDACTED
+	// (the Apple refusal keys on a non-empty stripped list; G3 keeps userinfo out of
+	// the names).
 	for _, want := range []string{
-		"url.https://u:p%zz@host.example.insteadof",
-		"http.https://u:p%zz@host.example.sslverify",
+		"url.<redacted>.insteadof",
+		"http.<redacted>.sslverify",
 	} {
 		found := false
 		for _, s := range stripped {
@@ -336,6 +366,86 @@ func TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase(t *testing.T) {
 	// lower-cased and values are always quoted).
 	if !strings.Contains(outStr, "[http \"https://clean.example\"]\n\tsslverify = \"false\"\n") {
 		t.Errorf("sibling key with a clean base was not kept:\n%s", outStr)
+	}
+
+	if _, err := parseGitConfigFile(out); err != nil {
+		t.Errorf("redacted config does not re-parse: %v\n%s", err, outStr)
+	}
+}
+
+// TestRedactGitConfigSecrets_S2Coverage covers the S2 additions: proxy URL keys,
+// sendemail.smtppass, lfs.<base> subsections, a remote-helper insteadOf base, and an
+// includeIf hasconfig:remote.*.url subsection. Synthetic placeholder userinfo only.
+func TestRedactGitConfigSecrets_S2Coverage(t *testing.T) {
+	in := strings.Join([]string{
+		"[http]",
+		"\tproxy = https://pxu:pxp@proxy.example/",
+		"[http \"https://site.example/\"]",
+		"\tproxy = https://pxu:pxp@proxy.example/",
+		"[remote \"origin\"]",
+		"\tproxy = https://pxu:pxp@proxy.example/",
+		"\turl = https://clean.example/r.git",
+		"[sendemail]",
+		"\tsmtppass = smtpAphrase",
+		"[sendemail \"work\"]",
+		"\tsmtppass = smtpBphrase",
+		"[lfs \"https://lfu:lfp@lfs.example/r.git/info/lfs\"]",
+		"\taccess = basic",
+		"[url \"http::https://iou:iop@up.example/\"]",
+		"\tinsteadOf = https://up.example/",
+		"[includeIf \"hasconfig:remote.*.url:https://icu:icp@ic.example/**\"]",
+		"\tpath = /x/.gitconfig",
+		"",
+	}, "\n")
+
+	out, stripped, err := RedactGitConfigSecrets([]byte(in))
+	if err != nil {
+		t.Fatalf("RedactGitConfigSecrets: %v", err)
+	}
+	outStr := string(out)
+	joined := strings.Join(stripped, "\n")
+
+	// No placeholder userinfo may survive in the output OR in the stripped names (G3).
+	for _, bad := range []string{"pxu:pxp", "smtpAphrase", "smtpBphrase", "lfu:lfp", "iou:iop", "icu:icp"} {
+		if strings.Contains(outStr, bad) || strings.Contains(joined, bad) {
+			t.Errorf("placeholder %q survived:\noutput:\n%s\nstripped=%v", bad, outStr, stripped)
+		}
+	}
+
+	// Proxy keys sanitized + noted; sendemail passwords dropped + noted.
+	for _, want := range []string{
+		"http.proxy",
+		"http.https://site.example/.proxy",
+		"remote.origin.proxy",
+		"sendemail.smtppass",
+		"sendemail.work.smtppass",
+	} {
+		found := false
+		for _, s := range stripped {
+			if s == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in stripped, got %v", want, stripped)
+		}
+	}
+
+	// Cleaned forms present in the serialized output.
+	for _, keep := range []string{
+		"\tproxy = \"https://proxy.example/\"\n",
+		"[lfs \"https://lfs.example/r.git/info/lfs\"]\n",
+		"[url \"http::https://up.example/\"]\n",
+		"[includeif \"hasconfig:remote.*.url:https://ic.example/**\"]\n",
+	} {
+		if !strings.Contains(outStr, keep) {
+			t.Errorf("expected cleaned form %q in output:\n%s", keep, outStr)
+		}
+	}
+	// The sendemail passwords must be gone entirely.
+	if strings.Contains(outStr, "smtppass") {
+		t.Errorf("sendemail smtppass not dropped:\n%s", outStr)
 	}
 
 	if _, err := parseGitConfigFile(out); err != nil {
