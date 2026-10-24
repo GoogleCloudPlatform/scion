@@ -49,6 +49,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionmigration"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
@@ -148,6 +150,8 @@ const (
 	TypeGroup                         = "Group"
 	TypeGroupMembership               = "GroupMembership"
 	TypeHarnessConfig                 = "HarnessConfig"
+	TypeHubEncryptionMigration        = "HubEncryptionMigration"
+	TypeHubEncryptionPolicy           = "HubEncryptionPolicy"
 	TypeHubInstance                   = "HubInstance"
 	TypeHubSetting                    = "HubSetting"
 	TypeIntegrationConfig             = "IntegrationConfig"
@@ -46151,6 +46155,1738 @@ func (m *HarnessConfigMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *HarnessConfigMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown HarnessConfig edge %s", name)
+}
+
+// HubEncryptionMigrationMutation represents an operation that mutates the HubEncryptionMigration nodes in the graph.
+type HubEncryptionMigrationMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *uuid.UUID
+	source_generation       *int64
+	addsource_generation    *int64
+	target_kid              *string
+	state                   *hubencryptionmigration.State
+	last_scanned_id         *string
+	plaintext_read_admitted *bool
+	scanned                 *int64
+	addscanned              *int64
+	rewritten               *int64
+	addrewritten            *int64
+	failures                *int64
+	addfailures             *int64
+	created                 *time.Time
+	updated                 *time.Time
+	clearedFields           map[string]struct{}
+	done                    bool
+	oldValue                func(context.Context) (*HubEncryptionMigration, error)
+	predicates              []predicate.HubEncryptionMigration
+}
+
+var _ ent.Mutation = (*HubEncryptionMigrationMutation)(nil)
+
+// hubencryptionmigrationOption allows management of the mutation configuration using functional options.
+type hubencryptionmigrationOption func(*HubEncryptionMigrationMutation)
+
+// newHubEncryptionMigrationMutation creates new mutation for the HubEncryptionMigration entity.
+func newHubEncryptionMigrationMutation(c config, op Op, opts ...hubencryptionmigrationOption) *HubEncryptionMigrationMutation {
+	m := &HubEncryptionMigrationMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeHubEncryptionMigration,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withHubEncryptionMigrationID sets the ID field of the mutation.
+func withHubEncryptionMigrationID(id uuid.UUID) hubencryptionmigrationOption {
+	return func(m *HubEncryptionMigrationMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *HubEncryptionMigration
+		)
+		m.oldValue = func(ctx context.Context) (*HubEncryptionMigration, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().HubEncryptionMigration.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withHubEncryptionMigration sets the old HubEncryptionMigration of the mutation.
+func withHubEncryptionMigration(node *HubEncryptionMigration) hubencryptionmigrationOption {
+	return func(m *HubEncryptionMigrationMutation) {
+		m.oldValue = func(context.Context) (*HubEncryptionMigration, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m HubEncryptionMigrationMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m HubEncryptionMigrationMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of HubEncryptionMigration entities.
+func (m *HubEncryptionMigrationMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *HubEncryptionMigrationMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *HubEncryptionMigrationMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().HubEncryptionMigration.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetSourceGeneration sets the "source_generation" field.
+func (m *HubEncryptionMigrationMutation) SetSourceGeneration(i int64) {
+	m.source_generation = &i
+	m.addsource_generation = nil
+}
+
+// SourceGeneration returns the value of the "source_generation" field in the mutation.
+func (m *HubEncryptionMigrationMutation) SourceGeneration() (r int64, exists bool) {
+	v := m.source_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceGeneration returns the old "source_generation" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldSourceGeneration(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceGeneration: %w", err)
+	}
+	return oldValue.SourceGeneration, nil
+}
+
+// AddSourceGeneration adds i to the "source_generation" field.
+func (m *HubEncryptionMigrationMutation) AddSourceGeneration(i int64) {
+	if m.addsource_generation != nil {
+		*m.addsource_generation += i
+	} else {
+		m.addsource_generation = &i
+	}
+}
+
+// AddedSourceGeneration returns the value that was added to the "source_generation" field in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedSourceGeneration() (r int64, exists bool) {
+	v := m.addsource_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSourceGeneration resets all changes to the "source_generation" field.
+func (m *HubEncryptionMigrationMutation) ResetSourceGeneration() {
+	m.source_generation = nil
+	m.addsource_generation = nil
+}
+
+// SetTargetKid sets the "target_kid" field.
+func (m *HubEncryptionMigrationMutation) SetTargetKid(s string) {
+	m.target_kid = &s
+}
+
+// TargetKid returns the value of the "target_kid" field in the mutation.
+func (m *HubEncryptionMigrationMutation) TargetKid() (r string, exists bool) {
+	v := m.target_kid
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetKid returns the old "target_kid" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldTargetKid(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetKid is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetKid requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetKid: %w", err)
+	}
+	return oldValue.TargetKid, nil
+}
+
+// ResetTargetKid resets all changes to the "target_kid" field.
+func (m *HubEncryptionMigrationMutation) ResetTargetKid() {
+	m.target_kid = nil
+}
+
+// SetState sets the "state" field.
+func (m *HubEncryptionMigrationMutation) SetState(h hubencryptionmigration.State) {
+	m.state = &h
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *HubEncryptionMigrationMutation) State() (r hubencryptionmigration.State, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldState(ctx context.Context) (v hubencryptionmigration.State, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *HubEncryptionMigrationMutation) ResetState() {
+	m.state = nil
+}
+
+// SetLastScannedID sets the "last_scanned_id" field.
+func (m *HubEncryptionMigrationMutation) SetLastScannedID(s string) {
+	m.last_scanned_id = &s
+}
+
+// LastScannedID returns the value of the "last_scanned_id" field in the mutation.
+func (m *HubEncryptionMigrationMutation) LastScannedID() (r string, exists bool) {
+	v := m.last_scanned_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastScannedID returns the old "last_scanned_id" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldLastScannedID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastScannedID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastScannedID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastScannedID: %w", err)
+	}
+	return oldValue.LastScannedID, nil
+}
+
+// ResetLastScannedID resets all changes to the "last_scanned_id" field.
+func (m *HubEncryptionMigrationMutation) ResetLastScannedID() {
+	m.last_scanned_id = nil
+}
+
+// SetPlaintextReadAdmitted sets the "plaintext_read_admitted" field.
+func (m *HubEncryptionMigrationMutation) SetPlaintextReadAdmitted(b bool) {
+	m.plaintext_read_admitted = &b
+}
+
+// PlaintextReadAdmitted returns the value of the "plaintext_read_admitted" field in the mutation.
+func (m *HubEncryptionMigrationMutation) PlaintextReadAdmitted() (r bool, exists bool) {
+	v := m.plaintext_read_admitted
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPlaintextReadAdmitted returns the old "plaintext_read_admitted" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldPlaintextReadAdmitted(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPlaintextReadAdmitted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPlaintextReadAdmitted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPlaintextReadAdmitted: %w", err)
+	}
+	return oldValue.PlaintextReadAdmitted, nil
+}
+
+// ResetPlaintextReadAdmitted resets all changes to the "plaintext_read_admitted" field.
+func (m *HubEncryptionMigrationMutation) ResetPlaintextReadAdmitted() {
+	m.plaintext_read_admitted = nil
+}
+
+// SetScanned sets the "scanned" field.
+func (m *HubEncryptionMigrationMutation) SetScanned(i int64) {
+	m.scanned = &i
+	m.addscanned = nil
+}
+
+// Scanned returns the value of the "scanned" field in the mutation.
+func (m *HubEncryptionMigrationMutation) Scanned() (r int64, exists bool) {
+	v := m.scanned
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScanned returns the old "scanned" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldScanned(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScanned is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScanned requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScanned: %w", err)
+	}
+	return oldValue.Scanned, nil
+}
+
+// AddScanned adds i to the "scanned" field.
+func (m *HubEncryptionMigrationMutation) AddScanned(i int64) {
+	if m.addscanned != nil {
+		*m.addscanned += i
+	} else {
+		m.addscanned = &i
+	}
+}
+
+// AddedScanned returns the value that was added to the "scanned" field in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedScanned() (r int64, exists bool) {
+	v := m.addscanned
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetScanned resets all changes to the "scanned" field.
+func (m *HubEncryptionMigrationMutation) ResetScanned() {
+	m.scanned = nil
+	m.addscanned = nil
+}
+
+// SetRewritten sets the "rewritten" field.
+func (m *HubEncryptionMigrationMutation) SetRewritten(i int64) {
+	m.rewritten = &i
+	m.addrewritten = nil
+}
+
+// Rewritten returns the value of the "rewritten" field in the mutation.
+func (m *HubEncryptionMigrationMutation) Rewritten() (r int64, exists bool) {
+	v := m.rewritten
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRewritten returns the old "rewritten" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldRewritten(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRewritten is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRewritten requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRewritten: %w", err)
+	}
+	return oldValue.Rewritten, nil
+}
+
+// AddRewritten adds i to the "rewritten" field.
+func (m *HubEncryptionMigrationMutation) AddRewritten(i int64) {
+	if m.addrewritten != nil {
+		*m.addrewritten += i
+	} else {
+		m.addrewritten = &i
+	}
+}
+
+// AddedRewritten returns the value that was added to the "rewritten" field in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedRewritten() (r int64, exists bool) {
+	v := m.addrewritten
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRewritten resets all changes to the "rewritten" field.
+func (m *HubEncryptionMigrationMutation) ResetRewritten() {
+	m.rewritten = nil
+	m.addrewritten = nil
+}
+
+// SetFailures sets the "failures" field.
+func (m *HubEncryptionMigrationMutation) SetFailures(i int64) {
+	m.failures = &i
+	m.addfailures = nil
+}
+
+// Failures returns the value of the "failures" field in the mutation.
+func (m *HubEncryptionMigrationMutation) Failures() (r int64, exists bool) {
+	v := m.failures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFailures returns the old "failures" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldFailures(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFailures is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFailures requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFailures: %w", err)
+	}
+	return oldValue.Failures, nil
+}
+
+// AddFailures adds i to the "failures" field.
+func (m *HubEncryptionMigrationMutation) AddFailures(i int64) {
+	if m.addfailures != nil {
+		*m.addfailures += i
+	} else {
+		m.addfailures = &i
+	}
+}
+
+// AddedFailures returns the value that was added to the "failures" field in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedFailures() (r int64, exists bool) {
+	v := m.addfailures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetFailures resets all changes to the "failures" field.
+func (m *HubEncryptionMigrationMutation) ResetFailures() {
+	m.failures = nil
+	m.addfailures = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *HubEncryptionMigrationMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *HubEncryptionMigrationMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *HubEncryptionMigrationMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *HubEncryptionMigrationMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *HubEncryptionMigrationMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the HubEncryptionMigration entity.
+// If the HubEncryptionMigration object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionMigrationMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *HubEncryptionMigrationMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the HubEncryptionMigrationMutation builder.
+func (m *HubEncryptionMigrationMutation) Where(ps ...predicate.HubEncryptionMigration) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the HubEncryptionMigrationMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *HubEncryptionMigrationMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.HubEncryptionMigration, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *HubEncryptionMigrationMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *HubEncryptionMigrationMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (HubEncryptionMigration).
+func (m *HubEncryptionMigrationMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *HubEncryptionMigrationMutation) Fields() []string {
+	fields := make([]string, 0, 10)
+	if m.source_generation != nil {
+		fields = append(fields, hubencryptionmigration.FieldSourceGeneration)
+	}
+	if m.target_kid != nil {
+		fields = append(fields, hubencryptionmigration.FieldTargetKid)
+	}
+	if m.state != nil {
+		fields = append(fields, hubencryptionmigration.FieldState)
+	}
+	if m.last_scanned_id != nil {
+		fields = append(fields, hubencryptionmigration.FieldLastScannedID)
+	}
+	if m.plaintext_read_admitted != nil {
+		fields = append(fields, hubencryptionmigration.FieldPlaintextReadAdmitted)
+	}
+	if m.scanned != nil {
+		fields = append(fields, hubencryptionmigration.FieldScanned)
+	}
+	if m.rewritten != nil {
+		fields = append(fields, hubencryptionmigration.FieldRewritten)
+	}
+	if m.failures != nil {
+		fields = append(fields, hubencryptionmigration.FieldFailures)
+	}
+	if m.created != nil {
+		fields = append(fields, hubencryptionmigration.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, hubencryptionmigration.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *HubEncryptionMigrationMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		return m.SourceGeneration()
+	case hubencryptionmigration.FieldTargetKid:
+		return m.TargetKid()
+	case hubencryptionmigration.FieldState:
+		return m.State()
+	case hubencryptionmigration.FieldLastScannedID:
+		return m.LastScannedID()
+	case hubencryptionmigration.FieldPlaintextReadAdmitted:
+		return m.PlaintextReadAdmitted()
+	case hubencryptionmigration.FieldScanned:
+		return m.Scanned()
+	case hubencryptionmigration.FieldRewritten:
+		return m.Rewritten()
+	case hubencryptionmigration.FieldFailures:
+		return m.Failures()
+	case hubencryptionmigration.FieldCreated:
+		return m.Created()
+	case hubencryptionmigration.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *HubEncryptionMigrationMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		return m.OldSourceGeneration(ctx)
+	case hubencryptionmigration.FieldTargetKid:
+		return m.OldTargetKid(ctx)
+	case hubencryptionmigration.FieldState:
+		return m.OldState(ctx)
+	case hubencryptionmigration.FieldLastScannedID:
+		return m.OldLastScannedID(ctx)
+	case hubencryptionmigration.FieldPlaintextReadAdmitted:
+		return m.OldPlaintextReadAdmitted(ctx)
+	case hubencryptionmigration.FieldScanned:
+		return m.OldScanned(ctx)
+	case hubencryptionmigration.FieldRewritten:
+		return m.OldRewritten(ctx)
+	case hubencryptionmigration.FieldFailures:
+		return m.OldFailures(ctx)
+	case hubencryptionmigration.FieldCreated:
+		return m.OldCreated(ctx)
+	case hubencryptionmigration.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown HubEncryptionMigration field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubEncryptionMigrationMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceGeneration(v)
+		return nil
+	case hubencryptionmigration.FieldTargetKid:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetKid(v)
+		return nil
+	case hubencryptionmigration.FieldState:
+		v, ok := value.(hubencryptionmigration.State)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case hubencryptionmigration.FieldLastScannedID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastScannedID(v)
+		return nil
+	case hubencryptionmigration.FieldPlaintextReadAdmitted:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPlaintextReadAdmitted(v)
+		return nil
+	case hubencryptionmigration.FieldScanned:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScanned(v)
+		return nil
+	case hubencryptionmigration.FieldRewritten:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRewritten(v)
+		return nil
+	case hubencryptionmigration.FieldFailures:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFailures(v)
+		return nil
+	case hubencryptionmigration.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case hubencryptionmigration.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionMigration field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *HubEncryptionMigrationMutation) AddedFields() []string {
+	var fields []string
+	if m.addsource_generation != nil {
+		fields = append(fields, hubencryptionmigration.FieldSourceGeneration)
+	}
+	if m.addscanned != nil {
+		fields = append(fields, hubencryptionmigration.FieldScanned)
+	}
+	if m.addrewritten != nil {
+		fields = append(fields, hubencryptionmigration.FieldRewritten)
+	}
+	if m.addfailures != nil {
+		fields = append(fields, hubencryptionmigration.FieldFailures)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *HubEncryptionMigrationMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		return m.AddedSourceGeneration()
+	case hubencryptionmigration.FieldScanned:
+		return m.AddedScanned()
+	case hubencryptionmigration.FieldRewritten:
+		return m.AddedRewritten()
+	case hubencryptionmigration.FieldFailures:
+		return m.AddedFailures()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubEncryptionMigrationMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSourceGeneration(v)
+		return nil
+	case hubencryptionmigration.FieldScanned:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddScanned(v)
+		return nil
+	case hubencryptionmigration.FieldRewritten:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRewritten(v)
+		return nil
+	case hubencryptionmigration.FieldFailures:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFailures(v)
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionMigration numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *HubEncryptionMigrationMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *HubEncryptionMigrationMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *HubEncryptionMigrationMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown HubEncryptionMigration nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *HubEncryptionMigrationMutation) ResetField(name string) error {
+	switch name {
+	case hubencryptionmigration.FieldSourceGeneration:
+		m.ResetSourceGeneration()
+		return nil
+	case hubencryptionmigration.FieldTargetKid:
+		m.ResetTargetKid()
+		return nil
+	case hubencryptionmigration.FieldState:
+		m.ResetState()
+		return nil
+	case hubencryptionmigration.FieldLastScannedID:
+		m.ResetLastScannedID()
+		return nil
+	case hubencryptionmigration.FieldPlaintextReadAdmitted:
+		m.ResetPlaintextReadAdmitted()
+		return nil
+	case hubencryptionmigration.FieldScanned:
+		m.ResetScanned()
+		return nil
+	case hubencryptionmigration.FieldRewritten:
+		m.ResetRewritten()
+		return nil
+	case hubencryptionmigration.FieldFailures:
+		m.ResetFailures()
+		return nil
+	case hubencryptionmigration.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case hubencryptionmigration.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionMigration field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *HubEncryptionMigrationMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *HubEncryptionMigrationMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *HubEncryptionMigrationMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *HubEncryptionMigrationMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *HubEncryptionMigrationMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *HubEncryptionMigrationMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown HubEncryptionMigration unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *HubEncryptionMigrationMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown HubEncryptionMigration edge %s", name)
+}
+
+// HubEncryptionPolicyMutation represents an operation that mutates the HubEncryptionPolicy nodes in the graph.
+type HubEncryptionPolicyMutation struct {
+	config
+	op                       Op
+	typ                      string
+	id                       *int
+	generation               *int64
+	addgeneration            *int64
+	min_reader_version       *int
+	addmin_reader_version    *int
+	allowed_write_kids       *[]string
+	appendallowed_write_kids []string
+	required_read_kids       *[]string
+	appendrequired_read_kids []string
+	migration_id             *string
+	state                    *hubencryptionpolicy.State
+	updated_at               *time.Time
+	clearedFields            map[string]struct{}
+	done                     bool
+	oldValue                 func(context.Context) (*HubEncryptionPolicy, error)
+	predicates               []predicate.HubEncryptionPolicy
+}
+
+var _ ent.Mutation = (*HubEncryptionPolicyMutation)(nil)
+
+// hubencryptionpolicyOption allows management of the mutation configuration using functional options.
+type hubencryptionpolicyOption func(*HubEncryptionPolicyMutation)
+
+// newHubEncryptionPolicyMutation creates new mutation for the HubEncryptionPolicy entity.
+func newHubEncryptionPolicyMutation(c config, op Op, opts ...hubencryptionpolicyOption) *HubEncryptionPolicyMutation {
+	m := &HubEncryptionPolicyMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeHubEncryptionPolicy,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withHubEncryptionPolicyID sets the ID field of the mutation.
+func withHubEncryptionPolicyID(id int) hubencryptionpolicyOption {
+	return func(m *HubEncryptionPolicyMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *HubEncryptionPolicy
+		)
+		m.oldValue = func(ctx context.Context) (*HubEncryptionPolicy, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().HubEncryptionPolicy.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withHubEncryptionPolicy sets the old HubEncryptionPolicy of the mutation.
+func withHubEncryptionPolicy(node *HubEncryptionPolicy) hubencryptionpolicyOption {
+	return func(m *HubEncryptionPolicyMutation) {
+		m.oldValue = func(context.Context) (*HubEncryptionPolicy, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m HubEncryptionPolicyMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m HubEncryptionPolicyMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of HubEncryptionPolicy entities.
+func (m *HubEncryptionPolicyMutation) SetID(id int) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *HubEncryptionPolicyMutation) ID() (id int, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *HubEncryptionPolicyMutation) IDs(ctx context.Context) ([]int, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().HubEncryptionPolicy.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetGeneration sets the "generation" field.
+func (m *HubEncryptionPolicyMutation) SetGeneration(i int64) {
+	m.generation = &i
+	m.addgeneration = nil
+}
+
+// Generation returns the value of the "generation" field in the mutation.
+func (m *HubEncryptionPolicyMutation) Generation() (r int64, exists bool) {
+	v := m.generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGeneration returns the old "generation" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldGeneration(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGeneration: %w", err)
+	}
+	return oldValue.Generation, nil
+}
+
+// AddGeneration adds i to the "generation" field.
+func (m *HubEncryptionPolicyMutation) AddGeneration(i int64) {
+	if m.addgeneration != nil {
+		*m.addgeneration += i
+	} else {
+		m.addgeneration = &i
+	}
+}
+
+// AddedGeneration returns the value that was added to the "generation" field in this mutation.
+func (m *HubEncryptionPolicyMutation) AddedGeneration() (r int64, exists bool) {
+	v := m.addgeneration
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetGeneration resets all changes to the "generation" field.
+func (m *HubEncryptionPolicyMutation) ResetGeneration() {
+	m.generation = nil
+	m.addgeneration = nil
+}
+
+// SetMinReaderVersion sets the "min_reader_version" field.
+func (m *HubEncryptionPolicyMutation) SetMinReaderVersion(i int) {
+	m.min_reader_version = &i
+	m.addmin_reader_version = nil
+}
+
+// MinReaderVersion returns the value of the "min_reader_version" field in the mutation.
+func (m *HubEncryptionPolicyMutation) MinReaderVersion() (r int, exists bool) {
+	v := m.min_reader_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMinReaderVersion returns the old "min_reader_version" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldMinReaderVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMinReaderVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMinReaderVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMinReaderVersion: %w", err)
+	}
+	return oldValue.MinReaderVersion, nil
+}
+
+// AddMinReaderVersion adds i to the "min_reader_version" field.
+func (m *HubEncryptionPolicyMutation) AddMinReaderVersion(i int) {
+	if m.addmin_reader_version != nil {
+		*m.addmin_reader_version += i
+	} else {
+		m.addmin_reader_version = &i
+	}
+}
+
+// AddedMinReaderVersion returns the value that was added to the "min_reader_version" field in this mutation.
+func (m *HubEncryptionPolicyMutation) AddedMinReaderVersion() (r int, exists bool) {
+	v := m.addmin_reader_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMinReaderVersion resets all changes to the "min_reader_version" field.
+func (m *HubEncryptionPolicyMutation) ResetMinReaderVersion() {
+	m.min_reader_version = nil
+	m.addmin_reader_version = nil
+}
+
+// SetAllowedWriteKids sets the "allowed_write_kids" field.
+func (m *HubEncryptionPolicyMutation) SetAllowedWriteKids(s []string) {
+	m.allowed_write_kids = &s
+	m.appendallowed_write_kids = nil
+}
+
+// AllowedWriteKids returns the value of the "allowed_write_kids" field in the mutation.
+func (m *HubEncryptionPolicyMutation) AllowedWriteKids() (r []string, exists bool) {
+	v := m.allowed_write_kids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowedWriteKids returns the old "allowed_write_kids" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldAllowedWriteKids(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowedWriteKids is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowedWriteKids requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowedWriteKids: %w", err)
+	}
+	return oldValue.AllowedWriteKids, nil
+}
+
+// AppendAllowedWriteKids adds s to the "allowed_write_kids" field.
+func (m *HubEncryptionPolicyMutation) AppendAllowedWriteKids(s []string) {
+	m.appendallowed_write_kids = append(m.appendallowed_write_kids, s...)
+}
+
+// AppendedAllowedWriteKids returns the list of values that were appended to the "allowed_write_kids" field in this mutation.
+func (m *HubEncryptionPolicyMutation) AppendedAllowedWriteKids() ([]string, bool) {
+	if len(m.appendallowed_write_kids) == 0 {
+		return nil, false
+	}
+	return m.appendallowed_write_kids, true
+}
+
+// ResetAllowedWriteKids resets all changes to the "allowed_write_kids" field.
+func (m *HubEncryptionPolicyMutation) ResetAllowedWriteKids() {
+	m.allowed_write_kids = nil
+	m.appendallowed_write_kids = nil
+}
+
+// SetRequiredReadKids sets the "required_read_kids" field.
+func (m *HubEncryptionPolicyMutation) SetRequiredReadKids(s []string) {
+	m.required_read_kids = &s
+	m.appendrequired_read_kids = nil
+}
+
+// RequiredReadKids returns the value of the "required_read_kids" field in the mutation.
+func (m *HubEncryptionPolicyMutation) RequiredReadKids() (r []string, exists bool) {
+	v := m.required_read_kids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequiredReadKids returns the old "required_read_kids" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldRequiredReadKids(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequiredReadKids is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequiredReadKids requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequiredReadKids: %w", err)
+	}
+	return oldValue.RequiredReadKids, nil
+}
+
+// AppendRequiredReadKids adds s to the "required_read_kids" field.
+func (m *HubEncryptionPolicyMutation) AppendRequiredReadKids(s []string) {
+	m.appendrequired_read_kids = append(m.appendrequired_read_kids, s...)
+}
+
+// AppendedRequiredReadKids returns the list of values that were appended to the "required_read_kids" field in this mutation.
+func (m *HubEncryptionPolicyMutation) AppendedRequiredReadKids() ([]string, bool) {
+	if len(m.appendrequired_read_kids) == 0 {
+		return nil, false
+	}
+	return m.appendrequired_read_kids, true
+}
+
+// ResetRequiredReadKids resets all changes to the "required_read_kids" field.
+func (m *HubEncryptionPolicyMutation) ResetRequiredReadKids() {
+	m.required_read_kids = nil
+	m.appendrequired_read_kids = nil
+}
+
+// SetMigrationID sets the "migration_id" field.
+func (m *HubEncryptionPolicyMutation) SetMigrationID(s string) {
+	m.migration_id = &s
+}
+
+// MigrationID returns the value of the "migration_id" field in the mutation.
+func (m *HubEncryptionPolicyMutation) MigrationID() (r string, exists bool) {
+	v := m.migration_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMigrationID returns the old "migration_id" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldMigrationID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMigrationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMigrationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMigrationID: %w", err)
+	}
+	return oldValue.MigrationID, nil
+}
+
+// ClearMigrationID clears the value of the "migration_id" field.
+func (m *HubEncryptionPolicyMutation) ClearMigrationID() {
+	m.migration_id = nil
+	m.clearedFields[hubencryptionpolicy.FieldMigrationID] = struct{}{}
+}
+
+// MigrationIDCleared returns if the "migration_id" field was cleared in this mutation.
+func (m *HubEncryptionPolicyMutation) MigrationIDCleared() bool {
+	_, ok := m.clearedFields[hubencryptionpolicy.FieldMigrationID]
+	return ok
+}
+
+// ResetMigrationID resets all changes to the "migration_id" field.
+func (m *HubEncryptionPolicyMutation) ResetMigrationID() {
+	m.migration_id = nil
+	delete(m.clearedFields, hubencryptionpolicy.FieldMigrationID)
+}
+
+// SetState sets the "state" field.
+func (m *HubEncryptionPolicyMutation) SetState(h hubencryptionpolicy.State) {
+	m.state = &h
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *HubEncryptionPolicyMutation) State() (r hubencryptionpolicy.State, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldState(ctx context.Context) (v hubencryptionpolicy.State, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *HubEncryptionPolicyMutation) ResetState() {
+	m.state = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *HubEncryptionPolicyMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *HubEncryptionPolicyMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the HubEncryptionPolicy entity.
+// If the HubEncryptionPolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubEncryptionPolicyMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *HubEncryptionPolicyMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the HubEncryptionPolicyMutation builder.
+func (m *HubEncryptionPolicyMutation) Where(ps ...predicate.HubEncryptionPolicy) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the HubEncryptionPolicyMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *HubEncryptionPolicyMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.HubEncryptionPolicy, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *HubEncryptionPolicyMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *HubEncryptionPolicyMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (HubEncryptionPolicy).
+func (m *HubEncryptionPolicyMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *HubEncryptionPolicyMutation) Fields() []string {
+	fields := make([]string, 0, 7)
+	if m.generation != nil {
+		fields = append(fields, hubencryptionpolicy.FieldGeneration)
+	}
+	if m.min_reader_version != nil {
+		fields = append(fields, hubencryptionpolicy.FieldMinReaderVersion)
+	}
+	if m.allowed_write_kids != nil {
+		fields = append(fields, hubencryptionpolicy.FieldAllowedWriteKids)
+	}
+	if m.required_read_kids != nil {
+		fields = append(fields, hubencryptionpolicy.FieldRequiredReadKids)
+	}
+	if m.migration_id != nil {
+		fields = append(fields, hubencryptionpolicy.FieldMigrationID)
+	}
+	if m.state != nil {
+		fields = append(fields, hubencryptionpolicy.FieldState)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, hubencryptionpolicy.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *HubEncryptionPolicyMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		return m.Generation()
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		return m.MinReaderVersion()
+	case hubencryptionpolicy.FieldAllowedWriteKids:
+		return m.AllowedWriteKids()
+	case hubencryptionpolicy.FieldRequiredReadKids:
+		return m.RequiredReadKids()
+	case hubencryptionpolicy.FieldMigrationID:
+		return m.MigrationID()
+	case hubencryptionpolicy.FieldState:
+		return m.State()
+	case hubencryptionpolicy.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *HubEncryptionPolicyMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		return m.OldGeneration(ctx)
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		return m.OldMinReaderVersion(ctx)
+	case hubencryptionpolicy.FieldAllowedWriteKids:
+		return m.OldAllowedWriteKids(ctx)
+	case hubencryptionpolicy.FieldRequiredReadKids:
+		return m.OldRequiredReadKids(ctx)
+	case hubencryptionpolicy.FieldMigrationID:
+		return m.OldMigrationID(ctx)
+	case hubencryptionpolicy.FieldState:
+		return m.OldState(ctx)
+	case hubencryptionpolicy.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown HubEncryptionPolicy field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubEncryptionPolicyMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGeneration(v)
+		return nil
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMinReaderVersion(v)
+		return nil
+	case hubencryptionpolicy.FieldAllowedWriteKids:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowedWriteKids(v)
+		return nil
+	case hubencryptionpolicy.FieldRequiredReadKids:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequiredReadKids(v)
+		return nil
+	case hubencryptionpolicy.FieldMigrationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMigrationID(v)
+		return nil
+	case hubencryptionpolicy.FieldState:
+		v, ok := value.(hubencryptionpolicy.State)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case hubencryptionpolicy.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionPolicy field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *HubEncryptionPolicyMutation) AddedFields() []string {
+	var fields []string
+	if m.addgeneration != nil {
+		fields = append(fields, hubencryptionpolicy.FieldGeneration)
+	}
+	if m.addmin_reader_version != nil {
+		fields = append(fields, hubencryptionpolicy.FieldMinReaderVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *HubEncryptionPolicyMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		return m.AddedGeneration()
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		return m.AddedMinReaderVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubEncryptionPolicyMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGeneration(v)
+		return nil
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMinReaderVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionPolicy numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *HubEncryptionPolicyMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(hubencryptionpolicy.FieldMigrationID) {
+		fields = append(fields, hubencryptionpolicy.FieldMigrationID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *HubEncryptionPolicyMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *HubEncryptionPolicyMutation) ClearField(name string) error {
+	switch name {
+	case hubencryptionpolicy.FieldMigrationID:
+		m.ClearMigrationID()
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionPolicy nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *HubEncryptionPolicyMutation) ResetField(name string) error {
+	switch name {
+	case hubencryptionpolicy.FieldGeneration:
+		m.ResetGeneration()
+		return nil
+	case hubencryptionpolicy.FieldMinReaderVersion:
+		m.ResetMinReaderVersion()
+		return nil
+	case hubencryptionpolicy.FieldAllowedWriteKids:
+		m.ResetAllowedWriteKids()
+		return nil
+	case hubencryptionpolicy.FieldRequiredReadKids:
+		m.ResetRequiredReadKids()
+		return nil
+	case hubencryptionpolicy.FieldMigrationID:
+		m.ResetMigrationID()
+		return nil
+	case hubencryptionpolicy.FieldState:
+		m.ResetState()
+		return nil
+	case hubencryptionpolicy.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown HubEncryptionPolicy field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *HubEncryptionPolicyMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *HubEncryptionPolicyMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *HubEncryptionPolicyMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *HubEncryptionPolicyMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *HubEncryptionPolicyMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *HubEncryptionPolicyMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *HubEncryptionPolicyMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown HubEncryptionPolicy unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *HubEncryptionPolicyMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown HubEncryptionPolicy edge %s", name)
 }
 
 // HubInstanceMutation represents an operation that mutates the HubInstance nodes in the graph.

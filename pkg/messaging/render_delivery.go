@@ -114,9 +114,21 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	// in.Msg and the persisted row keep the body as sent.
 	msg.Body = AppendArtifactFetchHints(msg.Body, in.Msg.Metadata)
 	msg.Body = appendPlanLines(msg.Body, in.Plan, false)
+	for i := range msg.Attachments {
+		if mount := in.Msg.AttachmentMounts[msg.Attachments[i].Path]; mount != "" {
+			msg.Attachments[i].Mount = mount
+		}
+	}
 	for _, e := range in.Plan {
+		// The inbox path comes first: it is valid on every runtime. The
+		// projection follows, tagged with its shared dir, so a recipient
+		// whose runtime does not mount that dir is never left with only a
+		// dangling path.
 		if e.State == messages.AttachmentDeliverable {
 			msg.Attachments = append(msg.Attachments, AttachmentRef{Path: e.InboxPath, Name: e.Name})
+		}
+		if e.State != messages.AttachmentWithheld && e.ProjectedPath != "" {
+			msg.Attachments = append(msg.Attachments, AttachmentRef{Path: e.ProjectedPath, Name: e.Name, Mount: e.ProjectedMount})
 		}
 	}
 
@@ -245,8 +257,9 @@ func RenderDeliveryTextWithLookup(
 // appendPlanLines appends to body, after a blank line, one line per
 // attachment of plan the recipient's runtime cannot receive and, with
 // paths, one "Attachment: <path>" line per deliverable attachment (the
-// plain form, which has no envelope to list them in). Withheld entries are
-// not mentioned. body is returned unchanged when there is nothing to add.
+// plain form, which has no envelope to list them in), plus one line per
+// non-withheld attachment that is also projected into a shared dir
+// (AttachmentProjectedLine). Withheld entries are not mentioned. body is returned unchanged when there is nothing to add.
 func appendPlanLines(body string, plan []messages.AttachmentPlanEntry, paths bool) string {
 	var lines []string
 	for _, e := range plan {
@@ -259,11 +272,23 @@ func appendPlanLines(body string, plan []messages.AttachmentPlanEntry, paths boo
 			lines = append(lines, AttachmentNotDeliveredLine(e.Name, e.Delivery.Size,
 				"the recipient's runtime cannot receive attachments"))
 		}
+		if e.State != messages.AttachmentWithheld && e.ProjectedPath != "" {
+			lines = append(lines, AttachmentProjectedLine(e.Name, e.ProjectedPath, e.ProjectedMount))
+		}
 	}
 	if len(lines) == 0 {
 		return body
 	}
 	return body + "\n\n" + strings.Join(lines, "\n")
+}
+
+// AttachmentProjectedLine is the line a recipient reads for an attachment
+// that is also projected into a shared dir (ptone/scion#5827): the
+// inbox path stays the one to use; the projection is where sibling agents
+// that mount the shared dir find the same file.
+func AttachmentProjectedLine(name, path, mount string) string {
+	return "Attachment " + name + " is also visible to sibling agents at " + path +
+		" (shared dir " + mount + ", only in containers that mount it)."
 }
 
 // Reasons a broker gives for an attachment that did not land in the
@@ -297,8 +322,10 @@ func FormatAttachmentSize(n int64) string {
 
 // ApplyAttachmentPlanLegacy applies plan to msg for the legacy envelope,
 // which the broker formats itself when the hub renders no delivery text:
-// deliverable inbox paths are appended to msg.Attachments and not-delivered
-// lines to msg.Msg. msg must be the per-recipient message being dispatched.
+// deliverable inbox paths are appended to msg.Attachments, and not-delivered
+// and projection lines to msg.Msg (the legacy attachment list carries no
+// mount, so a projection is described in the body only). msg must be the
+// per-recipient message being dispatched.
 func ApplyAttachmentPlanLegacy(msg *messages.StructuredMessage, plan []messages.AttachmentPlanEntry) {
 	if msg == nil {
 		return
