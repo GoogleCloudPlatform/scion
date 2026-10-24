@@ -780,7 +780,7 @@ func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
 // subdirectory, so the start fails closed with nothing mounted. The
 // registered-worktree variant of the same layout is covered by
 // TestBuildCommonRunArgs_AgentsMaskPointFailsClosed's "project in a repo
-// subdirectory" row. This refusal is new relative to upstream.
+// subdirectory" row.
 func TestBuildCommonRunArgs_UnregisteredRepoSubdirectoryRefused(t *testing.T) {
 	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
 		t.Run(rt, func(t *testing.T) {

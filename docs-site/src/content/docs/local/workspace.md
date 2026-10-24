@@ -383,8 +383,8 @@ other subdirectory workspaces are refused at start, because the per-agent git me
 mounted for a plain subdirectory.
 
 On Docker and Podman, a project `.scion` that is mounted read-only — one in a registered outside-root
-checkout, one in a subdirectory of the workspace, or a nested `.scion` directory without `agents/`
-inside the agent's own workspace (config-only agents) — must already contain an `agents` directory.
+checkout, one in a subdirectory of the workspace, or a nested `.scion` directory inside the agent's
+own workspace (config-only agents) — must already contain an `agents` directory.
 The runtime masks `.scion/agents` in the container but does not create it under a read-only mount, so
 when it is missing the start is refused; create it once with `mkdir <path>/.scion/agents` (`scion
 init` lists `.scion/agents/` in `.gitignore`) and start the agent again.

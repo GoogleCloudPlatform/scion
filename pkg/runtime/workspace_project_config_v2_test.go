@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fsSnapshot records every path under roots, for the fail-closed
@@ -502,8 +503,8 @@ func TestBuildCommonRunArgs_FallbackNestedProjectConfigReadOnly(t *testing.T) {
 
 // The outside-root fallback binds the bound workspace's OWN <ws>/.scion
 // read-only and masks its agents/ ONLY when it already exists (never created).
-// (Removing ONLY the fallback maskAgentsIfPresent call turns the with-agents
-// case red.)
+// (Removing ONLY the fallback requireExistingAgentsMask call turns the
+// with-agents case red.)
 func TestBuildCommonRunArgs_FallbackOwnScionAgentsMask(t *testing.T) {
 	for _, rt := range []string{"docker", appleContainerRuntimeName} {
 		for _, withAgents := range []bool{true, false} {
@@ -999,6 +1000,31 @@ func maskGateSite(t *testing.T, site, rt string) (RunConfig, string) {
 		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
 		cfg.AgentOwnWorkspace = true
 		return cfg, filepath.Join(ws, "sub", ".scion")
+	case "NfromS1":
+		// A nested .scion reached through the in-repo non-own worktree layout
+		// (no own <ws>/.scion, so the nested one is the only mask).
+		repoRoot, ws := setupHubManagedBaseRepo(t, "me")
+		mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = repoRoot, ws
+		cfg.AgentOwnWorkspace = false
+		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+		return cfg, filepath.Join(ws, "sub", ".scion")
+	case "NfromS2":
+		// A nested .scion reached through the shared-plain layout (non-git so it
+		// is reached on every runtime).
+		ws := filepath.Join(t.TempDir(), "workspace")
+		mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = ws, ws
+		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+		return cfg, filepath.Join(ws, "sub", ".scion")
+	case "NfromS4":
+		// A nested .scion reached through the outside-root fallback layout.
+		main, ws := registeredOutsideWorktree(t)
+		mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = main, ws
+		cfg.AgentOwnWorkspace = false
+		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+		return cfg, filepath.Join(ws, "sub", ".scion")
 	}
 	t.Fatalf("unknown mask gate site %q", site)
 	return cfg, ""
@@ -1224,6 +1250,55 @@ func TestBuildCommonRunArgs_EveryReadOnlyScionDirBindIsMasked(t *testing.T) {
 			}
 		}
 	}
+	// N reached from the S1, S2 and S4 parents (not only the config-only parent):
+	// the no-create helper refuses a non-directory agents entry on every runtime
+	// and creates nothing. Present/absent for these parents are covered by the
+	// dedicated nested tests.
+	for _, site := range []string{"NfromS1", "NfromS2", "NfromS4"} {
+		for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+			for _, state := range []string{"symlink-agents", "file-agents", "agents-lstat-error"} {
+				t.Run(site+"/"+rt+"/"+state, func(t *testing.T) {
+					cfg, scionSrc := maskGateSite(t, site, rt)
+					arrangeMaskState(t, scionSrc, state)
+					want := maskGateExpect(true, rt, state)
+					before := fsSnapshot(t, cfg.Workspace)
+					args, err := buildCommonRunArgs(cfg)
+					if !errors.Is(err, want.is) {
+						t.Fatalf("error = %v, want errors.Is %v", err, want.is)
+					}
+					if args != nil {
+						t.Errorf("fail-closed: expected nil args, got %q", args)
+					}
+					assertNothingCreated(t, before, cfg.Workspace)
+				})
+			}
+		}
+	}
+	// A git-backed shared-plain workspace on Apple is refused before any mask
+	// logic (Apple cannot bind a per-agent read-only .git/config).
+	t.Run("S2-git-backed/apple", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		ws := filepath.Join(t.TempDir(), "workspace")
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		layoutGit(t, ws, "init", "-q")
+		layoutGit(t, ws, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+		mkdirs(t, filepath.Join(ws, ".scion", "agents"))
+		cfg := minimalRunConfig()
+		cfg.BrokerMode = true
+		cfg.RuntimeName = appleContainerRuntimeName
+		cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+		mkdirs(t, cfg.HomeDir)
+		cfg.RepoRoot, cfg.Workspace = ws, ws
+		args, err := buildCommonRunArgs(cfg)
+		if !errors.Is(err, errAppleSharedWorkspaceUnsupported) {
+			t.Fatalf("error = %v, want errAppleSharedWorkspaceUnsupported", err)
+		}
+		if args != nil {
+			t.Errorf("fail-closed: expected nil args, got %q", args)
+		}
+	})
 }
 
 // TestBuildCommonRunArgs_NestedAndFallbackNeverCreateUnderScion is guarantee (b):
@@ -1428,4 +1503,89 @@ func errText(err error) string {
 		return "<nil>"
 	}
 	return err.Error()
+}
+
+// fakeFileInfo is a minimal os.FileInfo for injecting an entry type through the
+// agentsMaskLstat seam, so requireExistingAgentsMask's own src/agents type
+// branches are exercised directly (these are fail-closed branches a regression
+// could silently open; workspaceProjectConfigMount shadows the symlink case on
+// the real path).
+type fakeFileInfo struct {
+	name string
+	mode os.FileMode
+}
+
+func (f fakeFileInfo) Name() string       { return f.name }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return nil }
+
+// injectAgentsMaskLstatInfo makes the agentsMaskLstat seam return info (no error)
+// for target, restoring it with t.Cleanup. Tests using it must not run parallel.
+func injectAgentsMaskLstatInfo(t *testing.T, target string, info os.FileInfo) {
+	t.Helper()
+	real := agentsMaskLstat
+	agentsMaskLstat = func(p string) (os.FileInfo, error) {
+		if p == target {
+			return info, nil
+		}
+		return real(p)
+	}
+	t.Cleanup(func() { agentsMaskLstat = real })
+}
+
+// TestBuildCommonRunArgs_AgentsMaskHelperTypeRefusals drives requireExistingAgentsMask's
+// own src/agents type classification through the agentsMaskLstat seam, so the
+// fail-closed branches are covered directly and nothing is created.
+func TestBuildCommonRunArgs_AgentsMaskHelperTypeRefusals(t *testing.T) {
+	t.Run("src-symlink", func(t *testing.T) {
+		cfg, scionSrc := maskGateSite(t, "S4", "docker")
+		src := maskGateResolvedSrc(t, scionSrc)
+		injectAgentsMaskLstatInfo(t, src, fakeFileInfo{name: ".scion", mode: os.ModeSymlink})
+		before := fsSnapshot(t, cfg.Workspace)
+		args, err := buildCommonRunArgs(cfg)
+		if !errors.Is(err, errProjectConfigSymlink) {
+			t.Fatalf("error = %v, want errProjectConfigSymlink", err)
+		}
+		if args != nil {
+			t.Errorf("fail-closed: expected nil args, got %q", args)
+		}
+		assertNothingCreated(t, before, cfg.Workspace)
+	})
+	t.Run("src-special-file", func(t *testing.T) {
+		cfg, scionSrc := maskGateSite(t, "S4", "docker")
+		src := maskGateResolvedSrc(t, scionSrc)
+		injectAgentsMaskLstatInfo(t, src, fakeFileInfo{name: ".scion", mode: os.ModeNamedPipe})
+		before := fsSnapshot(t, cfg.Workspace)
+		args, err := buildCommonRunArgs(cfg)
+		if !errors.Is(err, errAgentsMaskNotDir) {
+			t.Fatalf("error = %v, want errAgentsMaskNotDir", err)
+		}
+		if !strings.Contains(err.Error(), "special file (") {
+			t.Errorf("error %q lacks the special-file type", err.Error())
+		}
+		if args != nil {
+			t.Errorf("fail-closed: expected nil args, got %q", args)
+		}
+		assertNothingCreated(t, before, cfg.Workspace)
+	})
+	t.Run("agents-special-file", func(t *testing.T) {
+		cfg, scionSrc := maskGateSite(t, "S4", "docker")
+		agentsPath := filepath.Join(maskGateResolvedSrc(t, scionSrc), "agents")
+		injectAgentsMaskLstatInfo(t, agentsPath, fakeFileInfo{name: "agents", mode: os.ModeNamedPipe})
+		before := fsSnapshot(t, cfg.Workspace)
+		args, err := buildCommonRunArgs(cfg)
+		if !errors.Is(err, errAgentsMaskNotDir) {
+			t.Fatalf("error = %v, want errAgentsMaskNotDir", err)
+		}
+		if !strings.Contains(err.Error(), "special file (") {
+			t.Errorf("error %q lacks the special-file type", err.Error())
+		}
+		if args != nil {
+			t.Errorf("fail-closed: expected nil args, got %q", args)
+		}
+		assertNothingCreated(t, before, cfg.Workspace)
+	})
 }
