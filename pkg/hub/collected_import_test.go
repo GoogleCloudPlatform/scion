@@ -1,0 +1,200 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite && !windows
+
+package hub
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// harnessConfigsByName lists the stored harness-configs by name.
+func harnessConfigsByName(t *testing.T, s store.Store) map[string]store.HarnessConfig {
+	t.Helper()
+	res, err := s.ListHarnessConfigs(context.Background(), store.HarnessConfigFilter{}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]store.HarnessConfig{}
+	for _, hc := range res.Items {
+		out[hc.Name] = hc
+	}
+	return out
+}
+
+// bundledTemplateTree is a template directory bundling harness-config
+// "probe".
+func bundledTemplateTree(t *testing.T) string {
+	return writeCollectedTestTree(t, map[string]string{
+		"scion-agent.yaml":                  collectedTestAgentConfig,
+		"harness-configs/probe/config.yaml": "harness: claude\n",
+		"harness-configs/probe/home/.rc":    "# rc\n",
+	})
+}
+
+func TestImportTemplateHarnessConfigs_UnchangedBundleImported(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	cd := collectTestDir(t, bundledTemplateTree(t))
+	srv.importTemplateHarnessConfigs(context.Background(), cd, string(store.TemplateScopeGlobal), "")
+	hc, ok := harnessConfigsByName(t, s)["probe"]
+	if !ok {
+		t.Fatal("the bundled harness-config was not imported")
+	}
+	if hc.Harness != "claude" {
+		t.Errorf("harness = %q, want claude", hc.Harness)
+	}
+}
+
+func TestImportTemplateHarnessConfigs_ChangedAfterCollectNotImported(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	dir := bundledTemplateTree(t)
+	cd := collectTestDir(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "harness-configs", "probe", "config.yaml"), []byte("harness: gemini-cli\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.importTemplateHarnessConfigs(context.Background(), cd, string(store.TemplateScopeGlobal), "")
+	if _, ok := harnessConfigsByName(t, s)["probe"]; ok {
+		t.Error("a bundled harness-config changed after the template's collection was imported")
+	}
+}
+
+func TestImportTemplateHarnessConfigs_ReplacedByLinkAfterCollectNotImported(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	dir := bundledTemplateTree(t)
+	cd := collectTestDir(t, dir)
+	sub := filepath.Join(dir, "harness-configs", "probe")
+	outside := writeCollectedTestTree(t, map[string]string{
+		"config.yaml": "harness: claude\n",
+		"home/.rc":    "# rc\n",
+	})
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, sub); err != nil {
+		t.Fatal(err)
+	}
+	srv.importTemplateHarnessConfigs(context.Background(), cd, string(store.TemplateScopeGlobal), "")
+	if _, ok := harnessConfigsByName(t, s)["probe"]; ok {
+		t.Error("a bundled harness-config replaced by a link after the template's collection was imported")
+	}
+}
+
+func TestImportTemplateHarnessConfigs_LinkAtCollectionNotImported(t *testing.T) {
+	outside := writeCollectedTestTree(t, map[string]string{
+		"probe/config.yaml": "harness: claude\n",
+	})
+	for name, link := range map[string]func(t *testing.T, dir string){
+		"linked harness-configs directory": func(t *testing.T, dir string) {
+			if err := os.Symlink(outside, filepath.Join(dir, "harness-configs")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"linked subdirectory": func(t *testing.T, dir string) {
+			if err := os.MkdirAll(filepath.Join(dir, "harness-configs"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(outside, "probe"), filepath.Join(dir, "harness-configs", "probe")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, s, _ := testTemplateBootstrapServer(t)
+			dir := writeCollectedTestTree(t, map[string]string{"scion-agent.yaml": collectedTestAgentConfig})
+			link(t, dir)
+			cd := collectTestDir(t, dir)
+			srv.importTemplateHarnessConfigs(context.Background(), cd, string(store.TemplateScopeGlobal), "")
+			if _, ok := harnessConfigsByName(t, s)["probe"]; ok {
+				t.Errorf("a harness-config reached through a link that collection skipped was imported (%s)", name)
+			}
+		})
+	}
+}
+
+// A bootstrap commit stores the harness the collected config.yaml gives,
+// never the store's placeholder; a collected config.yaml that gives none
+// fails the bootstrap.
+func TestHarnessConfigBootstrap_StoresCollectedHarnessOrFails(t *testing.T) {
+	t.Run("derived harness replaces the placeholder", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: gemini-cli\n"})
+		if _, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "my-config", dir, store.HarnessConfigScopeGlobal, "", "", false); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		hc := harnessConfigsByName(t, s)["my-config"]
+		if hc.Harness != "gemini-cli" || hc.Status != store.HarnessConfigStatusActive {
+			t.Errorf("stored harness %q status %q, want gemini-cli active", hc.Harness, hc.Status)
+		}
+	})
+	t.Run("collected config.yaml without a harness fails", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		// Validation before collection (LoadHarnessConfigDir) would refuse
+		// this file; it stands for a config.yaml changed after it.
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "image: example:latest\n"})
+		_, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "my-config", dir, store.HarnessConfigScopeGlobal, "", "", false)
+		if err == nil || !strings.Contains(err.Error(), "sets no harness") {
+			t.Fatalf("bootstrap error = %v, want the no-harness refusal", err)
+		}
+		if hc, ok := harnessConfigsByName(t, s)["my-config"]; ok && hc.Status == store.HarnessConfigStatusActive {
+			t.Errorf("an active row was stored with harness %q", hc.Harness)
+		}
+	})
+	t.Run("a config.yaml that passes validation gives a harness", func(t *testing.T) {
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\nimage: example:latest\n"})
+		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
+			t.Fatalf("validation: %v", err)
+		}
+		if idx := deriveHarnessConfigIndexFromCollected(collectTestDir(t, dir), "my-config"); idx.Harness == "" {
+			t.Error("a validated config.yaml derived no harness")
+		}
+	})
+}
+
+// The import named the resource from config.yaml before collection: the
+// collected config.yaml must still carry that name.
+func TestHarnessConfigImport_NameFromConfigMustMatchCollected(t *testing.T) {
+	t.Run("same name imports", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\nname: cfg-a\n"})
+		rs := srv.harnessConfigStore("claude")
+		rs.requireConfigName()
+		if _, err := rs.Bootstrap(context.Background(), "cfg-a", dir, store.HarnessConfigScopeGlobal, "", "", true); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		if _, ok := harnessConfigsByName(t, s)["cfg-a"]; !ok {
+			t.Error("cfg-a was not imported")
+		}
+	})
+	t.Run("changed name fails", func(t *testing.T) {
+		srv, s, _ := testTemplateBootstrapServer(t)
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\nname: cfg-b\n"})
+		rs := srv.harnessConfigStore("claude")
+		rs.requireConfigName()
+		_, err := rs.Bootstrap(context.Background(), "cfg-a", dir, store.HarnessConfigScopeGlobal, "", "", true)
+		if err == nil || !strings.Contains(err.Error(), "names it") {
+			t.Fatalf("bootstrap error = %v, want the name mismatch refusal", err)
+		}
+		if _, ok := harnessConfigsByName(t, s)["cfg-a"]; ok {
+			t.Error("cfg-a was stored although its collected config.yaml names it cfg-b")
+		}
+	})
+}
