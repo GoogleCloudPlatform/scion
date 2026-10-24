@@ -32,7 +32,7 @@ on:
 # upstream tag push would also run this pipeline on the fork, publishing a fork
 # release, moving the fork's channel branch, and merging a LATEST.json PR into fork
 # main. Every job carries the guard (not just the roots) so nothing relies solely on
-# skip propagation through `needs`. Same pattern as build-nightly.yml. When called
+# skip propagation through `needs`. Same repository guard as build-nightly.yml (applied to every job here). When called
 # via workflow_call, `github` is the caller's context, so upstream callers still run.
 jobs:
   build:
