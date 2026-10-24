@@ -5182,6 +5182,40 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 // Helper functions
 // ---------------------------------------------------------------------------
 
+// isDMParticipant checks whether the given userID occupies a "user" slot in
+// a DM conversation key.  It matches only slots whose kind label is "user",
+// so an agent principal cannot inadvertently satisfy a user-slot check and
+// vice-versa.
+func isDMParticipant(key, userID string) bool {
+	// DM key formats:
+	//   dm:agent:<agentUUID>:user:<userUUID>
+	//   dm:user:<uuidA>:user:<uuidB>
+	parts := strings.Split(key, ":")
+	if len(parts) < 5 {
+		return false
+	}
+	return (parts[1] == "user" && parts[2] == userID) ||
+		(parts[3] == "user" && parts[4] == userID)
+}
+
+// filterSearchDMs drops DM results the filter's participant may not see. The
+// SQL condition already enforces this; this is a defensive second check using
+// the canonical isDMParticipant, so it never trims a page for well-formed keys.
+func filterSearchDMs(results []ChatSearchResult, filter ChatSearchFilter) []ChatSearchResult {
+	if filter.ConversationKey != "" {
+		return results
+	}
+	kept := results[:0]
+	for _, r := range results {
+		if strings.HasPrefix(r.ConversationKey, "dm:") &&
+			(filter.DMParticipantUserID == "" || !isDMParticipant(r.ConversationKey, filter.DMParticipantUserID)) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
 // dmUserParticipants returns the user IDs named in a DM key, skipping the agent
 // side of an agent DM. Keys have the form dm:<kind>:<id>:<kind>:<id>.
 func dmUserParticipants(key string) []string {

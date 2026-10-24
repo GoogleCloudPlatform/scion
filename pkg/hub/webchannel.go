@@ -216,22 +216,6 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	return userID, projectID, agentID, true
 }
 
-// isDMParticipant checks whether the given userID occupies a "user" slot in
-// a DM conversation key.  It matches only slots whose kind label is "user",
-// so an agent principal cannot inadvertently satisfy a user-slot check and
-// vice-versa.
-func isDMParticipant(key, userID string) bool {
-	// DM key formats:
-	//   dm:agent:<agentUUID>:user:<userUUID>
-	//   dm:user:<uuidA>:user:<uuidB>
-	parts := strings.Split(key, ":")
-	if len(parts) < 5 {
-		return false
-	}
-	return (parts[1] == "user" && parts[2] == userID) ||
-		(parts[3] == "user" && parts[4] == userID)
-}
-
 // registerDMParticipants upserts one webchat_dm row per participant of a DM
 // conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
 // store or a malformed key.
