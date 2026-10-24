@@ -231,17 +231,78 @@ func TestStripURLUserinfo(t *testing.T) {
 	cases := map[string]struct {
 		want    string
 		changed bool
+		drop    bool
 	}{
-		"https://u:p@h/x": {"https://h/x", true},
-		"https://u@h/x":   {"https://h/x", true},
-		"https://h/x":     {"https://h/x", false},
-		"git@h:o/r.git":   {"git@h:o/r.git", false}, // scp-style, not http(s)
-		"ssh://u@h/x":     {"ssh://u@h/x", false},   // not http(s)
+		"https://u:p@h/x": {"https://h/x", true, false},
+		"https://u@h/x":   {"https://h/x", true, false},
+		"https://h/x":     {"https://h/x", false, false},
+		"git@h:o/r.git":   {"git@h:o/r.git", false, false}, // scp-style, not http(s)
+		"ssh://u@h/x":     {"ssh://u@h/x", false, false},   // not http(s), userinfo kept
+		// Unparseable header that still carries userinfo (an invalid percent escape
+		// in the userinfo): drop the key so the userinfo cannot reach the header.
+		"https://u:p%zz@host/x": {"", false, true},
+		// Unparseable header without userinfo: kept unchanged.
+		"https://host/x%zz": {"https://host/x%zz", false, false},
 	}
 	for in, want := range cases {
-		got, changed := stripURLUserinfo(in)
-		if got != want.want || changed != want.changed {
-			t.Errorf("stripURLUserinfo(%q) = (%q,%v), want (%q,%v)", in, got, changed, want.want, want.changed)
+		got, changed, drop := stripURLUserinfo(in)
+		if got != want.want || changed != want.changed || drop != want.drop {
+			t.Errorf("stripURLUserinfo(%q) = (%q,%v,%v), want (%q,%v,%v)", in, got, changed, drop, want.want, want.changed, want.drop)
 		}
+	}
+}
+
+// TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase covers the
+// subsection path: a url.<base>/http.<base> entry whose base cannot be parsed
+// but carries userinfo is dropped entirely, so the userinfo never reaches the
+// serialized section header. A sibling key with a clean base is kept.
+func TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase(t *testing.T) {
+	in := strings.Join([]string{
+		"[url \"https://u:p%zz@host.example\"]",
+		"\tinsteadOf = https://host.example/",
+		"[http \"https://u:p%zz@host.example\"]",
+		"\tsslVerify = true",
+		"[http \"https://clean.example\"]",
+		"\tsslVerify = false",
+		"",
+	}, "\n")
+
+	out, stripped, err := RedactGitConfigSecrets([]byte(in))
+	if err != nil {
+		t.Fatalf("RedactGitConfigSecrets: %v", err)
+	}
+	outStr := string(out)
+
+	// The userinfo substring must not survive anywhere, section header included.
+	if strings.Contains(outStr, "u:p%zz") {
+		t.Errorf("redacted config still contains the userinfo substring:\n%s", outStr)
+	}
+
+	// Both dropped keys must be recorded in stripped (the Apple refusal keys on a
+	// non-empty stripped list).
+	for _, want := range []string{
+		"url.https://u:p%zz@host.example.insteadof",
+		"http.https://u:p%zz@host.example.sslverify",
+	} {
+		found := false
+		for _, s := range stripped {
+			if s == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in stripped keys, got %v", want, stripped)
+		}
+	}
+
+	// The sibling key with a clean base is kept (in its serialized form: names are
+	// lower-cased and values are always quoted).
+	if !strings.Contains(outStr, "[http \"https://clean.example\"]\n\tsslverify = \"false\"\n") {
+		t.Errorf("sibling key with a clean base was not kept:\n%s", outStr)
+	}
+
+	if _, err := parseGitConfigFile(out); err != nil {
+		t.Errorf("redacted config does not re-parse: %v\n%s", err, outStr)
 	}
 }

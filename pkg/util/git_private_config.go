@@ -37,6 +37,10 @@ import (
 //     subsection of a url.<base>.* or http.<base>.* entry, and
 //   - any URL-valued key whose value cannot be parsed but carries userinfo.
 //
+// A url.<base>.* or http.<base>.* key whose base subsection cannot be parsed but
+// carries userinfo is dropped entirely, so the userinfo cannot survive in the
+// section header.
+//
 // The returned config is re-serialised from the parsed variables: comments are
 // not preserved, but every retained key/value (including multi-valued keys and
 // their order) is. A parse error is returned unchanged so the caller can fail
@@ -79,9 +83,15 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 			}
 		}
 		// Userinfo in a url.<base>.* or http.<base>.* subsection (the base is the
-		// URL that keys the section).
+		// URL that keys the section) — rewrite the subsection, or drop the key when
+		// the base cannot be parsed but still carries userinfo.
 		if (v.Section == "url" || v.Section == "http") && v.HasSubsection {
-			if clean, changed := stripURLUserinfo(v.Subsection); changed {
+			clean, changed, drop := stripURLUserinfo(v.Subsection)
+			if drop {
+				note(v.Key())
+				continue
+			}
+			if changed {
 				note(v.Key())
 				v.Subsection = clean
 			}
@@ -159,15 +169,25 @@ func hasUserinfoBeforePath(s string) bool {
 }
 
 // stripURLUserinfo removes any user[:password]@ userinfo from an http(s) URL,
-// returning the cleaned string and whether it changed. Non-URL or
-// non-http(s) strings (e.g. scp-style git@host:path) are returned unchanged.
-func stripURLUserinfo(s string) (string, bool) {
-	u, err := url.Parse(strings.TrimSpace(s))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User == nil {
-		return s, false
+// returning the cleaned string and whether it changed. When the string cannot be
+// parsed but still carries userinfo (an "@" before the path), it signals drop so
+// the caller removes the whole key rather than leave the userinfo in the section
+// header. Non-URL or non-http(s) strings (e.g. scp-style git@host:path) are
+// returned unchanged. Mirrors sanitizeURLValue.
+func stripURLUserinfo(s string) (clean string, changed, drop bool) {
+	t := strings.TrimSpace(s)
+	u, err := url.Parse(t)
+	if err == nil {
+		if (u.Scheme != "http" && u.Scheme != "https") || u.User == nil {
+			return s, false, false
+		}
+		u.User = nil
+		return u.String(), true, false
 	}
-	u.User = nil
-	return u.String(), true
+	if hasUserinfoBeforePath(t) {
+		return "", false, true
+	}
+	return s, false, false
 }
 
 // serializeGitConfig renders variables back to git config file syntax. Values
