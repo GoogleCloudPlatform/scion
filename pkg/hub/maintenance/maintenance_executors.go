@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -1390,118 +1389,6 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 		"latest", remoteCommit[:8])
 
 	return result, nil
-}
-
-// ReleaseUpdateCheckResult contains the result of a release-based update check
-// for binary-tier deployments.
-type ReleaseUpdateCheckResult struct {
-	Tier            string `json:"tier"`
-	UpdateAvailable bool   `json:"update_available"`
-	CurrentVersion  string `json:"current_version"`
-	LatestVersion   string `json:"latest_version"`
-	Channel         string `json:"channel"`
-	DownloadURL     string `json:"download_url,omitempty"`
-	ChecksumsURL    string `json:"checksums_url,omitempty"`
-	ReleaseURL      string `json:"release_url,omitempty"`
-}
-
-// CheckForReleaseUpdates checks for available binary updates by fetching the
-// release manifest via pkg/version/update. It returns version comparison results
-// and download URLs for binary-tier deployments.
-func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo string) (*ReleaseUpdateCheckResult, error) {
-	log := logging.Subsystem("hub.maintenance.check-release-updates")
-
-	// Determine channel: explicit config takes precedence, then detect from version.
-	if channel == "" {
-		channel = update.DetectChannel(currentVersion)
-	}
-
-	result := &ReleaseUpdateCheckResult{
-		Tier:           "binary",
-		CurrentVersion: currentVersion,
-		Channel:        channel,
-	}
-
-	// If no channel can be determined (dev builds), return early.
-	if channel == "" {
-		log.Debug("No release channel detected, skipping update check", "version", currentVersion)
-		return result, nil
-	}
-
-	// Build the manifest URL for the configured repo.
-	manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/LATEST.json", repo)
-
-	manifest, err := update.FetchManifest(ctx, update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("fetch release manifest: %w", err)
-	}
-
-	latest, ok := manifest.Channels[channel]
-	if !ok || latest.Version == "" {
-		log.Debug("No version found for channel", "channel", channel)
-		return result, nil
-	}
-
-	result.LatestVersion = latest.Version
-	result.ReleaseURL = latest.URL
-
-	// Compare versions using the same logic as pkg/version/update.
-	info, err := update.CheckForUpdate(ctx, currentVersion,
-		update.WithManifestURL(manifestURL))
-	if err != nil {
-		return nil, fmt.Errorf("check for update: %w", err)
-	}
-	result.UpdateAvailable = info.UpdateAvailable
-
-	// If an update is available, resolve the download and checksums URLs
-	// from GitHub Releases.
-	if result.UpdateAvailable {
-		downloadURL, checksumsURL, err := resolveReleaseAssets(ctx, repo, result.LatestVersion)
-		if err != nil {
-			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
-			// Non-fatal: we still know an update is available.
-		} else {
-			result.DownloadURL = downloadURL
-			result.ChecksumsURL = checksumsURL
-			if checksumsURL == "" {
-				// Not fatal here either: BinaryUpdateExecutor.Run fails
-				// closed on its own when it can't verify a checksum, but
-				// that decision belongs there, not in the check step.
-				log.Warn("Release has no SHA256SUMS asset; the binary update will fail closed",
-					"version", result.LatestVersion)
-			}
-		}
-	}
-
-	log.Info("Release update check complete",
-		"current", currentVersion,
-		"latest", result.LatestVersion,
-		"channel", channel,
-		"update_available", result.UpdateAvailable)
-
-	return result, nil
-}
-
-// resolveReleaseAssets looks up a release tag with a single-tag GitHub API
-// call and returns the platform tarball's URL and the SHA256SUMS URL
-// (empty, not an error, when the release has none). Both are pinned to the
-// repo's release download path.
-func resolveReleaseAssets(ctx context.Context, repo, tag string) (downloadURL, checksumsURL string, err error) {
-	rel, err := NewGitHubReleases(repo).ReleaseByTag(ctx, tag)
-	if err != nil {
-		return "", "", err
-	}
-	bin, ok := rel.Asset(BinaryAssetName())
-	if !ok {
-		return "", "", fmt.Errorf("no asset matching %q found in release %s", BinaryAssetName(), tag)
-	}
-	if err := CheckAssetURL(repo, tag, bin.URL); err != nil {
-		return "", "", err
-	}
-	if sums, ok := rel.Asset(ChecksumsAssetName); ok && CheckAssetURL(repo, tag, sums.URL) == nil {
-		checksumsURL = sums.URL
-	}
-	return bin.URL, checksumsURL, nil
 }
 
 // ExtractScionBinary extracts a .tar.gz archive and returns the path to the
