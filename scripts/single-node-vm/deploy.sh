@@ -53,7 +53,11 @@
 #
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
-#                       If omitted, the latest release is fetched from GitHub.
+#                       If omitted on a VM that already has /opt/scion, the
+#                       release it runs is kept (nothing is downloaded);
+#                       otherwise the latest release is fetched from GitHub.
+#                       A VERSION older than the running release is
+#                       installed with a DOWNGRADE warning.
 #   --update-policy POLICY
 #                       auto, notify, or disabled. Overrides update_policy in
 #                       the config file. The default is notify.
@@ -413,6 +417,68 @@ install_layout_command() {
     "SCIONLAYOUTEOF" \
     "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
     "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
+# points at on the hub VM (e.g. nightly-20261023, or git-<sha12> for an
+# adopted git build). Prints nothing when the VM has no layout yet, is
+# unreachable, or the link has an unexpected target. Never fails.
+read_current_release() {
+  local zone="$1" target
+  target="$(gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${zone}" --project="${PROJECT_ID}" \
+    --command="readlink ${INSTALL_ROOT}/current 2>/dev/null || true" 2>/dev/null)" || true
+  target="${target%%$'\n'*}"
+  target="${target//$'\r'/}"
+  if [[ "$target" == releases/* ]]; then
+    target="${target#releases/}"
+    if [[ "$target" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+      printf '%s' "$target"
+    fi
+  fi
+}
+
+# release_order A B -- prints older, newer or same for release tag A
+# relative to B, or unknown when they cannot be ordered (different
+# channels, or a git build). Nightlies order by date; semver tags order by
+# version, with a pre-release (v1.0.0-preview.2) older than its release.
+release_order() {
+  local a="$1" b="$2" semver_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-([0-9A-Za-z.-]+))?$'
+  local ka kb ap bp
+  if [[ "$a" == "$b" ]]; then
+    echo same
+    return 0
+  fi
+  if [[ "$a" == nightly-* && "$b" == nightly-* ]]; then
+    ka="${a#nightly-}"
+    kb="${b#nightly-}"
+  elif [[ "$a" =~ $semver_re ]]; then
+    ka="${BASH_REMATCH[1]}"
+    ap="${BASH_REMATCH[3]}"
+    if [[ ! "$b" =~ $semver_re ]]; then
+      echo unknown
+      return 0
+    fi
+    kb="${BASH_REMATCH[1]}"
+    bp="${BASH_REMATCH[3]}"
+    if [[ "$ka" == "$kb" ]]; then
+      # Same core version: the release outranks any pre-release of it.
+      if [[ -z "$ap" ]]; then echo newer; return 0; fi
+      if [[ -z "$bp" ]]; then echo older; return 0; fi
+      ka="$ap"
+      kb="$bp"
+    fi
+  else
+    echo unknown
+    return 0
+  fi
+  if [[ "$ka" == "$kb" ]]; then
+    echo same
+  elif [[ "$(printf '%s\n%s\n' "$ka" "$kb" | sort -V | head -1)" == "$ka" ]]; then
+    echo older
+  else
+    echo newer
+  fi
 }
 
 # read_update_policy_config -- prints the config file's update_policy
@@ -1491,6 +1557,36 @@ fi
 echo "  Update policy: ${UPDATE_POLICY}"
 
 # --- Release version ---
+# Without --version, a hub VM that already has the ${INSTALL_ROOT} layout
+# keeps the release it currently runs: the hub may have updated itself past
+# what the GitHub auto-detect below would pick (it reads /releases/latest,
+# not the hub's channel), and silently swapping current back would be a
+# downgrade nobody asked for. The binary is then neither downloaded nor
+# switched. An explicit --version is always honoured (see the downgrade
+# warning in Phase 3).
+VERSION_FROM_CLI=false
+[[ -n "$VERSION" ]] && VERSION_FROM_CLI=true
+KEEP_CURRENT_RELEASE=false
+if [[ -z "$VERSION" ]]; then
+  EXISTING_VM_ZONE="$(gcloud compute instances list \
+    --filter="name=${INSTANCE_NAME}" \
+    --format="value(zone)" \
+    --project="${PROJECT_ID}" 2>/dev/null | head -1)" || true
+  EXISTING_VM_ZONE="${EXISTING_VM_ZONE##*/}"
+  if [[ -n "$EXISTING_VM_ZONE" ]]; then
+    info "Checking the release installed on ${INSTANCE_NAME}..."
+    CURRENT_RELEASE="$(read_current_release "$EXISTING_VM_ZONE")"
+    if [[ "$CURRENT_RELEASE" == git-* ]]; then
+      err "${INSTANCE_NAME} runs a git build (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE}), not a release."
+      echo "  Pass --version <release tag> to choose the release to install." >&2
+      exit 1
+    elif [[ -n "$CURRENT_RELEASE" ]]; then
+      VERSION="$CURRENT_RELEASE"
+      KEEP_CURRENT_RELEASE=true
+      info "Keeping the installed release ${VERSION} (${INSTALL_ROOT}/current): the scion binary is not downloaded or switched. Pass --version to install a different release."
+    fi
+  fi
+fi
 if [[ -z "$VERSION" ]]; then
   info "Detecting latest Scion release..."
   # Try /releases/latest first (excludes pre-releases), fall back to
@@ -1578,10 +1674,19 @@ if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
 else
   ALLOW_UNVERIFIED_RELEASE=false
 fi
-info "Checking that release ${VERSION} publishes checksums..."
 SHA256SUMS_PREFLIGHT_RC=0
-curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
-if [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
+if [[ "$KEEP_CURRENT_RELEASE" == "true" && ${#CHAT_PLUGINS[@]} -eq 0 ]]; then
+  # Nothing is downloaded from the release (the binary is kept and there
+  # are no chat plugins), so there is nothing to verify; the release may
+  # even have aged out of GitHub (nightlies are kept for 14 days).
+  echo "  Keeping the installed binary and no chat plugins selected: no release download, checksum preflight skipped."
+else
+  info "Checking that release ${VERSION} publishes checksums..."
+  curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
+fi
+if [[ "$KEEP_CURRENT_RELEASE" == "true" && ${#CHAT_PLUGINS[@]} -eq 0 ]]; then
+  :
+elif [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
   echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
 elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
   # curl -f maps any HTTP error response to exit 22; anything else (DNS
@@ -2576,10 +2681,36 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # to /opt/scion/current/scion.
 SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
 SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
-info "Installing scion binary (${VERSION})..."
-gcloud compute ssh "${INSTANCE_NAME}" \
-  --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --command="
+# Downgrade guard: compare with what the VM currently runs. Without
+# --version, a VM whose layout the Phase 1 probe missed (e.g. SSH was not
+# ready yet) keeps its current release here instead of being switched to
+# the auto-detected one. With --version, the operator's choice is honoured,
+# with a clear warning when it is older than the current release.
+if [[ "$KEEP_CURRENT_RELEASE" != "true" ]]; then
+  CURRENT_RELEASE="$(read_current_release "$ZONE")"
+  if [[ -n "$CURRENT_RELEASE" && "$VERSION_FROM_CLI" != "true" ]]; then
+    warn "${INSTANCE_NAME} already runs ${CURRENT_RELEASE} (${INSTALL_ROOT}/current); keeping it instead of switching to the auto-detected ${VERSION}. Pass --version to install a different release."
+    KEEP_CURRENT_RELEASE=true
+  elif [[ -n "$CURRENT_RELEASE" ]]; then
+    case "$(release_order "$VERSION" "$CURRENT_RELEASE")" in
+      older)
+        warn "DOWNGRADE: --version ${VERSION} is OLDER than the release ${INSTANCE_NAME} runs now (${CURRENT_RELEASE})."
+        warn "Proceeding because --version was given explicitly. If ${CURRENT_RELEASE} already migrated the hub database, ${VERSION} may not start; ${CURRENT_RELEASE} stays installed as ${INSTALL_ROOT}/previous."
+        ;;
+      unknown)
+        warn "--version ${VERSION} and the current release ${CURRENT_RELEASE} cannot be ordered (different channels); this may be a downgrade. Proceeding because --version was given explicitly."
+        ;;
+    esac
+  fi
+fi
+
+if [[ "$KEEP_CURRENT_RELEASE" == "true" ]]; then
+  info "Keeping the installed scion binary (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE:-$VERSION}); not downloading or switching releases."
+else
+  info "Installing scion binary (${VERSION})..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
     curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
@@ -2607,7 +2738,8 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 $(install_layout_command install "${VERSION}" /tmp/scion)
     rm -f /tmp/scion /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
-  "
+    "
+fi
 
 # --- Download and install chat plugins ---
 if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then

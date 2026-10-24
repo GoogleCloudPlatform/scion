@@ -428,11 +428,15 @@ test_layout_settings_without_server_block_fails_unchanged() {
 # see README.md "How it works"): stops at the settings.yaml dev-mode write,
 # which comes after the binary install command. EXTRA_ARGS go after
 # --config.
+# LAYOUT_DEPLOY_VERSION picks the --version value (default v1.0.0-test);
+# "none" omits --version entirely.
 _layout_start_deploy_bg() {
-  local config_file="$1" log_file="$2"
+  local config_file="$1" log_file="$2" version="${LAYOUT_DEPLOY_VERSION:-v1.0.0-test}"
   shift 2
+  local version_args=(--version "$version")
+  [[ "$version" == "none" ]] && version_args=()
   set -m
-  bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test "$@" \
+  bash "$DEPLOY_SH" --config "$config_file" "${version_args[@]}" "$@" \
     < /dev/null > "$log_file" 2>&1 &
   _LAYOUT_DEPLOY_PID=$!
   set +m
@@ -449,12 +453,16 @@ _layout_stop_deploy_bg() {
 }
 
 # layout_deploy_through_settings CONFIG_JSON [EXTRA_ARGS...] -- sets
-# DEPLOY_LOG and LAYOUT_REACHED_SETTINGS (true/false).
+# DEPLOY_LOG, LAYOUT_CURL_LOG (deploy.sh's own local curl calls) and
+# LAYOUT_REACHED_SETTINGS (true/false).
 layout_deploy_through_settings() {
   local config_json="$1" config_file log_file pid waited_ms=0
   shift
   config_file="$(mktemp)"
   log_file="$(mktemp)"
+  local curl_log
+  curl_log="$(mktemp)"
+  export CURL_STUB_LOG="$curl_log"
   printf '%s' "$config_json" > "$config_file"
   local sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
   export GCLOUD_STUB_SSH_SUCCEEDS=true
@@ -469,8 +477,9 @@ layout_deploy_through_settings() {
   [[ -f "$sentinel" ]] && LAYOUT_REACHED_SETTINGS=true
   _layout_stop_deploy_bg "$pid"
   DEPLOY_LOG="$(cat "$log_file")"
-  rm -f "$config_file" "$log_file"
-  unset GCLOUD_STUB_SSH_SUCCEEDS
+  LAYOUT_CURL_LOG="$(cat "$curl_log")"
+  rm -f "$config_file" "$log_file" "$curl_log"
+  unset GCLOUD_STUB_SSH_SUCCEEDS CURL_STUB_LOG
 }
 
 # _layout_binary_install_cmd LOG -- the binary install command's body,
@@ -811,4 +820,109 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
     "a second run must leave the layout and settings exactly as the first left them"
   assert_eq "2" "$(grep -c '^systemctl restart scion-hub.service' "${LH_DIR}/work/systemctl.log")" "each run must restart the hub"
   rm -rf "$LH_DIR"
+}
+
+# =====================================================================
+# Re-runs on a VM that already has the layout (downgrade guard)
+# =====================================================================
+
+# Without --version, a VM with /opt/scion/current keeps the release it
+# runs: no GitHub auto-detect, no checksum probe, no binary download or
+# switch -- the hub may have updated itself past what auto-detect picks.
+test_layout_rerun_without_version_keeps_current_release() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  export GCLOUD_STUB_SSH_CURRENT_LINK="releases/nightly-20261020"
+  LAYOUT_DEPLOY_VERSION=none layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  unset GCLOUD_STUB_SSH_CURRENT_LINK
+  local log
+  log="$(gcloud_log)"
+  assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "the re-run must still reach the settings.yaml write (log: ${DEPLOY_LOG: -400})"
+  assert_contains "$DEPLOY_LOG" "Keeping the installed release nightly-20261020" \
+    "the re-run must say it keeps the current release"
+  assert_contains "$DEPLOY_LOG" "Pass --version to install a different release" "it must say how to change release"
+  assert_not_contains "$LAYOUT_CURL_LOG" "api.github.com" "no GitHub release auto-detect may run"
+  assert_not_contains "$LAYOUT_CURL_LOG" "SHA256SUMS" "with no chat plugins, no checksum probe is needed"
+  assert_not_contains "$log" "Downloading scion binary" "the binary must not be downloaded"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  assert_not_contains "$log" 'SCION_LAYOUT_SH" install' "current must not be switched"
+  assert_contains "$DEPLOY_LOG" "Keeping the installed scion binary" "Phase 3 must say the binary is kept"
+}
+
+test_layout_rerun_without_version_still_verifies_plugins() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  export GCLOUD_STUB_SSH_CURRENT_LINK="releases/nightly-20261020"
+  LAYOUT_DEPLOY_VERSION=none layout_deploy_through_settings \
+    "$(layout_config_json "$HUB" notify | sed 's/"chat_plugins": \[\]/"chat_plugins": ["telegram"]/')"
+  unset GCLOUD_STUB_SSH_CURRENT_LINK
+  local log
+  log="$(gcloud_log)"
+  assert_contains "$LAYOUT_CURL_LOG" "releases/download/nightly-20261020/SHA256SUMS" \
+    "chat plugins still come from the kept release, so its checksums must be probed"
+  assert_contains "$log" "scion-plugin-telegram-linux-amd64.tar.gz" "the plugin must still be installed from the kept release"
+  assert_not_contains "$log" "Downloading scion binary" "the binary must still not be downloaded"
+}
+
+test_layout_rerun_without_version_refuses_git_build() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  local config_file
+  config_file="$(mktemp)"
+  layout_config_json "$HUB" notify > "$config_file"
+  GCLOUD_STUB_SSH_SUCCEEDS=true GCLOUD_STUB_SSH_CURRENT_LINK="releases/git-abcdef012345" \
+    run_expect_fail bash "$DEPLOY_SH" --config "$config_file"
+  rm -f "$config_file"
+  assert_true "$([[ "$RUN_EXIT_CODE" -ne 0 ]] && echo true || echo false)" \
+    "a re-run without --version on a git build must stop"
+  assert_contains "$RUN_OUTPUT" "runs a git build" "the failure must say why"
+  assert_contains "$RUN_OUTPUT" "--version" "the failure must say how to proceed"
+  assert_not_contains "$(gcloud_log)" "services enable" "it must stop before any GCP change"
+}
+
+# _layout_rerun_with_version VERSION CURRENT_LINK -- an explicit --version
+# re-run against a VM whose current points at CURRENT_LINK.
+_layout_rerun_with_version() {
+  fresh_gcloud_state
+  seed_instance "scion-hub-${HUB}" "us-central1-b"
+  export GCLOUD_STUB_SSH_CURRENT_LINK="$2"
+  LAYOUT_DEPLOY_VERSION="$1" layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  unset GCLOUD_STUB_SSH_CURRENT_LINK
+}
+
+test_layout_rerun_explicit_older_version_warns_and_proceeds() {
+  _layout_rerun_with_version nightly-20261001 releases/nightly-20261024
+  assert_contains "$DEPLOY_LOG" "DOWNGRADE: --version nightly-20261001 is OLDER than the release scion-hub-${HUB} runs now (nightly-20261024)" \
+    "an explicit older nightly must be flagged as a downgrade"
+  assert_contains "$DEPLOY_LOG" "Proceeding because --version was given explicitly" "the warning must say it proceeds, and why"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install nightly-20261001 /tmp/scion' \
+    "the explicit version must still be installed"
+
+  _layout_rerun_with_version v1.0.0-test releases/v1.0.0
+  assert_contains "$DEPLOY_LOG" "DOWNGRADE: --version v1.0.0-test is OLDER" \
+    "a pre-release of the running release's version must be flagged as a downgrade"
+}
+
+test_layout_rerun_explicit_newer_or_same_version_no_warning() {
+  local current
+  for current in releases/v0.9.0 releases/v1.0.0-rc.1 releases/v1.0.0-test; do
+    _layout_rerun_with_version v1.0.0-test "$current"
+    assert_not_contains "$DEPLOY_LOG" "DOWNGRADE" "no downgrade warning for v1.0.0-test over ${current}"
+    assert_not_contains "$DEPLOY_LOG" "cannot be ordered" "no channel warning for v1.0.0-test over ${current}"
+    # shellcheck disable=SC2016 # a literal from the generated command
+    assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
+      "the explicit version must be installed over ${current}"
+  done
+  _layout_rerun_with_version nightly-20261024 releases/nightly-20261001
+  assert_not_contains "$DEPLOY_LOG" "DOWNGRADE" "no downgrade warning for a newer nightly"
+}
+
+test_layout_rerun_explicit_cross_channel_version_warns() {
+  _layout_rerun_with_version v1.0.0-test releases/nightly-20261024
+  assert_contains "$DEPLOY_LOG" "cannot be ordered (different channels)" \
+    "a version on another channel must get a may-be-a-downgrade warning"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
+    "and still be installed"
 }

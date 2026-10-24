@@ -1342,6 +1342,14 @@ STUBERR
       "uname -m")
         echo "${GCLOUD_STUB_SSH_ARCH:-x86_64}"
         ;;
+      "readlink /opt/scion/current 2>/dev/null || true")
+        # deploy.sh's read_current_release: the target of the VM's
+        # /opt/scion/current link (e.g. "releases/nightly-20261023").
+        # Empty by default -- a VM without the versioned layout yet.
+        if [[ -n "${GCLOUD_STUB_SSH_CURRENT_LINK:-}" ]]; then
+          echo "${GCLOUD_STUB_SSH_CURRENT_LINK}"
+        fi
+        ;;
       *"useradd -r -M -N -g scion"*)
         # The rendered NFS squash-identity script: its own docstring says
         # it prints exactly "SQUASH_UID:SCION_GID" on success.

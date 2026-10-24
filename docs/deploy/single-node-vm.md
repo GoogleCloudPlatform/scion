@@ -214,7 +214,8 @@ the VM always runs the active release. Do not copy a binary over
 `/usr/local/bin/scion` by hand: that replaces the symlink, and the Hub
 (which runs `/opt/scion/current/scion`) does not see the change. To install
 a different release, re-run `deploy.sh --version <tag>`, or update from the
-Maintenance page.
+Maintenance page. A re-run without `--version` keeps the release `current`
+points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
 
 ### Converting an existing VM (`migrate-layout`)
 
@@ -718,5 +719,17 @@ The script is idempotent. Re-running it will:
 - Install the requested release into `/opt/scion/releases/<tag>/` and switch
   `/opt/scion/current` to it. On a VM with the old layout, the old binary is
   kept as the `previous` release (see
-  [Binary layout and updates](#binary-layout-and-updates))
+  [Binary layout and updates](#binary-layout-and-updates)).
+- **Without `--version`, keep the release the VM already runs** when
+  `/opt/scion/current` exists. The Hub may have updated itself past the
+  release that auto-detect would pick (auto-detect reads GitHub's latest
+  release, not the Hub's channel), so the script neither downloads nor
+  switches the binary, and says so. Chat plugins are still installed from
+  that release. Pass `--version <tag>` to change releases. If the VM runs a
+  git build (`releases/git-<sha>`), the script stops and asks for
+  `--version`.
+- **With `--version` older than the running release**, print a `DOWNGRADE`
+  warning and proceed, because the version was chosen explicitly. A
+  downgrade can fail to start if the newer release already migrated the Hub
+  database. The newer release stays installed as `/opt/scion/previous`.
 - Re-deploy the Cloud Run proxy (converges to the same state)
