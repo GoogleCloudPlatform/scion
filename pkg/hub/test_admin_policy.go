@@ -567,6 +567,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.SecretRotation:               testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
