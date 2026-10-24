@@ -150,15 +150,15 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 	log.Info("Auto-applying update",
 		"version", result.LatestVersion)
 
-	// Check for an already-running update operation.
-	recentRuns, err := s.store.ListMaintenanceRuns(ctx, "update-binary", 1)
+	// Check for an already-running update or rebuild (one exclusive group).
+	blocking, err := s.maintenanceGroupInFlight(ctx, "update-binary")
 	if err != nil {
 		log.Error("Failed to check for running update operations", "error", err)
 		return
 	}
-	if len(recentRuns) > 0 && maintenanceRunInFlight(recentRuns[0].Status) {
-		log.Info("Update operation already running, skipping auto-apply",
-			"run_id", recentRuns[0].ID)
+	if blocking != nil {
+		log.Info("Update or rebuild already running, skipping auto-apply",
+			"run_id", blocking.ID, "operation_key", blocking.OperationKey)
 		return
 	}
 
@@ -179,8 +179,12 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 		StartedAt:    now,
 		StartedBy:    "system:auto-update",
 	}
-	if err := s.store.CreateMaintenanceRun(ctx, run); err != nil {
+	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); err != nil {
 		log.Error("Failed to create run record", "error", err)
+		return
+	} else if blocking != nil {
+		log.Info("Update or rebuild started meanwhile, skipping auto-apply",
+			"run_id", blocking.ID, "operation_key", blocking.OperationKey)
 		return
 	}
 

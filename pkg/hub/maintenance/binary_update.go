@@ -191,7 +191,12 @@ type BinaryUpdateOptions struct {
 //     verify the tarball's own checksum line;
 //  5. extract only `scion` and check `scion version --format json`;
 //  6. Installer.Stage, Installer.Activate, the before-restart hook,
-//     Installer.Restart.
+//     Installer.Restart. If the hook or Restart fails, an installer that
+//     implements Deactivator (symlink) is rolled back so nothing changed;
+//     sudo-install cannot be, and its error says the new binary stays.
+//
+// Preflight, install, the hook and Restart each run under a short deadline
+// derived from the run ctx, the download phase under DownloadTimeout.
 //
 // It writes no hub settings itself.
 type BinaryUpdateExecutor struct {
@@ -205,7 +210,21 @@ type BinaryUpdateExecutor struct {
 	buildTime   time.Time
 	maxBytes    int64
 	timeout     time.Duration
+
+	// Per-step deadlines after the download phase.
+	preflightTimeout time.Duration
+	installTimeout   time.Duration
+	hookTimeout      time.Duration
+	restartTimeout   time.Duration
 }
+
+// Deadlines for the steps of an update outside the download phase.
+const (
+	preflightTimeout = 30 * time.Second
+	installTimeout   = 2 * time.Minute
+	hookTimeout      = 30 * time.Second
+	restartTimeout   = 30 * time.Second
+)
 
 // NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
 func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
@@ -253,6 +272,10 @@ func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
 	if e.timeout <= 0 {
 		e.timeout = DefaultDownloadTimeout
 	}
+	e.preflightTimeout = preflightTimeout
+	e.installTimeout = installTimeout
+	e.hookTimeout = hookTimeout
+	e.restartTimeout = restartTimeout
 	return e
 }
 
@@ -343,7 +366,10 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 
 	// ── Preflight: before any network access ────────────────────────────
 	_, _ = fmt.Fprintf(logger, "==> Preflight (installer: %s)\n", e.installer.Name())
-	if err := e.installer.Preflight(ctx); err != nil {
+	preCtx, cancelPre := context.WithTimeout(ctx, e.preflightTimeout)
+	err := e.installer.Preflight(preCtx)
+	cancelPre()
+	if err != nil {
 		return fmt.Errorf("installer preflight failed (%s): %w", e.installer.Name(), err)
 	}
 	_, _ = fmt.Fprintln(logger, "Preflight passed.")
@@ -430,12 +456,18 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	cancel()
 
 	// ── Install ─────────────────────────────────────────────────────────
+	// Each remaining step has its own deadline, derived from the run ctx, so
+	// a hung sudo (NSS/PAM lookup) or store write cannot wedge the run.
 	_, _ = fmt.Fprintf(logger, "\n==> Installing %s (%s)\n", target, e.installer.Name())
-	staged, err := e.installer.Stage(ctx, target, bin)
+	installCtx, cancelInstall := context.WithTimeout(ctx, e.installTimeout)
+	staged, err := e.installer.Stage(installCtx, target, bin)
 	if err != nil {
+		cancelInstall()
 		return fmt.Errorf("stage %s: %w", target, err)
 	}
-	if err := e.installer.Activate(ctx, staged); err != nil {
+	err = e.installer.Activate(installCtx, staged)
+	cancelInstall()
+	if err != nil {
 		return fmt.Errorf("activate %s: %w", target, err)
 	}
 	_, _ = fmt.Fprintf(logger, "Installed %s.\n", target)
@@ -445,18 +477,45 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		displayVersion(e.current), target, time.Now().UTC().Format(time.RFC3339))
 	if before != nil {
 		p := PendingRestart{From: e.current, To: target, Strategy: e.installer.Name()}
-		if err := before(ctx, p); err != nil {
+		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
+		err := before(hookCtx, p)
+		cancelHook()
+		if err != nil {
 			log.Error("Before-restart hook failed; not restarting", "error", err)
-			return fmt.Errorf("%s is installed but the hub was not restarted, because recording the restart failed: %w (the hub will run %s after its next restart)",
-				target, err, target)
+			return e.undoActivation(ctx, logger, target,
+				fmt.Errorf("recording the restart failed, so the hub was not restarted: %w", err))
 		}
 	}
-	if err := e.installer.Restart(ctx); err != nil {
-		return fmt.Errorf("%s is installed but restarting the hub failed: %w", target, err)
+	restartCtx, cancelRestart := context.WithTimeout(ctx, e.restartTimeout)
+	err = e.installer.Restart(restartCtx)
+	cancelRestart()
+	if err != nil {
+		return e.undoActivation(ctx, logger, target, fmt.Errorf("restarting the hub failed: %w", err))
 	}
 	log.Info("Binary update installed, restart requested", "from", e.current, "to", target)
 	_, _ = fmt.Fprintln(logger, "Restart requested.")
 	return nil
+}
+
+// undoActivation is called when an activated update cannot be followed by a
+// restart. Installers that implement Deactivator are rolled back, so the
+// failed run changed nothing. Others (sudo-install keeps no backup) leave
+// the new binary installed, and the error says it will run after the next
+// restart.
+func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Writer, target string, cause error) error {
+	d, ok := e.installer.(Deactivator)
+	if !ok {
+		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
+			cause, target, e.installer.Name(), target)
+	}
+	undoCtx, cancel := context.WithTimeout(ctx, e.installTimeout)
+	defer cancel()
+	if err := d.Deactivate(undoCtx); err != nil {
+		return fmt.Errorf("%w; rolling back %s also failed (%v): %s stays installed and will run after the hub's next restart",
+			cause, target, err, target)
+	}
+	_, _ = fmt.Fprintf(logger, "Rolled back: the previous release is active again.\n")
+	return fmt.Errorf("%w; %s was rolled back, nothing changed", cause, target)
 }
 
 // resolveLatest returns the latest release of channel from LATEST.json and

@@ -451,23 +451,18 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	//   - Stale "running" runs left behind by a crash are reset to "failed" by
 	//     AbortRunningMaintenanceOps() at startup, so the guard cannot wedge an
 	//     operation permanently.
-	// There is a narrow TOCTOU window — two requests arriving at nearly the
-	// same instant could both pass this check before either writes its run
-	// record — but the goal is to stop accidental double-clicks and repeated
-	// triggers from piling up expensive builds on the hub VM, not to defend
-	// against adversarial concurrency.
-	recentRuns, err := s.store.ListMaintenanceRuns(ctx, key, 1)
-	if err != nil {
+	// Operations that install the hub binary (update-binary, rebuild-server)
+	// form one exclusive group: a run of either blocks both. This is a fast
+	// early check; createExclusiveMaintenanceRun repeats it atomically (for
+	// this process) right before creating the run.
+	if blocking, err := s.maintenanceGroupInFlight(ctx, key); err != nil {
 		log.Error("Failed to list recent runs", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
 		return
-	}
-	if len(recentRuns) > 0 && maintenanceRunInFlight(recentRuns[0].Status) {
+	} else if blocking != nil {
 		log.Debug("Rejected: operation already running",
-			maintenanceLogAttrs(key, "run_id", recentRuns[0].ID, "user", user.Email())...)
-		writeError(w, http.StatusConflict, ErrCodeConflict, "Operation is already running", map[string]interface{}{
-			"runId": recentRuns[0].ID,
-		})
+			maintenanceLogAttrs(key, "run_id", blocking.ID, "blocking_key", blocking.OperationKey, "user", user.Email())...)
+		writeMaintenanceInFlight(w, key, blocking)
 		return
 	}
 
@@ -514,9 +509,12 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		StartedAt:    now,
 		StartedBy:    user.Email(),
 	}
-	if err := s.store.CreateMaintenanceRun(ctx, run); err != nil {
+	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); err != nil {
 		log.Error("Failed to create run record", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to create run record", nil)
+		return
+	} else if blocking != nil {
+		writeMaintenanceInFlight(w, key, blocking)
 		return
 	}
 

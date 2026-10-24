@@ -1582,13 +1582,26 @@ const EnvMaintenanceInstallRoot = "SCION_MAINTENANCE_INSTALL_ROOT"
 const DefaultMaintenanceInstallRoot = "/opt/scion"
 
 // MaintenanceInstallRoot resolves the install root: $SCION_MAINTENANCE_INSTALL_ROOT,
-// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil.
+// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil. A
+// relative value is ignored with a warning (it would resolve against the
+// hub's working directory) and the next source is used.
 func MaintenanceInstallRoot(m *V1MaintenanceConfig) string {
-	if v := strings.TrimSpace(os.Getenv(EnvMaintenanceInstallRoot)); v != "" {
-		return v
+	candidates := []struct{ source, value string }{
+		{EnvMaintenanceInstallRoot, os.Getenv(EnvMaintenanceInstallRoot)},
 	}
-	if m != nil && strings.TrimSpace(m.InstallRoot) != "" {
-		return strings.TrimSpace(m.InstallRoot)
+	if m != nil {
+		candidates = append(candidates, struct{ source, value string }{"server.maintenance.install_root", m.InstallRoot})
+	}
+	for _, c := range candidates {
+		v := strings.TrimSpace(c.value)
+		if v == "" {
+			continue
+		}
+		if !filepath.IsAbs(v) {
+			slog.Warn("Ignoring relative maintenance install root; it must be an absolute path", "source", c.source, "value", v)
+			continue
+		}
+		return filepath.Clean(v)
 	}
 	return DefaultMaintenanceInstallRoot
 }

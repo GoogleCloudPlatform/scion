@@ -588,3 +588,131 @@ func TestCheckAllowedParams(t *testing.T) {
 		t.Fatalf("message = %q, want sorted unknown names", err)
 	}
 }
+
+func TestBinaryUpdate_HookFailureRollsBackSymlink(t *testing.T) {
+	requireLinux(t)
+	gh := newFakeGitHub(t)
+	gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+
+	root := installLayout(t, "nightly-20261022", "nightly-20261021")
+	if err := os.Symlink("releases/nightly-20261021", filepath.Join(root, prevLinkName)); err != nil {
+		t.Fatal(err)
+	}
+	opts := symlinkOpts(root)
+	signals := 0
+	opts.Signal = func() error { signals++; return nil }
+	inst := Detect(context.Background(), opts)
+	if inst.Name() != StrategySymlink {
+		t.Fatalf("Detect = %s (%s)", inst.Name(), inst.Status().Reason)
+	}
+	e := newTestExecutor(gh, inst, "nightly-20261022")
+	params := map[string]string{"target_version": "nightly-20261023"}
+
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, params,
+		func(context.Context, PendingRestart) error { return errors.New("db down") })
+	if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") {
+		t.Fatalf("err = %v, want rollback", err)
+	}
+	if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261022" {
+		t.Fatalf("current = %q after rollback", cur)
+	}
+	if prev := readLink(t, root, prevLinkName); prev != "releases/nightly-20261021" {
+		t.Fatalf("previous = %q after rollback", prev)
+	}
+	if signals != 0 {
+		t.Fatal("signalled although the hook failed")
+	}
+
+	// A retry of the same target now goes through.
+	if err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, params,
+		func(context.Context, PendingRestart) error { return nil }); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261023" {
+		t.Fatalf("current after retry = %q", cur)
+	}
+	if signals != 1 {
+		t.Fatalf("signals = %d, want 1", signals)
+	}
+}
+
+func TestBinaryUpdate_HookFailureSudoInstallSaysNoRollback(t *testing.T) {
+	requireLinux(t)
+	gh := newFakeGitHub(t)
+	gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+	opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+	inst := Detect(context.Background(), opts)
+	if inst.Name() != StrategySudoInstall {
+		t.Fatalf("Detect = %s", inst.Name())
+	}
+	e := newTestExecutor(gh, inst, "nightly-20261022")
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+		func(context.Context, PendingRestart) error { return errors.New("db down") })
+	if err == nil || !strings.Contains(err.Error(), "cannot be rolled back") || !strings.Contains(err.Error(), "next restart") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, c := range r.runs {
+		if strings.Contains(c, "systemctl restart") && !strings.Contains(c, " -l ") {
+			t.Fatalf("restarted although the hook failed: %q", c)
+		}
+	}
+}
+
+func TestBinaryUpdate_StepDeadlines(t *testing.T) {
+	requireLinux(t)
+
+	t.Run("hung sudo install fails the run", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+		inst := Detect(context.Background(), opts)
+		r.block = map[string]bool{
+			"sudo -n install -m 755 " + filepath.Join(opts.RepoPath, SudoStagingName) + " /usr/local/bin/scion": true,
+		}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		e.installTimeout = 50 * time.Millisecond
+		hooked := false
+		err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+			func(context.Context, PendingRestart) error { hooked = true; return nil })
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want deadline exceeded", err)
+		}
+		if hooked {
+			t.Fatal("hook ran after a failed install")
+		}
+	})
+
+	t.Run("hung preflight fails the run without network", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+		inst := Detect(context.Background(), opts)
+		r.block = map[string]bool{"sudo -n -l " + strings.ReplaceAll(ruleInstall, "$REPO", opts.RepoPath): true}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		e.preflightTimeout = 50 * time.Millisecond
+		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"})
+		if err == nil || !strings.Contains(err.Error(), "preflight failed") {
+			t.Fatalf("err = %v", err)
+		}
+		if gh.requestCount() != 0 {
+			t.Fatal("network used after a failed preflight")
+		}
+	})
+
+	t.Run("hook gets a bounded context", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		inst := &fakeInstaller{}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		e.hookTimeout = 50 * time.Millisecond
+		err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+			func(ctx context.Context, _ PendingRestart) error { <-ctx.Done(); return ctx.Err() })
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v", err)
+		}
+		for _, c := range inst.calls {
+			if c == "restart" {
+				t.Fatal("restarted after the hook timed out")
+			}
+		}
+	})
+}

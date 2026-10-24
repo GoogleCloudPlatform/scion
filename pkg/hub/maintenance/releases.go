@@ -181,16 +181,22 @@ func ReleaseDownloadPrefix(repo, tag string) string {
 
 // CheckAssetURL fails unless assetURL is an asset of repo@tag on github.com:
 // it must start with ReleaseDownloadPrefix(repo, tag) and name a single file.
+// GitHub owner and repository names are case-insensitive, so the
+// "https://github.com/<repo>/" part is compared ignoring case; the rest of
+// the prefix (releases/download/<tag>/) must match exactly.
 func CheckAssetURL(repo, tag, assetURL string) error {
 	prefix := ReleaseDownloadPrefix(repo, tag)
-	if !strings.HasPrefix(assetURL, prefix) {
+	repoPart := "https://github.com/" + repo + "/"
+	if len(assetURL) < len(prefix) ||
+		!strings.EqualFold(assetURL[:len(repoPart)], repoPart) ||
+		assetURL[len(repoPart):len(prefix)] != prefix[len(repoPart):] {
 		return fmt.Errorf("asset URL %q is not under %s", assetURL, prefix)
 	}
 	u, err := url.Parse(assetURL)
 	if err != nil || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("asset URL %q is not a plain github.com release asset", assetURL)
 	}
-	name := strings.TrimPrefix(assetURL, prefix)
+	name := assetURL[len(prefix):]
 	if name == "" || strings.ContainsAny(name, "/\\%") || name == "." || name == ".." {
 		return fmt.Errorf("asset URL %q does not name a single release file", assetURL)
 	}

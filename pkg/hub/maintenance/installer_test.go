@@ -96,6 +96,13 @@ func TestSymlinkInstaller_Preflight(t *testing.T) {
 		}
 	})
 
+	t.Run("relative root", func(t *testing.T) {
+		err := newSymlinkInstaller(symlinkOpts("opt/scion")).Preflight(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+			t.Fatalf("Preflight = %v", err)
+		}
+	})
+
 	t.Run("missing root", func(t *testing.T) {
 		opts := symlinkOpts(filepath.Join(t.TempDir(), "nope"))
 		if err := newSymlinkInstaller(opts).Preflight(context.Background()); err == nil {
@@ -295,6 +302,35 @@ func TestSymlinkInstaller_Prune(t *testing.T) {
 	}
 }
 
+func TestSymlinkInstaller_Deactivate(t *testing.T) {
+	ctx := context.Background()
+	root := installLayout(t, "nightly-20261022")
+	inst := newSymlinkInstaller(symlinkOpts(root))
+	if err := inst.Deactivate(ctx); err == nil {
+		t.Fatal("Deactivate without an activation succeeded")
+	}
+	staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Activate(ctx, staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Deactivate(ctx); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261022" {
+		t.Fatalf("current = %q", cur)
+	}
+	// There was no previous before the activation, so none is left.
+	if _, err := os.Lstat(filepath.Join(root, prevLinkName)); !os.IsNotExist(err) {
+		t.Fatalf("previous left behind: %v", err)
+	}
+	if err := inst.Deactivate(ctx); err == nil {
+		t.Fatal("second Deactivate succeeded")
+	}
+}
+
 func TestSymlinkInstaller_Restart(t *testing.T) {
 	called := false
 	opts := symlinkOpts(t.TempDir())
@@ -311,13 +347,22 @@ type fakeRunner struct {
 	runs    []string
 	starts  []string
 	failRun map[string]error // joined full command → error
+	block   map[string]bool  // joined full command → block until ctx is done
+	// startExit, when set, is the exit result of started commands, sent
+	// right away; otherwise they keep "running".
+	startExit error
 }
 
-func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	cmd := strings.Join(append([]string{name}, args...), " ")
 	f.runs = append(f.runs, cmd)
+	if f.block[cmd] {
+		f.mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	defer f.mu.Unlock()
 	if err := f.failRun[cmd]; err != nil {
 		return []byte("boom"), err
 	}
@@ -330,11 +375,15 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 	return nil, nil
 }
 
-func (f *fakeRunner) Start(name string, args ...string) error {
+func (f *fakeRunner) Start(name string, args ...string) (<-chan error, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, strings.Join(append([]string{name}, args...), " "))
-	return nil
+	done := make(chan error, 1)
+	if f.startExit != nil {
+		done <- f.startExit
+	}
+	return done, nil
 }
 
 func sudoOpts(t *testing.T, allowed ...string) (DetectOptions, *fakeRunner) {
@@ -384,6 +433,7 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 	t.Run("plain rule only falls back to plain restart", func(t *testing.T) {
 		opts, r := sudoOpts(t, ruleInstall, rulePlain)
 		inst := newSudoInstaller(opts)
+		inst.restartGrace = 10 * time.Millisecond
 		if err := inst.Preflight(ctx); err != nil {
 			t.Fatalf("Preflight: %v", err)
 		}
@@ -392,6 +442,49 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 		}
 		if len(r.starts) != 1 || r.starts[0] != rulePlainTk {
 			t.Fatalf("starts = %v, want [%q]", r.starts, rulePlainTk)
+		}
+	})
+
+	t.Run("plain restart that fails early fails Restart", func(t *testing.T) {
+		opts, r := sudoOpts(t, ruleInstall, rulePlain)
+		r.startExit = errors.New("exit status 1")
+		inst := newSudoInstaller(opts)
+		inst.restartGrace = time.Minute
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := inst.Restart(ctx); err == nil || !strings.Contains(err.Error(), "exit status 1") {
+			t.Fatalf("Restart = %v, want the child's failure", err)
+		}
+	})
+
+	t.Run("plain restart that exits cleanly", func(t *testing.T) {
+		opts, r := sudoOpts(t, ruleInstall, rulePlain)
+		inst := newSudoInstaller(opts)
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatal(err)
+		}
+		r.startExit = nil
+		inst.restartGrace = time.Minute
+		// Exit result nil arrives immediately via a closed-over channel.
+		inst.runner = exitRunner{fakeRunner: r}
+		if err := inst.Restart(ctx); err != nil {
+			t.Fatalf("Restart = %v", err)
+		}
+	})
+
+	t.Run("hung sudo install hits the deadline", func(t *testing.T) {
+		opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+		inst := newSudoInstaller(opts)
+		staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.block = map[string]bool{"sudo -n install -m 755 " + staged + " /usr/local/bin/scion": true}
+		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer cancel()
+		if err := inst.Activate(tctx, staged); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Activate = %v, want deadline exceeded", err)
 		}
 	})
 
@@ -545,4 +638,17 @@ func (b *blanketRunner) Run(context.Context, string, ...string) ([]byte, error) 
 	b.calls++
 	return nil, nil
 }
-func (b *blanketRunner) Start(string, ...string) error { b.calls++; return nil }
+func (b *blanketRunner) Start(string, ...string) (<-chan error, error) {
+	b.calls++
+	return make(chan error), nil
+}
+
+// exitRunner is a fakeRunner whose started commands exit successfully at once.
+type exitRunner struct{ *fakeRunner }
+
+func (e exitRunner) Start(name string, args ...string) (<-chan error, error) {
+	_, _ = e.fakeRunner.Start(name, args...)
+	done := make(chan error, 1)
+	done <- nil
+	return done, nil
+}

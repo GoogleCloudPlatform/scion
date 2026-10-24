@@ -83,6 +83,19 @@ func TestCheckAssetURL(t *testing.T) {
 	if err := CheckAssetURL(repo, tag, good); err != nil {
 		t.Fatalf("good URL refused: %v", err)
 	}
+	// Owner/repo are case-insensitive on GitHub.
+	if err := CheckAssetURL("googlecloudplatform/SCION", tag, good); err != nil {
+		t.Fatalf("repo case difference refused: %v", err)
+	}
+	if err := CheckAssetURL(repo, tag, strings.Replace(good, "/releases/download/", "/Releases/Download/", 1)); err == nil {
+		t.Fatal("case difference outside owner/repo accepted")
+	}
+	if err := CheckAssetURL(repo, "nightly-20261023", strings.Replace(good, "nightly-20261023", "NIGHTLY-20261023", 1)); err == nil {
+		t.Fatal("tag case difference accepted")
+	}
+	if err := CheckAssetURL(repo, tag, "https://github.com/x"); err == nil {
+		t.Fatal("short URL accepted")
+	}
 	for name, u := range map[string]string{
 		"foreign host":     "https://evil.example.com/GoogleCloudPlatform/scion/releases/download/nightly-20261023/scion-linux-amd64.tar.gz",
 		"http":             "http://github.com/GoogleCloudPlatform/scion/releases/download/nightly-20261023/scion-linux-amd64.tar.gz",

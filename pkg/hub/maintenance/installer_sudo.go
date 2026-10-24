@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SudoStagingName is the file, in the maintenance repo, where sudo-install
@@ -42,6 +43,9 @@ type sudoInstaller struct {
 	binaryDest  string
 	serviceName string
 	runner      CommandRunner
+	// restartGrace is how long the plain restart is watched for an early
+	// failure; default plainRestartGrace.
+	restartGrace time.Duration
 
 	mu      sync.Mutex
 	noBlock bool // the --no-block restart rule exists (set by Preflight)
@@ -49,12 +53,17 @@ type sudoInstaller struct {
 
 func newSudoInstaller(opts DetectOptions) *sudoInstaller {
 	return &sudoInstaller{
-		repoPath:    opts.RepoPath,
-		binaryDest:  opts.BinaryDest,
-		serviceName: opts.ServiceName,
-		runner:      opts.Runner,
+		repoPath:     opts.RepoPath,
+		binaryDest:   opts.BinaryDest,
+		serviceName:  opts.ServiceName,
+		runner:       opts.Runner,
+		restartGrace: plainRestartGrace,
 	}
 }
+
+// plainRestartGrace bounds how long Restart watches a plain
+// `systemctl restart` for an early failure.
+const plainRestartGrace = 10 * time.Second
 
 func (s *sudoInstaller) stagingPath() string { return filepath.Join(s.repoPath, SudoStagingName) }
 
@@ -150,6 +159,9 @@ func (s *sudoInstaller) Activate(ctx context.Context, staged string) error {
 	}
 	args := append([]string{"-n"}, s.installArgv()...)
 	if out, err := s.runner.Run(ctx, "sudo", args...); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("sudo %s: %w", strings.Join(s.installArgv(), " "), ctx.Err())
+		}
 		if detail := strings.TrimSpace(string(out)); detail != "" {
 			return fmt.Errorf("sudo %s: %s", strings.Join(s.installArgv(), " "), detail)
 		}
@@ -170,10 +182,27 @@ func (s *sudoInstaller) Restart(ctx context.Context) error {
 		return nil
 	}
 	args := append([]string{"-n"}, s.restartArgv(false)...)
-	if err := s.runner.Start("sudo", args...); err != nil {
+	done, err := s.runner.Start("sudo", args...)
+	if err != nil {
 		return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(false), " "), err)
 	}
-	return nil
+	// The plain restart blocks until systemd has stopped this process, so a
+	// child still running after the grace period means the restart is under
+	// way. One that exits with an error in that window (rule removed, sudo
+	// misconfigured) did not restart anything: report it.
+	timer := time.NewTimer(s.restartGrace)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(false), " "), err)
+		}
+		return nil
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 // Retained implements Installer: sudo-install keeps no releases.

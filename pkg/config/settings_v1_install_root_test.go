@@ -64,4 +64,12 @@ func TestMaintenanceInstallRoot_Resolution(t *testing.T) {
 	t.Setenv(EnvMaintenanceInstallRoot, "/srv/env")
 	assert.Equal(t, "/srv/env", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/a"}))
 	assert.Equal(t, "/srv/env", MaintenanceInstallRoot(nil))
+
+	// Relative values are ignored and the next source applies.
+	t.Setenv(EnvMaintenanceInstallRoot, "opt/scion")
+	assert.Equal(t, "/srv/a", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/a"}))
+	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "./scion"}))
+	t.Setenv(EnvMaintenanceInstallRoot, "")
+	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "relative"}))
+	assert.Equal(t, "/srv/b", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/b/"}))
 }

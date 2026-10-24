@@ -22,8 +22,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // RetainedReleases is how many release directories the symlink installer
@@ -52,6 +54,9 @@ type symlinkInstaller struct {
 	signal     func() error
 	uid        func() int
 	keep       int
+
+	mu   sync.Mutex
+	last *activation // undo record of the last Activate
 }
 
 func newSymlinkInstaller(opts DetectOptions) *symlinkInstaller {
@@ -81,6 +86,9 @@ func (s *symlinkInstaller) Status() InstallerStatus {
 // <root>/releases/, <root>/current is a symlink owned by the hub user, and
 // the root and releases directories are writable.
 func (s *symlinkInstaller) Preflight(context.Context) error {
+	if !filepath.IsAbs(s.root) {
+		return fmt.Errorf("install root %q is not an absolute path", s.root)
+	}
 	root, err := filepath.EvalSymlinks(s.root)
 	if err != nil {
 		return fmt.Errorf("install root %s not found", s.root)
@@ -159,7 +167,8 @@ func (s *symlinkInstaller) Stage(_ context.Context, tag, bin string) (string, er
 // Activate implements Installer: previous is pointed at the old current
 // target, then current is swapped to the staged release with
 // symlink(current.new) + rename, which is atomic. If the current swap fails
-// previous is restored. Old releases are then pruned (best effort).
+// previous is restored. Old releases are then pruned (best effort), keeping
+// what Deactivate would restore.
 func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 	if filepath.Clean(filepath.Dir(staged)) != filepath.Clean(s.releasesDir()) {
 		return fmt.Errorf("staged release %s is not in %s", staged, s.releasesDir())
@@ -172,6 +181,7 @@ func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 
 	oldCurrent, _ := os.Readlink(s.linkPath(currentLinkName))
 	oldPrevious, prevErr := os.Readlink(s.linkPath(prevLinkName))
+	undo := &activation{oldCurrent: oldCurrent, oldPrevious: oldPrevious, hadPrevious: prevErr == nil}
 
 	swappedPrevious := false
 	if oldCurrent != "" && filepath.Base(oldCurrent) != tag {
@@ -182,16 +192,61 @@ func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 	}
 	if err := s.swapLink(currentLinkName, target); err != nil {
 		if swappedPrevious {
-			if prevErr == nil {
-				_ = s.swapLink(prevLinkName, oldPrevious)
-			} else {
-				_ = os.Remove(s.linkPath(prevLinkName))
-			}
+			_ = s.restorePrevious(undo)
 		}
 		return fmt.Errorf("update %s: %w", currentLinkName, err)
 	}
 
-	_ = s.prune()
+	s.mu.Lock()
+	s.last = undo
+	s.mu.Unlock()
+
+	_ = s.prune(filepath.Base(oldPrevious))
+	return nil
+}
+
+// activation records the links Activate replaced, for Deactivate.
+type activation struct {
+	oldCurrent  string
+	oldPrevious string
+	hadPrevious bool
+}
+
+// Deactivate implements Deactivator: it points current and previous back
+// at what they were before the last Activate, so a failed update leaves the
+// hub on its old release with nothing changed.
+func (s *symlinkInstaller) Deactivate(context.Context) error {
+	s.mu.Lock()
+	undo := s.last
+	s.last = nil
+	s.mu.Unlock()
+	if undo == nil {
+		return errors.New("no activation to undo")
+	}
+	if undo.oldCurrent == "" {
+		return errors.New("current did not exist before the activation; cannot restore it")
+	}
+	if err := s.swapLink(currentLinkName, undo.oldCurrent); err != nil {
+		return fmt.Errorf("restore %s: %w", currentLinkName, err)
+	}
+	return s.restorePrevious(undo)
+}
+
+// restorePrevious points previous back at its pre-activation target, or
+// removes it if there was none (or its release has since been removed).
+func (s *symlinkInstaller) restorePrevious(undo *activation) error {
+	if undo.hadPrevious {
+		resolved := undo.oldPrevious
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(s.root, resolved)
+		}
+		if _, err := os.Stat(resolved); err == nil {
+			return s.swapLink(prevLinkName, undo.oldPrevious)
+		}
+	}
+	if err := os.Remove(s.linkPath(prevLinkName)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", prevLinkName, err)
+	}
 	return nil
 }
 
@@ -261,15 +316,15 @@ func (s *symlinkInstaller) listReleases() ([]InstalledRelease, error) {
 }
 
 // prune removes release directories beyond the newest s.keep, never the ones
-// current or previous point to.
-func (s *symlinkInstaller) prune() error {
+// current or previous point to, nor the extra names given.
+func (s *symlinkInstaller) prune(extra ...string) error {
 	rels, err := s.listReleases()
 	if err != nil {
 		return err
 	}
 	var errs []error
 	for i, r := range rels {
-		if i < s.keep || r.Current || r.Previous {
+		if i < s.keep || r.Current || r.Previous || slices.Contains(extra, r.Tag) {
 			continue
 		}
 		if err := os.RemoveAll(r.Path); err != nil {

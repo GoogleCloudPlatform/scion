@@ -212,3 +212,80 @@ func TestLaunchMaintenanceRun_RequestErrorCodeInResult(t *testing.T) {
 		t.Fatalf("result = %s", got.Result)
 	}
 }
+
+func TestExecuteOperation_UpdateAndRebuildAreExclusive(t *testing.T) {
+	prev := version.Version
+	version.Version = "nightly-20261023"
+	t.Cleanup(func() { version.Version = prev })
+
+	tests := []struct {
+		name, runningKey, runningStatus, postKey, body string
+	}{
+		{"rebuild running blocks update", "rebuild-server", store.MaintenanceStatusRunning, "update-binary", `{"params":{"target_version":"nightly-20261024"}}`},
+		{"update running blocks rebuild", "update-binary", store.MaintenanceStatusRunning, "rebuild-server", `{"params":{}}`},
+		{"update restarting blocks rebuild", "update-binary", store.MaintenanceStatusRestarting, "rebuild-server", `{"params":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s := newTestServerWithStore(t)
+			blockingID := api.NewUUID()
+			if err := s.CreateMaintenanceRun(context.Background(), &store.MaintenanceOperationRun{
+				ID: blockingID, OperationKey: tt.runningKey, Status: tt.runningStatus, StartedAt: time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rr := postOperationRun(t, srv, tt.postKey, tt.body)
+			if rr.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), blockingID) || !strings.Contains(rr.Body.String(), tt.runningKey) {
+				t.Fatalf("body does not name the blocking run: %s", rr.Body.String())
+			}
+			runs, err := s.ListMaintenanceRuns(context.Background(), tt.postKey, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("run created despite the exclusive group: %+v", runs)
+			}
+		})
+	}
+}
+
+func TestCreateExclusiveMaintenanceRun(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	ctx := context.Background()
+	first := &store.MaintenanceOperationRun{ID: api.NewUUID(), OperationKey: "rebuild-server",
+		Status: store.MaintenanceStatusRunning, StartedAt: time.Now()}
+	if blocking, err := srv.createExclusiveMaintenanceRun(ctx, first); err != nil || blocking != nil {
+		t.Fatalf("first create: blocking=%v err=%v", blocking, err)
+	}
+	second := &store.MaintenanceOperationRun{ID: api.NewUUID(), OperationKey: "update-binary",
+		Status: store.MaintenanceStatusRunning, StartedAt: time.Now()}
+	blocking, err := srv.createExclusiveMaintenanceRun(ctx, second)
+	if err != nil || blocking == nil || blocking.ID != first.ID {
+		t.Fatalf("second create: blocking=%v err=%v", blocking, err)
+	}
+	if _, err := s.GetMaintenanceRun(ctx, second.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("blocked run was created: %v", err)
+	}
+	// Unrelated operations are not part of the group.
+	other := &store.MaintenanceOperationRun{ID: api.NewUUID(), OperationKey: "pull-images",
+		Status: store.MaintenanceStatusRunning, StartedAt: time.Now()}
+	if blocking, err := srv.createExclusiveMaintenanceRun(ctx, other); err != nil || blocking != nil {
+		t.Fatalf("pull-images create: blocking=%v err=%v", blocking, err)
+	}
+}
+
+func TestMaintenanceRunContext(t *testing.T) {
+	ctx, cancel := maintenanceRunContext("update-binary")
+	defer cancel()
+	if dl, ok := ctx.Deadline(); !ok || time.Until(dl) > 20*time.Minute {
+		t.Fatalf("update-binary deadline = %v, %v", dl, ok)
+	}
+	ctx2, cancel2 := maintenanceRunContext("pull-images")
+	defer cancel2()
+	if _, ok := ctx2.Deadline(); ok {
+		t.Fatal("pull-images got a deadline")
+	}
+}

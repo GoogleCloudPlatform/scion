@@ -56,6 +56,69 @@ func writeMaintenanceRequestError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 }
 
+// maintenanceExclusiveGroups maps an operation key to every key whose runs
+// it must not overlap. update-binary (sudo-install) and rebuild-server both
+// stage <RepoPath>/scion.rebuild and install the hub binary, so they are one
+// group. Keys not listed only exclude themselves.
+var maintenanceExclusiveGroups = map[string][]string{
+	"update-binary":  {"update-binary", "rebuild-server"},
+	"rebuild-server": {"update-binary", "rebuild-server"},
+}
+
+func maintenanceExclusiveGroup(key string) []string {
+	if g, ok := maintenanceExclusiveGroups[key]; ok {
+		return g
+	}
+	return []string{key}
+}
+
+// maintenanceRunCreateMu serialises the in-flight check and run creation in
+// createExclusiveMaintenanceRun, closing the check-then-create window within
+// this hub process (a single-node hub is one process).
+var maintenanceRunCreateMu sync.Mutex
+
+// maintenanceGroupInFlight returns the in-flight run (running or restarting)
+// of any operation in key's exclusive group, or nil.
+func (s *Server) maintenanceGroupInFlight(ctx context.Context, key string) (*store.MaintenanceOperationRun, error) {
+	for _, k := range maintenanceExclusiveGroup(key) {
+		runs, err := s.store.ListMaintenanceRuns(ctx, k, 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(runs) > 0 && maintenanceRunInFlight(runs[0].Status) {
+			r := runs[0]
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+// createExclusiveMaintenanceRun creates run unless an operation in its
+// exclusive group is in flight, in which case that run is returned and
+// nothing is created.
+func (s *Server) createExclusiveMaintenanceRun(ctx context.Context, run *store.MaintenanceOperationRun) (*store.MaintenanceOperationRun, error) {
+	maintenanceRunCreateMu.Lock()
+	defer maintenanceRunCreateMu.Unlock()
+	blocking, err := s.maintenanceGroupInFlight(ctx, run.OperationKey)
+	if err != nil || blocking != nil {
+		return blocking, err
+	}
+	return nil, s.store.CreateMaintenanceRun(ctx, run)
+}
+
+// writeMaintenanceInFlight writes the 409 for a request blocked by an
+// in-flight run of key's exclusive group.
+func writeMaintenanceInFlight(w http.ResponseWriter, key string, blocking *store.MaintenanceOperationRun) {
+	msg := "Operation is already running"
+	if blocking.OperationKey != key {
+		msg = fmt.Sprintf("Operation %s is running; %s cannot run at the same time", blocking.OperationKey, key)
+	}
+	writeError(w, http.StatusConflict, ErrCodeConflict, msg, map[string]interface{}{
+		"runId":        blocking.ID,
+		"operationKey": blocking.OperationKey,
+	})
+}
+
 // maintenanceRunInFlight reports whether a run in this status blocks a new
 // run of the same operation: it is running, or it installed a binary and is
 // waiting for the hub restart to be confirmed.
@@ -74,6 +137,22 @@ func (s *Server) detectUpdateInstaller() maintenance.Installer {
 		BinaryDest:  mc.BinaryDest,
 		ServiceName: mc.ServiceName,
 	})
+}
+
+// maintenanceRunTimeouts bounds whole runs of the listed operations.
+// update-binary's own steps are bounded (10 min download phase plus short
+// install/hook/restart deadlines); this is the backstop. Other operations
+// (image builds, rebuilds) keep running until they finish, as before.
+var maintenanceRunTimeouts = map[string]time.Duration{
+	"update-binary": 20 * time.Minute,
+}
+
+// maintenanceRunContext returns the context a run of key executes under.
+func maintenanceRunContext(key string) (context.Context, context.CancelFunc) {
+	if d, ok := maintenanceRunTimeouts[key]; ok {
+		return context.WithTimeout(context.Background(), d)
+	}
+	return context.WithCancel(context.Background())
 }
 
 // launchMaintenanceRun runs executor in the background for the already
@@ -109,9 +188,12 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			}
 		}()
 
+		runCtx, cancel := maintenanceRunContext(key)
+		defer cancel()
+
 		var execErr error
 		if re, ok := executor.(maintenance.RestartingExecutor); ok {
-			execErr = re.RunWithBeforeRestart(context.Background(), buf, params,
+			execErr = re.RunWithBeforeRestart(runCtx, buf, params,
 				func(ctx context.Context, p maintenance.PendingRestart) error {
 					if err := s.markRunRestarting(ctx, run, buf, p); err != nil {
 						return err
@@ -120,7 +202,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 					return nil
 				})
 		} else {
-			execErr = executor.Run(context.Background(), buf, params)
+			execErr = executor.Run(runCtx, buf, params)
 		}
 
 		finishedAt := time.Now()

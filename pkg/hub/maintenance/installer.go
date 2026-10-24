@@ -77,6 +77,15 @@ type Installer interface {
 	Status() InstallerStatus
 }
 
+// Deactivator is implemented by installers that can undo their last
+// Activate. The update-binary executor calls it when the before-restart hook
+// fails, so the failed run leaves the old release active. The symlink
+// installer implements it; sudo-install cannot (no sudoers rule allows a
+// backup of the installed binary).
+type Deactivator interface {
+	Deactivate(ctx context.Context) error
+}
+
 // InstallerStatus is the installer section of the update-status API.
 type InstallerStatus struct {
 	Strategy    string `json:"strategy"`
@@ -100,8 +109,9 @@ type CommandRunner interface {
 	// Run runs the command to completion and returns its combined output.
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 	// Start starts the command without waiting for it, for commands that
-	// terminate this process (systemctl restart of our own unit).
-	Start(name string, args ...string) error
+	// terminate this process (systemctl restart of our own unit). done
+	// receives the command's exit result (nil on success) once it exits.
+	Start(name string, args ...string) (done <-chan error, err error)
 }
 
 // ExecRunner is the CommandRunner that runs real commands.
@@ -112,10 +122,17 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-// Start implements CommandRunner. The child is not waited for: it restarts
-// the service this process belongs to.
-func (ExecRunner) Start(name string, args ...string) error {
-	return exec.Command(name, args...).Start()
+// Start implements CommandRunner. The child restarts the service this
+// process belongs to, so the caller does not block on it; it is reaped in
+// the background and its exit result sent on done.
+func (ExecRunner) Start(name string, args ...string) (<-chan error, error) {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	return done, nil
 }
 
 // DetectOptions configures Detect. Zero values take the documented defaults.
