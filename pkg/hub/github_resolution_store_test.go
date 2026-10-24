@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -95,64 +97,118 @@ func TestGHRawContentURL(t *testing.T) {
 	}
 }
 
-// TestGHListContents_PermanentURLs is the regression test for the expiring
-// download URL defect: the Contents API hands back a CDN link carrying a
-// short-lived token for private repos, which would be dead long before this
-// entry's cache TTL elapses. The stored URL must instead be built from the
-// pinned commit SHA.
-func TestGHListContents_PermanentURLs(t *testing.T) {
+// TestGHListTree_FilesModesAndURLs pins what the hub reads from the recursive
+// git tree of a skill directory (ptone/scion#5781): every regular file at
+// any depth, with its normalised mode, its git blob SHA and a permanent raw
+// URL built from the pinned commit; symlinks and directory entries are not
+// files.
+func TestGHListTree_FilesModesAndURLs(t *testing.T) {
 	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/repos/acme/skills/contents/skills/deploy", r.URL.Path)
-		require.Equal(t, commitSHA, r.URL.Query().Get("ref"))
+		require.Equal(t, "/repos/acme/skills/git/trees/"+commitSHA+":skills/deploy", r.URL.Path)
+		require.Equal(t, "1", r.URL.Query().Get("recursive"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[
-			{"name":"SKILL.md","path":"skills/deploy/SKILL.md","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6,"type":"file",
-			 "download_url":"https://raw.githubusercontent.com/acme/skills/` + commitSHA + `/skills/deploy/SKILL.md?token=EXPIRES_SOON"},
-			{"name":"helper.py","path":"skills/deploy/helper.py","sha":"95d09f2b10159347eece71399a7e2e907ea3df4f","size":11,"type":"file",
-			 "download_url":"https://raw.githubusercontent.com/acme/skills/` + commitSHA + `/skills/deploy/helper.py?token=EXPIRES_SOON"},
-			{"name":"nested","path":"skills/deploy/nested","sha":"1111111111111111111111111111111111111111","size":0,"type":"dir",
-			 "download_url":null}
-		]`))
+		_, _ = w.Write([]byte(`{"sha":"t","truncated":false,"tree":[
+			{"path":"SKILL.md","mode":"100644","type":"blob","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6},
+			{"path":"scripts","mode":"040000","type":"tree","sha":"1111111111111111111111111111111111111111"},
+			{"path":"scripts/run.sh","mode":"100755","type":"blob","sha":"95d09f2b10159347eece71399a7e2e907ea3df4f","size":11},
+			{"path":"link","mode":"120000","type":"blob","sha":"2222222222222222222222222222222222222222","size":8}
+		]}`))
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
+	entries, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
 		"acme", "skills", "skills/deploy", commitSHA, "")
 	require.NoError(t, err)
 
-	// Directories are skipped.
-	require.Len(t, entries, 2)
+	require.Equal(t, []GitHubFileEntry{
+		{
+			Path: "SKILL.md",
+			URL:  "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/skills/deploy/SKILL.md",
+			Hash: "ce013625030ba8dba906f756967f9e9ca394464a",
+			Size: 6,
+			Mode: "0644",
+		},
+		{
+			Path: "scripts/run.sh",
+			URL:  "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/skills/deploy/scripts/run.sh",
+			Hash: "95d09f2b10159347eece71399a7e2e907ea3df4f",
+			Size: 11,
+			Mode: "0755",
+		},
+	}, entries)
+}
 
-	require.Equal(t, "SKILL.md", entries[0].Path)
-	require.Equal(t,
-		"https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/SKILL.md",
-		entries[0].URL)
-	require.Equal(t, "ce013625030ba8dba906f756967f9e9ca394464a", entries[0].Hash)
-	require.Equal(t, int64(6), entries[0].Size)
+// TestGHListTree_RejectsUnusableTrees covers the listings the hub refuses
+// instead of caching an incomplete or unsafe skill (ptone/scion#5781).
+func TestGHListTree_RejectsUnusableTrees(t *testing.T) {
+	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
+	cases := []struct {
+		name string
+		body string
+		want error
+	}{
+		{
+			name: "truncated",
+			body: `{"truncated":true,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
+			want: agent.ErrGitHubTreeTruncated,
+		},
+		{
+			name: "submodule",
+			body: `{"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},{"path":"vendor","mode":"160000","type":"commit","sha":"y"}]}`,
+			want: agent.ErrGitHubTreeSubmodule,
+		},
+		{
+			name: "more than the file limit",
+			body: ghManyFilesTree(agent.MaxGitHubSkillFiles + 1),
+			want: agent.ErrGitHubSkillTooManyFiles,
+		},
+		{
+			name: "parent segment",
+			body: `{"truncated":false,"tree":[{"path":"../SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
+			want: agent.ErrGitHubTreeUnsafePath,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
 
-	require.Equal(t, "helper.py", entries[1].Path)
-	require.Equal(t,
-		"https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/helper.py",
-		entries[1].URL)
-
-	for _, e := range entries {
-		require.NotContains(t, e.URL, "token=", "stored URL must not carry an expiring CDN token")
+			_, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
+				"acme", "skills", "skills/deploy", commitSHA, "")
+			require.ErrorIs(t, err, tc.want)
+		})
 	}
 }
 
-// TestGHListContents_RawBaseOverride confirms the raw origin is configurable,
+// ghManyFilesTree is a git trees API response listing n regular files.
+func ghManyFilesTree(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"truncated":false,"tree":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"path":"f%04d.md","mode":"100644","type":"blob","sha":"a","size":1}`, i)
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+// TestGHListTree_RawBaseOverride confirms the raw origin is configurable,
 // which is what lets a GitHub Enterprise deployment work.
-func TestGHListContents_RawBaseOverride(t *testing.T) {
+func TestGHListTree_RawBaseOverride(t *testing.T) {
 	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"s/SKILL.md","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6,"type":"file","download_url":"https://example.invalid/x"}]`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6}]}`))
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.ghe.example.com",
+	entries, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.ghe.example.com",
 		"acme", "skills", "s", commitSHA, "")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
