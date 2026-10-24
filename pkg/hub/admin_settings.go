@@ -383,7 +383,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
-	resp, err := buildServerConfigFileResponse()
+	resp, err := buildServerConfigFileResponse(s.config.StartupServerSettings)
 	if err != nil {
 		var ue *serverConfigReadError
 		if errors.As(err, &ue) {
@@ -398,8 +398,10 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 
 // buildServerConfigFileResponse builds the file-mode GET
 // /api/v1/admin/server-config body (sensitive fields masked). The file-mode
-// PUT also uses it as the reference view for echo detection.
-func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
+// PUT also uses it as the reference view for echo detection. startup is
+// ServerConfig.StartupServerSettings (nil when unset), which env_values
+// compares environment values with for the keys start-up overrides.
+func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
@@ -421,7 +423,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
-			resp.EnvValues = fileTierEnvValues(envK)
+			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -431,6 +433,10 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if err := yamlv3.Unmarshal(data, &vs); err != nil {
 		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
+
+	// The stored values, for env_values' saved_differs (taken before the
+	// view below hides or masks anything; never returned).
+	stored := fileStoredValues(&vs)
 
 	// Mask sensitive fields before sending to the client
 	resp := serverConfigResponseFromSettings(&vs)
@@ -447,7 +453,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
-	resp.EnvValues = fileTierEnvValues(envK)
+	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -525,7 +531,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
 	// written, unless it echoes the GET view (ptone/scion#3463). A key
 	// inside server.broker.instances was already decoded strictly above.
-	if rejectUnknownFileConfigKeys(w, rawBody) {
+	if rejectUnknownFileConfigKeys(w, rawBody, s.config.StartupServerSettings) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {

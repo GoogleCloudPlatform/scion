@@ -189,6 +189,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 		}
 	}
 
+	// The settings.yaml values, for env_values' saved_differs (taken before
+	// the response below shares and changes vs.Server; never returned).
+	fileStored := fileStoredValues(&vs)
+
 	// Start with file-based response for Layer-0 fields.
 	resp := ServerConfigDBResponse{
 		ServerConfigResponse: ServerConfigResponse{
@@ -262,7 +266,7 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// The environment values of the overridden keys and whether each is in
 	// effect, compared with the unmasked view built above.
 	if ops.envKoanf != nil {
-		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, &resp.ServerConfigResponse)
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
 	}
 
 	// Mask sensitive fields — same logic as file mode.

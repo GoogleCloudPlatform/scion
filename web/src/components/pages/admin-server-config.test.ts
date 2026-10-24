@@ -5731,6 +5731,7 @@ describe('env values in effect (env_values)', () => {
             'server.auth.authorized_domains': {
               value: ['env-a.example', 'env-b.example'],
               in_effect: true,
+              saved_differs: true,
             },
           },
           // Even if listed, a key whose env value is in effect is not superseded.
@@ -5800,13 +5801,95 @@ describe('env values in effect (env_values)', () => {
     const cfg = makeBaseConfig({
       settings_tier: 'file',
       env_overrides: ['server.hub.port'],
-      env_values: { 'server.hub.port': { value: 9090, in_effect: true } },
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
     });
     element = await createComponent(createFetchHandler(cfg));
     const field = fieldByLabel(element, 'Port');
     expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
     expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node'
+    );
     expect(field.querySelector('.env-value-saved')?.textContent).toContain('8080');
+  });
+
+  it('a hosted DB-tier Layer-0 field shows the environment value in effect with its badge', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      layer0_editable: false,
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+      'Managed via deployment configuration'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node: 8080'
+    );
+  });
+
+  it('never labels a default or an equal value as saved', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.port', 'server.auth.authorized_domains'],
+          layer0_editable: false,
+          env_values: {
+            'server.hub.port': { value: 9090, in_effect: true },
+            'server.auth.authorized_domains': { value: ['saved.example'], in_effect: true },
+          },
+        })
+      )
+    );
+    const port = fieldByLabel(element, 'Port');
+    expect(port.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(port.querySelector('.env-value-saved')).toBeNull();
+    const domains = fieldByLabel(element, 'Authorized Domains');
+    expect(domains.querySelector('.env-value-in-effect')).not.toBeNull();
+    expect(domains.querySelector('.env-value-saved-label')).toBeNull();
+  });
+
+  it('a read-only env-pinned field whose environment value is not in effect drops the env lock', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.host'],
+      env_values: { 'server.hub.host': { value: '10.0.0.1', in_effect: false } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Host');
+    expect(field.querySelector('.read-only-badge')).toBeNull();
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Environment value not in effect on this node'
+    );
+    expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('0.0.0.0');
+    const line = field.querySelector('.env-value-not-in-effect')?.textContent ?? '';
+    expect(line).toContain('10.0.0.1');
+    expect(line).toContain('a start-up default or flag wins');
+  });
+
+  it('the profiles section badge reflects env_values', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['profiles.local.runtime'],
+          env_values: {
+            'profiles.local.runtime': { value: '********', masked: true, in_effect: false },
+          },
+        })
+      )
+    );
+    const items = queryAll(element, '.env-values-under li').map((li) => li.textContent ?? '');
+    const item = items.find((t) => t.includes('profiles.local.runtime'));
+    expect(item).toBeDefined();
+    expect(item).toContain('not in effect');
+    const badges = queryAll(element, '.env-badge').map((b) => b.textContent ?? '');
+    expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(true);
   });
 
   it('without env_values the field renders as before', async () => {

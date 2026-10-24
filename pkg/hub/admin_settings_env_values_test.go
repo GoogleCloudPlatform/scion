@@ -22,8 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // envSecretSentinel builds a unique secret-looking value per key so a test
@@ -36,8 +39,9 @@ func envSecretSentinel(key string) string {
 // field class of the server-config GET: each maskedServerFields entry, the
 // telemetry cloud headers, notification channel params, the never-shown
 // server keys (relay-peer secret, test identities, proxy driver settings,
-// hub class), the map sections whose values are withheld, and a key that
-// matches no settings field. The values are strings unless noted.
+// hub class, the server keyring file and its world-readable override), the
+// map sections whose values are withheld, and a key that matches no
+// settings field. The values are strings unless noted.
 func secretEnvKeys() map[string]any {
 	keys := map[string]any{}
 	for _, f := range maskedServerFields {
@@ -54,9 +58,11 @@ func secretEnvKeys() map[string]any {
 		"harness_configs.claude.env.ANTHROPIC_API_KEY",
 		"hub.token",
 		"server.auth.devtokn",
+		"server.keyring_file",
 	} {
 		keys[k] = envSecretSentinel(k)
 	}
+	keys["server.keyring_file_allow_world_readable"] = true
 	keys["server.auth.proxy.driver_principals"] = []any{envSecretSentinel("server.auth.proxy.driver_principals")}
 	keys["server.notification_channels"] = []any{map[string]any{
 		"type":   "webhook",
@@ -141,6 +147,7 @@ func TestEnvValueMayBeShown(t *testing.T) {
 // not reported as superseded; a key whose managed row wins is not in effect;
 // a key with no row is in effect.
 func TestGetServerConfigDB_EnvValues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no settings.yaml
 	envDomains := []any{"env-a.example", "env-b.example"}
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"authorized_domains":["saved.example"]}`), "managed")
@@ -190,8 +197,8 @@ func TestGetServerConfigDB_EnvValues(t *testing.T) {
 	}
 
 	want := map[string]EnvKeyValue{
-		"server.auth.authorized_domains": {Value: envDomains, InEffect: true},
-		"server.hub.admin_emails":        {Value: []any{"env@example.com"}, InEffect: false},
+		"server.auth.authorized_domains": {Value: envDomains, InEffect: true, SavedDiffers: true},
+		"server.hub.admin_emails":        {Value: []any{"env@example.com"}, InEffect: false, SavedDiffers: true},
 		"telemetry.enabled":              {Value: true, InEffect: true},
 		"server.database.driver":         {Value: "postgres", InEffect: true},
 	}
@@ -228,6 +235,7 @@ func TestGetServerConfigDB_EnvValues(t *testing.T) {
 // TestGetServerConfigDB_EnvValuesNeverRawSecrets proves no secret env value
 // appears raw anywhere in the DB-tier GET body, for every masked field class.
 func TestGetServerConfigDB_EnvValuesNeverRawSecrets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no settings.yaml
 	keys := secretEnvKeys()
 	envK := newEnvKoanf(t, keys)
 	ops := NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), envK)
@@ -249,14 +257,51 @@ func TestGetServerConfigDB_EnvValuesNeverRawSecrets(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+	assertEnvValuesMatchOverrides(t, resp.EnvOverrides, resp.EnvValues, keys)
+}
+
+// assertEnvValuesMatchOverrides checks, for a GET body: the env_values keys
+// are exactly the env_overrides keys; no never-API-writable key (nor one
+// under it) is in either list, so the GET does not reveal which are set;
+// every other key of keys is listed and masked; and the keyring file path
+// appears nowhere.
+func assertEnvValuesMatchOverrides(t *testing.T, overrides []string, values map[string]EnvKeyValue, keys map[string]any) {
+	t.Helper()
+	got := make([]string, 0, len(values))
+	for k := range values {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	want := append([]string(nil), overrides...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("env_values keys %v != env_overrides %v", got, want)
+	}
 	for k := range keys {
-		ev, ok := resp.EnvValues[k]
+		neverWritable := len(withoutNeverAPIWritableKeys([]string{k})) == 0
+		_, inValues := values[k]
+		inOverrides := false
+		for _, o := range overrides {
+			inOverrides = inOverrides || o == k
+		}
+		if neverWritable {
+			if inValues || inOverrides {
+				t.Errorf("never-API-writable key %s listed (env_values %v, env_overrides %v)", k, inValues, inOverrides)
+			}
+			continue
+		}
+		ev, ok := values[k]
 		if !ok {
 			t.Errorf("env_values lacks %s", k)
 			continue
 		}
 		if !ev.Masked || ev.Value != maskedValue {
 			t.Errorf("env_values[%s] = %#v, want masked placeholder", k, ev)
+		}
+	}
+	for _, nw := range []string{config.KeyringFileKey, config.KeyringFileAllowWorldReadableKey, config.HubClassKey, config.ConduitPeerSecretKey} {
+		if _, ok := values[nw]; ok {
+			t.Errorf("env_values lists never-API-writable key %s", nw)
 		}
 	}
 }
@@ -299,13 +344,23 @@ func TestFileMode_EnvValues(t *testing.T) {
 	t.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "env-a.example,env-b.example")
 	t.Setenv("SCION_SERVER_AUTH_DEVTOKEN", envSecretSentinel("server.auth.dev_token"))
 	t.Setenv("SCION_SERVER_DATABASE_URL", envSecretSentinel("server.database.url"))
+	t.Setenv("SCION_SERVER_KEYRING_FILE", envSecretSentinel("server.keyring_file"))
 
 	rr, resp := fileTierGET(t)
 	if strings.Contains(rr.Body.String(), "SENTINEL-") {
 		t.Fatalf("raw secret env value in the file-mode GET body: %s", rr.Body.String())
 	}
-	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example", "env-b.example"}, InEffect: true}) {
+	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example", "env-b.example"}, InEffect: true, SavedDiffers: true}) {
 		t.Errorf("env_values[server.auth.authorized_domains] = %#v", got)
+	}
+	// The keyring file path is never-API-writable: not listed at all.
+	if _, ok := resp.EnvValues[config.KeyringFileKey]; ok {
+		t.Errorf("env_values lists %s", config.KeyringFileKey)
+	}
+	for _, o := range resp.EnvOverrides {
+		if o == config.KeyringFileKey {
+			t.Errorf("env_overrides lists %s", config.KeyringFileKey)
+		}
 	}
 	for _, k := range []string{"server.auth.dev_token", "server.database.url"} {
 		if got := resp.EnvValues[k]; !got.Masked || got.Value != maskedValue || !got.InEffect {
@@ -326,4 +381,184 @@ func TestFileMode_EnvValuesNoSettingsFile(t *testing.T) {
 	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example"}, InEffect: true}) {
 		t.Errorf("env_values[server.auth.authorized_domains] = %#v", got)
 	}
+}
+
+// dbEnvValuesGET runs the DB-tier GET on a server built from rows (section
+// name to origin and JSON document), the bootstrap merge boot and the env
+// koanf env, with configure applied to the server first, and returns
+// env_values. HOME is a fresh directory (no settings.yaml).
+func dbEnvValuesGET(t *testing.T, rows map[string][2]string, boot, env map[string]any, configure func(*Server)) map[string]EnvKeyValue {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	if boot == nil {
+		boot = map[string]any{}
+	}
+	if env == nil {
+		env = map[string]any{}
+	}
+	fakeStore := newFakeHubSettingStore()
+	for section, r := range rows {
+		fakeStore.seedWithOrigin(section, json.RawMessage(r[1]), r[0])
+	}
+	ops := NewOperationalSettings(fakeStore, newFileKoanf(t, boot), newEnvKoanf(t, env))
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	if configure != nil {
+		configure(srv)
+	}
+	srv.SetOperationalSettings(ops)
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return resp.EnvValues
+}
+
+func wantEnvValue(t *testing.T, values map[string]EnvKeyValue, key string, want EnvKeyValue) {
+	t.Helper()
+	got, ok := values[key]
+	if !ok {
+		t.Errorf("env_values lacks %s", key)
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("env_values[%s] = %#v, want %#v", key, got, want)
+	}
+}
+
+// TestGetServerConfigDB_EnvValuesWorkstationStartupOverrides: on a
+// workstation hub, start-up sets hub.host to loopback (and storage, secrets
+// and the broker switch) whatever the environment says, so an environment
+// value of such a key is in effect only when it equals the start-up value.
+func TestGetServerConfigDB_EnvValuesWorkstationStartupOverrides(t *testing.T) {
+	enabled := true
+	values := dbEnvValuesGET(t, nil, nil, map[string]any{
+		"server.hub.host":         "0.0.0.0",
+		"server.hub.port":         9810,
+		"server.storage.provider": "gcs",
+		"server.broker.enabled":   true,
+		"server.secrets.backend":  "local",
+	}, func(s *Server) {
+		s.workstation = true
+		s.config.StartupServerSettings = &config.V1ServerConfig{
+			Hub:     &config.V1ServerHubConfig{Host: "127.0.0.1", Port: 9810},
+			Broker:  &config.V1BrokerConfig{Enabled: enabled},
+			Storage: &config.V1StorageConfig{Provider: "local"},
+			Secrets: &config.V1SecretsConfig{Backend: "local"},
+		}
+	})
+	wantEnvValue(t, values, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: false})
+	wantEnvValue(t, values, "server.hub.port", EnvKeyValue{Value: float64(9810), InEffect: true})
+	wantEnvValue(t, values, "server.storage.provider", EnvKeyValue{Value: "gcs", InEffect: false})
+	wantEnvValue(t, values, "server.broker.enabled", EnvKeyValue{Value: true, InEffect: true})
+	wantEnvValue(t, values, "server.secrets.backend", EnvKeyValue{Value: "local", InEffect: true})
+}
+
+// TestFileMode_EnvValuesStartupOverrides: a flag or workstation value beats
+// the environment in the settings.yaml tier too.
+func TestFileMode_EnvValuesStartupOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_HUB_HOST", "0.0.0.0")
+	t.Setenv("SCION_SERVER_HUB_PORT", "9090")
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv.config.StartupServerSettings = &config.V1ServerConfig{Hub: &config.V1ServerHubConfig{Host: "127.0.0.1", Port: 9090}}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantEnvValue(t, resp.EnvValues, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: false})
+	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: true})
+}
+
+// TestGetServerConfigDB_EnvValuesSavedDiffers: saved_differs is set only
+// when a managed row holds the key with another value; a row equal to the
+// environment value, a section without a row, and a seeded row are not
+// "saved, not in effect".
+func TestGetServerConfigDB_EnvValuesSavedDiffers(t *testing.T) {
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"access":    {"managed", `{"admin_emails":["env@example.com"],"authorized_domains":["saved.example"]}`},
+		"endpoints": {"seeded", `{"monitoring_dashboard_url":"https://seed.example"}`},
+	}, map[string]any{
+		"server.hub.admin_emails":             []any{"env@example.com"},
+		"server.auth.authorized_domains":      []any{"env.example"},
+		"server.hub.monitoring_dashboard_url": "https://env.example",
+		"telemetry.enabled":                   true,
+	}, map[string]any{
+		"server.hub.admin_emails":             []any{"env@example.com"},
+		"server.hub.monitoring_dashboard_url": "https://env.example",
+		"telemetry.enabled":                   true,
+	}, func(s *Server) { s.config.AuthorizedDomains = []string{"env.example"} })
+	// A managed row equal to the environment value: in effect, nothing to label.
+	wantEnvValue(t, values, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: true})
+	// No row: the bootstrap (environment) value is in effect, nothing saved.
+	wantEnvValue(t, values, "telemetry.enabled", EnvKeyValue{Value: true, InEffect: true})
+	// A seeded row holding another replica's value wins over this node's
+	// environment, but it is not a saved value.
+	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: false})
+}
+
+// TestGetServerConfigDB_EnvValuesSeededRowFromThisBootstrap: a seeded row
+// holding this node's bootstrap value: the environment value is in effect.
+func TestGetServerConfigDB_EnvValuesSeededRowFromThisBootstrap(t *testing.T) {
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"endpoints": {"seeded", `{"monitoring_dashboard_url":"https://env.example"}`},
+	}, nil, map[string]any{
+		"server.hub.monitoring_dashboard_url": "https://env.example",
+	}, nil)
+	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: true})
+}
+
+// TestGetServerConfigDB_EnvValuesManagedRowLackingKey: a managed row that
+// does not hold the key replaces the whole section (Snapshot loads the
+// bootstrap only for sections without a row), so the hub applies the key's
+// zero value and the environment value is not in effect.
+func TestGetServerConfigDB_EnvValuesManagedRowLackingKey(t *testing.T) {
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"lifecycle": {"managed", `{"soft_delete_retention":"72h"}`},
+	}, map[string]any{
+		"server.hub.auto_suspend_stalled": true,
+	}, map[string]any{
+		"server.hub.auto_suspend_stalled": true,
+	}, nil)
+	wantEnvValue(t, values, "server.hub.auto_suspend_stalled", EnvKeyValue{Value: true, InEffect: false})
+}
+
+// TestGetServerConfigDB_EnvValuesPinnedPublicURL: an operator setting pins
+// the public URL on this node, so its environment value is in effect even
+// against a saved row.
+func TestGetServerConfigDB_EnvValuesPinnedPublicURL(t *testing.T) {
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"endpoints": {"managed", `{"public_url":"https://saved.example"}`},
+	}, map[string]any{
+		config.PublicURLKey: "https://env.example",
+	}, map[string]any{
+		config.PublicURLKey: "https://env.example",
+	}, func(s *Server) {
+		s.config.HubEndpoints = &HubEndpoints{Operator: "https://env.example", Public: "https://env.example", Pin: "SCION_SERVER_HUB_PUBLICURL"}
+	})
+	wantEnvValue(t, values, config.PublicURLKey, EnvKeyValue{Value: "https://env.example", InEffect: true, SavedDiffers: true})
+}
+
+// TestFileMode_EnvValuesSavedDiffers: in the settings.yaml tier
+// saved_differs is set only for a key the file holds with another value.
+func TestFileMode_EnvValuesSavedDiffers(t *testing.T) {
+	writeFileTierSettings(t, "schema_version: \"1\"\nserver:\n  hub:\n    admin_emails:\n      - env@example.com\n")
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "env@example.com")
+	t.Setenv("SCION_SERVER_HUB_PORT", "9090")
+	_, resp := fileTierGET(t)
+	wantEnvValue(t, resp.EnvValues, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: true})
+	// Not in the file: the page's default is not a saved value.
+	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: true})
 }

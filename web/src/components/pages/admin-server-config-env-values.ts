@@ -27,6 +27,12 @@ export interface EnvKeyValue {
   masked?: boolean;
   /** True when the hub on this node runs with the environment value. */
   in_effect: boolean;
+  /**
+   * True when a stored value (settings.yaml, or a managed database row for
+   * a Layer-1 key) exists and differs from the environment value: only
+   * then is the stored value labelled "saved, not in effect".
+   */
+  saved_differs?: boolean;
 }
 
 /** The placeholder the server sends for a secret (maskedValue in pkg/hub). */
@@ -44,11 +50,16 @@ export function formatEnvValue(ev: EnvKeyValue): string {
   if (Array.isArray(v)) {
     return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
   }
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
+  return JSON.stringify(v) ?? '';
 }
 
-/** The first of keys that env_values reports, with its entry. */
+/**
+ * The first of keys that env_values reports, with its entry. Only that one
+ * is shown for a field with several keys; this is deliberate (the keys of
+ * one field share one environment value in practice).
+ */
 export function envValueFor(
   envValues: Record<string, EnvKeyValue> | null | undefined,
   keys: readonly string[]

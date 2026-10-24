@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 
@@ -34,8 +35,76 @@ type EnvKeyValue struct {
 	// secret, or its value could not be shown safely.
 	Masked bool `json:"masked,omitempty"`
 	// InEffect is true when the hub on this node runs with the environment
-	// value; false when another value (a saved database value) wins.
+	// value; false when another value (a saved database value, or a value
+	// start-up sets from a flag or the workstation defaults) wins.
 	InEffect bool `json:"in_effect"`
+	// SavedDiffers is true when a stored value of the key exists (in
+	// settings.yaml, or in a managed database row for a Layer-1 key on a
+	// DB-backed hub) and differs from the environment value. Only then does
+	// the page label the stored value as "saved, not in effect"; a default,
+	// or a stored value equal to the environment value, is never so
+	// labelled.
+	SavedDiffers bool `json:"saved_differs,omitempty"`
+}
+
+// envSavedDiffers reports whether stored (flattened stored values, keyed by
+// settings key) holds key with a value other than the environment value.
+func envSavedDiffers(envK *koanf.Koanf, key string, stored map[string]any) bool {
+	v, ok := stored[key]
+	if !ok {
+		return false
+	}
+	return !envValueEqualsShown(envK, key, map[string]any{key: v})
+}
+
+// fileStoredValues returns the settings.yaml values (vs) flattened by
+// settings key, for envSavedDiffers. Internal only: never returned.
+func fileStoredValues(vs *config.VersionedSettings) map[string]any {
+	if vs == nil {
+		return nil
+	}
+	flat, err := config.FlattenSettingsJSON(vs)
+	if err != nil {
+		return nil
+	}
+	return flat
+}
+
+// dbStoredValues returns, for envSavedDiffers on a DB-backed hub, the
+// settings.yaml values of the keys outside the Layer-1 sections (file) and
+// the values the managed database rows hold for Layer-1 keys. A seeded row
+// is not a saved value (start-up rewrites it from the bootstrap merge), and
+// a Layer-1 key that a managed row does not hold is not saved either.
+func dbStoredValues(file map[string]any, ops *OperationalSettings) map[string]any {
+	out := make(map[string]any, len(file))
+	for k, v := range file {
+		if !opsettings.IsLayer1Key(k) {
+			out[k] = v
+		}
+	}
+	if ops == nil {
+		return out
+	}
+	ops.mu.RLock()
+	rows := make(map[string]json.RawMessage, len(ops.cache))
+	for name, ss := range ops.cache {
+		if ss.Origin == "managed" && !ss.Malformed {
+			rows[name] = ss.Value
+		}
+	}
+	ops.mu.RUnlock()
+	for section, doc := range rows {
+		var m map[string]any
+		if err := json.Unmarshal(doc, &m); err != nil {
+			continue
+		}
+		for field, v := range m {
+			if p := opsettings.KoanfPathFromSectionKey(section, field); p != "" {
+				out[p] = v
+			}
+		}
+	}
+	return out
 }
 
 // startupOnlyLayer1Keys are Layer-1 keys whose saved value ApplySnapshot does
@@ -146,7 +215,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 // out, that the masking changed, or that envValueMayBeShown refuses, is
 // shown as the masked placeholder (maskedValue, true).
 func shownEnvValue(envK *koanf.Koanf, key string) (any, bool) {
-	if !envValueMayBeShown(key) {
+	if !envValueMayBeShown(key) || len(withoutNeverAPIWritableKeys([]string{key})) == 0 {
 		return maskedValue, true
 	}
 	return viewMaskedEnvValue(envK, key)
@@ -214,18 +283,67 @@ func envValueEqualsShown(envK *koanf.Koanf, key string, running map[string]any) 
 	return eok == rok && (!eok || reflect.DeepEqual(ev, rv))
 }
 
-// fileTierEnvValues returns env_values for the file-tier GET. The settings
-// loader layers SCION_SERVER_* above settings.yaml (LoadGlobalConfig), so
-// every environment value is the one in effect.
-func fileTierEnvValues(envK *koanf.Koanf) map[string]EnvKeyValue {
-	keys := opsettings.DetectEnvOverrides(envK)
+// startupOverriddenServerKeys are the server keys that start-up sets after
+// the settings load, so an environment value of one may not be the value
+// the hub runs with: the workstation defaults (hub host, broker enabled,
+// dev auth, storage provider, secrets backend: cmd applyWorkstationDefaults
+// and applyServerListenHosts) and the command-line flags (--port, --host,
+// --db, --enable-runtime-broker, --runtime-broker-port, --dev-auth,
+// --storage-bucket, --storage-dir). Each holds a plain string, number or
+// bool, so its value compares exactly. Their in_effect compares with
+// ServerConfig.StartupServerSettings. The conduit flags also override
+// settings, but their values are durations whose text form start-up
+// normalizes, so they are left to the loader's precedence (a documented
+// limitation).
+var startupOverriddenServerKeys = map[string]bool{
+	"server.hub.host":           true,
+	"server.hub.port":           true,
+	"server.broker.enabled":     true,
+	"server.broker.port":        true,
+	"server.broker.host":        true,
+	"server.auth.dev_mode":      true,
+	"server.storage.provider":   true,
+	"server.storage.bucket":     true,
+	"server.storage.local_path": true,
+	"server.secrets.backend":    true,
+	"server.database.url":       true,
+}
+
+// startupEnvInEffect reports, for a key in startupOverriddenServerKeys,
+// whether its environment value equals the value start-up resolved
+// (startup, ServerConfig.StartupServerSettings). ok is false for any other
+// key, or when startup is nil; the caller then applies its own rule.
+func startupEnvInEffect(envK *koanf.Koanf, key string, startup *config.V1ServerConfig) (inEffect, ok bool) {
+	if startup == nil || !startupOverriddenServerKeys[key] {
+		return false, false
+	}
+	running, err := config.FlattenSettingsJSON(map[string]any{"server": startup})
+	if err != nil {
+		return false, true
+	}
+	return envValueEqualsShown(envK, key, running), true
+}
+
+// fileTierEnvValues returns env_values for the file-tier GET, one entry per
+// key of keys, which must be the response's env_overrides (already without
+// the never-API-writable keys), so the two lists never differ. The settings
+// loader layers SCION_SERVER_* above settings.yaml (LoadGlobalConfig), so an
+// environment value is in effect, except for a key start-up overrides
+// after the load, which compares with startup (startupEnvInEffect).
+//
+// stored is fileStoredValues of settings.yaml (nil without a file).
+func fileTierEnvValues(envK *koanf.Koanf, keys []string, startup *config.V1ServerConfig, stored map[string]any) map[string]EnvKeyValue {
 	if len(keys) == 0 {
 		return nil
 	}
 	out := make(map[string]EnvKeyValue, len(keys))
 	for _, key := range keys {
 		v, masked := shownEnvValue(envK, key)
-		out[key] = EnvKeyValue{Value: v, Masked: masked, InEffect: true}
+		inEffect, ok := startupEnvInEffect(envK, key, startup)
+		if !ok {
+			inEffect = true
+		}
+		out[key] = EnvKeyValue{Value: v, Masked: masked, InEffect: inEffect, SavedDiffers: envSavedDiffers(envK, key, stored)}
 	}
 	return out
 }
@@ -233,13 +351,17 @@ func fileTierEnvValues(envK *koanf.Koanf) map[string]EnvKeyValue {
 // dbTierEnvValues returns env_values for the DB-tier GET. view is the GET
 // body before secrets are masked: for Layer-1 keys it holds the value the
 // hub runs with (the snapshot, a saved database value winning over the
-// bootstrap merge). A Layer-1 environment value is in effect when it equals
-// that value, or for startupOnlyLayer1Keys when it equals the running value;
-// a pinned public URL is in effect. Layer-0 and other keys are read at
-// startup from the bootstrap merge, where SCION_SERVER_* is the top layer, so
-// they are in effect.
-func (s *Server) dbTierEnvValues(envK *koanf.Koanf, view *ServerConfigResponse) map[string]EnvKeyValue {
-	keys := opsettings.DetectEnvOverrides(envK)
+// bootstrap merge). A key start-up overrides compares with the start-up
+// value (startupEnvInEffect). A Layer-1 environment value is in effect when
+// it equals the value in view, or for startupOnlyLayer1Keys when it equals
+// the running value; a pinned public URL is in effect. Other Layer-0 keys
+// are read at startup from the bootstrap merge, where SCION_SERVER_* is the
+// top layer, so they are in effect.
+//
+// keys must be the response's env_overrides (already without the
+// never-API-writable keys), so the two lists never differ. stored is
+// dbStoredValues.
+func (s *Server) dbTierEnvValues(envK *koanf.Koanf, keys []string, view *ServerConfigResponse, stored map[string]any) map[string]EnvKeyValue {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -250,7 +372,12 @@ func (s *Server) dbTierEnvValues(envK *koanf.Koanf, view *ServerConfigResponse) 
 	out := make(map[string]EnvKeyValue, len(keys))
 	for _, key := range keys {
 		v, masked := shownEnvValue(envK, key)
-		out[key] = EnvKeyValue{Value: v, Masked: masked, InEffect: s.dbTierEnvInEffect(envK, key, running)}
+		out[key] = EnvKeyValue{
+			Value:        v,
+			Masked:       masked,
+			InEffect:     s.dbTierEnvInEffect(envK, key, running),
+			SavedDiffers: envSavedDiffers(envK, key, stored),
+		}
 	}
 	return out
 }
@@ -258,6 +385,9 @@ func (s *Server) dbTierEnvValues(envK *koanf.Koanf, view *ServerConfigResponse) 
 // dbTierEnvInEffect reports, for dbTierEnvValues, whether the environment
 // value of key is the one the hub runs with.
 func (s *Server) dbTierEnvInEffect(envK *koanf.Koanf, key string, running map[string]any) bool {
+	if inEffect, ok := startupEnvInEffect(envK, key, s.config.StartupServerSettings); ok {
+		return inEffect
+	}
 	if !opsettings.IsLayer1Key(key) {
 		return true
 	}
