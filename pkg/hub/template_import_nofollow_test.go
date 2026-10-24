@@ -232,3 +232,116 @@ func TestImportTemplatesFromRemote_RefusesLinkedFetchResult(t *testing.T) {
 		t.Errorf("expected no stored objects, got %d", len(stor.objects))
 	}
 }
+
+// installLinkingFakeGit puts a fake git first on PATH whose `checkout`
+// writes a repository tree into its working directory the way git
+// materialises one: regular files plus absolute, relative and in-tree
+// symbolic links, the file links pointing at $SCION_FAKE_SECRET and the
+// directory link (outside the imported sub-path) at $SCION_FAKE_OUTSIDE.
+// chain-file is a chained relative link: deep/d0/.../d29/b points back up to
+// deep's parent, and chain-file steps through b and then up to the secret.
+// Every other subcommand succeeds without doing anything.
+func installLinkingFakeGit(t *testing.T, secretPath, outside string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+while [ "$1" = "-c" ]; do shift 2; done
+if [ "$1" = "checkout" ]; then
+  mkdir -p templates/my-template
+  printf 'schema_version: "1"\n' > templates/my-template/scion-agent.yaml
+  printf '# Agents\n' > templates/my-template/agents.md
+  ln -s "$SCION_FAKE_SECRET" templates/my-template/abs-file
+  ln -s "$SCION_FAKE_SECRET" templates/my-template/system-prompt.md
+  ln -s "$SCION_FAKE_REL_SECRET" templates/my-template/rel-file
+  ln -s agents.md templates/my-template/inside
+  ln -s "$SCION_FAKE_OUTSIDE" abs-dir
+  deep=deep; i=0
+  while [ $i -lt 30 ]; do deep="$deep/d$i"; i=$((i+1)); done
+  mkdir -p "$deep"
+  ln -s "$SCION_FAKE_UP30" "$deep/b"
+  ln -s "../../$deep/b/$SCION_FAKE_UP31$SCION_FAKE_SECRET_REL" templates/my-template/chain-file
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SCION_FAKE_SECRET", secretPath)
+	t.Setenv("SCION_FAKE_OUTSIDE", outside)
+	// From templates/my-template inside the checkout, enough ".." reach the
+	// file-system root, then the secret's absolute path.
+	t.Setenv("SCION_FAKE_REL_SECRET", strings.Repeat("../", 40)+strings.TrimPrefix(secretPath, "/"))
+	t.Setenv("SCION_FAKE_SECRET_REL", strings.TrimPrefix(secretPath, "/"))
+	t.Setenv("SCION_FAKE_UP30", strings.Repeat("../", 30))
+	t.Setenv("SCION_FAKE_UP31", strings.Repeat("../", 31))
+}
+
+// TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets drives the
+// hub import through the sparse-checkout path (the tarball download fails,
+// so the production execSparseGitCheckout runs against a fake git whose
+// checkout holds file links to a file outside the fetch) and asserts that
+// the stored template holds only its regular files and never the link
+// target's content.
+func TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixtures require a POSIX file system")
+	}
+	t.Setenv("HOME", t.TempDir())
+	outside := t.TempDir()
+	secretPath := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte(importOutsideSecret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installLinkingFakeGit(t, secretPath, outside)
+
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	projectID := tid("nofollow-sparse-git-project")
+	if err := s.CreateProject(ctx, &store.Project{ID: projectID, Name: "nofollow-sparse-git", Slug: "nofollow-sparse-git"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
+		return nil, errors.New("ls-remote disabled in test")
+	}))
+	old := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = old })
+	http.DefaultClient.Transport = &mockRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}}
+
+	imported, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/acme/repo/tree/main/templates")
+	if err != nil {
+		t.Fatalf("importTemplatesFromRemote: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "my-template" {
+		t.Fatalf("imported = %v, want [my-template]", imported)
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 stored template, got %d", result.TotalCount)
+	}
+	var paths []string
+	for _, f := range result.Items[0].Files {
+		paths = append(paths, f.Path)
+	}
+	sort.Strings(paths)
+	if want := []string{"agents.md", "scion-agent.yaml"}; !slices.Equal(paths, want) {
+		t.Errorf("stored template files = %v, want %v", paths, want)
+	}
+
+	stor.mu.Lock()
+	defer stor.mu.Unlock()
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 stored objects, got %d", len(stor.objects))
+	}
+	for name, data := range stor.content {
+		if strings.Contains(string(data), importOutsideSecret) {
+			t.Errorf("stored object %s contains a link target's content", name)
+		}
+	}
+}
