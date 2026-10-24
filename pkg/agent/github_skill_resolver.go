@@ -1007,7 +1007,12 @@ func (r *GitHubSkillResolver) listTree(ctx context.Context, ghRef *GitHubSkillRe
 		return nil, r.apiError(resp, "list skill tree")
 	}
 
-	return DecodeGitHubSkillTree(resp.Body)
+	files, err := DecodeGitHubSkillTree(resp.Body)
+	if err != nil && IsGitHubSkillTreeError(err) {
+		// A stable cause code, the same one the hub reports for these.
+		return nil, &githubResolveError{code: SkillErrCodeUnsupportedContent, msg: err.Error(), err: err}
+	}
+	return files, err
 }
 
 func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHubSkillRef, commitSHA, filePath string, token string) ([]byte, error) {

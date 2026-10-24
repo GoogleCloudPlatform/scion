@@ -1538,3 +1538,39 @@ func TestResolveGitHubSkill_ModelessRow(t *testing.T) {
 		})
 	}
 }
+
+// TestSkillsResolve_GHTreeErrorCode pins the per-URI cause code for a skill
+// tree the hub refuses (ptone/scion#5781): unsupported_skill_content, the
+// same code the local resolver reports, not the generic resolve_failed.
+func TestSkillsResolve_GHTreeErrorCode(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "code-repo"
+		skillPath = "skills/tool"
+		commitSHA = "abababababababababababababababababababab"
+		uri       = "gh://" + owner + "/" + repo + "/tool@" + commitSHA
+	)
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	mux := http.NewServeMux()
+	mux.HandleFunc(ghTreeTestPath(owner, repo, commitSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"truncated":false,"tree":[
+			{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},
+			{"path":"vendor/lib","mode":"160000","type":"commit","sha":"y"}]}`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: uri}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeUnsupportedContent, resp.Errors[0].Code)
+}

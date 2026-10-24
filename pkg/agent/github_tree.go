@@ -50,7 +50,7 @@ var ErrGitHubSkillTooManyFiles = fmt.Errorf("skill has more than %d files", MaxG
 // ErrGitHubTreeTruncated is returned when GitHub truncated the tree of a
 // skill directory. The tree is the skill's file list, so a truncated one
 // would install an incomplete skill; the resolve fails instead.
-var ErrGitHubTreeTruncated = errors.New("GitHub truncated the file tree of the skill directory (too many entries); split the skill or pin fewer files")
+var ErrGitHubTreeTruncated = errors.New("GitHub truncated the file tree of the skill directory (too many entries); split the skill into smaller directories")
 
 // ErrGitHubTreeSubmodule is returned when a skill directory contains a git
 // submodule. GitHub serves no content for a submodule path, so such a
@@ -166,6 +166,16 @@ func validateGitHubTreePath(p string) error {
 		}
 	}
 	return nil
+}
+
+// IsGitHubSkillTreeError reports whether err is one of the skill tree
+// failures DecodeGitHubSkillTree returns: a submodule, more than
+// MaxGitHubSkillFiles files, a truncated listing or an unsafe path. These
+// are deterministic properties of the skill at that commit, reported with
+// SkillErrCodeUnsupportedContent on both resolver paths.
+func IsGitHubSkillTreeError(err error) bool {
+	return errors.Is(err, ErrGitHubTreeSubmodule) || errors.Is(err, ErrGitHubSkillTooManyFiles) ||
+		errors.Is(err, ErrGitHubTreeTruncated) || errors.Is(err, ErrGitHubTreeUnsafePath)
 }
 
 // skillFilesHaveModes reports whether every file of skill records a mode.

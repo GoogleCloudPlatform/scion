@@ -318,9 +318,11 @@ func ghListTree(ctx context.Context, cooldown *agent.GitHubCooldown, identity, a
 		return nil, &ghStatusError{status: resp.StatusCode, msg: fmt.Sprintf("GitHub API error %d listing %s/%s at %s: %s", resp.StatusCode, owner, repo, path, ghErrorBody(body))}
 	}
 
+	// The caller (fetchAndCacheGitHubSkill) already prefixes "failed to
+	// list contents", so a decode error is returned as it is.
 	files, err := agent.DecodeGitHubSkillTree(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list %s/%s at %s: %w", owner, repo, path, err)
+		return nil, err
 	}
 
 	entries := make([]GitHubFileEntry, 0, len(files))

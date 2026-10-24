@@ -107,6 +107,13 @@ const (
 	// SkillErrCodeInvalidURI is the code for a skill reference that does
 	// not parse as a URI the resolver accepts.
 	SkillErrCodeInvalidURI = "invalid_uri"
+
+	// SkillErrCodeUnsupportedContent is the code for a gh:// skill whose
+	// repository tree cannot be installed as a skill: it holds a git
+	// submodule, more than MaxGitHubSkillFiles files or an unsafe path, or
+	// GitHub truncated its listing (see IsGitHubSkillTreeError). The hub
+	// and the local resolver both use it (ptone/scion#5781).
+	SkillErrCodeUnsupportedContent = "unsupported_skill_content"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill

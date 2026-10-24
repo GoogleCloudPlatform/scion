@@ -139,8 +139,22 @@ func TestGitHubSkillResolver_FileLimitBeforeDownload(t *testing.T) {
 	if msg := res.Errors[0].Message; !strings.Contains(msg, "skill has more than 1000 files") {
 		t.Fatalf("error %q does not name the file limit", msg)
 	}
+	if code := res.Errors[0].Code; code != SkillErrCodeUnsupportedContent {
+		t.Fatalf("error code %q, want %q", code, SkillErrCodeUnsupportedContent)
+	}
 	if n := downloads.Load(); n != 0 {
 		t.Fatalf("%d files downloaded before the limit was checked, want 0", n)
+	}
+}
+
+func TestIsGitHubSkillTreeError(t *testing.T) {
+	for _, err := range []error{ErrGitHubTreeSubmodule, ErrGitHubSkillTooManyFiles, ErrGitHubTreeTruncated, ErrGitHubTreeUnsafePath} {
+		if !IsGitHubSkillTreeError(fmt.Errorf("wrapped: %w", err)) {
+			t.Errorf("IsGitHubSkillTreeError(%v) = false, want true", err)
+		}
+	}
+	if IsGitHubSkillTreeError(errors.New("network down")) {
+		t.Error("IsGitHubSkillTreeError(other) = true, want false")
 	}
 }
 
@@ -259,7 +273,50 @@ func TestGitHubSkillResolver_RejectsUnusableTree(t *testing.T) {
 			if msg := res.Errors[0].Message; !strings.Contains(msg, tc.want) {
 				t.Fatalf("error %q does not mention %q", msg, tc.want)
 			}
+			if code := res.Errors[0].Code; code != SkillErrCodeUnsupportedContent {
+				t.Fatalf("error code %q, want %q", code, SkillErrCodeUnsupportedContent)
+			}
 		})
+	}
+}
+
+// TestGitHubSkillResolver_ModelessExpiredSHAEntryNotServed pins that a
+// mode-less entry for a commit-SHA ref past its TTL is not served when the
+// re-resolve fails: SHA-ref entries have no stale window, before or after
+// ptone/scion#5781 (the local counterpart of the hub's "expired SHA row is
+// not served").
+func TestGitHubSkillResolver_ModelessExpiredSHAEntryNotServed(t *testing.T) {
+	mux := http.NewServeMux()
+	var treeCalls atomic.Int64
+	serveExecTestSkill(mux, &treeCalls)
+	clock := newFakeClock()
+	r := newCooldownTestResolver(t, mux, clock)
+
+	uri := "gh://owner/repo/tool@" + testCommitSHA
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	r.resolutionCache.mu.Lock()
+	r.resolutionCache.entries[resolutionCacheKey(ghRef, r.token)] = &resolutionCacheEntry{
+		Skill: ResolvedSkill{Name: "tool", URI: uri, Version: "legacy", Files: []ResolvedFile{
+			{Path: "SKILL.md", Content: []byte("# tool\n")},
+		}},
+		CachedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute), IsBranchRef: false,
+	}
+	r.resolutionCache.mu.Unlock()
+	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+
+	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Resolved) != 0 || len(res.Errors) != 1 {
+		t.Fatalf("want the expired SHA-ref entry not served (one error), got %+v", res)
+	}
+	if n := treeCalls.Load(); n != 0 {
+		t.Fatalf("%d tree calls during the cooldown, want 0", n)
 	}
 }
 
