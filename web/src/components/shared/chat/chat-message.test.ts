@@ -563,6 +563,46 @@ describe('scion-chat-message path links', () => {
     expect(seen).toEqual(['/workspace/src/main.go']);
   });
 
+  it('gives path links a "#" href and keeps the click on the page', async () => {
+    const el = await mount('see /workspace/src/main.go');
+    const link = pathLinks(el)[0];
+    // Positive control: the link exists, so the href check is not vacuous.
+    expect(link).toBeDefined();
+    expect(link.getAttribute('href')).toBe('#');
+
+    const click = new MouseEvent('click', { bubbles: true, composed: true, cancelable: true });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+  });
+
+  it('keeps a middle-click on a path link from opening a tab', async () => {
+    const el = await mount('see /workspace/src/main.go and [the docs](https://example.com/docs)');
+    const link = pathLinks(el)[0];
+    expect(link).toBeDefined();
+    const aux = new MouseEvent('auxclick', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 1,
+    });
+    link.dispatchEvent(aux);
+    expect(aux.defaultPrevented).toBe(true);
+
+    // Positive control: a middle-click on an ordinary external link is left alone.
+    const external = el.shadowRoot?.querySelector<HTMLAnchorElement>(
+      '.md-content a[href="https://example.com/docs"]'
+    );
+    expect(external).toBeTruthy();
+    const externalAux = new MouseEvent('auxclick', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 1,
+    });
+    external?.dispatchEvent(externalAux);
+    expect(externalAux.defaultPrevented).toBe(false);
+  });
+
   it('does not include trailing sentence punctuation in path links', async () => {
     const el = await mount(
       'results are in /scion-volumes/scratchpad/final-summary.md. Check them.'
@@ -1171,6 +1211,49 @@ describe('scion-chat-message gs:// linkification', () => {
       name: 'report.md',
       messageId: 'msg-123',
     });
+  });
+
+  it('gives gs:// links a "#" href and keeps the click on the page', async () => {
+    const el = await mountGcs('gs://bkt/dir/report.md', true);
+    const link = gcsLinks(el)[0];
+    // Positive control: the link exists, so the href check is not vacuous.
+    expect(link).toBeDefined();
+    expect(link.getAttribute('href')).toBe('#');
+
+    const click = new MouseEvent('click', { bubbles: true, composed: true, cancelable: true });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+  });
+
+  it('keeps a middle-click on a gs:// link from opening a tab', async () => {
+    const el = await mountGcs(
+      'gs://bkt/dir/report.md and [the docs](https://example.com/docs)',
+      true
+    );
+    const link = gcsLinks(el)[0];
+    expect(link).toBeDefined();
+    const aux = new MouseEvent('auxclick', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 1,
+    });
+    link.dispatchEvent(aux);
+    expect(aux.defaultPrevented).toBe(true);
+
+    // Positive control: a middle-click on an ordinary external link is left alone.
+    const external = el.shadowRoot?.querySelector<HTMLAnchorElement>(
+      '.md-content a[href="https://example.com/docs"]'
+    );
+    expect(external).toBeTruthy();
+    const externalAux = new MouseEvent('auxclick', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 1,
+    });
+    external?.dispatchEvent(externalAux);
+    expect(externalAux.defaultPrevented).toBe(false);
   });
 
   it('gs:// link wins leftmost over an embedded /workspace path, with no path-link inside it', async () => {

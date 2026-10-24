@@ -251,10 +251,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return TemplateFromDir(name)
 	}
 
 	// 2. Check project-local templates
@@ -308,6 +305,17 @@ func FindTemplateInScope(name, scope string) *Template {
 	}
 
 	return nil
+}
+
+// TemplateFromDir returns the template stored in dir, an absolute directory
+// path. The directory must exist. The template's name is derived from the
+// directory's base name with templateNameFromDir, so it is "" for a
+// content-addressed cache directory.
+func TemplateFromDir(dir string) (*Template, error) {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return &Template{Name: templateNameFromDir(dir), Path: dir}, nil
+	}
+	return nil, fmt.Errorf("template path %s not found or not a directory", dir)
 }
 
 // templateNameFromDir derives a template name from a template directory path.
@@ -1318,10 +1326,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
-			if override.Cloud.TLS.CertFile != "" {
+			// The client certificate and its key are one setting: a layer
+			// that sets either replaces both, so the pair never mixes
+			// files from different layers. A layer that sets only one
+			// leaves the other empty, which ValidateTelemetryTLS reports.
+			if override.Cloud.TLS.CertFile != "" || override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
-			}
-			if override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}
