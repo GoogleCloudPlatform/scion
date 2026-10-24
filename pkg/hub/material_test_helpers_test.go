@@ -246,7 +246,7 @@ func materialCallerOnStack(name string) bool {
 
 func (f *materialFailingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	f.getUserCalls++
-	if f.getUserErrCaller != "" {
+	if f.getUserErrCaller != "" && f.getUserErr != nil {
 		if materialCallerOnStack(f.getUserErrCaller) {
 			f.getUserErrCallerFired++
 			return nil, f.getUserErr
