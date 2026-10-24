@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -325,4 +326,33 @@ func (t *mockOAuthTransport) RoundTrip(req *http.Request) (*http.Response, error
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 	}, nil
+}
+
+// hubPageHeaderNames are the page headers the web server sets on every
+// response besides the page policy and nosniff (securityHeadersMiddleware).
+var hubPageHeaderNames = []string{"X-Frame-Options", "X-XSS-Protection", "Referrer-Policy", "Permissions-Policy"}
+
+// hubPageHeaderValues returns the value securityHeadersMiddleware sets for
+// each of hubPageHeaderNames, read from a response it wrapped.
+func hubPageHeaderValues(t *testing.T) map[string]string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	(&WebServer{}).securityHeadersMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+		ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	out := make(map[string]string, len(hubPageHeaderNames))
+	for _, name := range hubPageHeaderNames {
+		v := rec.Header().Get(name)
+		require.NotEmpty(t, v, "securityHeadersMiddleware does not set %s", name)
+		out[name] = v
+	}
+	return out
+}
+
+// agentPageHeaders are the values a proxied app sends for
+// hubPageHeaderNames in the agent port tests; each differs from the hub's.
+var agentPageHeaders = map[string]string{
+	"X-Frame-Options":    "SAMEORIGIN",
+	"X-XSS-Protection":   "0",
+	"Referrer-Policy":    "unsafe-url",
+	"Permissions-Policy": "camera=*",
 }

@@ -1585,8 +1585,10 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 		if got.Telemetry.Cloud.TLS.CertFile != "/etc/ssl/certs/override-client.pem" {
 			t.Errorf("expected CertFile override, got %q", got.Telemetry.Cloud.TLS.CertFile)
 		}
-		if got.Telemetry.Cloud.TLS.KeyFile != "/etc/ssl/private/base-client-key.pem" {
-			t.Errorf("expected KeyFile preserved from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
+		// cert_file and key_file merge as a pair: the override sets only
+		// the certificate, so the base key is not carried over.
+		if got.Telemetry.Cloud.TLS.KeyFile != "" {
+			t.Errorf("expected KeyFile not mixed in from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
 		}
 		// Batch max_size overridden, timeout preserved
 		if got.Telemetry.Cloud.Batch.MaxSize != 256 {
@@ -2331,5 +2333,54 @@ func TestModelSizeAlias(t *testing.T) {
 				t.Errorf("ModelSizeAlias(%q) = %q disagrees with ResolveModelAlias -> %q", tt.input, ModelSizeAlias(tt.input), resolved)
 			}
 		})
+	}
+}
+
+// TestTemplateFromDir: an existing directory yields a template named after
+// its base name (empty for a content-hash directory); a missing path or a
+// file is refused. FindTemplateWithContext resolves absolute paths with it.
+func TestTemplateFromDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "planner")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hashDir := filepath.Join(root, strings.Repeat("ab", 32))
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tpl, err := TemplateFromDir(dir)
+	if err != nil {
+		t.Fatalf("TemplateFromDir(%s): %v", dir, err)
+	}
+	if tpl.Name != "planner" || tpl.Path != dir {
+		t.Errorf("TemplateFromDir(%s) = {%q, %q}, want {planner, %s}", dir, tpl.Name, tpl.Path, dir)
+	}
+
+	tpl, err = TemplateFromDir(hashDir)
+	if err != nil {
+		t.Fatalf("TemplateFromDir(hash dir): %v", err)
+	}
+	if tpl.Name != "" {
+		t.Errorf("hash dir name = %q, want empty", tpl.Name)
+	}
+
+	for _, bad := range []string{filepath.Join(root, "missing"), file} {
+		if _, err := TemplateFromDir(bad); err == nil || !strings.Contains(err.Error(), "not found or not a directory") {
+			t.Errorf("TemplateFromDir(%s) err = %v, want not found or not a directory", bad, err)
+		}
+	}
+
+	viaFind, err := FindTemplate(dir)
+	if err != nil {
+		t.Fatalf("FindTemplate(%s): %v", dir, err)
+	}
+	if viaFind.Name != "planner" || viaFind.Path != dir {
+		t.Errorf("FindTemplate(%s) = {%q, %q}, want {planner, %s}", dir, viaFind.Name, viaFind.Path, dir)
 	}
 }
