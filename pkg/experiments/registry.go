@@ -139,7 +139,10 @@ const Artifacts = "hub.artifacts"
 // stores each file through the artifact service, which must be installed
 // with its settings section enabled (hub.artifacts need not be on). The hub
 // checks it on every upload. Attachments stored while it was on stay
-// readable after it is turned off.
+// readable after it is turned off. Its compiled default is off, but a hub
+// whose resource storage is an object store resolves it on unless an
+// override is stored (ptone/scion#5827; pkg/hub
+// deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
 // ChatScheduledSend gates scheduled send in native web chat: the Schedule
@@ -362,7 +365,7 @@ var compiled = []Experiment{
 	{
 		Name:        AttachmentArtifacts,
 		Title:       "Attachments as artifacts",
-		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: each one is readable exactly by the readers of that message, and is removed when the message is deleted. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off.",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox; for a message in a project topic thread a copy is also placed in the project's scratchpad shared directory, where every agent and member with access to that directory can read it (direct and group conversations get inbox delivery only). Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on when the hub's resource storage is an object store (GCS); off on hubs with local storage.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
