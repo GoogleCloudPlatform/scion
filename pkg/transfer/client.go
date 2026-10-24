@@ -118,6 +118,11 @@ func (c *Client) uploadToFile(fileURL string, content io.Reader) error {
 	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(f, content); err != nil {
+		// No object is left for a failed write (for example content that
+		// fails its collected size or hash check at the end of the read).
+		// Removal is best-effort; the write error is returned.
+		_ = f.Close()
+		_ = os.Remove(path)
 		return fmt.Errorf("failed to write file %s: %w", path, err)
 	}
 

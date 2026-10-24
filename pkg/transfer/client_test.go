@@ -17,6 +17,7 @@ package transfer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -350,5 +351,69 @@ func TestClient_UploadFiles_NilRoot(t *testing.T) {
 	err := NewClient(nil).UploadFiles(context.Background(), nil, files, urls, nil)
 	if err == nil || !strings.Contains(err.Error(), "no root") {
 		t.Fatalf("err = %v, want a no-root error", err)
+	}
+}
+
+// TestClient_UploadFiles_HashMismatchLeavesNoObject pins that a file whose
+// content changed after collection (same size, so the open succeeds and the
+// hash check fails at the end of the read) leaves no object at a file://
+// destination.
+func TestClient_UploadFiles_HashMismatchLeavesNoObject(t *testing.T) {
+	dir, dest := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files, err := CollectFiles(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("FIRST\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	obj := filepath.Join(dest, "a.txt")
+	urls := []UploadURLInfo{{Path: "a.txt", URL: "file://" + obj, Method: "PUT"}}
+
+	err = NewClient(nil).UploadFiles(context.Background(), root, files, urls, nil)
+	if err == nil || !strings.Contains(err.Error(), "content hash differs") {
+		t.Fatalf("err = %v, want a content hash error", err)
+	}
+	if _, err := os.Lstat(obj); !os.IsNotExist(err) {
+		t.Errorf("an object was left at %s (lstat err %v)", obj, err)
+	}
+}
+
+// failingReader returns its data, then err instead of io.EOF.
+type failingReader struct {
+	data []byte
+	err  error
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// TestClient_UploadFile_FileURLWriteErrorLeavesNoObject pins that a read
+// error while writing to a file:// destination removes the partially
+// written object and returns the read error.
+func TestClient_UploadFile_FileURLWriteErrorLeavesNoObject(t *testing.T) {
+	obj := filepath.Join(t.TempDir(), "sub", "a.txt")
+	readErr := errors.New("size differs")
+	err := NewClient(nil).UploadFile(context.Background(), UploadURLInfo{URL: "file://" + obj, Method: "PUT"},
+		&failingReader{data: []byte("partial content"), err: readErr})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("err = %v, want it to wrap %v", err, readErr)
+	}
+	if _, err := os.Lstat(obj); !os.IsNotExist(err) {
+		t.Errorf("an object was left at %s (lstat err %v)", obj, err)
 	}
 }

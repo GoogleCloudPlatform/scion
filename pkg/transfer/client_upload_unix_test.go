@@ -29,23 +29,23 @@ import (
 // TestClient_UploadFiles_RefusesChangedFiles pins that UploadFiles reads
 // each file through the root it is given: a collected file swapped or
 // changed after collection (a leaf link inside or outside the root, a
-// parent link outside it, a FIFO, or new content) fails the upload, none of
-// its bytes are written, no later file is uploaded and progress is not
+// parent link outside it, a FIFO, or new content) fails the upload, no
+// object is left for it, no later file is uploaded and progress is not
 // reported for it.
 func TestClient_UploadFiles_RefusesChangedFiles(t *testing.T) {
 	const content = "first\n"
 	cases := map[string]struct {
 		swap    func(t *testing.T, dir, outside string)
 		wantErr string
-		// partial: the change is only detected at the end of the read, so a
-		// file:// destination may already hold a partial object for the
-		// refused file (local storage writes while it streams).
-		partial bool
+		// atEnd: the change is only detected at the end of the read, after the
+		// file:// destination directory was created; the partially written
+		// object must have been removed.
+		atEnd bool
 	}{
 		"content changed, same size": {
 			swap:    func(t *testing.T, dir, _ string) { writeReadTestFile(t, dir, "sub/a.txt", "FIRST\n") },
 			wantErr: "changed since it was collected",
-			partial: true,
+			atEnd:   true,
 		},
 		"leaf link inside the root": {
 			swap: func(t *testing.T, dir, _ string) {
@@ -122,7 +122,11 @@ func TestClient_UploadFiles_RefusesChangedFiles(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(dest, "z.txt")); !os.IsNotExist(err) {
 				t.Errorf("z.txt was uploaded after a refused file (lstat err %v)", err)
 			}
-			if !tc.partial {
+			if tc.atEnd {
+				if _, err := os.Lstat(filepath.Join(dest, "sub", "a.txt")); !os.IsNotExist(err) {
+					t.Errorf("an object was left for the refused file (lstat err %v)", err)
+				}
+			} else {
 				// Refused at open: nothing at all was written.
 				entries, _ := os.ReadDir(dest)
 				if len(entries) != 0 {
