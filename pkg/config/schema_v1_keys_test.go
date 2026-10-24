@@ -94,6 +94,7 @@ server:
     update_policy: notify
     check_interval_hours: 6
     github_repo: owner/repo
+    install_root: /opt/scion
   notification_channels:
     - type: slack
       params:

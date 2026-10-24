@@ -2555,7 +2555,8 @@
         "release_channel": { "type": "string", "description": "Release channel to track: \"stable\" or \"preview\"." },
         "update_policy": { "type": "string", "description": "Automatic update behavior: \"auto\", \"notify\", or \"disabled\". Unknown values are treated as \"notify\"." },
         "check_interval_hours": { "type": "integer", "minimum": 0, "description": "Hours between release checks." },
-        "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." }
+        "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." },
+        "install_root": { "type": "string", "description": "Versioned install root (releases/, current, previous) for release self-update. Default /opt/scion; SCION_MAINTENANCE_INSTALL_ROOT overrides it." }
       },
       "additionalProperties": false
     },

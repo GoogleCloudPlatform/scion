@@ -23,6 +23,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Installer strategy names, as reported by Installer.Name and
@@ -35,7 +37,7 @@ const (
 
 // Defaults for DetectOptions.
 const (
-	DefaultInstallRoot = "/opt/scion"
+	DefaultInstallRoot = config.DefaultMaintenanceInstallRoot
 	DefaultBinaryDest  = "/usr/local/bin/scion"
 	DefaultServiceName = "scion-hub"
 )
