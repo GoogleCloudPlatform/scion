@@ -82,3 +82,33 @@ func TestLoadVersionedSettings_MergeKeyPanicIsError(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectSettingsFormat_MergeKeyPanicIsUnparseable(t *testing.T) {
+	data := []byte("schema_version: \"1\"\n" + mergeKeyWithSequenceKeyYAML)
+	var version string
+	var isLegacy bool
+	require.NotPanics(t, func() { version, isLegacy = DetectSettingsFormat(data) })
+	assert.Equal(t, "", version)
+	assert.False(t, isLegacy)
+}
+
+func TestValidateSettings_MergeKeyPanicIsError(t *testing.T) {
+	data := []byte("schema_version: \"1\"\n" + mergeKeyWithSequenceKeyYAML)
+	var err error
+	require.NotPanics(t, func() { _, err = ValidateSettings(data, "1") })
+	require.Error(t, err)
+}
+
+func TestUpdateSettingGlobal_MergeKeyPanicIsError(t *testing.T) {
+	writeMergeKeySettings(t, true)
+	var err error
+	require.NotPanics(t, func() { err = UpdateSetting("", "default_template", "x", true) })
+	require.Error(t, err)
+}
+
+func TestMigrateSettingsFile_MergeKeyPanicIsError(t *testing.T) {
+	projectDir := writeMergeKeySettings(t, false)
+	var err error
+	require.NotPanics(t, func() { _, err = MigrateSettingsFile(projectDir, true) })
+	require.Error(t, err)
+}
