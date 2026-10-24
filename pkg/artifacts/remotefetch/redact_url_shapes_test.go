@@ -30,14 +30,16 @@ import (
 )
 
 // jsonLoggerWithoutTime returns a JSON logger to w that leaves out each
-// record's time. The time is the one value in a record the code under test
-// does not write, and its digits (nanoseconds such as "...944958461Z") can
-// hold a 4-byte part of a masked value ("8461") by chance; every other value
-// of the record (message, level and attributes) is still written and checked.
+// record's time: the top-level "time" attribute when it holds a time (an
+// attribute of another kind under that key is still written). The time is
+// the one value in a record the code under test does not write, and its
+// digits (nanoseconds such as "...944958461Z") can hold a 4-byte part of a
+// masked value ("8461") by chance; every other value of the record
+// (message, level and attributes) is still written and checked.
 func jsonLoggerWithoutTime(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if len(groups) == 0 && a.Key == slog.TimeKey {
+			if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
 				return slog.Attr{}
 			}
 			return a
