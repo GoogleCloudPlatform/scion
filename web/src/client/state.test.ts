@@ -100,6 +100,21 @@ describe('StateManager user-scoped chat subjects', () => {
     const detail = (scheduled.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
     expect(detail.data).toEqual(data);
   });
+
+  it('routes user.{id}.chat.stars to chat-stars-updated, never as a message', () => {
+    const sm = new StateManager();
+    const stars = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('chat-stars-updated', stars);
+    sm.addEventListener('chat-message-received', message);
+
+    emit(sm, 'user.b.chat.stars', { action: 'changed' });
+
+    expect(message).not.toHaveBeenCalled();
+    expect(stars).toHaveBeenCalledTimes(1);
+    const detail = (stars.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual({ action: 'changed' });
+  });
 });
 
 /**

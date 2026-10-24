@@ -389,60 +389,68 @@ func (s *OwnershipStore) mutate(projectID, agentID string, fn func(*OwnershipRec
 // A slug held by a different agent ID is refused; a deleting or deleted
 // record cannot take a new run.
 func (s *OwnershipStore) BeginRun(projectID, agentID, slug, runID string) error {
+	_, err := s.beginRun(projectID, agentID, slug, runID)
+	return err
+}
+
+// beginRun is BeginRun, also reporting whether it created the record and
+// the revision it wrote (for AbandonCreateRun).
+func (s *OwnershipStore) beginRun(projectID, agentID, slug, runID string) (beganRun, error) {
 	if runID == "" {
-		return errors.New("ownership: a run ID is required")
+		return beganRun{}, errors.New("ownership: a run ID is required")
 	}
 	if _, err := s.slugPath(projectID, slug); err != nil {
-		return err
+		return beganRun{}, err
 	}
 	l := s.keyLock(projectID, agentID)
 	l.Lock()
 	defer l.Unlock()
 	rec, ok, err := s.read(projectID, agentID)
 	if err != nil {
-		return err
+		return beganRun{}, err
 	}
 	s.slugMu.Lock()
 	defer s.slugMu.Unlock()
 	holder, err := s.SlugHolder(projectID, slug)
 	if err != nil {
-		return err
+		return beganRun{}, err
 	}
 	if holder != "" && holder != agentID {
 		if held, found, _ := s.readFile(projectID, holder); found && held.State != OwnershipStateActive {
-			return fmt.Errorf("%w: slug %q in project %q on Runtime Broker instance %s: the delete of agent %s has not yet confirmed that all its objects are gone",
+			return beganRun{}, fmt.Errorf("%w: slug %q in project %q on Runtime Broker instance %s: the delete of agent %s has not yet confirmed that all its objects are gone",
 				ErrOwnershipSlugPending, slug, projectID, s.brokerID, holder)
 		}
-		return fmt.Errorf("%w: slug %q in project %q is held by agent %s", ErrOwnershipSlugHeld, slug, projectID, holder)
+		return beganRun{}, &slugHeldError{projectID: projectID, slug: slug, holder: holder}
 	}
+	created := !ok
 	if !ok {
 		rec = &OwnershipRecord{SchemaVersion: ownershipSchemaVersion, RuntimeBrokerID: s.brokerID,
 			ProjectID: projectID, AgentID: agentID, AgentSlug: slug, State: OwnershipStateActive}
 	}
 	if rec.State != OwnershipStateActive {
-		return fmt.Errorf("%w: agent %q is %s", ErrOwnershipStateOrder, agentID, rec.State)
+		return beganRun{}, fmt.Errorf("%w: agent %q is %s", ErrOwnershipStateOrder, agentID, rec.State)
 	}
 	if rec.AgentSlug != slug {
-		return fmt.Errorf("%w: agent %q is recorded with slug %q, not %q", ErrOwnershipKeyInvalid, agentID, rec.AgentSlug, slug)
+		return beganRun{}, fmt.Errorf("%w: agent %q is recorded with slug %q, not %q", ErrOwnershipKeyInvalid, agentID, rec.AgentSlug, slug)
 	}
 	if existing := rec.Run(runID); existing == nil {
 		rec.Runs = append(rec.Runs, OwnedRun{RunID: runID, State: OwnershipStateProvisioning})
 	} else if runStateOrder[existing.State] >= runStateOrder[OwnershipStateDeleting] {
-		return fmt.Errorf("%w: run %q of agent %q is %s and cannot be revived", ErrOwnershipStateOrder, runID, agentID, existing.State)
+		return beganRun{}, fmt.Errorf("%w: run %q of agent %q is %s and cannot be revived", ErrOwnershipStateOrder, runID, agentID, existing.State)
 	}
 	rec.Revision++
 	rec.UpdatedAt = s.now().UTC()
 	p, _ := s.recordPath(projectID, agentID)
 	if err := writeOwnershipFile(p, mustJSON(rec)); err != nil {
-		return err
+		return beganRun{}, err
 	}
 	if holder == "" {
 		sp, _ := s.slugPath(projectID, slug)
 		if err := writeOwnershipFile(sp, []byte(agentID+"\n")); err != nil {
-			return err
+			return beganRun{}, err
 		}
 	}
-	return nil
+	return beganRun{created: created, revision: rec.Revision}, nil
 }
 
 // AddResource records an object a run created. It is refused once the run
@@ -917,26 +925,36 @@ func (s *Server) fileAgentOwned(projectID, slug string) bool {
 // instance or of another instance of the host), or a write failure refuses
 // the operation before any side effect.
 func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bool) error {
+	_, err := s.beginOwnedRunInfo(projectID, agentID, slug, runID, create)
+	return err
+}
+
+// beginOwnedRunInfo is beginOwnedRun, also reporting what BeginRun did.
+func (s *Server) beginOwnedRunInfo(projectID, agentID, slug, runID string, create bool) (beganRun, error) {
 	if s.ownership == nil {
-		return nil
+		return beganRun{}, nil
 	}
 	if projectID == "" || agentID == "" {
-		return fmt.Errorf("flat Runtime Broker %s: a project ID and an agent ID are required to record ownership", s.ownership.RuntimeBrokerID())
+		return beganRun{}, fmt.Errorf("flat Runtime Broker %s: a project ID and an agent ID are required to record ownership", s.ownership.RuntimeBrokerID())
 	}
 	if !create {
 		rec, ok, err := s.ownership.Get(projectID, agentID)
 		if err != nil {
-			return err
+			return beganRun{}, err
 		}
 		if !ok || rec.State != OwnershipStateActive {
-			return fmt.Errorf("%w: agent %s in project %s has no live ownership record of this Runtime Broker instance", ErrOwnershipNotRecorded, agentID, projectID)
+			return beganRun{}, fmt.Errorf("%w: agent %s in project %s has no live ownership record of this Runtime Broker instance", ErrOwnershipNotRecorded, agentID, projectID)
 		}
 	}
 	// The slug must also be free on every other instance sharing this
 	// host's project directories.
-	return s.locks().reserveSlug(s, projectID, slug, func() error {
-		return s.ownership.BeginRun(projectID, agentID, slug, runID)
+	var began beganRun
+	err := s.locks().reserveSlug(s, projectID, slug, func() error {
+		var err error
+		began, err = s.ownership.beginRun(projectID, agentID, slug, runID)
+		return err
 	})
+	return began, err
 }
 
 // ownedStart is one flat start's ownership journal mirror: it records every
@@ -950,6 +968,10 @@ type ownedStart struct {
 	mu      sync.Mutex
 	err     error
 	handles []api.ResourceHandle
+
+	// hold is a create's in-flight hold on its run, which an async launch
+	// takes over (nil otherwise).
+	hold *ownedHold
 }
 
 func (o *ownedStart) observe(h api.ResourceHandle) {

@@ -33,8 +33,8 @@ const HashPrefix = "sha256:"
 var contentHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // IsContentHash reports whether s is a content hash in the "sha256:<hex64>"
-// form produced by HashBytes and ComputeContentHash. Content-addressed
-// caches (for example the broker's template cache) use this value as a
+// form produced by HashBytes, ComputeContentHashV1 and ComputeContentHashV2.
+// Content-addressed caches (for example the broker's template cache) use this value as a
 // directory name, so callers use it to tell such a directory name apart from
 // a human-chosen name.
 func IsContentHash(s string) bool {
@@ -97,9 +97,10 @@ func GitBlobHashFile(path string) (string, error) {
 }
 
 // HashFile computes the SHA-256 hash of a file.
-// Returns the hash in format "sha256:<hex>".
+// Returns the hash in format "sha256:<hex>". The file is opened
+// non-blocking on Unix, so a FIFO at path does not block the open.
 func HashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, readOnlyFlags, 0)
 	if err != nil {
 		return "", err
 	}
@@ -121,26 +122,72 @@ func HashBytes(data []byte) string {
 	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
 }
 
-// ComputeContentHash computes the overall content hash from a list of file hashes.
-// Files are sorted by path for deterministic ordering before hash computation.
-// Returns the hash in format "sha256:<hex>".
-func ComputeContentHash(files []FileInfo) string {
+// ComputeContentHashV1 is the original aggregate content hash: SHA-256 over
+// the per-file hashes concatenated in path order. Paths and file modes are
+// not part of the preimage, so a rename-only or chmod-only change keeps the
+// same value (ptone/scion#5658).
+//
+// It remains the skill bundle hash: published skill versions are immutable
+// and pinned by this value (registry pins, content-addressed version lookup,
+// broker install verification), so it cannot change without a pin
+// migration. For templates and harness-configs the hub records it while
+// the hub.content_hash_v2 experiment is off, and ComputeContentHashV2 while
+// it is on. The hub never uses it to accept a client's expected hash
+// against a v2 row: the commit compare-and-swap compares the stored value
+// strictly (accepting a v1 value that matches the v1 hash of the stored
+// files would accept a stale commit over a rename-only or chmod-only
+// change). The CLI uses it only to compare with a hub response that has no
+// manifest.
+// Returns "" for an empty file list.
+func ComputeContentHashV1(files []FileInfo) string {
 	if len(files) == 0 {
 		return ""
 	}
 
-	// Sort files by path for deterministic ordering
-	sorted := make([]FileInfo, len(files))
-	copy(sorted, files)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Path < sorted[j].Path
-	})
-
-	// Concatenate hashes and compute final hash
+	sorted := sortedByPath(files)
 	hasher := sha256.New()
 	for _, file := range sorted {
 		hasher.Write([]byte(file.Hash))
 	}
 
 	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
+}
+
+// ComputeContentHashV2 is the content hash of templates and harness-configs
+// (ptone/scion#5658): SHA-256 over one line per file, in path order,
+//
+//	<path> NUL <normalised mode> NUL <file hash> LF
+//
+// where the mode is NormalizedModeString ("0644" or "0755"; an empty mode
+// is "0644"). A rename, a chmod that flips the
+// executable bit, and a content change each change the value. It has the
+// same "sha256:<64 hex>" form as ComputeContentHashV1 (IsContentHash).
+// Returns "" for an empty file list.
+func ComputeContentHashV2(files []FileInfo) string {
+	if len(files) == 0 {
+		return ""
+	}
+
+	sorted := sortedByPath(files)
+	hasher := sha256.New()
+	for _, file := range sorted {
+		hasher.Write([]byte(file.Path))
+		hasher.Write([]byte{0})
+		hasher.Write([]byte(NormalizedModeString(file.Mode)))
+		hasher.Write([]byte{0})
+		hasher.Write([]byte(file.Hash))
+		hasher.Write([]byte{'\n'})
+	}
+
+	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
+}
+
+// sortedByPath returns a copy of files sorted by path.
+func sortedByPath(files []FileInfo) []FileInfo {
+	sorted := make([]FileInfo, len(files))
+	copy(sorted, files)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Path < sorted[j].Path
+	})
+	return sorted
 }

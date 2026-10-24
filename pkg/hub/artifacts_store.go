@@ -169,6 +169,9 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 // attachments of messages that are gone are retired; a failure in either is
 // logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
+	// Attachment retention (scratchpad projections, legacy blobs) does not
+	// depend on the artifact store; it paces itself to once an hour.
+	s.sweepAttachmentRetention(ctx, time.Now())
 	st := s.ArtifactStore()
 	if st == nil {
 		return
