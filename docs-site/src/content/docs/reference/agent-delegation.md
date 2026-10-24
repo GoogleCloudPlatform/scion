@@ -71,12 +71,12 @@ unexpired credentials work again when it is turned back on. To end grants for go
 or use revoke-all.
 
 An optional operational setting, `agent_delegation_policy`, can narrow the delegable permissions
-per boundary kind. It can never widen them. See [Admin settings](/scion/reference/admin-settings/).
+per boundary kind. It can never widen them. See [Server configuration](/scion/reference/server-config/).
 
 ## Issuance
 
 ```sh
-scion hub delegation create <agent> --permission agent:read --permission agent:list --hub --name nightly-triage --expires 7d
+scion hub delegation create <agent> --permission agent:read --permission agent:list --boundary hub --name nightly-triage --expires 7d
 ```
 
 - **Who may issue:** the agent's owner, or a user in its recorded ancestry, who is admitted to the
@@ -127,8 +127,8 @@ What to configure:
 | `scion hub delegation get <agent> <grant>` | `GET /api/v1/agents/{agentId}/delegations/{grantId}` | as for list; a grant outside your authority answers `404 grant_not_found` |
 | `scion hub delegation revoke <agent> <grant>` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}` | the issuer; the bound agent (it relinquishes its own grant); the agent's current owner; hub admins, for any grant; project owners and admins of P, for grants bounded to project P only |
 | `scion hub delegation revoke <agent> <grant> --credential <id>` | `DELETE …/delegations/{grantId}/credentials/{credentialId}` | as for revoke |
-| `scion hub delegation revoke-all --mine --yes` | `POST /api/v1/users/me/delegations/revoke-all` | your own issued grants |
-| `scion hub delegation revoke-all <agent> --yes` | `POST /api/v1/agents/{agentId}/delegations/revoke-all` | per grant: the issuer and the agent's current owner, and holders of `agent.delegation.revoke_all` (hub admins, for any grant) |
+| `scion hub delegation revoke-all --mine` | `POST /api/v1/users/me/delegations/revoke-all` | your own issued grants |
+| `scion hub delegation revoke-all <agent>` | `POST /api/v1/agents/{agentId}/delegations/revoke-all` | per grant: the issuer and the agent's current owner, and holders of `agent.delegation.revoke_all` (hub admins, for any grant) |
 
 - **Names:** the revoke-all permission is `agent.delegation.revoke_all`. Its catalog operation is
   `agent.delegation.revokeall`, because operation IDs take no underscore.
@@ -142,6 +142,8 @@ What to configure:
     project-bounded grants, because project roles hold `agent.delegation.revoke` but not
     `agent.delegation.revoke_all`.
   - Revoke-all needs a session; the bound agent relinquishes its grants one by one.
+  - The CLI asks for confirmation on a terminal (default No). `--yes` (`-y`) or `--non-interactive`
+    confirms; without a terminal and without either flag it refuses.
 - **Management needs a session** (or, on the per-agent routes other than revoke-all, the bound
   agent's own agent token). Delegated credentials and access tokens are refused.
 - **Responses never carry** a credential, its hash or any prefix beyond `scion_adt_`.

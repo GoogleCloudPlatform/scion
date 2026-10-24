@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 )
 
 // scion hub delegation: agent delegation grant management
@@ -105,15 +106,18 @@ var hubDelegationRevokeAllCmd = &cobra.Command{
 	Short: "Revoke every grant you issued, or every grant of one agent",
 	Long: `Revoke every unrevoked grant you issued (--mine), or every unrevoked grant bound to <agent>
 that you may revoke this way. Grants you may see but not revoke this way are reported as
-skipped; revoke them one by one with 'scion hub delegation revoke'. Needs --yes.`,
+skipped; revoke them one by one with 'scion hub delegation revoke'.
+
+It asks for confirmation on a terminal (default No). --yes (-y) or --non-interactive confirms; without
+a terminal and without either flag it refuses.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runHubDelegationRevokeAll,
 }
 
 var (
 	delegationPermissions []string
-	delegationProject     string
-	delegationHub         bool
+	delegationBoundary    string
+	delegationBoundaryPrj string
 	delegationExpires     string
 	delegationName        string
 	delegationPurpose     string
@@ -121,7 +125,6 @@ var (
 	delegationMaxCredTTL  time.Duration
 	delegationCredential  string
 	delegationMine        bool
-	delegationYes         bool
 	delegationJSON        bool
 )
 
@@ -132,18 +135,18 @@ func init() {
 
 	f := hubDelegationCreateCmd.Flags()
 	f.StringArrayVar(&delegationPermissions, "permission", nil, "Permission to delegate, repeatable (for example agent:read, agent:list, project:read, agent:message, agent:attach)")
-	f.StringVar(&delegationProject, "project", "", "Bound the grant to this project ID (default: the agent's project)")
-	f.BoolVar(&delegationHub, "hub", false, "Bound the grant to the whole Hub")
+	f.StringVar(&delegationBoundary, "boundary", "project", "Grant boundary: project (one project) or hub (the whole Hub)")
+	f.StringVar(&delegationBoundaryPrj, "boundary-project", "", "Project ID of a project boundary (default: the agent's project)")
 	f.StringVar(&delegationExpires, "expires", "", "Grant lifetime, for example 12h or 7d (default 7d, at most 30d)")
 	f.StringVar(&delegationName, "name", "", "Short name for the grant, shown in lists and audit (required)")
 	f.StringVar(&delegationPurpose, "purpose", "", "Free-text note (descriptive only, never used for authorization)")
 	f.StringArrayVar(&delegationLabels, "label", nil, "Descriptive label key=value, repeatable")
 	f.DurationVar(&delegationMaxCredTTL, "max-credential-ttl", 0, "Lifetime cap of each delegated credential (default 15m, at most 60m)")
-	hubDelegationCreateCmd.MarkFlagsMutuallyExclusive("project", "hub")
 
 	hubDelegationRevokeCmd.Flags().StringVar(&delegationCredential, "credential", "", "Revoke only this credential of the grant")
 	hubDelegationRevokeAllCmd.Flags().BoolVar(&delegationMine, "mine", false, "Revoke every grant you issued")
-	hubDelegationRevokeAllCmd.Flags().BoolVar(&delegationYes, "yes", false, "Confirm the revocation")
+	hubDelegationRevokeAllCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to the confirmation prompt (required to confirm when stdin is not a terminal)")
+	hubDelegationRevokeAllCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
 	for _, c := range []*cobra.Command{hubDelegationCreateCmd, hubDelegationListCmd, hubDelegationGetCmd, hubDelegationRevokeAllCmd} {
 		c.Flags().BoolVar(&delegationJSON, "json", false, "Print the Hub's answer as JSON")
 	}
@@ -154,6 +157,14 @@ func init() {
 var hubDelegationClientFn = func() (hubclient.Client, error) {
 	_, client, err := loadHubClient()
 	return client, err
+}
+
+// hubDelegationConfirm asks for confirmation of a destructive delegation
+// command: --yes or --non-interactive confirms; otherwise an interactive
+// terminal is asked (default No), and without a terminal it is refused.
+// Tests replace it.
+var hubDelegationConfirm = func(prompt string) bool {
+	return hubsync.ConfirmAction(prompt, false, autoConfirm || nonInteractive)
 }
 
 // parseDelegationExpires parses a grant lifetime: a Go duration, or a whole
@@ -187,15 +198,23 @@ func buildCreateAgentDelegationRequest(projectOfAgent string, now time.Time) (*h
 		Name:        delegationName,
 		Purpose:     delegationPurpose,
 	}
-	switch {
-	case delegationHub:
+	switch delegationBoundary {
+	case "hub":
+		if delegationBoundaryPrj != "" {
+			return nil, newUsageError("--boundary-project applies to --boundary project only")
+		}
 		req.Boundary = hubclient.AgentDelegationBoundary{Kind: "hub"}
-	case delegationProject != "":
-		req.Boundary = hubclient.AgentDelegationBoundary{Kind: "project", ProjectID: delegationProject}
-	case projectOfAgent != "":
-		req.Boundary = hubclient.AgentDelegationBoundary{Kind: "project", ProjectID: projectOfAgent}
+	case "project", "":
+		projectID := delegationBoundaryPrj
+		if projectID == "" {
+			projectID = projectOfAgent
+		}
+		if projectID == "" {
+			return nil, newUsageError("the agent has no project; pass --boundary-project or --boundary hub")
+		}
+		req.Boundary = hubclient.AgentDelegationBoundary{Kind: "project", ProjectID: projectID}
 	default:
-		return nil, newUsageError("the agent has no project; pass --project or --hub")
+		return nil, newUsageError("invalid --boundary %q: must be project or hub", delegationBoundary)
 	}
 	if delegationExpires != "" {
 		d, err := parseDelegationExpires(delegationExpires)
@@ -380,9 +399,6 @@ func runHubDelegationRevokeAll(cmd *cobra.Command, args []string) error {
 	if delegationMine == (len(args) == 1) {
 		return newUsageError("pass either --mine or <agent>")
 	}
-	if !delegationYes {
-		return newUsageError("revoke-all ends every matching grant for good; rerun with --yes")
-	}
 	client, err := hubDelegationClientFn()
 	if err != nil {
 		return err
@@ -391,11 +407,17 @@ func runHubDelegationRevokeAll(cmd *cobra.Command, args []string) error {
 	defer cancel()
 	var resp *hubclient.RevokeAllAgentDelegationsResponse
 	if delegationMine {
+		if !hubDelegationConfirm("Revoke every unrevoked agent delegation grant you issued? This cannot be undone") {
+			return fmt.Errorf("revoke-all cancelled")
+		}
 		resp, err = client.AgentDelegations().RevokeAllMine(ctx)
 	} else {
 		agent, rerr := resolveReferenceAgent(ctx, client.Agents(), args[0])
 		if rerr != nil {
 			return rerr
+		}
+		if !hubDelegationConfirm(fmt.Sprintf("Revoke every unrevoked agent delegation grant of agent %s that you may revoke? This cannot be undone", agent.ID)) {
+			return fmt.Errorf("revoke-all cancelled")
 		}
 		resp, err = client.AgentDelegations().RevokeAll(ctx, agent.ID)
 	}

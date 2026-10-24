@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -38,10 +39,11 @@ import (
 func resetDelegationFlags(t *testing.T) {
 	t.Helper()
 	reset := func() {
-		delegationPermissions, delegationProject, delegationHub = nil, "", false
+		delegationPermissions, delegationBoundary, delegationBoundaryPrj = nil, "project", ""
 		delegationExpires, delegationName, delegationPurpose = "", "", ""
 		delegationLabels, delegationMaxCredTTL, delegationCredential = nil, 0, ""
-		delegationMine, delegationYes, delegationJSON = false, false, false
+		delegationMine, delegationJSON = false, false
+		autoConfirm, nonInteractive = false, false
 	}
 	reset()
 	t.Cleanup(reset)
@@ -79,6 +81,8 @@ func delegationTestHub(t *testing.T) func() []delegationHubRequest {
 			_, _ = w.Write([]byte(grant))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/delegations"):
 			_, _ = w.Write([]byte(`{"delegations":[` + grant + `]}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/delegations/"):
+			_, _ = w.Write([]byte(grant))
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -182,9 +186,9 @@ func TestHubDelegationCreate_RequestAndAttachNotice(t *testing.T) {
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now().Add(7*24*time.Hour), exp, time.Minute)
 
-	// Without agent:attach there is no notice; --hub bounds to the hub.
+	// Without agent:attach there is no notice; --boundary hub bounds to the hub.
 	resetDelegationFlags(t)
-	delegationPermissions, delegationName, delegationHub = []string{"agent:read"}, "n", true
+	delegationPermissions, delegationName, delegationBoundary = []string{"agent:read"}, "n", "hub"
 	_, errOut, err = runDelegationCmd(t, runHubDelegationCreate, "agent-1")
 	require.NoError(t, err)
 	assert.Empty(t, errOut)
@@ -207,6 +211,12 @@ func TestBuildCreateAgentDelegationRequest_Refusals(t *testing.T) {
 			delegationPermissions, delegationName, delegationMaxCredTTL = []string{"agent:read"}, "n", 2*time.Hour
 		},
 		"no project known": func() { delegationPermissions, delegationName = []string{"agent:read"}, "n" },
+		"bad boundary": func() {
+			delegationPermissions, delegationName, delegationBoundary = []string{"agent:read"}, "n", "world"
+		},
+		"hub boundary with a project": func() {
+			delegationPermissions, delegationName, delegationBoundary, delegationBoundaryPrj = []string{"agent:read"}, "n", "hub", "p-2"
+		},
 	}
 	for name, set := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -228,11 +238,20 @@ func TestBuildCreateAgentDelegationRequest_Refusals(t *testing.T) {
 }
 
 // TestHubDelegationRevokeAll_ConfirmationAndOutput: revoke-all needs exactly
-// one of --mine and <agent>, and --yes; it reports revoked and skipped
-// grants.
+// one of --mine and <agent>, and a confirmation (the shared --yes or
+// --non-interactive, or a Yes on a terminal); without one nothing is sent.
+// It reports revoked and skipped grants.
 func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 	resetDelegationFlags(t)
 	requests := delegationTestHub(t)
+	var prompts []string
+	answer := false
+	prev := hubDelegationConfirm
+	hubDelegationConfirm = func(prompt string) bool {
+		prompts = append(prompts, prompt)
+		return answer || autoConfirm || nonInteractive
+	}
+	t.Cleanup(func() { hubDelegationConfirm = prev })
 
 	_, _, err := runDelegationCmd(t, runHubDelegationRevokeAll)
 	require.Error(t, err, "neither --mine nor an agent")
@@ -240,10 +259,11 @@ func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 	_, _, err = runDelegationCmd(t, runHubDelegationRevokeAll, "agent-1")
 	require.Error(t, err, "both --mine and an agent")
 	_, _, err = runDelegationCmd(t, runHubDelegationRevokeAll)
-	require.Error(t, err, "no --yes")
+	require.ErrorContains(t, err, "cancelled", "not confirmed")
+	require.Len(t, prompts, 1)
 	assert.Empty(t, requests(), "nothing was sent without confirmation")
 
-	delegationYes = true
+	autoConfirm = true
 	out, _, err := runDelegationCmd(t, runHubDelegationRevokeAll)
 	require.NoError(t, err)
 	assert.Contains(t, out, "Revoked 1 grant(s).")
@@ -252,11 +272,80 @@ func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "/api/v1/users/me/delegations/revoke-all", got[0].path)
 
-	delegationMine = false
+	autoConfirm, nonInteractive, delegationMine = false, true, false
 	_, _, err = runDelegationCmd(t, runHubDelegationRevokeAll, "agent-1")
-	require.NoError(t, err)
+	require.NoError(t, err, "--non-interactive confirms")
 	got = requests()
 	assert.Equal(t, "/api/v1/agents/agent-1/delegations/revoke-all", got[len(got)-1].path)
+}
+
+// TestHubDelegationConfirm_DefaultRefusesWithoutTerminal: the real
+// confirmation refuses without --yes when stdin is not a terminal (go test
+// runs without one) and accepts with the shared flag.
+func TestHubDelegationConfirm_DefaultRefusesWithoutTerminal(t *testing.T) {
+	resetDelegationFlags(t)
+	assert.False(t, hubDelegationConfirm("revoke?"))
+	autoConfirm = true
+	assert.True(t, hubDelegationConfirm("revoke?"))
+}
+
+// TestHubDelegationFlags_ParseThroughRootTree: the subcommands' flags parse
+// through the real command tree, and none shadows a root persistent flag
+// with another meaning: --hub and --project stay the root's hub and project
+// selection, and revoke-all's --yes/-y and --non-interactive are the shared
+// confirmation flags.
+func TestHubDelegationFlags_ParseThroughRootTree(t *testing.T) {
+	resetDelegationFlags(t)
+	prevHub, prevProject := hubEndpoint, projectPath
+	var parsed []*cobra.Command
+	t.Cleanup(func() {
+		// Put the real tree's flags back to their defaults for later tests.
+		for _, c := range parsed {
+			c.Flags().VisitAll(func(f *pflag.Flag) {
+				if f.Changed {
+					if sv, ok := f.Value.(pflag.SliceValue); ok {
+						_ = sv.Replace(nil)
+					} else {
+						_ = f.Value.Set(f.DefValue)
+					}
+					f.Changed = false
+				}
+			})
+		}
+		hubEndpoint, projectPath = prevHub, prevProject
+	})
+
+	args := []string{"hub", "delegation", "create", "agent-1", "--hub", "https://hub.example", "--project", "proj-x",
+		"--boundary", "hub", "--permission", "agent:read", "--name", "n"}
+	c, rest, err := rootCmd.Find(args)
+	require.NoError(t, err)
+	require.Equal(t, "create", c.Name())
+	parsed = append(parsed, c)
+	require.NoError(t, c.ParseFlags(rest))
+	assert.Equal(t, "https://hub.example", hubEndpoint, "--hub is the root hub selection")
+	assert.Equal(t, "proj-x", projectPath, "--project is the root project selection")
+	assert.Equal(t, "hub", delegationBoundary)
+	assert.Equal(t, []string{"agent:read"}, delegationPermissions)
+	require.NoError(t, c.ValidateArgs(c.Flags().Args()))
+
+	c, rest, err = rootCmd.Find([]string{"hub", "delegation", "revoke-all", "--mine", "-y"})
+	require.NoError(t, err)
+	require.Equal(t, "revoke-all", c.Name())
+	parsed = append(parsed, c)
+	require.NoError(t, c.ParseFlags(rest))
+	assert.True(t, autoConfirm, "-y is the shared confirmation flag")
+	assert.True(t, delegationMine)
+
+	for _, sub := range hubDelegationCmd.Commands() {
+		sub.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
+			root := rootCmd.PersistentFlags().Lookup(f.Name)
+			if root == nil {
+				return
+			}
+			assert.True(t, f.Name == "yes" || f.Name == "non-interactive",
+				"%s --%s shadows the root flag of the same name", sub.Name(), f.Name)
+		})
+	}
 }
 
 // TestHubDelegationListGetRevoke_Routes: list (per agent and mine), get and
@@ -270,6 +359,9 @@ func TestHubDelegationListGetRevoke_Routes(t *testing.T) {
 	assert.Contains(t, out, "g-1")
 	_, _, err = runDelegationCmd(t, runHubDelegationList, "agent-1")
 	require.NoError(t, err)
+	out, _, err = runDelegationCmd(t, runHubDelegationGet, "agent-1", "g-1")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Grant g-1 for agent agent-1")
 	_, _, err = runDelegationCmd(t, runHubDelegationRevoke, "agent-1", "g-1")
 	require.NoError(t, err)
 	delegationCredential = "c-1"
@@ -284,6 +376,8 @@ func TestHubDelegationListGetRevoke_Routes(t *testing.T) {
 		"GET /api/v1/users/me/delegations",
 		"GET /api/v1/agents/agent-1",
 		"GET /api/v1/agents/agent-1/delegations",
+		"GET /api/v1/agents/agent-1",
+		"GET /api/v1/agents/agent-1/delegations/g-1",
 		"GET /api/v1/agents/agent-1",
 		"DELETE /api/v1/agents/agent-1/delegations/g-1",
 		"GET /api/v1/agents/agent-1",
