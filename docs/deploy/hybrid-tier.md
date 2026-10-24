@@ -721,9 +721,16 @@ running this tier:
   runtime doesn't set `automountServiceAccountToken: false` or require a
   dedicated service account. Exposure depends entirely on what RBAC exists in
   your agent namespace; review it for this tier's cluster specifically.
-- **With shared directories on NFS, chat attachments aren't staged into
-  NFS-backed shared dirs in this release.** Plan around this for projects on
-  the NFS tier until a confined NFS attachment path is built.
+- **Chat attachments on the NFS tier.** When the Hub has object storage,
+  attachments are stored as artifacts and delivered into the recipient's
+  inbox (`~/.scion/inbox/<message-id>/`), and that inbox path is the one the
+  message lists first. For messages in a project topic thread, the Hub also
+  copies each attachment into the project's NFS-backed `scratchpad` at
+  `.attachments/_webchat/<id>/<name>`, through the same confined resolver as
+  the file browser, so sibling agents can read it at
+  `/scion-volumes/scratchpad/.attachments/_webchat/<id>/`. Direct and group
+  conversations get inbox delivery only. Scratchpad copies are removed after
+  `messaging.attachment_inbox_retention_days` (default 7).
 - **A manually provisioned hub's default export is a plain subdirectory of
   the boot disk's root filesystem, not a dedicated filesystem's own root**
   (`deploy.sh` already exports a dedicated filesystem; see Security posture

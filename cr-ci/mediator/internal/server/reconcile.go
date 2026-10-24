@@ -17,14 +17,17 @@ import (
 
 // ReconcileResult is the /reconcile response body.
 type ReconcileResult struct {
-	ClaimsExpired      int      `json:"claims_expired"`
-	RunnersReaped      int      `json:"runners_reaped"`
-	ExecutionsReaped   int      `json:"executions_reaped"`
-	HijacksKilled      int      `json:"hijacks_killed"`
-	Backfilled         int      `json:"backfilled"`
-	LeftQueued         int      `json:"left_queued"`
-	ForkRunsRejected   int      `json:"fork_runs_rejected"`
-	Errors             []string `json:"errors,omitempty"`
+	ClaimsExpired    int      `json:"claims_expired"`
+	RunnersReaped    int      `json:"runners_reaped"`
+	ExecutionsReaped int      `json:"executions_reaped"`
+	HijacksKilled    int      `json:"hijacks_killed"`
+	Backfilled       int      `json:"backfilled"`
+	LeftQueued       int      `json:"left_queued"`
+	ForkRunsRejected int      `json:"fork_runs_rejected"`
+	Errors           []string `json:"errors,omitempty"`
+	// Skipped: steps for one repo, run or job that GitHub answered with a 5xx.
+	// They are retried by the next pass and do not fail this one (HTTP 200).
+	Skipped            []string `json:"skipped,omitempty"`
 	CapacityFullAtStop bool     `json:"capacity_full,omitempty"`
 }
 
@@ -75,31 +78,54 @@ type runnerJob struct {
 
 // Reconcile runs one pass:
 //  1. discovery, without the lock: queued and in_progress runs and their jobs;
-//  2. hijack guard for jobs running on cr-ci runners (covers missed webhooks);
-//  3. under the lock: expire claims, reap stale registrations and
-//     executions, and backfill queued servable jobs, oldest first, within
-//     capacity.
+//  2. under the lock from here on: the hijack guard for jobs running on
+//     cr-ci runners (covers missed webhooks), sharing one view;
+//  3. expire claims, reap stale registrations and executions, and backfill
+//     queued servable jobs, oldest first, within capacity (a fresh view).
 func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	var res ReconcileResult
+	// Every GitHub call in a pass concerns one repo, run or job. A GitHub 5xx
+	// there (a 502 on one run's jobs list, say) skips that item only: the rest of
+	// the pass goes on, and the next pass retries it. Anything else is an error
+	// and makes /reconcile answer 500.
 	addErr := func(stage string, err error) {
+		if githubServerError(err) {
+			res.Skipped = append(res.Skipped, stage+": "+err.Error())
+			s.log().Warn("reconcile step skipped after a GitHub server error; retried next pass", "event", logging.EventReconcileSkip, "stage", stage, "error", err.Error())
+			return
+		}
 		res.Errors = append(res.Errors, stage+": "+err.Error())
 		s.log().Error("reconcile step failed", "event", logging.EventError, "stage", stage, "error", err.Error())
 	}
 
-	cands, onRunners, notices := s.discover(ctx, &res, addErr)
+	cands, onRunners, notices, listed := s.discover(ctx, &res, addErr)
+	// Skipping one repo's or run's 5xx keeps a pass green, but a pass that could
+	// list no repo at all (a sustained GitHub outage) must turn /reconcile red.
+	// (Other errors already make it red.)
+	if listed == 0 && len(s.o.TargetRepos) > 0 && len(res.Errors) == 0 {
+		msg := "GitHub server errors on every repo; nothing was discovered"
+		res.Errors = append(res.Errors, "all_skipped: "+msg)
+		s.log().Error("reconcile skipped every repo after GitHub server errors", "event", logging.EventReconcileAllSkipped,
+			"repos", len(s.o.TargetRepos), "skipped", len(res.Skipped))
+	}
 
+	// One lock hold from the hijack guard to the end of the pass, so the guard
+	// loop can share one view (each swap would otherwise list runners and
+	// executions again) and nothing launches between its checks.
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+	gv := newView()
 	for _, rj := range onRunners {
-		out, err := s.checkRunnerJob(ctx, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, &rj.run, "reconcile")
+		out, err := s.checkRunnerJobLocked(ctx, gv, rj.repo.String(), rj.job.ID, rj.run.ID, rj.job.RunnerName, &rj.run, "reconcile")
 		if err != nil {
 			addErr("runner_check "+rj.job.RunnerName, err)
 		}
 		if out == "killed" {
 			res.HijacksKilled++
+			gv = newView() // the kill changed registrations and executions
 		}
 	}
 
-	s.dispatchMu.Lock()
-	defer s.dispatchMu.Unlock()
 	now := s.o.Now()
 	for k := range s.noticed {
 		if !notices[k] {
@@ -149,17 +175,22 @@ func (s *Server) Reconcile(ctx context.Context) ReconcileResult {
 	s.log().Info("reconcile finished", "event", logging.EventReconcile,
 		"claims_expired", res.ClaimsExpired, "runners_reaped", res.RunnersReaped, "executions_reaped", res.ExecutionsReaped,
 		"hijacks_killed", res.HijacksKilled, "backfilled", res.Backfilled, "left_queued", res.LeftQueued,
-		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors))
+		"fork_runs_rejected", res.ForkRunsRejected, "errors", len(res.Errors), "skipped", len(res.Skipped))
 	return res
+}
+
+// githubServerError reports whether err is a GitHub 5xx response.
+func githubServerError(err error) bool {
+	var ae *githubapp.APIError
+	return errors.As(err, &ae) && ae.Status >= 500 && ae.Status <= 599
 }
 
 // discover lists queued and in_progress runs of every served repo. It
 // returns queued servable jobs of runs that pass the fork guard (oldest
 // first, deduplicated) and the jobs currently running on cr-ci runners.
-func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func(string, error)) ([]candidate, []runnerJob, map[string]bool) {
-	var cands []candidate
-	var onRunners []runnerJob
-	notices := map[string]bool{}
+// listed counts the repos for which at least one runs list succeeded.
+func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func(string, error)) (cands []candidate, onRunners []runnerJob, notices map[string]bool, listed int) {
+	notices = map[string]bool{}
 	notice := func(key string) bool { // true the first time a notice is seen
 		notices[key] = true
 		s.dispatchMu.Lock()
@@ -170,11 +201,16 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 	}
 	seenJob := map[int64]bool{}
 	for _, repo := range s.o.TargetRepos {
+		repoListed := false
 		for _, status := range []string{"queued", "in_progress"} {
 			runs, err := s.o.GitHub.ListRuns(ctx, repo, status)
 			if err != nil {
 				addErr("list_runs "+repo.String(), err)
 				continue
+			}
+			if !repoListed {
+				repoListed = true
+				listed++
 			}
 			for i := range runs {
 				run := runs[i]
@@ -224,7 +260,7 @@ func (s *Server) discover(ctx context.Context, res *ReconcileResult, addErr func
 		}
 		return a.ID < b.ID
 	})
-	return cands, onRunners, notices
+	return cands, onRunners, notices, listed
 }
 
 // runnerScopes returns one repo per distinct runner list: every repo with
@@ -241,8 +277,9 @@ func (s *Server) runnerScopes() []githubapp.Repo {
 	return out
 }
 
-// reapRunners deletes offline, idle cr-job-* registrations older than
-// ReapAfter. Age is measured from the launch when this process launched the
+// reapRunners deletes offline, idle cr-job-* registrations of this stack
+// (Options.StackLabel) older than ReapAfter, and those of other stacks once
+// they have been offline for TaskTimeout + ReapAfter. Age is measured from the launch when this process launched the
 // runner, otherwise from when reconcile first saw it offline. Runners whose
 // claim is still pending (cold start) are kept.
 func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileResult, addErr func(string, error)) {
@@ -261,16 +298,26 @@ func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileR
 			if !ok || rn.Status != "offline" || rn.Busy {
 				continue
 			}
+			// Another stack's registration may be one of its runners cold-starting,
+			// so it gets that stack's whole task budget first. Offline for longer
+			// than TASK_TIMEOUT + ReapAfter, it cannot belong to a live execution: a
+			// leftover of a stack that was torn down (teardown.sh --regional-only),
+			// which would otherwise block the backfill of its job's runner name.
+			reapAfter := s.o.ReapAfter
+			other := s.otherStack(rn)
+			if other {
+				reapAfter = s.o.TaskTimeout + s.o.ReapAfter
+			}
 			stillOffline[rn.Name] = true
 			since, seen := s.offlineSeen[rn.Name]
 			if !seen {
 				since = now
 				s.offlineSeen[rn.Name] = now
 			}
-			if rec := s.runners[rn.Name]; rec != nil && rec.at.Before(since) {
+			if rec := s.runners[rn.Name]; rec != nil && !other && rec.at.Before(since) {
 				since = rec.at
 			}
-			if now.Sub(since) < s.o.ReapAfter || s.o.Claims.Pending(nameID) {
+			if now.Sub(since) < reapAfter || (!other && s.o.Claims.Pending(nameID)) {
 				continue
 			}
 			if err := s.o.GitHub.DeleteRunner(ctx, repo, rn.ID); err != nil {
@@ -281,7 +328,7 @@ func (s *Server) reapRunners(ctx context.Context, now time.Time, res *ReconcileR
 			delete(s.runners, rn.Name)
 			res.RunnersReaped++
 			s.log().Warn("deleted stale offline runner registration", "event", logging.EventRunnerReaped,
-				"repo", repo.String(), "runner", rn.Name, "runner_id", rn.ID, "offline_for", now.Sub(since).String())
+				"repo", repo.String(), "runner", rn.Name, "runner_id", rn.ID, "offline_for", now.Sub(since).String(), "other_stack", other)
 		}
 	}
 	for name := range s.offlineSeen {

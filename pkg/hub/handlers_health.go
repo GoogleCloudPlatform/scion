@@ -475,6 +475,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An instance whose keyring signing ring cannot issue (its active
+	// generation reached sign_until, or it has none) is not ready
+	// (ptone/scion#1530 §2); verification of eligible generations continues
+	// until verify_until.
+	if reason := s.signingNotReadyReason(); reason != "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": reason,
+		})
+		return
+	}
+
 	// Check if database is connected and migrated
 	if err := s.store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{

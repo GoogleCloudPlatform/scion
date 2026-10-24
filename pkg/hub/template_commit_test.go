@@ -299,7 +299,7 @@ func TestTemplateCommit_RoutedPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertBothIndex(t, got)
-			if got.ContentHash != computeContentHash(got.Files) {
+			if got.ContentHash != defaultContentHash(got.Files) {
 				t.Errorf("ContentHash %q does not match the manifest", got.ContentHash)
 			}
 			if got.Layout != store.TemplateLayoutBlobs || got.StoragePath != srv.templateBlobStoragePath(got) {

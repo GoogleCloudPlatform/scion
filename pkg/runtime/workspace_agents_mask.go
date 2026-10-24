@@ -196,3 +196,29 @@ func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
 	}
 	return rel, true
 }
+
+// ensureAgentsMaskPoint creates <src>/agents, the mount point of the agents
+// mask under the read-only project configuration directory src, on the
+// runtimes that mask the agents directory whenever src is a directory
+// (Docker and Podman). The read-only mount leaves the container runtime no
+// way to create it, so a failure to create it, or an existing entry that is
+// not a real directory, refuses the start instead of running without the
+// mask. Apple masks only an existing agents directory and creates nothing;
+// a src that is not a directory (a marker file) has no agents directory.
+func ensureAgentsMaskPoint(config RunConfig, src string) error {
+	if config.RuntimeName == appleContainerRuntimeName || !isDir(src) {
+		return nil
+	}
+	agents := filepath.Join(src, "agents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		return fmt.Errorf("cannot create the project's agents directory to mask it: %w", err)
+	}
+	info, err := os.Lstat(agents)
+	if err != nil {
+		return fmt.Errorf("cannot check the project's agents directory to mask it: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the project's agents directory is not a directory (%s), so it cannot be masked", info.Mode().Type())
+	}
+	return nil
+}

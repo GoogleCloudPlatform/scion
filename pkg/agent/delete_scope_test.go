@@ -136,7 +136,10 @@ func TestDeleteAgentFiles_EmptyOrUnresolvablePathLeavesGlobalAgentIntact(t *test
 
 // TestDeleteAgentFiles_GlobalProjectTargetStillDeletes: with the global
 // project as the target, the global project's agent is removed: its
-// directory (with its worktree), its branch and its global workspace.
+// directory (with its worktree) and its global workspace. The global
+// project has no repository of its own, so the branch in the repository the
+// worktree belongs to is left alone: the repository a delete changes comes
+// from the project, never from the worktree's own metadata.
 func TestDeleteAgentFiles_GlobalProjectTargetStillDeletes(t *testing.T) {
 	f := newScopeFixture(t)
 	if _, err := DeleteAgentFiles("worker", f.globalDir, true); err != nil {
@@ -148,8 +151,8 @@ func TestDeleteAgentFiles_GlobalProjectTargetStillDeletes(t *testing.T) {
 	if _, err := os.Stat(f.globalWorkspace); !os.IsNotExist(err) {
 		t.Errorf("the global project's agent workspace remains: %v", err)
 	}
-	if err := exec.Command("git", "-C", f.globalRepo, "rev-parse", "--verify", "--quiet", "refs/heads/worker").Run(); err == nil {
-		t.Error("the global project's agent branch remains")
+	if err := exec.Command("git", "-C", f.globalRepo, "rev-parse", "--verify", "--quiet", "refs/heads/worker").Run(); err != nil {
+		t.Error("the branch in a repository the global project does not own was deleted")
 	}
 }
 

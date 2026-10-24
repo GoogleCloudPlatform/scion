@@ -493,7 +493,7 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		// time.
 		if sortField != accessconstraint.FieldName {
 			if _, err := time.Parse(time.RFC3339Nano, cursorVal); err != nil {
-				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidInput, err)
+				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidCursor, err)
 			}
 		}
 		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
@@ -690,12 +690,12 @@ func encodeConstraintCursor(sortVal string, id string) string {
 }
 
 // decodeConstraintCursor is the inverse of encodeConstraintCursor. Every
-// failure wraps store.ErrInvalidInput: a malformed pageToken is caller error,
+// failure wraps store.ErrInvalidCursor: a malformed pageToken is caller error,
 // which the hub maps to HTTP 400 rather than 500 (ptone/scion#1957).
 func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	s := string(raw)
 	// Split at the last comma — UUIDs never contain commas, so the sort
@@ -703,11 +703,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	// everything before the last comma.
 	lastComma := strings.LastIndex(s, ",")
 	if lastComma < 0 {
-		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidInput)
+		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidCursor)
 	}
 	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return s[:lastComma], id, nil
 }

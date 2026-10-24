@@ -22,19 +22,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// Chat attachments are not available for NFS-backed shared dirs in this
-// release: sharedDirHostPath returns ("", false) immediately for an
-// NFS-backed shared dir, with no fallback, so neither ingest
-// (storeAgentAttachment) nor staging (attachmentStaging.stage) ever runs
-// against the NFS export (see the comment on sharedDirHostPath).
+// Chat attachments on NFS-backed shared dirs (ptone/scion#5827,
+// ptone/scion#5829). Phase 1 left these tests pinning the old refusal; phase
+// 4 flips them: the scratchpad resolves through the layout authority to the
+// uuid tree every agent mounts, projection writes and ingest reads go
+// through Resolved.Open (pkg/shareddirs' anchored O_NOFOLLOW walk), and a
+// resolution failure still never falls back to a local directory.
 
 // nfsAttachmentServer mirrors agentAttachmentServer, but with
 // server.shared_dir_storage: nfs in the hub's server config (and in the
@@ -68,48 +71,103 @@ func nfsAttachmentServer(t *testing.T) (srv *Server, project *store.Project, hos
 	return srv, project, hostBase
 }
 
-// TestSharedDirHostPath_NFSBackend_Refused: an NFS-backed shared dir must
-// never be returned as an attachment host path, even though it resolves
-// successfully and exists on disk.
-func TestSharedDirHostPath_NFSBackend_Refused(t *testing.T) {
-	srv, project, hostBase := nfsAttachmentServer(t)
-
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-
-	hostPath, inWorkspace := srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	assert.Empty(t, hostPath, "an NFS-backed shared dir must never be used for attachments (not yet confined to os.Root)")
-	assert.False(t, inWorkspace)
+// nfsScratchpadLeaf is the scratchpad leaf agents mount for project.
+func nfsScratchpadLeaf(hostBase string, project *store.Project) string {
+	return filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
 }
 
-// TestSharedDirHostPath_NFSBackend_NoFallbackToStaleLocalDir: a stale local
-// project-configs directory -- e.g. left over from before the project moved
-// to shared_dir_storage: nfs -- must never be used as an attachment staging
-// target once the project is NFS-backed. sharedDirHostPath returns
-// immediately on an NFS backend, before ever reaching the conventional
-// local-layout fallback candidate, even though that candidate exists on
-// disk here.
-func TestSharedDirHostPath_NFSBackend_NoFallbackToStaleLocalDir(t *testing.T) {
+// TestResolveScratchpad_NFSBackend_UUIDTree: an NFS-backed scratchpad
+// resolves to the uuid tree agents mount, and staging is set to create the
+// leaf when it is missing.
+func TestResolveScratchpad_NFSBackend_UUIDTree(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
 
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	sp := srv.resolveScratchpad(context.Background(), project.ID)
+	require.NotNil(t, sp, "an NFS-backed scratchpad is resolved, not refused")
+	assert.Equal(t, projectfs.BackendNFS, sp.resolution.Resolved.Backend)
+	assert.Equal(t, nfsScratchpadLeaf(hostBase, project), sp.resolution.Resolved.HostPath)
 
-	// A stale local project-configs directory, computed the same way
-	// config.SharedDirHostPath does, with a marker file inside it.
+	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
+	require.NotNil(t, staging)
+	assert.True(t, staging.create, "staging creates the NFS leaf when missing")
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", staging.agentDir())
+}
+
+// TestAttachmentStaging_NFSBackend_ProjectsIntoUUIDTree: staging writes the
+// projection into the uuid tree (creating the missing leaf), and returns the
+// container path computed from the scratchpad Mount's Target.
+func TestAttachmentStaging_NFSBackend_ProjectsIntoUUIDTree(t *testing.T) {
+	srv, project, hostBase := nfsAttachmentServer(t)
+	leaf := nfsScratchpadLeaf(hostBase, project)
+	require.NoDirExists(t, leaf)
+
+	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
+	require.NotNil(t, staging)
+
+	src := writeTempFile(t, "notes.txt", "hello sibling")
+	agentPath, err := staging.stage(src, "att-1", "notes.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", agentPath)
+
+	got, err := os.ReadFile(filepath.Join(leaf, ".attachments", "_webchat", "att-1", "notes.txt"))
+	require.NoError(t, err, "the projection must land in the leaf agents mount")
+	assert.Equal(t, "hello sibling", string(got))
+}
+
+// TestAttachmentStaging_WorkspaceStorageNFS_ProjectsIntoUUIDTree is the T4
+// case (only server.workspace_storage: nfs): the projection lands under the
+// workspace export's uuid tree, as phase 1 does for web uploads.
+func TestAttachmentStaging_WorkspaceStorageNFS_ProjectsIntoUUIDTree(t *testing.T) {
+	f := newSharedDirLayoutFixture(t)
+	t.Setenv("K_SERVICE", "scion-hub") // a Cloud Run Service: NFS is durable
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
+	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
+
+	staging := f.srv.resolveAttachmentStaging(context.Background(), f.project.ID)
+	require.NotNil(t, staging)
+	src := writeTempFile(t, "a.png", "png")
+	agentPath, err := staging.stage(src, "att-t4", "a.png")
+	require.NoError(t, err)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-t4/a.png", agentPath)
+
+	leaf := filepath.Join(f.mountRoot, "share1", "projects", f.project.ID, "shared-dirs", "scratchpad")
+	assert.FileExists(t, filepath.Join(leaf, ".attachments", "_webchat", "att-t4", "a.png"))
+	_, err = os.Stat(resolveTestSharedDirPath(t, f.project, "scratchpad"))
+	assert.True(t, os.IsNotExist(err), "nothing may be written to the hub's local slug-keyed tree")
+}
+
+// TestResolveScratchpad_CloudRunLocalLayout_NotProjected: on a Cloud Run
+// Service whose shared dirs resolve to local disk, nothing is projected
+// (no agent mounts the instance disk, and a recycle discards it).
+func TestResolveScratchpad_CloudRunLocalLayout_NotProjected(t *testing.T) {
+	f := newSharedDirLayoutFixture(t)
+	t.Setenv("K_SERVICE", "scion-hub")
+	dir := resolveTestSharedDirPath(t, f.project, "scratchpad")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	assert.Nil(t, f.srv.resolveAttachmentStaging(context.Background(), f.project.ID))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+// TestAttachmentStaging_NFSBackend_NoFallbackToStaleLocalDir: a stale local
+// project-configs directory, left over from before the project moved to
+// NFS, is never used: the projection goes to the NFS leaf only.
+func TestAttachmentStaging_NFSBackend_NoFallbackToStaleLocalDir(t *testing.T) {
+	srv, project, hostBase := nfsAttachmentServer(t)
+
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
 	staleLocalDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
 	require.NoError(t, os.MkdirAll(staleLocalDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(staleLocalDir, "marker.txt"), []byte("stale"), 0o644))
 
-	hostPath, inWorkspace := srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	assert.Empty(t, hostPath, "an NFS-backed project must never fall back to the stale local project-configs dir")
-	assert.False(t, inWorkspace)
-
-	// The staging half, end to end: no attachment ever lands in the stale dir.
 	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
-	require.Nil(t, staging, "staging must be unavailable, not silently backed by the stale local dir")
+	require.NotNil(t, staging)
+	_, err = staging.stage(writeTempFile(t, "n.txt", "x"), "att-1", "n.txt")
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(nfsScratchpadLeaf(hostBase, project), ".attachments", "_webchat", "att-1", "n.txt"))
 
 	entries, err := os.ReadDir(staleLocalDir)
 	require.NoError(t, err)
@@ -117,48 +175,63 @@ func TestSharedDirHostPath_NFSBackend_NoFallbackToStaleLocalDir(t *testing.T) {
 	assert.Equal(t, "marker.txt", entries[0].Name())
 }
 
-// TestResolveAttachmentStaging_NFSBackend_Refused is the staging half: with
-// server.shared_dir_storage: nfs configured, resolveAttachmentStaging must
-// report unavailable, never returning a staging target backed by the
-// unconfined path.
-func TestResolveAttachmentStaging_NFSBackend_Refused(t *testing.T) {
+// TestIngestAgentAttachments_NFSBackend_ReadsThroughAuthority: a file the
+// CLI staged in the NFS scratchpad is ingested (read through the anchored
+// root), so agent --attach works on NFS projects.
+func TestIngestAgentAttachments_NFSBackend_ReadsThroughAuthority(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
-
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
+	leaf := nfsScratchpadLeaf(hostBase, project)
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	agentPath := stageAgentFile(t, leaf, "report.txt", "from the agent")
 
-	assert.Nil(t, srv.resolveAttachmentStaging(context.Background(), project.ID))
+	refs, warnings := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{agentPath})
+	require.Empty(t, warnings)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "report.txt", refs[0].Name)
 }
 
-// TestIngestAgentAttachments_NFSBackend_RefusedNoLeak: a directory symlink
-// planted inside an NFS-backed leaf, pointing at a victim outside the
-// export -- if ingest read through that symlink, publishing a path through
-// it would read (and then publish into the chat) the victim's file. The NFS
-// refusal must stop this before any filesystem access through the symlink
-// happens at all.
-func TestIngestAgentAttachments_NFSBackend_RefusedNoLeak(t *testing.T) {
+// TestIngestAgentAttachments_NFSBackend_SymlinkNoLeak: a directory symlink
+// planted inside the NFS leaf, pointing at a victim outside the export, is
+// never followed: os.Root refuses the escape, so nothing outside is read.
+func TestIngestAgentAttachments_NFSBackend_SymlinkNoLeak(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
 	outside := newOutsideTree(t)
 
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
+	leaf := nfsScratchpadLeaf(hostBase, project)
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
 	require.NoError(t, os.Symlink(outside.dir, filepath.Join(leaf, "escape")))
 
 	before := outside.snapshot(t)
-	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
+	refs, warnings := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{
 		"/scion-volumes/" + attachmentSharedDirName + "/escape/secret.txt",
 	})
-	assert.Empty(t, refs, "NFS-backed attachment ingest must be refused outright")
+	assert.Empty(t, refs, "a path through a planted symlink must not be ingested")
+	assert.Len(t, warnings, 1)
 	outside.assertIntact(t, before)
 }
 
-// TestSharedDirHostPath_NFSResolutionError_SymlinkedPid_NoFallback: when the
-// project's shared_dir_storage is nfs-configured but resolution itself
-// errors -- here, a symlinked <pid> component with an existing victim leaf,
-// caught by the shared-dir resolution's symlink-escape backstop --
-// sharedDirHostPath must fail closed and never fall back to a stale local
-// project-configs directory, even though that directory exists on disk.
-func TestSharedDirHostPath_NFSResolutionError_SymlinkedPid_NoFallback(t *testing.T) {
+// TestAttachmentStaging_NFSBackend_SymlinkedAttachmentsDirNoOutsideWrite: a
+// planted .attachments symlink in the NFS leaf is not followed by staging.
+func TestAttachmentStaging_NFSBackend_SymlinkedAttachmentsDirNoOutsideWrite(t *testing.T) {
+	srv, project, hostBase := nfsAttachmentServer(t)
+	outside := newOutsideTree(t)
+	leaf := nfsScratchpadLeaf(hostBase, project)
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.Symlink(filepath.Join(outside.dir, "landing"), filepath.Join(leaf, ".attachments")))
+	before := outside.snapshot(t)
+
+	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
+	require.NotNil(t, staging)
+	_, err := staging.stage(writeTempFile(t, "n.txt", "x"), "att-1", "n.txt")
+	assert.Error(t, err)
+	outside.assertIntact(t, before)
+}
+
+// TestResolveScratchpad_NFSResolutionError_SymlinkedPid_NoFallback: when the
+// NFS resolution itself errors -- a symlinked <pid> component with an
+// existing victim leaf, caught by the symlink-escape backstop -- nothing is
+// resolved and no stale local directory is used.
+func TestResolveScratchpad_NFSResolutionError_SymlinkedPid_NoFallback(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
 
 	victim := t.TempDir()
@@ -171,98 +244,84 @@ func TestSharedDirHostPath_NFSResolutionError_SymlinkedPid_NoFallback(t *testing
 	staleLocalDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
 	require.NoError(t, os.MkdirAll(staleLocalDir, 0o755))
 
-	hostPath, inWorkspace := srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	assert.Empty(t, hostPath, "an NFS resolution error must fail closed, never fall back to a local directory")
-	assert.False(t, inWorkspace)
-
-	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
-	require.Nil(t, staging, "staging must be unavailable when NFS resolution errors")
+	assert.Nil(t, srv.resolveScratchpad(context.Background(), project.ID))
+	assert.Nil(t, srv.resolveAttachmentStaging(context.Background(), project.ID))
 }
 
-// TestSharedDirHostPath_NFSResolutionError_InvalidBlock_NoFallback: the same
-// fail-closed requirement, this time triggered by an nfs block that fails
-// V1SharedDirStorageConfig.Validate() (a missing mount_root).
-func TestSharedDirHostPath_NFSResolutionError_InvalidBlock_NoFallback(t *testing.T) {
+// TestResolveScratchpad_NFSResolutionError_InvalidBlock_NoFallback: the same
+// fail-closed requirement for an nfs block that fails Validate (no
+// mount_root).
+func TestResolveScratchpad_NFSResolutionError_InvalidBlock_NoFallback(t *testing.T) {
 	srv, project, _ := nfsAttachmentServer(t)
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
-	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
-
 	staleLocalDir := config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName)
 	require.NoError(t, os.MkdirAll(staleLocalDir, 0o755))
 
-	hostPath, inWorkspace := srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	assert.Empty(t, hostPath, "an invalid nfs block must fail closed, never fall back to a local directory")
-	assert.False(t, inWorkspace)
+	assert.Nil(t, srv.resolveScratchpad(context.Background(), project.ID))
 }
 
-// TestSharedDirHostPath_NFSBackend_SkipLoggedOncePerProject: the Info log
-// noting that chat attachments are not staged into an NFS-backed shared dir
-// must be emitted once per project, not once per call -- a second call for
-// the same project must not add a second log line.
-func TestSharedDirHostPath_NFSBackend_SkipLoggedOncePerProject(t *testing.T) {
+// TestResolveScratchpad_ResolveErrorWarnLoggedOncePerProject: a storage
+// resolution failure is logged once per project, not once per dispatch.
+func TestResolveScratchpad_ResolveErrorWarnLoggedOncePerProject(t *testing.T) {
 	buf := captureSlog(t)
-	srv, project, hostBase := nfsAttachmentServer(t)
-
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-
-	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-
-	count := strings.Count(buf.String(), "chat attachments are not staged into NFS-backed shared dirs")
-	assert.Equal(t, 1, count, "the skip log must be emitted exactly once across two calls for the same project")
-}
-
-// TestSharedDirHostPath_NFSBackend_ResolveErrorWarnLoggedIndependentlyOfSkipLog:
-// the Info skip log (successful NFS resolution) and the Warn resolution-error
-// log dedup independently, keyed separately, so a project that later starts
-// failing to resolve still gets its Warn even though its Info line already
-// fired once.
-func TestSharedDirHostPath_NFSBackend_ResolveErrorWarnLoggedIndependentlyOfSkipLog(t *testing.T) {
-	buf := captureSlog(t)
-	srv, project, hostBase := nfsAttachmentServer(t)
-
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-
-	// First call: NFS resolution succeeds, the Info skip log fires once.
-	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	infoCount := strings.Count(buf.String(), "chat attachments are not staged into NFS-backed shared dirs")
-	require.Equal(t, 1, infoCount, "sanity: the Info skip log must have fired once")
-
-	// Now the same project's NFS-configured resolution starts failing
-	// (invalid block, mount_root missing) -- the Warn must still fire, not
-	// be suppressed by the Info log's own dedup key.
+	srv, project, _ := nfsAttachmentServer(t)
 	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
-	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	warnCount := strings.Count(buf.String(), "NFS-configured shared dir resolution failed")
-	assert.Equal(t, 1, warnCount, "the resolution-error Warn must fire despite the project's Info log already having fired")
+	_ = srv.resolveScratchpad(context.Background(), project.ID)
+	_ = srv.resolveScratchpad(context.Background(), project.ID)
 
-	// A second call on the same still-failing path must not add a second
-	// Warn line: the resolution-error log dedups per project too, exactly
-	// like the Info log does.
-	_, _ = srv.sharedDirHostPath(context.Background(), project.ID, attachmentSharedDirName)
-	warnCount = strings.Count(buf.String(), "NFS-configured shared dir resolution failed")
-	assert.Equal(t, 1, warnCount, "the resolution-error Warn must still be deduped across repeated calls")
+	count := strings.Count(buf.String(), "shared dir storage resolution failed")
+	assert.Equal(t, 1, count, "the resolution-error Warn must be emitted once per project")
 }
 
-// TestAttachmentStaging_NFSBackend_NoOutsideWrite is the staging half of the
-// same requirement: staging must not be attempted at all for an NFS-backed
-// project (resolveAttachmentStaging returns nil, so stage() is never
-// called), which this confirms end to end by checking nothing is ever
-// written under the NFS leaf's .attachments directory.
-func TestAttachmentStaging_NFSBackend_NoOutsideWrite(t *testing.T) {
+// saveLegacyAttachment stores a legacy (AttachmentStore) attachment for
+// project and records its metadata row; it returns the reference a send
+// carries.
+func saveLegacyAttachment(t *testing.T, srv *Server, projectID, name, content string) AttachmentRef {
+	t.Helper()
+	ctx := context.Background()
+	srv.mu.RLock()
+	as := srv.attachmentStore.(*LocalDiskAttachmentStore)
+	wcs := srv.webChatStore
+	srv.mu.RUnlock()
+	meta, err := as.Save(ctx, projectID, name, strings.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+	meta.UploadedBy = "u1"
+	require.NoError(t, wcs.CreateAttachment(ctx, meta))
+	return AttachmentRef{ID: meta.ID, Name: name, MimeType: "text/plain", Size: int64(len(content))}
+}
+
+// TestStageChatAttachments_LegacyOnNFS_OnlyWholeProjectAudience: on a shared
+// (NFS) scratchpad every agent of the project reads the copy, so a legacy
+// attachment is staged only for a project topic thread. In a direct
+// conversation it is not copied there; the send carries the hub-local path,
+// as before shared backends were staged.
+func TestStageChatAttachments_LegacyOnNFS_OnlyWholeProjectAudience(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
+	ctx := context.Background()
+	leaf := nfsScratchpadLeaf(hostBase, project)
+	topicID := api.NewUUID()
+	srv.mu.RLock()
+	wcs := srv.webChatStore
+	srv.mu.RUnlock()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "t", CreatedBy: "u1", CreatedAt: time.Now().UTC()}))
 
-	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", attachmentSharedDirName)
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	dmRef := saveLegacyAttachment(t, srv, project.ID, "dm.txt", "dm bytes")
+	paths, mounts := srv.stageChatAttachments(ctx, "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{dmRef})
+	require.Len(t, paths, 1)
+	assert.NotContains(t, paths[0], "/scion-volumes/", "a DM legacy attachment gets the hub-local path, not a scratchpad copy")
+	assert.Empty(t, mounts)
+	assert.NoDirExists(t, filepath.Join(leaf, ".attachments", "_webchat", dmRef.ID))
 
-	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
-	require.Nil(t, staging, "staging must be unavailable for an NFS-backed shared dir")
-
-	_, statErr := os.Stat(filepath.Join(leaf, ".attachments"))
-	assert.True(t, os.IsNotExist(statErr), "nothing should ever be staged under the NFS leaf")
+	topicRef := saveLegacyAttachment(t, srv, project.ID, "topic.txt", "topic bytes")
+	paths, mounts = srv.stageChatAttachments(ctx, topicID, project.ID, api.NewUUID(), []AttachmentRef{topicRef})
+	require.Len(t, paths, 1)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+topicRef.ID+"/topic.txt", paths[0])
+	assert.Equal(t, attachmentSharedDirName, mounts[paths[0]])
+	got, err := os.ReadFile(filepath.Join(leaf, ".attachments", "_webchat", topicRef.ID, "topic.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "topic bytes", string(got))
 }

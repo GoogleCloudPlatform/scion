@@ -29,8 +29,11 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 )
 
@@ -62,6 +65,9 @@ func TestServerRoleFlag(t *testing.T) {
 // internal URL, its public URL and the internal listener; errors name the
 // setting, never a value.
 func TestValidateRelayRoleConfig(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	relayOnCloudRun = func() bool { return false }
 	require.NoError(t, validateRelayRoleConfig(relayRoleTestConfig()))
 	for name, tc := range map[string]struct {
 		mod     func(*config.GlobalConfig)
@@ -118,6 +124,45 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 			assert.ErrorContains(t, validateConduitPeerSecret(external, false, ""), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 		})
 	}
+}
+
+// TestValidateRelayRoleConfig_CloudRunSingleton (design §3.9 "Cloud Run
+// singleton"): on Cloud Run (K_SERVICE set) a relay without
+// server.relay.singleton: true fails, with an error naming the key and the
+// three instance settings; with it, or off Cloud Run, the relay starts.
+func TestValidateRelayRoleConfig_CloudRunSingleton(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	for _, tc := range []struct {
+		name      string
+		cloudRun  bool
+		singleton bool
+		wantErr   bool
+	}{
+		{name: "Cloud Run without the assertion", cloudRun: true, wantErr: true},
+		{name: "Cloud Run singleton", cloudRun: true, singleton: true},
+		{name: "singleton off Cloud Run", singleton: true},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relayOnCloudRun = func() bool { return tc.cloudRun }
+			cfg := relayRoleTestConfig()
+			cfg.Relay.Singleton = tc.singleton
+			err := validateRelayRoleConfig(cfg)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			for _, want := range []string{"server.relay.singleton: true", "max_instances=1", "min_instances=1", "cpu_idle=false", "K_SERVICE"} {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+	t.Setenv("K_SERVICE", "scion-relay")
+	assert.True(t, prevCR(), "K_SERVICE set means Cloud Run")
+	t.Setenv("K_SERVICE", "")
+	assert.False(t, prevCR(), "an empty K_SERVICE is not Cloud Run")
 }
 
 // TestRunRelayRoleChecksConfigBeforeTheDatabase: an incomplete
@@ -177,6 +222,7 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	assert.Equal(t, "relay-7", rcfg.InstanceID)
 	assert.Equal(t, "http://hub-internal.example:9811", rcfg.HubInternalURL)
 	assert.Equal(t, "https://relay-7.example.com", rcfg.PublicURL)
+	assert.False(t, rcfg.Singleton)
 	assert.Equal(t, "127.0.0.1:18443", rcfg.PublicListen)
 	assert.Equal(t, "127.0.0.1:0", rcfg.InternalListen)
 	assert.Equal(t, "http://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
@@ -274,4 +320,79 @@ func TestRelayShutdownTimeoutPadsPastTheDrainCap(t *testing.T) {
 	assert.Equal(t, relayShutdownPad, relayShutdownTimeout(0, true))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(0, false))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(60*time.Second, false))
+}
+
+// TestRelayMetrics_OffIsANoOp (design §3.9, v2.21.55): with metrics unset
+// or off in the relay's settings and no export project, the relay builds
+// no exporter and makes no network call: no metadata lookup is offered and
+// the exporter constructor is never called; the flush is a no-op.
+func TestRelayMetrics_OffIsANoOp(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := false
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built = true
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	off := false
+	for name, setting := range map[string]*bool{"unset": nil, "off": &off} {
+		t.Run(name, func(t *testing.T) {
+			cfg := relayRoleTestConfig()
+			cfg.Hub.Observability.MetricsEnabled = setting
+			in := relayObservabilityInputs(cfg)
+			assert.Nil(t, in.metadata, "no metadata-server lookup with metrics not on")
+			mp, flush := relayMetrics(context.Background(), cfg, "relay-7", in)
+			assert.Nil(t, mp)
+			assert.False(t, built, "no exporter is built")
+			assert.NoError(t, flush(context.Background()))
+		})
+	}
+}
+
+// TestRelayMetrics_OnBuildsTheRelayProvider: with metrics on and an export
+// project, the relay builds its provider with the hub's helper for that
+// project, and the flush shuts it down.
+func TestRelayMetrics_OnBuildsTheRelayProvider(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	var gotProject string
+	relayNewMeterProvider = func(_ context.Context, project string, _ ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		gotProject = project
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	on := true
+	cfg := relayRoleTestConfig()
+	cfg.Hub.Observability.MetricsEnabled = &on
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayMetricsInputs{getenv: os.Getenv})
+	require.NotNil(t, mp)
+	assert.Equal(t, "relay-metrics-project", gotProject)
+	assert.NoError(t, flush(context.Background()))
+}
+
+// TestRelayMetrics_UnsetWithAProjectExports: as for the hub (legacy rule),
+// with the switch unset an operator-set export project turns relay metrics
+// export on; only an explicit off keeps it off.
+func TestRelayMetrics_UnsetWithAProjectExports(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := 0
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built++
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	cfg := relayRoleTestConfig()
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	require.NotNil(t, mp, "unset switch with a set project: export on")
+	assert.NoError(t, flush(context.Background()))
+
+	off := false
+	cfg.Hub.Observability.MetricsEnabled = &off
+	mp, _ = relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	assert.Nil(t, mp, "explicitly off: no export even with a project")
+	assert.Equal(t, 1, built)
 }

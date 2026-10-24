@@ -48,6 +48,11 @@ type SharedDirHostPath struct {
 	// Backend is "local", or the shared backend of the shared-dir Layout
 	// ("nfs", "gke-shared-volume" or "cloudrun-volume").
 	Backend string
+	// Resolved is the layout authority's answer for the same directory
+	// (pkg/projectfs). Host processes write below Path only through
+	// Resolved.Open, never with path-based os calls: agents mount the dir
+	// read-write, so a component below it may be a planted symlink.
+	Resolved projectfs.Resolved
 }
 
 // ResolveSharedDirHostPath resolves the host directory that agents on this
@@ -96,9 +101,15 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 		return SharedDirHostPath{}, fmt.Errorf("%w: %v", ErrSharedDirStorageUnavailable, err)
 	}
 	if !layout.Backend.Shared() {
+		mount := projectfs.SharedDirMount(api.SharedDir{Name: name}, "")
+		path := config.SharedDirHostPath(home, slug, projectID, name)
 		return SharedDirHostPath{
-			Path:    config.SharedDirHostPath(home, slug, projectID, name),
+			Path:    path,
 			Backend: "local",
+			Resolved: projectfs.Resolved{
+				Backend: projectfs.BackendLocal, HostPath: path,
+				Target: mount.Target, Kind: mount.Kind, Name: mount.Name,
+			},
 		}, nil
 	}
 	backend := string(layout.Backend)
@@ -152,7 +163,9 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 		return SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q resolves through a symlink to %q, want %q",
 			ErrSharedDirStorageUnavailable, name, got, want)
 	}
-	return SharedDirHostPath{Path: got, Backend: backend}, nil
+	// res is the layout authority's answer itself (the shared-dir Layout
+	// resolved it above), so there is no second derivation to cross-check.
+	return SharedDirHostPath{Path: got, Backend: backend, Resolved: res}, nil
 }
 
 // LoadSharedDirStorageSettings loads the global settings

@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -245,6 +246,12 @@ func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 		"MessageMode": func(f reflect.Value) { f.SetString("project") },
 		"AppliedConfig": func(f reflect.Value) {
 			f.Set(reflect.ValueOf(&store.AgentAppliedConfig{Image: "reflect-image", Task: "reflect-task"}))
+		},
+		"PendingConfig": func(f reflect.Value) {
+			f.Set(reflect.ValueOf(&store.AgentPendingConfig{
+				Config:  map[string]json.RawMessage{"model": json.RawMessage(`"reflect-model"`)},
+				SavedBy: "user:reflect",
+			}))
 		},
 		"ExposedPorts": func(f reflect.Value) {
 			f.Set(reflect.ValueOf([]store.ExposedPort{{

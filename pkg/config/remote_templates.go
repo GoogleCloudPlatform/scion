@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/sync"
 	// Import rclone backends for remote template support
@@ -565,6 +566,12 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
 	}
 
+	// Host-side git for the template cache: run with the fixed pins (no
+	// repository hooks, fsmonitor, pager; ext transport off) and with the LFS
+	// smudge skipped, so the checkout below never resolves an LFS pointer
+	// through an endpoint named in the template's own tracked .lfsconfig.
+	gitEnv := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+
 	// Initialize git repo with sparse checkout
 	commands := [][]string{
 		{"git", "init"},
@@ -573,8 +580,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	}
 
 	for _, args := range commands {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd := exec.CommandContext(ctx, args[0], append(util.HostGitArgs(), args[1:]...)...)
 		cmd.Dir = tmpDir
+		cmd.Env = gitEnv
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("git command %v failed: %w", args, err)
 		}
@@ -597,8 +605,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 
 	// Fetch and checkout the branch
 	var stderrBuf strings.Builder
-	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "--depth=1", "origin", parts.Branch)
+	fetchCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "fetch", "--depth=1", "origin", parts.Branch)...)
 	fetchCmd.Dir = tmpDir
+	fetchCmd.Env = gitEnv
 	fetchCmd.Stderr = &stderrBuf
 	if err := fetchCmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderrBuf.String())
@@ -609,8 +618,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	}
 
 	stderrBuf.Reset()
-	checkoutCmd := exec.CommandContext(ctx, "git", "checkout", parts.Branch)
+	checkoutCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "checkout", parts.Branch)...)
 	checkoutCmd.Dir = tmpDir
+	checkoutCmd.Env = gitEnv
 	checkoutCmd.Stderr = &stderrBuf
 	if err := checkoutCmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderrBuf.String())

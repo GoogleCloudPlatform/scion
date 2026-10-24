@@ -108,6 +108,7 @@ func setupStartOutcomeTest(t *testing.T, serverURL, projectID string) *HubContex
 	hubCreateRequestTimeout = 300 * time.Millisecond
 	nonInteractive = true
 	autoConfirm = true
+	allowEnvSend(t)
 	outputFormat = "json"
 	startOutcomeLookupTimeout = 2 * time.Second
 	// A user caller: a 404 is a definite not-found.
@@ -298,6 +299,7 @@ func TestGatherAndSubmitEnvGuarded_MarksSubmitted(t *testing.T) {
 	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
 	t.Cleanup(func() { nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm })
 	nonInteractive, autoConfirm = true, true
+	allowEnvSend(t)
 	t.Setenv("START_OUTCOME_KEY", "value")
 
 	projectID := tid("project-1")
@@ -323,6 +325,7 @@ func TestGatherAndSubmitEnvGuarded_NothingSent(t *testing.T) {
 	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
 	t.Cleanup(func() { nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm })
 	nonInteractive, autoConfirm = true, true
+	allowEnvSend(t)
 	t.Setenv("START_OUTCOME_KEY", "value")
 
 	projectID := tid("project-1")

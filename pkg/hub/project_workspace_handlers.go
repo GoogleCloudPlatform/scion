@@ -1631,7 +1631,10 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	token := s.resolveCloneToken(ctx, project)
 
-	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
+	// Pull from the project's clone URL as the hub knows it, not from the
+	// remote configured in the workspace, which agents can change.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	pullResult, err := util.PullSharedWorkspace(workspacePath, cloneURL, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())

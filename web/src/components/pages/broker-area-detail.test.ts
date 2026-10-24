@@ -21,7 +21,8 @@
  * only with delete. After a PATCH, Configure re-reads the broker and the
  * page takes that record: the new name shows in the header and the form,
  * hostedByThisServer (carried by GET) stays, and cleared labels and GCP
- * fields stay cleared.
+ * fields stay cleared. The Default-for-project marker comes from isDefault
+ * on the broker's providers listing, with no per-project reads.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -67,6 +68,8 @@ let summaryItems: { id: string }[] = [];
 let patchResponse: Partial<RuntimeBroker> = {};
 /** What GET returns after a PATCH (the stored record); null = unchanged. */
 let afterPatch: RuntimeBroker | null = null;
+/** The providers listing GET /runtime-brokers/{id}/projects returns. */
+let providerProjects: Record<string, unknown>[] = [];
 let fetchMock: ReturnType<typeof vi.fn>;
 const mounted: HTMLElement[] = [];
 
@@ -101,6 +104,7 @@ describe('scion-page-broker-area-detail', () => {
     summaryItems = [];
     patchResponse = {};
     afterPatch = null;
+    providerProjects = [];
     fetchMock = vi.fn((url: string, init?: RequestInit) => {
       const id = broker.id;
       if (url === `/api/v1/runtime-brokers/${id}` && init?.method === 'PATCH') {
@@ -108,7 +112,9 @@ describe('scion-page-broker-area-detail', () => {
         return jsonResponse(patchResponse);
       }
       if (url === `/api/v1/runtime-brokers/${id}`) return jsonResponse(broker);
-      if (url === `/api/v1/runtime-brokers/${id}/projects`) return jsonResponse({ projects: [] });
+      if (url === `/api/v1/runtime-brokers/${id}/projects`) {
+        return jsonResponse({ projects: providerProjects });
+      }
       if (url === `/api/v1/runtime-brokers/${id}/settings`) return jsonResponse(SETTINGS);
       if (url.startsWith('/api/v1/agents')) return jsonResponse({ agents: [] });
       if (url === '/api/v1/admin/health/summary') {
@@ -158,6 +164,23 @@ describe('scion-page-broker-area-detail', () => {
     await health.updateComplete;
     expect(health.shadowRoot!.querySelector('.not-in-summary')).not.toBeNull();
     expect(health.shadowRoot!.textContent).not.toContain('healthy');
+  });
+
+  it('Default for project: taken from isDefault in the providers listing, with no project reads', async () => {
+    providerProjects = [
+      { projectId: 'p1', projectName: 'One', agentCount: 0, isDefault: false },
+      { projectId: 'p2', projectName: 'Two', agentCount: 0, isDefault: true },
+      { projectId: 'p3', projectName: 'Three', agentCount: 0 },
+    ];
+    const el = await mount(FLAT_K8S);
+    const agents = el.shadowRoot!.querySelector('scion-broker-area-agents') as HTMLElement & {
+      defaultFor: ReadonlySet<string>;
+    };
+    expect(agents).not.toBeNull();
+    expect([...agents.defaultFor]).toEqual(['p2']);
+    expect(
+      fetchMock.mock.calls.some(([u]) => typeof u === 'string' && u.startsWith('/api/v1/projects/'))
+    ).toBe(false);
   });
 
   it('Configure: absent without update or delete capability', async () => {

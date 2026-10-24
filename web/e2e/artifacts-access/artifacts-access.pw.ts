@@ -1377,15 +1377,36 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect
         .soft(r.ui.dialogLabel, 'Share dialog label')
         .toBe(`Share “${journey.artifact!.title}”`);
-      // The home project row: listed, "(home project)", no controls.
+      // The home project row (oracle R1 rev2 AMEND1, ptone/scion#4582): listed
+      // as "(home project)", exactly one permission select offering exactly
+      // Can view (read) and Can edit (write), never admin, and no buttons (no
+      // Remove). The select's current value is recorded, not graded or changed.
       const homeControls = grantRowControls(homeGrantRow(ownerPage));
+      const homeSelects = await homeControls.selects.count();
       r.ui.homeRowControls = {
-        selects: await homeControls.selects.count(),
+        selects: homeSelects,
         buttons: await homeControls.buttons.count(),
       };
+      const homeSelect = homeControls.selects.first();
+      r.ui.homeRowPermissionOptions =
+        homeSelects === 1
+          ? await homeSelect
+              .locator('sl-option')
+              .evaluateAll((os) => os.map((o) => o.getAttribute('value') ?? ''))
+          : [];
+      r.ui.homeRowPermissionValue =
+        homeSelects === 1
+          ? await homeSelect.evaluate((el) => String((el as HTMLInputElement).value))
+          : null;
       expect
-        .soft(r.ui.homeRowControls, 'home project row has no controls')
-        .toEqual({ selects: 0, buttons: 0 });
+        .soft(r.ui.homeRowControls, 'home project row: one permission select, no buttons')
+        .toEqual({ selects: 1, buttons: 0 });
+      expect
+        .soft(
+          r.ui.homeRowPermissionOptions,
+          'home project row offers exactly Can view and Can edit'
+        )
+        .toEqual(['read', 'write']);
 
       const res = await searchPeople(grantee.email);
       r.api.push({

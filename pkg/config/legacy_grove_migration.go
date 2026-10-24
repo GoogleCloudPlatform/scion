@@ -716,11 +716,13 @@ func gitTracked(path string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitTrackedTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))
+	// The settings file can sit in a checkout agents can write, so git runs
+	// with the host-side settings (no repository hooks or monitor).
+	cmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))...)
 	// This can run while the server loads its config, before it clears
 	// server secrets from its own env, so the child gets an env without
 	// them.
-	cmd.Env = util.EnvWithoutAgentRefusedNames(os.Environ())
+	cmd.Env = util.HostGitEnv(util.EnvWithoutAgentRefusedNames(os.Environ()))
 	return cmd.Run() == nil
 }
 

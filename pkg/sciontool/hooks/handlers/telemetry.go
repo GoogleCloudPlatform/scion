@@ -74,6 +74,12 @@ type TelemetryHandler struct {
 	// handler, so without it a session's counts are lost between events.
 	SessionState SessionStateStore
 
+	// Analytics, if set, receives one agent.usage event per accepted
+	// model-end usage increment (SCION_USAGE_SOURCE=hooks only), appended
+	// to the analytics outbox before the counters are updated. Set by the
+	// hook command only when the GCP exporter is configured.
+	Analytics *telemetry.UsageAnalytics
+
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
 	toolCalls    metric.Int64Counter
@@ -604,6 +610,10 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
@@ -646,6 +656,10 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {

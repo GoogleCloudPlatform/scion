@@ -375,12 +375,8 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 		},
 	}
 	for dir, g := range guarded {
-		// pkgmove:scan-covers pkg/hub/apierr
-		// scanned through guardScanSubdirs; guards conduitBrokerTunnel construction (pkg/hub and its subpackages; ../runtimebroker is scanned on its own for the broker RPC handler).
-		// pkgmove:scan-covers pkg/hub/internal/principal
-		// scanned through guardScanSubdirs; guards conduitBrokerTunnel construction (pkg/hub and its subpackages; ../runtimebroker is scanned on its own for the broker RPC handler).
-		// pkgmove:scan-covers pkg/hub/maintenance
-		// scanned through guardScanSubdirs once it exists; guards conduitBrokerTunnel construction (pkg/hub and its subpackages; ../runtimebroker is scanned on its own for the broker RPC handler).
+		// pkgmove:scan-covers guardScanSubdirs
+		// scanned through guardScanSubdirs; guards conduitBrokerTunnel construction (pkg/hub and its guardScanSubdirs entries; ../runtimebroker is scanned on its own for the broker RPC handler).
 		var files []string
 		var err error
 		if dir == "." {
