@@ -312,7 +312,7 @@ var Registry = []Permission{
 	{ID: "gcp_service_account.delete", Resource: ResourceGCPServiceAccount, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.list", Resource: ResourceGCPServiceAccount, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "gcp_service_account:list", Description: "List GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.verify", Resource: ResourceGCPServiceAccount, Action: ActionVerify, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:verify", Description: "Verify GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
-	{ID: "gcp_service_account.mint", Resource: ResourceGCPServiceAccount, Action: ActionMint, CapabilityKind: CapabilityScope, Description: "Mint GCP service account tokens", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
+	{ID: "gcp_service_account.mint", Resource: ResourceGCPServiceAccount, Action: ActionMint, CapabilityKind: CapabilityScope, Description: "Create Hub-minted GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	// AgentScopes names project:agent:sa_assign only, its own agent scope
 	// distinct from project:agent:create (ptone/scion#2339): a ceiling that
 	// covers agent.create does not thereby cover this permission, and vice
