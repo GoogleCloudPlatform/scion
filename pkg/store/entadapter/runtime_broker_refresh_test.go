@@ -114,8 +114,8 @@ func TestRefreshRuntimeBrokerState_NotFound(t *testing.T) {
 
 // The heartbeat refresh stores the broker's build token (Version). A
 // refresh that leaves Version alone keeps a version a concurrent
-// re-registration stored, because it writes the value of its fresh read
-// (ptone/scion#5972).
+// re-registration stored, because it writes the value of its fresh read,
+// and a version set on a stale read is not stored (ptone/scion#5972).
 func TestRefreshRuntimeBrokerState_Version(t *testing.T) {
 	ctx := context.Background()
 	s := NewProjectStore(enttest.NewClient(t))
@@ -138,6 +138,9 @@ func TestRefreshRuntimeBrokerState_Version(t *testing.T) {
 			require.NoError(t, err)
 			reg.Version = "1.5.0"
 			require.NoError(t, s.UpdateRuntimeBroker(ctx, reg))
+			// A version set on the stale copy is never stored: the
+			// write conflicts and the refresh runs again on the fresh row.
+			cur.Version = "stale"
 		}
 		cur.Capabilities = &store.BrokerCapabilities{Attach: true}
 		return true
