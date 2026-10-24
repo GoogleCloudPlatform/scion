@@ -938,6 +938,8 @@ describe('scion-chat-message authorized-by line', () => {
   const bob = { id: 'u-bob', displayName: '', email: 'bob@example.com' };
   const found = (user: object) => ({ ok: true, status: 200, json: () => Promise.resolve(user) });
   const notFound = { ok: false, status: 404, json: () => Promise.resolve({}) };
+  const forbidden = { ok: false, status: 403, json: () => Promise.resolve({}) };
+  const serverError = { ok: false, status: 500, json: () => Promise.resolve({}) };
 
   beforeEach(async () => {
     document.body.innerHTML = '';
@@ -998,6 +1000,25 @@ describe('scion-chat-message authorized-by line', () => {
     await Promise.resolve();
     await goneMsg.updateComplete;
     expect(lineText(goneMsg)).toBe('authorized by u-gone');
+  });
+
+  it('shows the ID when the lookup is forbidden or fails', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(path === '/api/v1/users/u-denied' ? forbidden : serverError)
+    );
+    const denied = await mountFromAgent('u-denied', 'grant-4');
+    const broken = await mountFromAgent('u-broken', 'grant-5');
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    await denied.updateComplete;
+    await broken.updateComplete;
+
+    expect(lineText(denied)).toBe('authorized by u-denied');
+    expect(lineText(broken)).toBe('authorized by u-broken');
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/v1/users/u-denied',
+      '/api/v1/users/u-broken',
+    ]);
   });
 
   it('shows the line on a grouped message with no header', async () => {

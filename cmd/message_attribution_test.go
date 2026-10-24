@@ -108,6 +108,18 @@ func newAttributionHub(t *testing.T, msgs []store.Message) *attributionHub {
 				writeJSONBody(w, http.StatusOK, u)
 				return
 			}
+			switch id {
+			case "u-denied":
+				writeJSONBody(w, http.StatusForbidden, map[string]any{
+					"error": map[string]any{"code": "forbidden", "message": "forbidden"},
+				})
+				return
+			case "u-broken":
+				writeJSONBody(w, http.StatusInternalServerError, map[string]any{
+					"error": map[string]any{"code": "internal_error", "message": "internal error"},
+				})
+				return
+			}
 			writeJSONBody(w, http.StatusNotFound, map[string]any{
 				"error": map[string]any{"code": "not_found", "message": "user not found"},
 			})
@@ -197,15 +209,21 @@ func TestNewUserLabeler_DisplayNameEmailThenID(t *testing.T) {
 
 	assert.Equal(t, "Alice Example", label("u-alice"), "display name first")
 	assert.Equal(t, "bob@example.com", label("u-bob"), "email when there is no display name")
-	assert.Equal(t, "u-gone", label("u-gone"), "the ID when the hub cannot resolve the user")
+	assert.Equal(t, "u-gone", label("u-gone"), "the ID when the user is not found")
+	assert.Equal(t, "u-denied", label("u-denied"), "the ID when the lookup is forbidden")
+	assert.Equal(t, "u-broken", label("u-broken"), "the ID when the lookup fails")
 	assert.Equal(t, "Alice Example", label("u-alice"))
 	assert.Equal(t, "u-gone", label("u-gone"))
-	assert.Equal(t, []string{"/api/v1/users/u-alice", "/api/v1/users/u-bob", "/api/v1/users/u-gone"},
-		h.userLookups(), "each user is looked up once")
+	assert.Equal(t, "u-denied", label("u-denied"))
+	assert.Equal(t, "u-broken", label("u-broken"))
+	assert.Equal(t, []string{
+		"/api/v1/users/u-alice", "/api/v1/users/u-bob", "/api/v1/users/u-gone",
+		"/api/v1/users/u-denied", "/api/v1/users/u-broken",
+	}, h.userLookups(), "each user is looked up once, failed lookups included")
 
 	// The ID is one escaped path segment.
 	assert.Equal(t, "a/b?c", label("a/b?c"))
-	assert.Equal(t, "/api/v1/users/a%2Fb%3Fc", h.userLookups()[3])
+	assert.Equal(t, "/api/v1/users/a%2Fb%3Fc", h.userLookups()[5])
 }
 
 func TestConversationMessages_DelegatedShowsAuthorizedBy(t *testing.T) {

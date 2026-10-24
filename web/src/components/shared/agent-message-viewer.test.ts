@@ -25,6 +25,13 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEl = any;
 
+// The user directory's lookups go through apiFetch; the rest of api.js is real.
+const { apiFetchMock } = vi.hoisted(() => ({ apiFetchMock: vi.fn() }));
+vi.mock('../../client/api.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../client/api.js')>()),
+  apiFetch: (path: string, options?: RequestInit) => apiFetchMock(path, options),
+}));
+
 beforeAll(async () => {
   await import('./agent-message-viewer.js');
 });
@@ -101,6 +108,12 @@ describe('scion-agent-message-viewer authorized-by line', () => {
     };
   }
 
+  beforeEach(async () => {
+    apiFetchMock.mockReset();
+    const { resetUserDirectory } = await import('../../client/user-directory.js');
+    resetUserDirectory();
+  });
+
   async function mountWith(items: unknown[]): Promise<AnyEl> {
     const { rememberUsers } = await import('../../client/user-directory.js');
     rememberUsers([{ id: 'u-alice', displayName: 'Alice Example', email: 'alice@example.com' }]);
@@ -127,14 +140,43 @@ describe('scion-agent-message-viewer authorized-by line', () => {
     expect(lines(el)).toEqual(['authorized by Alice Example via delegation grant-1']);
     const actor = el.shadowRoot.querySelector('.msg-actor') as HTMLElement;
     expect((actor.textContent ?? '').trim()).toBe('agent:builder');
+    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
-  it('shows the issuer ID when the user is not resolved', async () => {
+  it('resolves an uncached issuer once and re-renders with the name', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'u-bob', displayName: '', email: 'bob@example.com' }),
+    });
+    const el = await mountWith([hubMessage('d3', { authorizingUserId: 'u-bob' })]);
+
+    await vi.waitFor(() => expect(lines(el)).toEqual(['authorized by bob@example.com']));
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/v1/users/u-bob');
+  });
+
+  it('shows the issuer ID after a failed lookup and does not retry it', async () => {
+    apiFetchMock.mockResolvedValue({ ok: false, status: 403, json: () => Promise.resolve({}) });
     const el = await mountWith([
       hubMessage('d2', { authorizingUserId: 'u-unknown', delegationGrantId: 'grant-2' }),
     ]);
-
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(1));
     expect(lines(el)).toEqual(['authorized by u-unknown via delegation grant-2']);
+
+    // Later renders (another batch, a forced update) ask the hub no more.
+    el.mergeHubMessages([
+      hubMessage('d4', { authorizingUserId: 'u-unknown', delegationGrantId: 'grant-2' }),
+    ]);
+    await el.updateComplete;
+    el.requestUpdate();
+    await el.updateComplete;
+    await Promise.resolve();
+    expect(lines(el)).toEqual([
+      'authorized by u-unknown via delegation grant-2',
+      'authorized by u-unknown via delegation grant-2',
+    ]);
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('shows nothing on an ordinary message', async () => {
@@ -142,5 +184,6 @@ describe('scion-agent-message-viewer authorized-by line', () => {
 
     expect(el.shadowRoot.querySelectorAll('.message-row').length).toBe(1);
     expect(lines(el)).toEqual([]);
+    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 });

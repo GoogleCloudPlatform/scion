@@ -1074,14 +1074,16 @@ export class ScionAgentMessageViewer extends LitElement {
   /**
    * The "authorized by <user> via delegation <grant>" line of a message sent
    * with an agent delegated credential; nothing for any other message. The
-   * user is shown by display name, else email, else ID; an unresolved user
-   * is looked up once and the list re-renders when the answer arrives.
+   * user is shown by display name, else email, else ID. An uncached user is
+   * looked up at most once per viewer (a failed lookup is not retried on
+   * later renders), and the list re-renders when a name arrives.
    */
   private renderAuthorizedBy(msg: ParsedMessage) {
     const id = msg.authorizingUserId;
     if (!id) return nothing;
     const cached = peekUser(id);
-    if (!cached) {
+    if (!cached && !this.authorizerLookups.has(id)) {
+      this.authorizerLookups.add(id);
       void resolveUser(id).then((user) => {
         if (user) this.requestUpdate();
       });
@@ -1090,6 +1092,9 @@ export class ScionAgentMessageViewer extends LitElement {
     const grant = msg.delegationGrantId ? ` via delegation ${msg.delegationGrantId}` : '';
     return html`<div class="msg-authorized-by">authorized by ${name}${grant}</div>`;
   }
+
+  /** Authorizing user IDs this viewer has already looked up. */
+  private readonly authorizerLookups = new Set<string>();
 
   private truncateBody(body: string): string {
     if (body.length > 300) {
