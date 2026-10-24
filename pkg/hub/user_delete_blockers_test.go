@@ -657,3 +657,29 @@ func TestDeprecatedAllowListDelete_EdgeBlockedThenSwept(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 	requireEdgeSwept(t, s, edge.ID)
 }
+
+// GET /api/v1/users/{id}/delete-blockers takes no further path segment. A
+// request with one (or a trailing slash) answers 404 for every method, and
+// does not fall through to the user handlers: a GET does not return the
+// user, and a DELETE does not delete it.
+func TestUserDeleteBlockers_TrailingSegmentNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	base := "/api/v1/users/" + dave.ID + "/delete-blockers"
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, base + "/extra"},
+		{http.MethodGet, base + "/"},
+		{http.MethodGet, base + "/a/b"},
+		{http.MethodPost, base + "/extra"},
+		{http.MethodDelete, base + "/extra"},
+	} {
+		rec := doRequest(t, srv, tc.method, tc.path, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), dave.Email, "%s %s must not return the user", tc.method, tc.path)
+	}
+	_, err := s.GetUser(context.Background(), dave.ID)
+	require.NoError(t, err, "no request below delete-blockers deletes the user")
+
+	rec := doRequest(t, srv, http.MethodGet, base, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
