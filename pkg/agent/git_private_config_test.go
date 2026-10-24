@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -377,5 +378,38 @@ func TestSeedPrivateGitConfig_RefusesSymlinkedBase(t *testing.T) {
 	}
 	if _, err := seedPrivateGitConfig(base, t.TempDir(), "agent-x"); err == nil {
 		t.Error("a symlinked base .git/config must be refused, got nil")
+	}
+}
+
+// TestSeedPrivateGitConfig_CloseErrorFailsClosed injects a close error on the
+// written temp config and confirms the write path fails closed: an error is
+// returned, no config file is created, and the temp file is removed.
+func TestSeedPrivateGitConfig_CloseErrorFailsClosed(t *testing.T) {
+	agentDir := t.TempDir()
+	orig := tmpConfigClose
+	tmpConfigClose = func(f *os.File) error {
+		_ = f.Close() // close the real fd so it does not leak, then report a failure
+		return fmt.Errorf("injected close error")
+	}
+	t.Cleanup(func() { tmpConfigClose = orig })
+
+	dest, err := seedPrivateGitConfig(filepath.Join(t.TempDir(), "nobase"), agentDir, "agent-x")
+	if err == nil {
+		t.Fatalf("expected a close error, got nil (dest=%q)", dest)
+	}
+	if !strings.Contains(err.Error(), "close") {
+		t.Errorf("error = %v, want it to mention the close failure", err)
+	}
+	// Fail closed: the config file is never created, and the temp file is removed.
+	cfg := filepath.Join(agentDir, "git", "config")
+	if _, statErr := os.Stat(cfg); !os.IsNotExist(statErr) {
+		t.Errorf("a config file was left behind on a close failure: os.Stat(%s) = %v", cfg, statErr)
+	}
+	entries, rderr := os.ReadDir(filepath.Join(agentDir, "git"))
+	if rderr != nil {
+		t.Fatalf("read git dir: %v", rderr)
+	}
+	for _, e := range entries {
+		t.Errorf("leftover file after a close failure (temp not removed): %s", e.Name())
 	}
 }

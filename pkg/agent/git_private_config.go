@@ -47,6 +47,11 @@ const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 // The returned path is always a fresh, broker-written regular file: any stale
 // file (including one an earlier agent run left, or a symlink) is replaced by the
 // rename.
+// tmpConfigClose closes the written temp config before the rename. It is a
+// package var only so a test can inject a close error and confirm the write path
+// fails closed; it is otherwise exactly (*os.File).Close.
+var tmpConfigClose = func(f *os.File) error { return f.Close() }
+
 func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, error) {
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
@@ -103,16 +108,22 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 		return "", fmt.Errorf("seed private git config: temp: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once renamed
+	// Best-effort cleanup of the temp config; a no-op once renamed. The write path
+	// below fails closed (an explicit, checked close before the rename), so on any
+	// error the temp is removed and no config file is left behind.
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // chmod already failed; the close is best-effort and the temp is removed by the deferred cleanup
 		return "", fmt.Errorf("seed private git config: chmod: %w", err)
 	}
 	if _, err := tmp.Write(redacted); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // write already failed; the close is best-effort and the temp is removed by the deferred cleanup
 		return "", fmt.Errorf("seed private git config: write: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
+	// Explicit, checked close before the rename: a close error here means the
+	// written bytes may not be flushed, so fail closed (no rename; the deferred
+	// cleanup removes the temp). tmpConfigClose is a test seam.
+	if err := tmpConfigClose(tmp); err != nil {
 		return "", fmt.Errorf("seed private git config: close: %w", err)
 	}
 	dest := filepath.Join(gitDir, "config")
@@ -179,7 +190,7 @@ func readBaseGitConfig(path string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err

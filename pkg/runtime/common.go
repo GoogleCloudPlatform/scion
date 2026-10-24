@@ -1659,7 +1659,7 @@ func readSmallConfigFile(path string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
