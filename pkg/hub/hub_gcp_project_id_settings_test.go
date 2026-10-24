@@ -126,3 +126,35 @@ func TestNeverAPIWritable_DBAndWorkstationGetDoesNotEchoHubGCPProjectID(t *testi
 		})
 	}
 }
+
+// TestNeverAPIWritable_EnvOverridesHideHubGCPProjectID: when
+// server.hub.gcp_project_id is set from the environment, GET's env_overrides
+// list does not reveal it, in file and DB mode (the never-API-writable
+// filter); another env-set key still shows.
+func TestNeverAPIWritable_EnvOverridesHideHubGCPProjectID(t *testing.T) {
+	const envSentinel = "hub-project-env-sentinel"
+	t.Setenv("SCION_SERVER_HUB_GCPPROJECTID", envSentinel)
+	t.Setenv("SCION_SERVER_LOGLEVEL", "warn")
+	require.Contains(t, opsettings.DetectEnvOverrides(config.LoadEnvKoanf()), config.HubGCPProjectIDKey,
+		"control: the environment variable sets server.hub.gcp_project_id")
+
+	writeHubGCPProjectSettings(t)
+	srv := &Server{}
+	fileRR := httptest.NewRecorder()
+	srv.handleGetServerConfig(fileRR)
+	require.Equal(t, http.StatusOK, fileRR.Code, fileRR.Body.String())
+	assert.Contains(t, fileRR.Body.String(), "server.log_level", "control: env overrides are listed")
+	assert.NotContains(t, fileRR.Body.String(), config.HubGCPProjectIDKey)
+	assert.NotContains(t, fileRR.Body.String(), envSentinel)
+
+	db, _, ops := newSQLiteHubInMode(t, false, nil)
+	dbRR := httptest.NewRecorder()
+	db.handleGetServerConfigDB(dbRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	require.Equal(t, http.StatusOK, dbRR.Code, dbRR.Body.String())
+	assert.NotContains(t, dbRR.Body.String(), config.HubGCPProjectIDKey)
+	assert.NotContains(t, dbRR.Body.String(), envSentinel)
+
+	assert.Equal(t, []string{"server.log_level"}, withoutNeverAPIWritableKeys([]string{
+		config.HubGCPProjectIDKey, "server.log_level",
+	}))
+}
