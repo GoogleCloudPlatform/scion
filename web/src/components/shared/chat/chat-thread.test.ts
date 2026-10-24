@@ -4025,7 +4025,19 @@ describe('scion-chat-thread unread-divider open anchor', () => {
     expect(internal.pinnedToBottom).toBe(false);
   });
 
-  it('re-pins the bottom when the anchor frame throws on its scrollTop write', async () => {
+  /**
+   * Open with the divider above the tail, park the view `distFromBottom`
+   * pixels up from the bottom, then fire the anchor's first frame with its
+   * scrollTop write throwing. applyUnreadAnchor has already set the pin off
+   * (the divider is above the tail) when the write throws, so the view stays
+   * where it was parked.
+   */
+  async function throwOnAnchorWriteFrom(distFromBottom: number): Promise<{
+    el: ScionChatThread;
+    container: HTMLElement;
+    internal: FrameThrowInternal;
+    parkedTop: number;
+  }> {
     mockEndpoints('m1');
     globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
     const el = mountThread();
@@ -4033,17 +4045,15 @@ describe('scion-chat-thread unread-divider open anchor', () => {
     const container = scrollContainer(el);
     await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
     const internal = el as unknown as FrameThrowInternal;
-    // The history render's own bottom pin left the view at the tail.
-    const bottomTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
-    container.scrollTop = bottomTop;
+    const parkedTop = SCROLL_HEIGHT - CLIENT_HEIGHT - distFromBottom;
+    container.scrollTop = parkedTop;
 
-    // applyUnreadAnchor turns the pin off, then its scrollTop write throws.
     await runFirstAnchorFrameThrowing(
       internal,
       () => {
         Object.defineProperty(container, 'scrollTop', {
           configurable: true,
-          get: () => bottomTop,
+          get: () => parkedTop,
           set: () => {
             throw new Error('scroll write failed');
           },
@@ -4054,8 +4064,13 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       },
       'scroll write failed'
     );
+    expect(container.scrollTop).toBe(parkedTop);
+    return { el, container, internal, parkedTop };
+  }
 
-    expect(container.scrollTop).toBe(bottomTop);
+  it('re-pins the bottom when the anchor frame throws on its scrollTop write', async () => {
+    // The history render's own bottom pin left the view at the tail.
+    const { el, container, internal } = await throwOnAnchorWriteFrom(0);
     expect(internal.pinnedToBottom).toBe(true);
 
     // A message arriving afterwards keeps the view stuck to the bottom.
@@ -4065,6 +4080,12 @@ describe('scion-chat-thread unread-divider open anchor', () => {
     );
     await vi.waitFor(() => expect(container.scrollTop).toBe(SCROLL_HEIGHT));
     expect(internal.pinnedToBottom).toBe(true);
+  });
+
+  it('leaves the bottom unpinned when the anchor write throws exactly the threshold up from the bottom', async () => {
+    // SCROLL_BOTTOM_THRESHOLD (80px) is strict: exactly that far up is not at the bottom.
+    const { internal } = await throwOnAnchorWriteFrom(80);
+    expect(internal.pinnedToBottom).toBe(false);
   });
 
   it("a failed render of a superseded open leaves the next open's anchor alone", async () => {
