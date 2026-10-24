@@ -56,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -131,6 +132,17 @@ type ServerConfig struct {
 	// Operators enabling it must provide a SharedSigningSecret or pre-provision
 	// the signing keys; otherwise first boot will (correctly) refuse to start.
 	RequireStableSigningKey bool
+	// Keyring is the server keyring loaded from server.keyring_file
+	// (ptone/scion#1530), or nil without one (legacy single-secret mode). In
+	// this release only the web session cookies use its signing ring; every
+	// other purpose uses SharedSigningSecret, which must then be the
+	// keyring's "legacy" signing entry. Explicit AgentTokenConfig/
+	// UserTokenConfig signing keys are refused with it. When the active
+	// signing generation reaches its sign_until, /readyz reports not ready.
+	Keyring *keyring.Keyring
+	// KeyringNow is the clock for keyring deadlines (nil: time.Now). A seam
+	// for tests; production leaves it nil.
+	KeyringNow func() time.Time
 
 	// ConduitTCPAllowedPorts is the operator allow-list of agent-local
 	// loopback ports a Conduit tcp stream grant may target in addition to
@@ -487,11 +499,11 @@ type ServerConfig struct {
 	Mode string
 
 	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces. When Backend is "nfs",
-	// "cloudrun-volume" or "gke-shared-volume", hubManagedProjectPath returns
-	// a path on the configured durable mount instead of the node-local home
-	// directory.
-	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
+	// hub-managed project workspaces; the hub builds its workspace Layout
+	// from it (workspaceLayout). With Backend "nfs", "cloudrun-volume" or
+	// "gke-shared-volume" the hub serves the same projects/<uuid>/workspace
+	// tree agents mount. Nil or Backend=="" / "local" keeps the local,
+	// slug-keyed layout (~/.scion/projects/<slug>).
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 
 	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
@@ -835,6 +847,11 @@ type StartExtras struct {
 	LaunchID               string
 	LaunchTimeoutSeconds   int
 	LaunchKeepaliveSeconds int
+	// PreviousProjectIDs are earlier IDs of the agent's project that the
+	// broker may carry a git project's agent over from after a re-link
+	// (wire key previousProjectIds; see previousProjectIDs). Set on start
+	// and restart; empty sends nothing.
+	PreviousProjectIDs []string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -917,6 +934,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if len(extras.PreviousProjectIDs) > 0 {
+		payload["previousProjectIds"] = extras.PreviousProjectIDs
 	}
 	if extras.AsyncLaunch {
 		payload["asyncLaunch"] = true
@@ -1477,6 +1497,11 @@ type RemoteCreateAgentRequest struct {
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
 
+	// PreviousProjectIDs are earlier IDs of the agent's project that the
+	// broker may carry a git project's agent over from after a re-link
+	// (see previousProjectIDs). An older broker ignores the key.
+	PreviousProjectIDs []string `json:"previousProjectIds,omitempty"`
+
 	// ProvisionCredentials carries project-scope secrets for use by core provision
 	// logic (skill resolution, URI variable substitution, credential helpers).
 	// These are NEVER forwarded to the agent container environment or harness scripts.
@@ -1722,6 +1747,10 @@ type Server struct {
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
+	// projectConfigIdentity records shared-backend projects whose
+	// <ProjectRoot>/.scion/project-id names another project
+	// (project_config_identity health check).
+	projectConfigIdentity projectConfigIdentityState
 
 	// startupLayer1 holds the startup values ApplySnapshot reverts to when
 	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
@@ -2001,6 +2030,9 @@ type Server struct {
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
 	attachmentStore AttachmentStore
+	// attachmentRetention paces the attachment retention sweep inside the
+	// artifact maintenance loop (attachments_retention.go).
+	attachmentRetention attachmentRetention
 
 	// Presence manager for in-memory user presence tracking (nil = disabled).
 	// Single-node only; see design §4.5 HA limitation.
@@ -2104,6 +2136,10 @@ type Server struct {
 	// resolved at startup (signingKeySource). Labels only, never keys.
 	signingKeySourcesMu sync.Mutex
 	signingKeySources   map[string]string
+
+	// signingNotReadyLogged is set once /readyz has logged that the
+	// keyring's signing ring cannot issue (signingNotReadyReason).
+	signingNotReadyLogged atomic.Bool
 
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
@@ -2290,11 +2326,6 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
-	// workspace upload into a hub workspace when set (tests only). Guarded
-	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
-	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
 	templateSourceFetcher templateSourceFetcher
@@ -2386,10 +2417,9 @@ type Server struct {
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
 
-	// warnedEphemeralProjects holds the project slugs already reported as being
-	// served from ephemeral local storage, keeping that warning to one line per
-	// slug on a request path. See warnEphemeralProjectPath.
-	warnedEphemeralProjects sync.Map
+	// storageMigrationNotice caches the dry-run plan of the project storage
+	// migration behind the Files tab notice (workspace_migration_notice.go).
+	storageMigrationNotice storageMigrationNoticeCache
 
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
@@ -2501,6 +2531,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
 		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
+	}
+	if err := validateKeyringConfig(cfg); err != nil {
+		return nil, err
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
@@ -4988,11 +5021,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		dispatcher.SetAuthzService(s.authzService)
 	}
 
-	// In dev-auth mode, pass the dev token so agents get it for fallback auth
-	if s.config.DevAuthToken != "" {
-		dispatcher.SetDevAuthToken(s.config.DevAuthToken)
-	}
-
 	// Configure GitHub App token minter if the app is configured
 	if s.config.GitHubAppConfig.AppID != 0 {
 		dispatcher.SetGitHubAppMinter(s)
@@ -5251,7 +5279,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	}
 	stopRunID := agent.RunID
 	if agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for suspend, record work in an ephemeral workspace that
 		// the suspend discards, so the next start reports it. There is
 		// no response to carry a warning (ptone/scion#4387).
@@ -6619,6 +6646,15 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// project ID as the workspace project identity of hub-cloned projects
 	// created with a locally generated one.
 	s.startClonedProjectIdentityAlignment(ctx)
+
+	// Ensure project-id and project-slug in every shared-backend project's
+	// configuration (<ProjectRoot>/.scion), in the background (never
+	// blocks start or readiness).
+	s.startProjectConfigIdentityEnsure(ctx)
+
+	// Plan the project storage migration in the background so the Files
+	// tab notice is known early (never blocks start or readiness).
+	s.startStorageMigrationNoticePlan(ctx)
 
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.

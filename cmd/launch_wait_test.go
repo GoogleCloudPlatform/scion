@@ -1402,6 +1402,7 @@ func TestStartAgentViaHub_EnvGatherAgentLauncherRefusedIsNotADeletion(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SCION_AGENT_ID", "agent-launcher")
 			t.Setenv("SCION_TEST_4568_NEEDED", "value")
+			allowEnvSend(t)
 			hub := &launchMockHub{t: t,
 				envGatherBody: hubclient.CreateAgentResponse{
 					Agent:     &hubclient.Agent{ID: "id-1", Slug: "a1", Name: "a1", Phase: "provisioning"},

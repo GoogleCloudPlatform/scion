@@ -81,14 +81,19 @@ func TestHubClientAuthSource(t *testing.T) {
 		{"agent token file wins over SCION_HUB_TOKEN", remote, setup{tokenFile: true, envHub: true}, hubAuthSourceAgentTokenFile, "", "file-tok"},
 		{"SCION_AUTH_TOKEN next", remote, setup{envAuth: true, envHub: true, dev: true}, hubAuthSourceEnvAuthToken, "", "env-auth-tok"},
 		{"SCION_HUB_TOKEN next", remote, setup{envHub: true, dev: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
-		{"development token last", remote, setup{dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		// The dev label follows the development credential: it is reported
+		// only when that credential is sent.
+		{"development credential last", local, setup{dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		{"development credential not sent", remote, setup{dev: true}, hubAuthSourceNone, "", ""},
 		{"no credential", remote, setup{}, hubAuthSourceNone, "", ""},
 		{"transport credential only (iap)", remote, setup{transport: "iap"}, hubAuthSourceTransport, "", ""},
-		{"a development token wins over the transport credential (iap)", remote, setup{transport: "iap", dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		{"a development credential wins over the transport credential (iap)", local, setup{transport: "iap", dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},
+		{"development credential not sent, transport credential only (iap)", remote, setup{transport: "iap", dev: true}, hubAuthSourceTransport, "", ""},
 		{"SCION_HUB_TOKEN with a transport credential (iap)", remote, setup{transport: "iap", envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
 		// Default header mode: the transport token goes in Authorization
 		// unless a Hub credential is already there.
 		{"transport credential only (default mode)", remote, setup{transport: "default"}, hubAuthSourceTransport, "Bearer transport-tok", ""},
+		{"development credential not sent, transport credential only (default mode)", remote, setup{transport: "default", dev: true}, hubAuthSourceTransport, "Bearer transport-tok", ""},
 		{"SCION_HUB_TOKEN with a transport credential (default mode)", remote, setup{transport: "default", envHub: true}, hubAuthSourceEnvHubToken, "Bearer env-hub-tok", ""},
 		{"agent token file with a transport credential (default mode)", remote, setup{transport: "default", tokenFile: true}, hubAuthSourceAgentTokenFile, "Bearer transport-tok", "file-tok"},
 		{"localhost prefers the development token over the agent token file", local, setup{tokenFile: true, dev: true}, hubAuthSourceDev, "Bearer dev-tok", ""},

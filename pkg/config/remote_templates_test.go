@@ -33,6 +33,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -760,14 +761,22 @@ func TestFetchGitHubTarball(t *testing.T) {
 // every subcommand except `fetch`, which fails with an auth-style error, so
 // execSparseGitCheckout runs end to end without touching the network
 // (ptone/scion#3750). It returns a func that reads the logged invocations.
-func installFakeGit(t *testing.T) (calls func() []string) {
+func installFakeGit(t *testing.T) (calls, rawCalls func() []string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake git shell script requires a POSIX shell")
 	}
 	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	logDir := t.TempDir()
+	logPath := filepath.Join(logDir, "git-calls.log")
+	rawPath := filepath.Join(logDir, "git-calls-raw.log")
+	// Record the full argv of every call (raw), then strip ONLY the leading
+	// host-side pins ('-c key=value' pairs) and record the remainder — so a
+	// caller sees the real command exactly as before, and can also assert the
+	// exact set of pins that was prefixed.
 	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$SCION_FAKE_GIT_RAW"
+while [ "$1" = "-c" ]; do shift 2; done
 printf '%s\n' "$*" >> "$SCION_FAKE_GIT_LOG"
 if [ "$1" = "fetch" ]; then
   echo "fatal: Authentication failed (fake git)" >&2
@@ -778,14 +787,18 @@ exit 0
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir)
 	t.Setenv("SCION_FAKE_GIT_LOG", logPath)
-	return func() []string {
-		data, err := os.ReadFile(logPath)
+	t.Setenv("SCION_FAKE_GIT_RAW", rawPath)
+	read := func(p string) []string {
+		data, err := os.ReadFile(p)
 		if os.IsNotExist(err) {
 			return nil
 		}
 		require.NoError(t, err)
 		return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	}
+	calls = func() []string { return read(logPath) }
+	rawCalls = func() []string { return read(rawPath) }
+	return calls, rawCalls
 }
 
 func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
@@ -803,7 +816,7 @@ func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			calls := installFakeGit(t)
+			calls, rawCalls := installFakeGit(t)
 			err := execSparseGitCheckout(context.Background(), parts, t.TempDir(), tt.token)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "git fetch failed")
@@ -811,12 +824,24 @@ func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
 			if tt.token != "" {
 				assert.NotContains(t, err.Error(), tt.token, "token must never appear in error text")
 			}
-			assert.Equal(t, []string{
+			want := []string{
 				"init",
 				tt.wantRemote,
 				"config core.sparseCheckout true",
 				"fetch --depth=1 origin main",
-			}, calls())
+			}
+			// The real command, after the host-side pins are stripped, is
+			// exactly as before.
+			assert.Equal(t, want, calls())
+			// Every call is prefixed with EXACTLY the host-side pins
+			// (util.HostGitArgs): none missing, none extra, exact values. The
+			// raw argv must equal "<pins> <stripped command>".
+			pins := strings.Join(util.HostGitArgs(), " ")
+			raw := rawCalls()
+			require.Len(t, raw, len(want))
+			for i := range want {
+				assert.Equal(t, pins+" "+want[i], raw[i], "call %d must carry exactly the host-side pins", i)
+			}
 		})
 	}
 }
@@ -832,7 +857,7 @@ func (f remoteTemplatesRoundTripFunc) RoundTrip(r *http.Request) (*http.Response
 // packages can stub it via SetGitSparseCheckoutForTest) with the parsed ref
 // and the auth token, and that its result is returned as-is.
 func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
-	calls := installFakeGit(t) // any real git exec would be recorded here
+	calls, _ := installFakeGit(t) // any real git exec would be recorded here
 	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
 		return nil, errors.New("ls-remote disabled in test")
 	}))

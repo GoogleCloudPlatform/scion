@@ -13,25 +13,36 @@
 # limitations under the License.
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
-# check. PRs and main pushes run only when web/, the hub files the
-# page-policy suite checks, or this file change; the nightly run covers
-# everything else, such as browser drift.
+# check. PRs and main pushes run only when web/ (or this file) changes,
+# or one of the few Go paths the page-policy and port-proxy suites
+# exercise (listed under on:, below); the nightly run covers everything
+# else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in full Chromium. Every suite except test-identity-session and
-# page-policy (below) serves the web sources itself (Vite dev server or an
-# esbuild bundle) with a mocked hub. Only terminal-workspace also needs a
-# production build: some of its tests check the Shoelace icon files in
-# web/dist, so that job runs npm run build first.
+# all in full Chromium. Every suite except test-identity-session,
+# page-policy and port-proxy (below) serves the web sources itself (Vite
+# dev server or an esbuild bundle) with a mocked hub. Only
+# terminal-workspace also needs a production build: some of its tests
+# check the Shoelace icon files in web/dist, so that job runs npm run build
+# first.
 #
-# test-identity-session and page-policy are the exceptions: they run
-# against the real Go hub binary (a throwaway hub started by their global
-# setup; test-identity-session's is a member-level test hub,
-# ptone/scion#4240; page-policy checks the page script policy the hub
-# sends, ptone/scion#5912). Only those jobs set up Go (go.mod version,
-# with setup-go's built-in cache; ci.yml uses per-job caches instead, see
+# test-identity-session and page-policy run against the real Go hub binary
+# (a throwaway hub started by their global setup; test-identity-session's
+# is a member-level test hub, ptone/scion#4240; page-policy checks the page
+# script policy the hub sends, ptone/scion#5912). They and port-proxy are
+# the only jobs that set up Go (go.mod version, with setup-go's built-in
+# cache; ci.yml uses per-job caches instead, see
 # .github/actions/setup-go-cache) and build the binary (make build) and
 # the web assets (npm run build) before the suite runs.
+#
+# port-proxy (ptone/scion#5568) runs against the real hub binary too, with
+# the same Go setup and builds, plus the fake agent helper (go build of
+# hack/e2e/fakeagent) that serves the fixture app's port from agents.
+# The workflow-level path filter below also lists the Go files that suite
+# depends on (the hub's port proxy, its no-credentials answer and session
+# fallthrough, the agent-side tunnel clients and the helper). GitHub path
+# filters apply to the whole workflow, not one matrix entry, so a change to
+# those paths runs every suite here; the list is kept to those files.
 #
 # iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
 # checks the e2e harness IAP driver hook against two local HTTP servers it
@@ -56,10 +67,11 @@
 # 50-60 runner-minutes across the 14 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The two real-hub jobs, test-identity-session and page-policy,
-# each add setup-go, a Go build (make build; a few minutes on a cold Go
-# cache, less with the setup-go cache) and a Vite production build before
-# their short suites; iap-driver is the 17th job.
+# total). The three real-hub jobs, test-identity-session, page-policy and
+# port-proxy, each add setup-go, a Go build (make build; a few minutes on a
+# cold Go cache, less with the setup-go cache) and a Vite production build
+# before a short suite; port-proxy also builds the helper. iap-driver is
+# the 18th job.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -73,6 +85,17 @@ on:
       - 'pkg/hub/csp_reports.go'
       - 'pkg/cspreport/**'
       - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/port_proxy_metrics.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
   push:
     branches: [ main ]
     paths:
@@ -82,6 +105,17 @@ on:
       - 'pkg/hub/csp_reports.go'
       - 'pkg/cspreport/**'
       - '.github/workflows/web-e2e.yml'
+      # port-proxy suite (ptone/scion#5568): see the header.
+      - 'hack/e2e/**'
+      - 'pkg/hub/port_forward_handlers.go'
+      - 'pkg/hub/conduit_proxy.go'
+      - 'pkg/hub/project_workspace_handlers.go'
+      - 'pkg/hub/auth.go'
+      - 'pkg/hub/port_proxy_metrics.go'
+      - 'pkg/hub/web.go'
+      - 'pkg/portforward/**'
+      - 'pkg/sciontool/portforward/**'
+      - 'pkg/sciontool/conduit/**'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
@@ -121,6 +155,7 @@ jobs:
           - broker-area
           - test-identity-session
           - page-policy
+          - port-proxy
           - iap-driver
     steps:
       - name: Checkout code
@@ -139,9 +174,10 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session and page-policy only: the suites start the real hub binary.
-      - name: Setup Go (test-identity-session, page-policy)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy'
+      # test-identity-session, page-policy and port-proxy: the suites start
+      # the real hub binary.
+      - name: Setup Go (real hub suites)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'port-proxy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
@@ -152,6 +188,14 @@ jobs:
         run: |
           make build
           npm --prefix web run build
+
+      # port-proxy also runs the fake agent helper (hack/e2e/fakeagent).
+      - name: Build hub binary, web assets and fake agent helper (port-proxy)
+        if: matrix.suite == 'port-proxy'
+        run: |
+          make build
+          npm --prefix web run build
+          go build -buildvcs=false -o build/e2e-fakeagent ./hack/e2e/fakeagent
 
       # terminal-workspace tests (workspace.pw.ts, dm-buttons.pw.ts) read
       # icon files from the production build output in web/dist/client.
@@ -207,8 +251,8 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session and page-policy: the binary and web assets
-          # were built in the step above.
+          # Read only by test-identity-session, page-policy and port-proxy:
+          # the binaries and web assets were built in the steps above.
           E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"

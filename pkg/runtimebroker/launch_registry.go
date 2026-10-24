@@ -98,6 +98,9 @@ type launchRecord struct {
 	// after removing its objects (zero for a legacy Runtime Broker).
 	ownedRunMu sync.Mutex
 	ownedRun   ownedRunKey
+	// filesRemoved is set by cleanupLaunchFiles when it removed the
+	// agent's files and a flat instance's files proof then found none.
+	filesRemoved atomic.Bool
 	// done is closed once runLaunch (including any cleanup), or a create's
 	// registration (syncStart.finish), has fully finished. A later create
 	// for the same key waits on this before any name-addressed work

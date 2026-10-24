@@ -309,11 +309,7 @@ type result struct {
 
 func (h *harness) run() result {
 	h.t.Helper()
-	cmd := exec.Command("bash", "entrypoint.sh")
-	cmd.Env = make([]string, 0, len(h.env))
-	for k, v := range h.env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd := h.entrypointCmd()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -381,8 +377,8 @@ func TestEntrypointSuccess(t *testing.T) {
 	}
 	// The watcher's done FIFO is closed for the child: no fd of run.sh points at it.
 	// (Other inherited fds, such as a build wrapper's lock, are not the entrypoint's.)
-	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") {
-		t.Errorf("run.sh inherited the watcher's done FIFO:\n%s", fds)
+	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") || strings.Contains(fds, "idle-wait") {
+		t.Errorf("run.sh inherited the watcher's done FIFO or the idle timer's FIFO:\n%s", fds)
 	}
 	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
 	if got := h.stubFile("int_trap"); got != "" {
@@ -604,6 +600,8 @@ func TestEntrypointConfigErrors(t *testing.T) {
 		{"http to a remote host", func(h *harness) { h.env["MEDIATOR_URL"] = "http://mediator.example.com" }, "must be an https origin"},
 		{"url with a path", func(h *harness) { h.env["MEDIATOR_URL"] = "https://mediator.example.com/x" }, "must be an https origin"},
 		{"remote metadata url", func(h *harness) { h.env["CR_METADATA_URL"] = "http://metadata.example.com" }, "CR_METADATA_URL must be"},
+		{"zero idle timeout", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "0" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
+		{"idle timeout with a unit", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "10m" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
 		{"runner dir without run.sh", func(h *harness) { os.Remove(filepath.Join(h.runnerDir, "run.sh")) }, "run.sh not found"},
 	}
 	for _, tc := range cases {
@@ -1221,8 +1219,26 @@ func killEntrypoint(h *harness, cmd *exec.Cmd) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+	// The entrypoint's own process group (entrypointCmd: Setpgid): the entrypoint, its
+	// output watcher and its idle watchdog, which hold the test's stdout/stderr pipes.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+}
+
+// entrypointCmd returns the command that runs entrypoint.sh with the harness env, as
+// the leader of its own process group, so killEntrypoint can end it together with the
+// background processes it starts (output watcher, idle watchdog). WaitDelay bounds
+// Wait if a process that escaped the group still holds the output pipes.
+func (h *harness) entrypointCmd() *exec.Cmd {
+	cmd := exec.Command("bash", "entrypoint.sh")
+	cmd.Env = make([]string, 0, len(h.env))
+	for k, v := range h.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 30 * time.Second
+	return cmd
 }
 
 // signalStub waits until it is signalled, records the signal and exits with a
@@ -1243,10 +1259,7 @@ func TestEntrypointForwardsSignals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSuccessHarness(t)
 			h.setRunSh(stubRunShWith(signalStub))
-			cmd := exec.Command("bash", "entrypoint.sh")
-			for k, v := range h.env {
-				cmd.Env = append(cmd.Env, k+"="+v)
-			}
+			cmd := h.entrypointCmd()
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			if err := cmd.Start(); err != nil {
@@ -1374,10 +1387,7 @@ func TestEntrypointSignalDuringClaim(t *testing.T) {
 	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
 	h := newHarness(t, cs.URL)
 	h.env["CR_CLAIM_BACKOFF_SECONDS"] = "2"
-	cmd := exec.Command("bash", "entrypoint.sh")
-	for k, v := range h.env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd := h.entrypointCmd()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
@@ -1434,10 +1444,7 @@ touch "$out/ready"
 wait "$nap"
 exit 9
 `))
-		cmd := exec.Command("bash", "entrypoint.sh")
-		for k, v := range h.env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
+		cmd := h.entrypointCmd()
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
@@ -1497,5 +1504,98 @@ func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
 	expectFailure(t, h, h.run(), 3, "410")
 	if left, _ := filepath.Glob(filepath.Join(fifoRoot, "cr-ci-entrypoint.*")); len(left) != 0 {
 		t.Errorf("FIFO directory left behind after the failed claim: %v", left)
+	}
+}
+
+// --- Idle timeout (RUNNER_IDLE_TIMEOUT_SECONDS) -------------------------------------
+
+// A runner that has not started a job by its idle deadline is stopped like a cancel
+// (SIGTERM to run.sh), and the execution ends 0 with a distinct log line.
+func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
+	h := newSuccessHarness(t)
+	// 3 s: the stub's recording prelude runs before its traps are set, and a TERM that
+	// came first would end it by default instead of through the trap.
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3"
+	h.setRunSh(stubRunShWith(signalStub))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (an idle stop is not a failure); stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got := h.stubFile("signal"); got != "TERM" {
+		t.Errorf("run.sh received %q, want TERM from the idle watchdog", got)
+	}
+	for _, want := range []string{
+		"idle timeout: no job started within 3s of the container start; stopping the runner gracefully",
+		"idle_timeout: runner stopped after 3s without a job (run.sh exited 42); exiting 0",
+	} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr does not contain %q:\n%s", want, res.stderr)
+		}
+	}
+}
+
+// A job that starts shortly before the deadline (3 s after run.sh starts, the deadline
+// 9 s after the entrypoint starts: about 6 s of margin for the claim and a loaded
+// machine) is not touched: the runner runs it to
+// the end and the entrypoint reports run.sh's own result.
+func TestEntrypointIdleTimeoutJobJustBeforeDeadline(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "9"
+	h.setRunSh(stubRunShWith(`trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+sleep 3
+echo "2026-10-22 21:00:00Z: Running job: lint"
+for _ in $(seq 1 30); do sleep 0.1; done
+echo "2026-10-22 21:00:03Z: Job lint completed with result: Succeeded"
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want run.sh's 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(h.stubOut, "signal")); err == nil {
+		t.Errorf("run.sh was signalled (%s), want the started job left alone", h.stubFile("signal"))
+	}
+	if strings.Contains(res.stderr, "idle") {
+		t.Errorf("stderr reports an idle stop for a runner that started a job:\n%s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "run.sh exited 0") {
+		t.Errorf("stderr does not report run.sh's exit:\n%s", res.stderr)
+	}
+}
+
+// A run that ends before the deadline does not wait for it, and leaves no watchdog behind.
+func TestEntrypointIdleTimeoutDoesNotDelayExit(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "60"
+	start := time.Now()
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("entrypoint took %s, want it to end with run.sh, not at the idle deadline", d)
+	}
+}
+
+// The idle stop raced a job start: the watchdog found no job and sent SIGTERM, and the
+// job's "Running job:" line arrived anyway (here: printed by the stub on SIGTERM, which
+// makes the race deterministic). The cancelled job must not pass for an idle stop.
+func TestEntrypointIdleTimeoutRacedJob(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3" // room for the stub's prelude before its trap
+	h.setRunSh(stubRunShWith(`trap 'echo "2026-10-22 21:00:01Z: Running job: lint"; echo TERM > "$out/signal"; exit 0' TERM
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`))
+	res := h.run()
+	if res.exitCode != 4 {
+		t.Errorf("exit code = %d, want 4 for an idle stop that raced a job; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "ERROR idle_timeout_raced_job:") {
+		t.Errorf("stderr does not report the race:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stderr, "without a job") {
+		t.Errorf("stderr reports a plain idle stop for a cancelled job:\n%s", res.stderr)
 	}
 }

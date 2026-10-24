@@ -46,6 +46,8 @@ import { dispatchTeardown } from '../utils/auth.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { isFeatureEnabled, SSE_HIDDEN_TAB_CLOSE_FLAG } from '../utils/feature-flags.js';
 import type { AuthMeResponse } from '../shared/types.js';
+import { apiFetch } from './api.js';
+import { loadPage } from './navigation.js';
 
 /** Data shape for SSE 'update' events from the server */
 export interface SSEUpdateEvent {
@@ -374,7 +376,7 @@ export class SSEClient extends EventTarget {
       const authUrl = this.endpoint.startsWith('/')
         ? '/auth/me'
         : new URL('auth/me', this.endpoint).href;
-      const resp = await fetch(authUrl, { credentials: 'include' });
+      const resp = await apiFetch(authUrl, { authErrors: 'caller' });
       if (generation !== this.generation) return;
       if (resp.status === 401 || resp.redirected) {
         console.warn('[SSE] Session expired, redirecting to login');
@@ -382,7 +384,7 @@ export class SSEClient extends EventTarget {
         // active terminals survive the transition.
         dispatchTeardown('auth-expired');
         const returnTo = encodeURIComponent(window.location.pathname);
-        window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
+        loadPage(`/login?error=session_expired&returnTo=${returnTo}`);
         return;
       }
       // Review R1-6: this reconnect check already fetches /auth/me live, so

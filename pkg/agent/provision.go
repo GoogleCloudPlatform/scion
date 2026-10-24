@@ -264,7 +264,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 						}
 					}
 					worktreeStart := time.Now()
-					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
+					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, repoRoot, branchToDelete(removeBranch, branch)); err == nil {
 						if deleted {
 							branchDeleted = true
 						}
@@ -323,7 +323,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, removeBranch); err == nil {
+			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
@@ -360,7 +360,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
+				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
@@ -1775,6 +1775,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	var workspaceSource string
 	shouldCreateWorktree := false
 	explicitWorkspace := false
+	// projectRepoRoot is the repository root recorded for a git project
+	// (Case 2), "" otherwise.
+	var projectRepoRoot string
 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
@@ -1841,6 +1844,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
 			}
+			if err := refuseWorkspaceInAgentsDir(projectDir, absWorkspace); err != nil {
+				return "", "", nil, err
+			}
 			workspaceSource = absWorkspace
 			agentWorkspace = ""
 			explicitWorkspace = true
@@ -1852,6 +1858,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if err != nil {
 				return "", "", nil, err
 			}
+			if err := refuseWorkspaceInAgentsDir(projectDir, resolved); err != nil {
+				return "", "", nil, err
+			}
 			workspaceSource = resolved
 			agentWorkspace = ""
 			explicitWorkspace = true
@@ -1859,6 +1868,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// The repository root is identified without git
+		// (trustedProjectRepoRoot) and must match what git reports;
+		// provisioning stops otherwise. It is recorded below.
+		trustedRoot, rootErr := checkProvisionRepoRoot(projectDir)
+		if rootErr != nil {
+			return "", "", nil, rootErr
+		}
+		projectRepoRoot = trustedRoot
 		// A flat Runtime Broker instance serializes the repository's
 		// worktree and sharer changes with every instance of its host (the
 		// host's workspace lock), through the rest of provisioning.
@@ -2447,7 +2464,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// gate, for the one case this function never runs at all: GetAgent
 	// skipping ProvisionAgent because the agent directory already exists.
 	// See persistProvisionedWorktreeRepoRootIfValid.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource, finalScionCfg.Volumes)
+
+	// Record the project's repository root for a git project (Case 2), so
+	// every later start reads it from this record instead of deriving it
+	// from the workspace. Written only when agentDir is outside every
+	// mount of the agent (writeRepoRootRecord).
+	if projectRepoRoot != "" && api.ProvisionedWorktreeRepoRootFromContext(ctx) == "" {
+		recordWorkspace := agentWorkspace
+		if recordWorkspace == "" {
+			recordWorkspace = workspaceSource
+		}
+		if err := writeRepoRootRecord(agentDir, projectRepoRoot, repoRootSourceProvision,
+			agentMountSources(recordWorkspace, projectRepoRoot, finalScionCfg.Volumes)); err != nil {
+			slog.Info("provision: repository root not recorded; the agent starts without a repository root mount",
+				"agent", agentName, "reason", err)
+		}
+	}
 
 	// scion-agent.json carries only the requester's own environment values
 	// (the inline image, kubernetes, resources and volumes) and the workspace
@@ -3139,19 +3172,13 @@ const provisionedWorktreeStateFile = "provisioned-worktree.json"
 // provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
 type provisionedWorktreeState struct {
 	RepoRoot string `json:"repoRoot"`
-}
-
-// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
-// broker-owned state file (atomic write via writeAgentInfoFile). A write
-// failure only means a later resume falls back to detectRepoRoot — a
-// functional regression, not a security issue — so callers may log and
-// continue rather than fail the whole dispatch.
-func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
-	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
-	if err != nil {
-		return err
-	}
-	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+	// Source is how the record was made (repoRootSourceBroker,
+	// repoRootSourceProvision or repoRootSourceBackfill). Each is written
+	// only when agentDir is outside every mount of the agent. Source is used
+	// by writeRepoRootRecord's idempotence check and by readRepoRootRecord
+	// (write path); the start read path reconciles the record with the
+	// derived root regardless of source.
+	Source string `json:"source,omitempty"`
 }
 
 // agentOwnWorkspaceFile records, in agentDir, a workspace outside
@@ -3194,23 +3221,6 @@ func readAgentOwnWorkspace(agentDir string) string {
 	return state.Workspace
 }
 
-// readProvisionedWorktreeRepoRoot reads the value written by
-// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
-// parse. Never returns an error: a missing or unreadable state file is
-// exactly equivalent to "no broker-provisioned worktree recorded", which is
-// the correct, common state for every agent that isn't one.
-func readProvisionedWorktreeRepoRoot(agentDir string) string {
-	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
-	if err != nil {
-		return ""
-	}
-	var state provisionedWorktreeState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
-	}
-	return state.RepoRoot
-}
-
 // persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against
 // workspace (via validatedWorktreeRepoRoot) and, only if it validates and
 // differs from what is already on disk, persists it to agentDir's
@@ -3240,17 +3250,15 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 //     skips it when the agent directory already exists on disk (e.g. a
 //     leftover from a deleted hub agent recreated under the same name).
 //
-// A write failure only means a later resume falls back to detectRepoRoot;
-// see writeProvisionedWorktreeRepoRoot.
-func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+// A write failure only means a later resume has no broker record;
+// see writeRepoRootRecord (the production writer, which also applies the
+// agentDir-unmounted check).
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string, volumes []api.VolumeMount) {
 	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return
 	}
-	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
-		return
-	}
-	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
-		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	if err := writeRepoRootRecord(agentDir, ctxRepoRoot, repoRootSourceBroker, agentMountSources(workspace, ctxRepoRoot, volumes)); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: not persisted for %s: %v", agentDir, err)
 	}
 }
 
@@ -3897,18 +3905,26 @@ var worktreeGitTimeout = 30 * time.Second
 func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false",
-		"-c", "core.excludesFile=" + os.DevNull,
-		"-C", wt.workTree,
-	}, args...)...)
+	// util.HostGitCommand adds no repository hooks, no file-system monitor
+	// and no repository-defined filter commands: the agent can write this
+	// worktree's git files.
+	cmd, err := util.HostGitCommand(ctx, wt.workTree, util.HostGitOptions{
+		Policy:              util.RepoPolicyLinked,
+		AllowedWorktreePath: wt.workTree,
+		Config: []string{
+			"core.untrackedCache=false",
+			"core.excludesFile=" + os.DevNull,
+		},
+		Env: append(worktreeGitEnv(),
+			"GIT_DIR="+wt.gitDir,
+			"GIT_COMMON_DIR="+wt.commonDir,
+			"GIT_WORK_TREE="+wt.workTree,
+		),
+	}, args...)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(worktreeGitEnv(),
-		"GIT_DIR="+wt.gitDir,
-		"GIT_COMMON_DIR="+wt.commonDir,
-		"GIT_WORK_TREE="+wt.workTree,
-	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -4009,6 +4025,17 @@ func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 	if err := util.RemoveWorktreeEntryIn(root, agentWorkspace); err != nil {
 		slog.Warn("could not remove the worktree entry", "path", agentWorkspace, "error", err)
 	}
+}
+
+// branchToDelete returns branch when removeBranch is set and "" otherwise:
+// the branch util.RemoveWorktree is asked to delete. The branch always comes
+// from the caller (the sharer marker, or the agent's own branch name), never
+// from the worktree.
+func branchToDelete(removeBranch bool, branch string) string {
+	if !removeBranch {
+		return ""
+	}
+	return branch
 }
 
 // claimAgentHome is claimDir for ProvisionAgent's agent home; a variable

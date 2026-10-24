@@ -58,6 +58,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
 	"project.manage_visitors": true,
+	// project.chat_post targets an existing project's chat threads.
+	"project.chat_post": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; create_global and register are explicitly hub-catalog actions.
@@ -224,6 +226,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
+	// project.chat_post's selector targets an existing project, like
+	// project.set_messaging_policy.
+	"project.chat_post": {BoundaryKindProject, BoundaryKindHub},
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
@@ -401,6 +406,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
+	// project.chat_post targets an existing project's chat threads.
+	"project.chat_post": {TargetClassKindProjectScoped},
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},

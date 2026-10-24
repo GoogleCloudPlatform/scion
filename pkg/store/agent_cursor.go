@@ -64,12 +64,12 @@ func EncodeAgentCursor(sort, dir string, k, created time.Time, id, binding strin
 // request's sort, dir and binding, before any store call is made. Every
 // failure — malformed input, a legacy cursor, a mismatched sort, dir or
 // binding, or an unparseable timestamp or id — is reported by wrapping
-// ErrInvalidInput, so callers can map it to a uniform 400 the same way they
-// already do for store.ErrInvalidInput.
+// ErrInvalidCursor (which wraps ErrInvalidInput), so callers can map it to a
+// uniform 400 invalid_cursor.
 func DecodeAgentCursor(cursor, sort, dir, binding string) (AgentCursor, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: %w", ErrInvalidInput)
+		return AgentCursor{}, ErrInvalidCursor
 	}
 	// binding is itself an opaque token that may contain commas (it is a
 	// hash in practice, but nothing here relies on that), so split into
@@ -77,31 +77,31 @@ func DecodeAgentCursor(cursor, sort, dir, binding string) (AgentCursor, error) {
 	// 7th capturing everything from the id's trailing comma on, unsplit.
 	parts := strings.SplitN(string(raw), ",", 7)
 	if len(parts) != 7 {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: %w", ErrInvalidInput)
+		return AgentCursor{}, ErrInvalidCursor
 	}
 	if parts[0] != agentCursorV2Prefix {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: not a sorted-mode cursor: %w", ErrInvalidInput)
+		return AgentCursor{}, fmt.Errorf("%w: not a sorted-mode cursor", ErrInvalidCursor)
 	}
 	if parts[1] != sort || parts[2] != dir {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: sort/dir mismatch: %w", ErrInvalidInput)
+		return AgentCursor{}, fmt.Errorf("%w: sort/dir mismatch", ErrInvalidCursor)
 	}
 	if parts[6] != binding {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: %w", ErrInvalidInput)
+		return AgentCursor{}, ErrInvalidCursor
 	}
 	k, err := time.Parse(time.RFC3339Nano, parts[3])
 	if err != nil {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: parse key: %w", ErrInvalidInput)
+		return AgentCursor{}, fmt.Errorf("%w: parse key", ErrInvalidCursor)
 	}
 	created, err := time.Parse(time.RFC3339Nano, parts[4])
 	if err != nil {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: parse created: %w", ErrInvalidInput)
+		return AgentCursor{}, fmt.Errorf("%w: parse created", ErrInvalidCursor)
 	}
 	// uuid.Parse also accepts urn:uuid:, braced, undashed and uppercase
 	// forms. Agent ids are always stored in the canonical lowercase dashed
 	// form, so anything else is rejected rather than bound into SQL.
 	parsed, err := uuid.Parse(parts[5])
 	if err != nil || parsed.String() != parts[5] {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: parse id: %w", ErrInvalidInput)
+		return AgentCursor{}, fmt.Errorf("%w: parse id", ErrInvalidCursor)
 	}
 	return AgentCursor{K: k, Created: created, ID: parts[5]}, nil
 }

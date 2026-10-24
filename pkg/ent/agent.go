@@ -95,6 +95,8 @@ type Agent struct {
 	Message string `json:"message,omitempty"`
 	// AppliedConfig holds the value of the "applied_config" field.
 	AppliedConfig string `json:"applied_config,omitempty"`
+	// PendingConfig holds the value of the "pending_config" field.
+	PendingConfig *string `json:"pending_config,omitempty"`
 	// HarnessConfig holds the value of the "harness_config" field.
 	HarnessConfig string `json:"harness_config,omitempty"`
 	// Ancestry holds the value of the "ancestry" field.
@@ -288,7 +290,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldPinnedRuntimeBrokerID, agent.FieldPinnedRuntimeTargetID, agent.FieldPinnedRuntimeTargetType, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldSSHHostKey, agent.FieldSSHHostKeyRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldLaunchCause, agent.FieldLaunchPriorPhase, agent.FieldLaunchResumePhase, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldPinnedRuntimeBrokerID, agent.FieldPinnedRuntimeTargetID, agent.FieldPinnedRuntimeTargetType, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldPendingConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldSSHHostKey, agent.FieldSSHHostKeyRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldLaunchCause, agent.FieldLaunchPriorPhase, agent.FieldLaunchResumePhase, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldRunIDUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
 			values[i] = new(sql.NullTime)
@@ -549,6 +551,13 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field applied_config", values[i])
 			} else if value.Valid {
 				_m.AppliedConfig = value.String
+			}
+		case agent.FieldPendingConfig:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field pending_config", values[i])
+			} else if value.Valid {
+				_m.PendingConfig = new(string)
+				*_m.PendingConfig = value.String
 			}
 		case agent.FieldHarnessConfig:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -1089,6 +1098,11 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("applied_config=")
 	builder.WriteString(_m.AppliedConfig)
+	builder.WriteString(", ")
+	if v := _m.PendingConfig; v != nil {
+		builder.WriteString("pending_config=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	builder.WriteString("harness_config=")
 	builder.WriteString(_m.HarnessConfig)
