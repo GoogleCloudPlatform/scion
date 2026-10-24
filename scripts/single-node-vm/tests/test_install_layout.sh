@@ -500,7 +500,8 @@ layout_deploy_through_settings() {
   curl_log="$(mktemp)"
   export CURL_STUB_LOG="$curl_log"
   printf '%s' "$config_json" > "$config_file"
-  local sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+  # LAYOUT_SENTINEL picks a later stop point (a gcloud stub sentinel name).
+  local sentinel="${GCLOUD_STUB_STATE_DIR}/${LAYOUT_SENTINEL:-settings-yaml-dev-mode-written}"
   export GCLOUD_STUB_SSH_SUCCEEDS=true
   _layout_start_deploy_bg "$config_file" "$log_file" "$@"
   pid="$_LAYOUT_DEPLOY_PID"
@@ -2132,5 +2133,80 @@ test_layout_settings_refuses_file_not_owned_by_install_owner() {
     assert_contains "$LAYOUT_OUT" "is owned by ${who}, not by" "the ${who} refusal must say why"
     assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "${who}: the file must be unchanged"
     rm -rf "$LH_DIR"
+  done
+}
+
+# =====================================================================
+# Fix3 round 1: image build status files
+# =====================================================================
+
+# The build status lives in a private dir in the SSH user's home, not under
+# fixed /tmp names, and the progress line is echoed with control
+# characters (terminal escapes) stripped. Drives the real poll loop
+# through the stub: one "running" poll, then exit 0.
+test_layout_image_build_status_private_and_log_sanitized() {
+  fresh_gcloud_state
+  export GCLOUD_STUB_SSH_BUILD_EXIT_SEQ="running 0"
+  export GCLOUD_STUB_SSH_BUILD_LOG_LINE='step 2\033[2J\033]0;pwned\007 done'
+  export SCION_TEST_BUILD_POLL_SECS=0
+  LAYOUT_SENTINEL=images-verified layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  unset GCLOUD_STUB_SSH_BUILD_EXIT_SEQ GCLOUD_STUB_SSH_BUILD_LOG_LINE SCION_TEST_BUILD_POLL_SECS
+  local log
+  log="$(gcloud_log)"
+  assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "the deploy must reach the image check after the build (log: ${DEPLOY_LOG: -400})"
+  assert_not_contains "$log" "/tmp/scion-image-build" "no fixed /tmp status file may be used"
+  # shellcheck disable=SC2016 # literals from the generated commands
+  assert_contains "$log" 'B="$HOME/.scion-image-build"' "the build must keep its status in the private home dir"
+  # shellcheck disable=SC2016
+  assert_contains "$log" 'cat "$HOME/.scion-image-build/exit"' "the poll must read the private exit file"
+  assert_contains "$DEPLOY_LOG" "[1] step 2[2J]0;pwned done" "the progress line must be echoed with control characters removed"
+  # deploy.sh's own info/err lines are colored on purpose; check the
+  # echoed progress line itself.
+  local progress
+  progress="$(grep -a '\[1\] step 2' <<< "$DEPLOY_LOG")"
+  assert_false "$(LC_ALL=C grep -q $'\033\|\a' <<< "$progress" && echo true || echo false)" "no escape or bell byte from the log may reach the terminal"
+  assert_contains "$DEPLOY_LOG" "Image build completed successfully" "exit 0 must be taken as success"
+}
+
+# Run the generated build-start command for real (sudo is a no-op shim,
+# HOME and the source checkout point into a work dir): the status dir is
+# created 0700 and gets exit/log/pid; a symlinked or non-directory status
+# dir is refused and nothing is written through it.
+test_layout_image_build_status_dir_checked() {
+  fresh_gcloud_state
+  export SCION_TEST_BUILD_POLL_SECS=0
+  LAYOUT_SENTINEL=image-build-started layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  unset SCION_TEST_BUILD_POLL_SECS
+  local cmd kind work out rc waited
+  cmd="$(_layout_ssh_cmd_with "$(gcloud_log)" "Image build started in background")"
+  assert_contains "$cmd" "cd /opt/scion-source" "sanity: the build-start command must have been captured"
+  for kind in fresh symlink file; do
+    work="$(mktemp -d)"
+    mkdir -p "${work}/home" "${work}/src" "${work}/shim" "${work}/victim"
+    # No-op sudo; only `sudo tee` (the marker write) needs its stdin drained.
+    # shellcheck disable=SC2016 # script text written to a stub file
+    printf '#!/usr/bin/env bash\n[[ "${1:-}" == tee ]] && cat > /dev/null\nexit 0\n' > "${work}/shim/sudo"
+    chmod 0755 "${work}/shim/sudo"
+    case "$kind" in
+      symlink) ln -s "${work}/victim" "${work}/home/.scion-image-build" ;;
+      file) echo "not a dir" > "${work}/home/.scion-image-build" ;;
+    esac
+    out="$(cd "$work" && HOME="${work}/home" PATH="${work}/shim:${PATH}" \
+      bash -c "${cmd//cd \/opt\/scion-source/cd \"${work}/src\"}" 2>&1 < /dev/null)"
+    rc=$?
+    if [[ "$kind" == fresh ]]; then
+      assert_eq "0" "$rc" "the build start must succeed with a fresh status dir (output: ${out})"
+      assert_eq "700" "$(stat -c %a "${work}/home/.scion-image-build" 2>/dev/null)" "the status dir must be 0700"
+      waited=0
+      while [[ ! -s "${work}/home/.scion-image-build/exit" && "$waited" -lt 100 ]]; do sleep 0.1; waited=$((waited + 1)); done
+      assert_eq "0" "$(cat "${work}/home/.scion-image-build/exit" 2>/dev/null)" "the build's exit status must be written to the private dir"
+      assert_true "$([[ -f "${work}/home/.scion-image-build/log" && -s "${work}/home/.scion-image-build/pid" ]] && echo true || echo false)" \
+        "log and pid must be written to the private dir"
+    else
+      assert_true "$([[ "$rc" -ne 0 ]] && echo true || echo false)" "a ${kind} status dir must be refused"
+      assert_contains "$out" "is not a directory owned by" "the ${kind} refusal must say why"
+      assert_eq "" "$(ls -A "${work}/victim")" "${kind}: nothing may be written through it"
+    fi
+    rm -rf "$work"
   done
 }

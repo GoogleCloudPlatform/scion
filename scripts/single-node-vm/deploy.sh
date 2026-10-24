@@ -248,7 +248,20 @@ readonly CLOUD_INIT_RETRY_SECS=15
 readonly HEALTH_CHECK_MAX_ATTEMPTS=12
 readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
-readonly BUILD_POLL_INTERVAL_SECS=15
+# Overridable (0-60, whole seconds) so a test can drive the poll loop
+# without waiting 15 s per poll; anything else falls back to 15.
+if [[ "${SCION_TEST_BUILD_POLL_SECS:-}" =~ ^[0-9]{1,2}$ ]] && (( 10#$SCION_TEST_BUILD_POLL_SECS <= 60 )); then
+  readonly BUILD_POLL_INTERVAL_SECS="$((10#$SCION_TEST_BUILD_POLL_SECS))"
+else
+  readonly BUILD_POLL_INTERVAL_SECS=15
+fi
+# The background image build's status files (log, exit, pid) live in a
+# fixed 0700 directory in the SSH user's home on the VM, not under fixed
+# /tmp names another local user could pre-create to abort the deploy,
+# forge the exit status or inject log output. Sent verbatim to the remote
+# shell, which expands $HOME.
+# shellcheck disable=SC2016 # expanded by the remote shell, not here
+readonly IMAGE_BUILD_STATUS_DIR='$HOME/.scion-image-build'
 # Overridable via env so a test can drive this deploy without waiting
 # out the real wait for real IAP enforcement to activate.
 readonly IAP_ENFORCEMENT_WAIT_SECS="${IAP_ENFORCEMENT_WAIT_SECS:-60}"
@@ -3101,7 +3114,22 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       --command="
         set -euo pipefail
         cd /opt/scion-source
-        rm -f /tmp/scion-image-build.exit
+        # Status dir: a real directory owned by this user (checked without
+        # following a symlink), created 0700 if missing; anything else is
+        # refused.
+        B=\"${IMAGE_BUILD_STATUS_DIR}\"
+        if [ -e \"\$B\" ] || [ -L \"\$B\" ]; then
+          if [ -L \"\$B\" ] || [ ! -d \"\$B\" ] || [ \"\$(stat -c %u \"\$B\")\" != \"\$(id -u)\" ]; then
+            echo \"ERROR: \$B is not a directory owned by \$(id -un); refusing to use it for the image build status.\" >&2
+            exit 1
+          fi
+        else
+          mkdir -m 0700 \"\$B\"
+        fi
+        chmod 0700 \"\$B\"
+        # Exported: the background build below runs in a child bash.
+        export B
+        rm -f \"\$B/exit\"
         # Clear the marker before starting: if this build is interrupted or
         # fails partway, no marker should be left claiming a stale version
         # is built (Step 5 below only writes it back on full success).
@@ -3144,11 +3172,11 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
             echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
 
             echo \"=== All images built and tagged successfully ===\"
-          } > /tmp/scion-image-build.log 2>&1
-          echo \$? > /tmp/scion-image-build.exit
+          } > \"\$B/log\" 2>&1
+          echo \$? > \"\$B/exit\"
         ' >/dev/null 2>&1 </dev/null &
-        echo \$! > /tmp/scion-image-build.pid
-        echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
+        echo \$! > \"\$B/pid\"
+        echo \"Image build started in background (PID \$(cat \"\$B/pid\"))\"
       "
 
     # Poll for build completion
@@ -3161,29 +3189,33 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       # Check if the exit code file exists (build finished)
       BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" \
-        --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
+        --command="cat \"${IMAGE_BUILD_STATUS_DIR}/exit\" 2>/dev/null || echo running" \
         2>/dev/null) || true
+      BUILD_EXIT="$(printf '%s' "$BUILD_EXIT" | LC_ALL=C tr -d '\000-\037\177')"
       if [[ "$BUILD_EXIT" != "running" ]]; then
         BUILD_DONE=true
       else
         # Show progress (last line of build log)
         LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
           --zone="${ZONE}" --project="${PROJECT_ID}" \
-          --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
+          --command="tail -1 \"${IMAGE_BUILD_STATUS_DIR}/log\" 2>/dev/null || echo '(waiting...)'" \
           2>/dev/null) || true
+        # The log is build output: strip control characters (terminal
+        # escape sequences included) before echoing it.
+        LAST_LINE="$(printf '%s' "$LAST_LINE" | LC_ALL=C tr -d '\000-\037\177')"
         echo "  [${POLL_COUNT}] ${LAST_LINE}"
       fi
     done
 
     if [[ "$BUILD_DONE" != "true" ]]; then
       err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
-      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat ~/.scion-image-build/log'"
       exit 1
     fi
 
     if [[ "$BUILD_EXIT" != "0" ]]; then
       err "Image build failed (exit code: ${BUILD_EXIT})."
-      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 ~/.scion-image-build/log'"
       exit 1
     fi
     echo "  Image build completed successfully."

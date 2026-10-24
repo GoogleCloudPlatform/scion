@@ -1360,6 +1360,30 @@ STUBERR
         # it prints exactly "SQUASH_UID:SCION_GID" on success.
         echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
         ;;
+      *"Image build started in background"*)
+        # Phase 3b's background image build start (it also mentions the
+        # status dir, so it must match before the poll cases below).
+        touch "${GCLOUD_STUB_STATE_DIR}/image-build-started"
+        echo "Image build started in background (PID 4242)"
+        ;;
+      "cat \"\$HOME/.scion-image-build/exit\" 2>/dev/null || echo running")
+        # The build poll: answers from GCLOUD_STUB_SSH_BUILD_EXIT_SEQ, one
+        # space-separated word per poll ("running running 0"); default 0.
+        n_file="${GCLOUD_STUB_STATE_DIR}/build-exit-polls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        read -r -a seq <<< "${GCLOUD_STUB_SSH_BUILD_EXIT_SEQ:-0}"
+        idx=$(( n <= ${#seq[@]} ? n - 1 : ${#seq[@]} - 1 ))
+        echo "${seq[$idx]}"
+        ;;
+      "tail -1 \"\$HOME/.scion-image-build/log\" 2>/dev/null || echo '(waiting...)'")
+        # The build progress line; %b so a test can inject escape bytes.
+        printf '%b\n' "${GCLOUD_STUB_SSH_BUILD_LOG_LINE:-building}"
+        ;;
+      *"sudo docker images | grep"*)
+        # The post-build image check: the point a Phase 3b test stops at.
+        touch "${GCLOUD_STUB_STATE_DIR}/images-verified"
+        ;;
       "mktemp -d /tmp/scion-hubenv.XXXXXX")
         # deploy.sh's private hub.env staging directory on the VM.
         echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
