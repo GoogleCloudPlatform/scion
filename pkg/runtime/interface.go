@@ -52,9 +52,11 @@ type RunConfig struct {
 	// .scion is project configuration and is mounted read-only.
 	AgentOwnWorkspace bool
 	// ProjectConfigPath is the broker-side path of the project's .scion
-	// entry (a directory or marker file). In the full-repo-root fallback
-	// layout, a project whose .scion lies below the repo root other than at
-	// <repo>/.scion has that entry masked (or a marker bound read-only) too.
+	// entry (a directory or marker file). When it lies in a SUBDIRECTORY of
+	// the bound workspace (not at <workspace>/.scion), that nested entry is
+	// bound read-only — with its agents/ masked when it exists — in the
+	// shared-plain, config-Workspace-only, non-own worktree, and registered
+	// outside-root fallback layouts.
 	ProjectConfigPath string
 	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
 	// trusts. In broker mode, this field arrives already resolved by the
@@ -100,6 +102,24 @@ type RunConfig struct {
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+
+	// PrivateGitConfigSource is the host path to the per-agent private copy of
+	// the repository's .git/config, seeded by the broker into the agent's
+	// (broker-owned, agent-scoped) state dir. For git-backed worktree and
+	// shared-plain layouts on docker/podman it is bound as a single file,
+	// read-only, over the container's .git/config, so in-container git reads a
+	// credential-stripped config and never writes the host repository's or a
+	// sibling agent's config. The copy is pre-seeded with the agent's own branch
+	// upstream and push.autoSetupRemote so a bare `git push` finds the upstream
+	// already set and exits 0 without a config write; `git push -u` also exits 0
+	// but cannot persist the upstream and prints an error. Immediately before the
+	// bind the source is re-checked (regular file, not a symlink, link count 1,
+	// broker-owned); a missing or unsafe source refuses the start. The broker
+	// never reads this file back as configuration. Empty when the layout does not
+	// use a private config (clone-per-agent, empty-per-agent). On Apple it is
+	// seeded but not bound (the Apple read-only-.git layout cannot bind single
+	// files).
+	PrivateGitConfigSource string
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates

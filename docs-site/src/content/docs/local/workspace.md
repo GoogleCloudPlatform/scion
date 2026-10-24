@@ -308,8 +308,9 @@ safe stops the command rather than being ignored.
   agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
 - As defence in depth these commands also run with hooks, the file-system monitor and the pager
   off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
-  transport disabled and the `file://` transport allowed only for a URL given on the command line,
-  submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
+  transport disabled and the `file://` transport allowed only for a top-level operation the user
+  drives directly (`protocol.file.allow=user`; git's own indirect uses such as submodule fetches are
+  blocked), submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
   config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
   the host operator overrides the `protocol.*.allow` pins.
 - **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a
@@ -335,8 +336,62 @@ safe stops the command rather than being ignored.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 
-Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
-upcoming change gives each agent its own private copy of `.git/config`.
+Your own git commands in your checkout are not affected. Scion also mounts the repository's git
+metadata into agents so that an agent cannot change what git does for you or for other agents. In the
+worktree layouts, the whole `.git` root is mounted **read-only**, so an agent cannot create a
+root-level file git honours (such as a `commondir` that would redirect where git reads config, hooks
+and refs from). Only the paths an in-container git must write are re-opened read-write: `objects/`,
+`refs/`, `logs/`, the git-lfs object store (`.git/lfs`), and the agent's own worktree admin directory.
+The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already exists — Scion never
+creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
+`.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
+the private copy has credential-bearing settings stripped and is pre-seeded (the agent's branch
+upstream plus `push.autoSetupRemote`) so that a bare `git push` exits 0 — without the pre-seed a bare
+push fails with "no upstream branch". `git push -u origin <branch>` exits 0 and reaches the remote
+either way; git cannot persist the upstream (the private `.git/config` is read-only) and prints an
+`error:`, but the push still succeeds.
+That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
+commands do not try to write lock files in the read-only root. Personal git preferences inside the
+agent go in the agent's own global git config, which is writable, not in the repository config. On the
+Apple runtime agents read the repository's git config directly (the runtime cannot bind a single
+private file), so the private-copy settings above (credential stripping, the push pre-seed, the
+housekeeping defaults) do not apply there; keep credentials out of repository git config (use a
+credential helper in your global git config). An Apple agent whose repository `.git/config` holds
+credential-bearing settings is refused at start, naming the sections that must be cleared; use a
+credential helper in your global git config, or run the project on a runtime that provides the private
+config copy.
+
+A shared-workspace git project (agents sharing one checkout) is refused outright on the Apple runtime,
+which cannot bind the per-agent private `.git/config`; use a worktree-per-agent project or a non-Apple
+runtime.
+
+Commit, branch creation, fetch, pull, push and rebase work normally. Because the `.git` root is
+read-only, a few operations that write a lock or state file directly in it do not work inside an agent:
+deleting a branch or a tag and `git fetch --prune` (all need `packed-refs.lock`), `git gc` /
+`git pack-refs`, and fetching into a shallow clone. These fail cleanly, without corrupting the
+repository. `git stash` still round-trips (the stash ref lives in the writable `refs/` overlay), though
+it may print a cosmetic `packed-refs.lock` warning.
+
+This applies to the worktree-per-agent and outside-root layouts, where each agent has its own
+worktree. In the shared-workspace layout agents share one working tree and the `.git` root stays
+writable; there the host-side git controls additionally refuse to run if a root-level `commondir` or
+`gitdir` is present in the repository, so a redirect file cannot steer git that Scion runs on the
+host.
+
+A workspace in a subdirectory of a repository must be a registered git worktree of that repository;
+other subdirectory workspaces are refused at start, because the per-agent git metadata cannot be
+mounted for a plain subdirectory.
+
+On Docker and Podman, a project `.scion` that is mounted read-only — one in a registered outside-root
+checkout, one in a subdirectory of the workspace, or a nested `.scion` directory inside the agent's
+own workspace (config-only agents) — must already contain an `agents` directory.
+The runtime masks `.scion/agents` in the container but does not create it under a read-only mount, so
+when it is missing the start is refused; create it once with `mkdir <path>/.scion/agents` (`scion
+init` lists `.scion/agents/` in `.gitignore`) and start the agent again.
+
+On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
+shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
+its own clone of the repository, or run the project on a local or Docker broker.
 
 ---
 
