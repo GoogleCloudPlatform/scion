@@ -31,7 +31,7 @@ type HealthAnswer = { uptime?: string; scionVersion?: string } | 'down' | number
  * Stubs fetch so /healthz answers come from `answers` in order; the last
  * answer repeats. 'down' is a network error, a number is that HTTP status.
  */
-function stubHealthz(answers: HealthAnswer[]) {
+function stubHealthz(answers: HealthAnswer[]): ReturnType<typeof vi.fn> {
   let i = 0;
   const fn = vi.fn((input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;

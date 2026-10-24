@@ -388,7 +388,7 @@ describe('Apply update', () => {
 });
 
 describe('Reconnect after an update restart', () => {
-  const restartingOps = () => [
+  const restartingOps = (): Json[] => [
     op('update-binary', 'Update Binary', {
       id: 'run-1',
       status: 'restarting',
