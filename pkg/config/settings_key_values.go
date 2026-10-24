@@ -23,10 +23,13 @@ import (
 )
 
 // DecodeSettingsKey decodes the single settings key from k into a fresh
-// VersionedSettings, with the settings loader's decode options. It fails when
-// k has no value for key, when the value does not decode, or when any key of
-// k matches no VersionedSettings field, so a caller never takes a value that
-// did not land in a known field.
+// VersionedSettings, with the settings loader's decode options. A list key
+// whose value arrives as a comma-separated string (as SCION_SERVER_* list
+// variables do) is split first, exactly as the bootstrap merge splits it
+// (commaSplitKoanfKeys), so the decoded value is the one the hub uses. It
+// fails when k has no value for key, when the value does not decode, or when
+// any key of k matches no VersionedSettings field, so a caller never takes a
+// value that did not land in a known field.
 func DecodeSettingsKey(k *koanf.Koanf, key string) (*VersionedSettings, error) {
 	if k == nil || !k.Exists(key) {
 		return nil, fmt.Errorf("settings key %q is not set", key)
@@ -35,6 +38,7 @@ func DecodeSettingsKey(k *koanf.Koanf, key string) (*VersionedSettings, error) {
 	if err := single.Set(key, k.Get(key)); err != nil {
 		return nil, err
 	}
+	splitKoanfListKeys(single, commaSplitKoanfKeys)
 	vs, ok := settingsProbeStruct(true).(*VersionedSettings)
 	if !ok {
 		return nil, fmt.Errorf("unexpected settings probe type")

@@ -140,3 +140,125 @@ server:
 		t.Errorf("with env: authorized domains = %v, want %v", got, want)
 	}
 }
+
+// TestDecodeSettingsKey_SplitsCommaSeparatedListEnv: a list key whose value
+// arrives as a comma-separated string (the SCION_SERVER_* form) decodes to the
+// list the bootstrap merge produces, entries trimmed and empties dropped.
+func TestDecodeSettingsKey_SplitsCommaSeparatedListEnv(t *testing.T) {
+	k := settingsKoanf(t, map[string]any{
+		"server.auth.authorized_domains": "env-a.example, env-b.example,",
+		"server.hub.admin_emails":        "only@example.com",
+	})
+	vs, err := DecodeSettingsKey(k, "server.auth.authorized_domains")
+	if err != nil {
+		t.Fatalf("DecodeSettingsKey: %v", err)
+	}
+	if got, want := vs.Server.Auth.AuthorizedDomains, []string{"env-a.example", "env-b.example"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("authorized_domains = %#v, want %#v", got, want)
+	}
+	vs, err = DecodeSettingsKey(k, "server.hub.admin_emails")
+	if err != nil {
+		t.Fatalf("DecodeSettingsKey: %v", err)
+	}
+	if got, want := vs.Server.Hub.AdminEmails, []string{"only@example.com"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("admin_emails = %#v, want %#v", got, want)
+	}
+	// The caller's koanf is not changed.
+	if got := k.Get("server.auth.authorized_domains"); got != "env-a.example, env-b.example," {
+		t.Errorf("source koanf changed: %#v", got)
+	}
+}
+
+// TestDecodeSettingsKey_ListEnvMatchesBootstrapMerge covers every list-typed
+// setting the SCION_SERVER_* table holds: set as a comma-separated variable,
+// the value env_values decodes from the env layer (LoadEnvKoanf, then
+// DecodeSettingsKey) equals the value the hub's bootstrap merge
+// (LoadBootstrapKoanf: the same env provider, then splitCommaSeparatedKoanfKeys)
+// gives the same key. The keys the bootstrap splits (commaSplitKoanfKeys)
+// decode to two elements; the others keep the single string, in both.
+func TestDecodeSettingsKey_ListEnvMatchesBootstrapMerge(t *testing.T) {
+	split := map[string]bool{}
+	for _, k := range commaSplitKoanfKeys {
+		split[k] = true
+	}
+	var listKeys []ServerEnvEntry
+	for _, e := range ServerEnvEntries() {
+		if e.Type == "array" {
+			listKeys = append(listKeys, e)
+		}
+	}
+	if len(listKeys) == 0 {
+		t.Fatal("no list-typed settings in the env table")
+	}
+	for k := range split {
+		found := false
+		for _, e := range listKeys {
+			found = found || e.Path == k
+		}
+		if !found {
+			t.Errorf("comma-split key %s is not a list-typed table entry", k)
+		}
+	}
+	for _, e := range listKeys {
+		e := e
+		t.Run(e.Path, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv(e.Canonical, "8081,8082")
+			envK := LoadEnvKoanf()
+			vs, err := DecodeSettingsKey(envK, e.Path)
+			if err != nil {
+				t.Fatalf("decode from the env layer: %v", err)
+			}
+			got, err := FlattenSettingsJSON(vs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bvs, err := DecodeSettingsKey(LoadBootstrapKoanf(), e.Path)
+			if err != nil {
+				t.Fatalf("decode from the bootstrap merge: %v", err)
+			}
+			want, err := FlattenSettingsJSON(bvs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got[e.Path], want[e.Path]) {
+				t.Errorf("env layer %#v != bootstrap merge %#v", got[e.Path], want[e.Path])
+			}
+			list, ok := got[e.Path].([]any)
+			if !ok {
+				t.Fatalf("decoded value %#v is not a list", got[e.Path])
+			}
+			wantN := 1
+			if split[e.Path] {
+				wantN = 2
+			}
+			if len(list) != wantN {
+				t.Errorf("decoded %d element(s) %#v, want %d", len(list), list, wantN)
+			}
+		})
+	}
+}
+
+// TestDecodeSettingsKey_ReportedTwoDomainCase: the reported case,
+// SCION_SERVER_AUTH_AUTHORIZEDDOMAINS with two comma-separated domains,
+// decodes from the env layer to the two domains, as the hub's settings
+// loader (LoadGlobalConfig) also reads it.
+func TestDecodeSettingsKey_ReportedTwoDomainCase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "env-a.example,env-b.example")
+	vs, err := DecodeSettingsKey(LoadEnvKoanf(), "server.auth.authorized_domains")
+	if err != nil {
+		t.Fatalf("DecodeSettingsKey: %v", err)
+	}
+	want := []string{"env-a.example", "env-b.example"}
+	if got := vs.Server.Auth.AuthorizedDomains; !reflect.DeepEqual(got, want) {
+		t.Errorf("env layer decode = %#v, want %#v", got, want)
+	}
+	cfg, err := LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Auth.AuthorizedDomains, want) {
+		t.Errorf("LoadGlobalConfig = %#v, want %#v", cfg.Auth.AuthorizedDomains, want)
+	}
+}

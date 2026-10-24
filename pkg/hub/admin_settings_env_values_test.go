@@ -458,7 +458,9 @@ func TestGetServerConfigDB_EnvValuesWorkstationStartupOverrides(t *testing.T) {
 	wantEnvValue(t, values, "server.hub.port", EnvKeyValue{Value: float64(9810), InEffect: boolPtr(true)})
 	wantEnvValue(t, values, "server.storage.provider", EnvKeyValue{Value: "gcs", InEffect: boolPtr(false)})
 	wantEnvValue(t, values, "server.broker.enabled", EnvKeyValue{Value: true, InEffect: boolPtr(true)})
-	wantEnvValue(t, values, "server.secrets.backend", EnvKeyValue{Value: "local", InEffect: boolPtr(true)})
+	// "secret" in the key name: masked by the fail-closed key-word rule, so
+	// neither bit is reported, whatever the start-up value.
+	wantEnvValue(t, values, "server.secrets.backend", maskedEnvKeyValue())
 }
 
 // TestFileMode_EnvValuesStartupOverrides: a flag or workstation value beats
@@ -661,4 +663,25 @@ func TestGetServerConfigDB_MaskedEnvValueIsNoGuessOracle(t *testing.T) {
 	}
 	wantEnvValue(t, rv, "telemetry.cloud.headers.authorization", maskedEnvKeyValue())
 	wantEnvValue(t, rv, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: boolPtr(false), SavedDiffers: true})
+}
+
+// TestGetServerConfigDB_EnvValuesReportedTwoDomainCase: the reported case on
+// a DB-backed hub. SCION_SERVER_AUTH_AUTHORIZEDDOMAINS holds two
+// comma-separated domains; the env layer keeps it as one string (as
+// LoadEnvKoanf does), env_values shows the two domains (the same split as the
+// bootstrap merge), and, the running list being those two domains, reports
+// them in effect, with the different saved value labelled.
+func TestGetServerConfigDB_EnvValuesReportedTwoDomainCase(t *testing.T) {
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"access": {"managed", `{"authorized_domains":["google.com"]}`},
+	}, map[string]any{
+		"server.auth.authorized_domains": []any{"env-a.example", "env-b.example"},
+	}, map[string]any{
+		"server.auth.authorized_domains": "env-a.example,env-b.example",
+	}, func(s *Server) { s.config.AuthorizedDomains = []string{"env-a.example", "env-b.example"} })
+	wantEnvValue(t, values, "server.auth.authorized_domains", EnvKeyValue{
+		Value:        []any{"env-a.example", "env-b.example"},
+		InEffect:     boolPtr(true),
+		SavedDiffers: true,
+	})
 }
