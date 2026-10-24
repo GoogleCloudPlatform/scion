@@ -2846,6 +2846,10 @@ test_deploy_rerun_existing_hub_env_keeps_base_url_sources() {
   local log
   log="$(gcloud_log)"
   assert_not_contains "$log" "/tmp/hub.env" "a re-run must not copy or move a new hub.env onto the VM"
+  # Regression guards, not discriminators: deploy.sh has never written
+  # either base URL source. They fail if a later change starts to, which
+  # could change the base URL of an existing VM on a re-run (#6150 brief:
+  # a re-run must not change it).
   assert_not_contains "$log" "SCION_SERVER_BASE_URL" "deploy.sh must not set SCION_SERVER_BASE_URL"
   assert_not_contains "$log" "public_url" "deploy.sh must not set server.hub.public_url"
   assert_true "$(_lt "$(line_number "$BOOTSTRAP_HOST_LINE" "$log")" "$(line_number 'sudo systemctl start scion-hub.service' "$log")")" \

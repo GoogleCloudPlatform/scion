@@ -505,6 +505,12 @@ Common causes:
   longer.
 - **VPC connectivity** — the Cloud Run proxy must be on the same VPC as the VM.
   The script deploys with `--network=default --subnet=default --vpc-egress=all-traffic`.
+- **5xx, or agents cannot reach the Hub, after a deploy that did not reach
+  "Deployment Complete"** — the Hub is still on the Phase 3 bootstrap bind
+  (`server.hub.host: 127.0.0.1`; see [settings.yaml](#settingsyaml)), so
+  `/healthz` answers on the VM's localhost but nothing else can connect.
+  Only the Phase 5 `settings.yaml` rewrite and restart remove the bind.
+  Fix: re-run `deploy.sh` to completion.
 
 ### Cloud-init takes too long
 
