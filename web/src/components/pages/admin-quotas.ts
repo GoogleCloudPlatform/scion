@@ -954,8 +954,18 @@ export class ScionPageAdminQuotas extends LitElement {
     // just the count for this one limit; the per-broker expansion below
     // still shows each broker's real effective cap and source.
     const isPerBrokerLimit = limit.name === 'max_agents_per_broker';
+    // max_agents_per_project's activeCount is likewise a sum across every
+    // project, while the cap applies per project (and is the agent creator's
+    // resolved cap), so it gets the same count-only rendering
+    // (ptone/scion#6033).
+    const isPerProjectLimit = limit.name === 'max_agents_per_project';
+    const usageMeta = isPerBrokerLimit
+      ? 'across all brokers; cap is per broker'
+      : isPerProjectLimit
+        ? "across all projects; cap applies per project (creator's resolved cap)"
+        : '';
     const pct =
-      !isPerBrokerLimit && limit.defaultValue > 0
+      !usageMeta && limit.defaultValue > 0
         ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
         : 0;
 
@@ -986,12 +996,10 @@ export class ScionPageAdminQuotas extends LitElement {
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            ${isPerBrokerLimit
+            ${usageMeta
               ? html`
                   <span>${activeCount}</span>
-                  <span class="meta-text" style="font-size: 0.75rem"
-                    >across all brokers; cap is per broker</span
-                  >
+                  <span class="meta-text" style="font-size: 0.75rem">${usageMeta}</span>
                 `
               : html`
                   <span

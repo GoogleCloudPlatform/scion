@@ -157,3 +157,62 @@ describe('scion-page-admin-quotas — not_enforced marker (design.md Amendment A
     expect(element.shadowRoot?.querySelector('.not-enforced-marker')).toBeNull();
   });
 });
+
+// ptone/scion#6033: max_agents_per_project's summary count is a sum across
+// every project, while its cap applies per project, so the row shows the
+// count only, labelled, never an "n / cap" fraction or a progress bar.
+describe('scion-page-admin-quotas — per-project limit row', () => {
+  const PROJECT_LIMIT = {
+    ...LIMIT_DEFINITION,
+    id: 'limit-max-agents-per-project',
+    name: 'max_agents_per_project',
+    description: 'Maximum agents per project',
+    defaultValue: 5,
+  };
+  let element: (HTMLElement & { updateComplete: Promise<boolean> }) | null = null;
+
+  beforeAll(async () => {
+    await import('./admin-quotas.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the hub-wide count with the per-project label and no fraction', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.endsWith('/api/v1/admin/limits')) {
+          return Promise.resolve(jsonResponse({ items: [PROJECT_LIMIT] }));
+        }
+        if (path.endsWith('/api/v1/admin/usage')) {
+          return Promise.resolve(
+            jsonResponse({ items: [{ limitDefinition: PROJECT_LIMIT, activeCount: 31 }] })
+          );
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      })
+    );
+    const el = document.createElement('scion-page-admin-quotas') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    element = el;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await el.updateComplete;
+
+    const row = el.shadowRoot?.querySelector('tr.clickable');
+    expect(row).not.toBeNull();
+    const text = row?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    expect(text).toContain('31');
+    expect(text).toContain("across all projects; cap applies per project (creator's resolved cap)");
+    expect(text).not.toContain('31 / 5');
+    expect(row?.querySelector('sl-progress-bar')).toBeNull();
+  });
+});
