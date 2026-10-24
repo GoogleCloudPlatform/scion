@@ -147,7 +147,10 @@ func (c *client) UploadAttachments(ctx context.Context, paths []string) (*Attach
 		return &result, nil
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	return nil, apiclient.CheckResponse(resp)
+	if err := apiclient.CheckResponse(resp); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("unexpected attachment upload response status: %d", resp.StatusCode)
 }
 
 // appendAttachmentPart adds the file at path to writer as a "files" part.
