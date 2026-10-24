@@ -836,8 +836,11 @@ not enable dev auth, so until the Phase 5 proxy settings are written every
 authenticated API call returns `401`. This is expected; do not treat it as a
 failed deploy. Dev auth is enabled only by `--dev-auth` or
 `server.auth.dev_mode: true`, and the server refuses to start with dev auth
-when the web server binds a non-loopback address. The Hub unit binds
-`0.0.0.0` so the IAP proxy can reach it, so do not enable dev auth on the VM.
+when the web server binds a non-loopback address. The Phase 3 bootstrap
+binds the Hub to `127.0.0.1` (the server refuses a non-loopback listener
+without an https base URL, which exists only once Phase 5 writes the IAP
+audience); from Phase 5 on the Hub binds `0.0.0.0` so the IAP proxy can
+reach it, so do not enable dev auth on the VM.
 If the user needs authenticated access before Phase 5, configure OAuth
 instead, or, for a short-lived test only, bind the Hub to `127.0.0.1` with
 dev auth and use an SSH tunnel; see the `settings.yaml` section of
