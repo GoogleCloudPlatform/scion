@@ -18,6 +18,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   addLeaveGuard,
   browserPath,
+  fullPageUrl,
+  loadPage,
   mayLeave,
   navigateTo,
   noteShownEntry,
@@ -43,6 +45,59 @@ describe('browserPath', () => {
   it('prefixes the base path, without doubling the slash', () => {
     vi.stubEnv('BASE_URL', '/scion/');
     expect(browserPath('/projects/p1')).toBe('/scion/projects/p1');
+  });
+});
+
+describe('fullPageUrl', () => {
+  it('returns app paths unchanged when served at the root', () => {
+    vi.stubEnv('BASE_URL', '/');
+    expect(fullPageUrl('/brokers')).toBe('/brokers');
+    expect(fullPageUrl('/login?error=session_expired')).toBe('/login?error=session_expired');
+  });
+
+  it('prefixes app paths, query included, under a non-root base path', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(fullPageUrl('/')).toBe('/scion/');
+    expect(fullPageUrl('/settings?tab=service-accounts')).toBe(
+      '/scion/settings?tab=service-accounts'
+    );
+    expect(fullPageUrl('/auth/login/github?returnTo=%2Fscion%2Finvite')).toBe(
+      '/scion/auth/login/github?returnTo=%2Fscion%2Finvite'
+    );
+  });
+
+  it('leaves absolute, protocol-relative and relative URLs alone', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(fullPageUrl('https://example.com/x')).toBe('https://example.com/x');
+    expect(fullPageUrl('//example.com/x')).toBe('//example.com/x');
+    expect(fullPageUrl('brokers')).toBe('brokers');
+  });
+});
+
+describe('loadPage', () => {
+  it('assigns the base-prefixed URL to window.location.href', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    const original = window.location;
+    let written = '';
+    Object.defineProperty(window, 'location', {
+      value: {
+        set href(v: string) {
+          written = v;
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      loadPage('/projects/new');
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+    }
+    expect(written).toBe('/scion/projects/new');
   });
 });
 

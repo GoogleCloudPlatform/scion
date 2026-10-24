@@ -112,6 +112,12 @@ type Agent struct {
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
 
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
@@ -2410,6 +2416,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -2519,6 +2538,13 @@ type Notification struct {
 	// stored before outcomes were recorded, whose Dispatched flag keeps its
 	// old meaning).
 	DispatchOutcome string `json:"dispatchOutcome"`
+	// DispatchReason says why a NotificationOutcomeFailed outcome was
+	// recorded (a NotificationReason* value). Empty for any other outcome
+	// and for rows stored before reasons were recorded.
+	DispatchReason string `json:"dispatchReason,omitempty"`
+	// NextAttemptAt is the earliest time the dispatch sweep may claim the
+	// notification again after a failed delivery; nil means at once.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.
@@ -2532,6 +2558,57 @@ const (
 	// stays dispatched so the sweep does not retry it.
 	NotificationOutcomeFailed = "failed"
 )
+
+// Notification.DispatchReason values, recorded with
+// NotificationOutcomeFailed.
+const (
+	// NotificationReasonExpired: the notification was still undelivered
+	// when it reached the maximum retry age, for example because its
+	// subscriber stayed suspended or had no runtime broker.
+	NotificationReasonExpired = "expired"
+	// NotificationReasonSubscriptionGone: the subscription was deleted.
+	NotificationReasonSubscriptionGone = "subscription_gone"
+	// NotificationReasonSubscriberGone: the subscriber agent was deleted.
+	NotificationReasonSubscriberGone = "subscriber_gone"
+	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
+	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+)
+
+// ValidNotificationReason reports whether reason is a known
+// NotificationReason* value.
+func ValidNotificationReason(reason string) bool {
+	switch reason {
+	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		return true
+	}
+	return false
+}
+
+// Notification retry backoff bounds. The base equals the dispatch sweep
+// cadence (a shorter delay would have no effect); the cap keeps a
+// subscriber that recovers on its own reachable within an hour.
+const (
+	NotificationRetryBackoffBase = 5 * time.Minute
+	NotificationRetryBackoffMax  = time.Hour
+)
+
+// NotificationRetryBackoff returns how long the dispatch sweep waits
+// before retrying a notification whose latest delivery attempt failed.
+// attempts is the number of delivery attempts made so far, including the
+// failed one. The delay starts at NotificationRetryBackoffBase for the
+// first attempt and doubles with each further attempt, up to
+// NotificationRetryBackoffMax.
+func NotificationRetryBackoff(attempts int) time.Duration {
+	d := NotificationRetryBackoffBase
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d >= NotificationRetryBackoffMax {
+			return NotificationRetryBackoffMax
+		}
+	}
+	return d
+}
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {

@@ -199,6 +199,20 @@ type StructuredMessage struct {
 	DeliveryText string `json:"delivery_text,omitempty"`
 }
 
+// LogTypeOther is what LogType returns for a type outside the closed enum.
+const LogTypeOther = "other"
+
+// LogType returns t when it is in the closed enum and LogTypeOther
+// otherwise. A message type can arrive as caller free text (the outbound DM
+// path only defaults an empty one), so log lines carry LogType(t) to keep
+// the value bounded and caller-independent (ptone/scion#4827).
+func LogType(t string) string {
+	if validTypes[t] {
+		return t
+	}
+	return LogTypeOther
+}
+
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {

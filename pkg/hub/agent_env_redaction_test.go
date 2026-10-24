@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -126,5 +127,111 @@ func TestAgentResponseOmitsNonPlainEnv(t *testing.T) {
 		assert.Equal(t, "plain-value", stored.AppliedConfig.Env["PLAIN_VAR"])
 		assert.Equal(t, "ghp_should_never_be_returned", stored.AppliedConfig.Env["GITHUB_TOKEN"],
 			"the persisted row is untouched by response redaction; cleanup migration handles storage separately")
+	})
+}
+
+// TestAgentGet_ResolvedTimezoneGatedOnEnvView covers ptone/scion#2767: the
+// single-agent GET (both routes) carries resolvedTimezone and timezoneSource,
+// equal to the PATCH response for the same agent, but only for a caller who
+// may view the agent's env. The resolved zone can come from a user, project,
+// hub or broker TZ env var, so a reader without env view gets neither key.
+// List responses never carry them.
+func TestAgentGet_ResolvedTimezoneGatedOnEnvView(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: "Asia/Tokyo"})
+
+	agent := &store.Agent{
+		ID:            tid("agent-get-tz"),
+		Slug:          "agent-get-tz",
+		Name:          "Get TZ Agent",
+		ProjectID:     project.ID,
+		OwnerID:       alice.ID,
+		Phase:         string(state.PhaseStopped),
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Bob can read and manage the agent but holds no attach-equivalent
+	// grant on it, so he may not view its env (see
+	// TestAgentResponseOmitsNonPlainEnv).
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-get-tz"), "Bob", store.GroupMemberRoleOwner)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleOwner)
+
+	routes := []string{
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/projects/" + project.ID + "/agents/" + agent.ID,
+	}
+	getTZ := func(t *testing.T, user *store.User, path string) map[string]json.RawMessage {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+	patchTZ := func(t *testing.T) map[string]json.RawMessage {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, alice, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]any{"taskSummary": "tz check"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+
+	for _, tc := range []struct {
+		name       string
+		defaultTZ  string
+		wantZone   string
+		wantSource string
+	}{
+		{name: "hub default", defaultTZ: "Asia/Tokyo", wantZone: `"Asia/Tokyo"`, wantSource: `"` + TZSourceHubDefault + `"`},
+		// No rung supplies a zone: "" with source none still reaches the wire.
+		{name: "none", defaultTZ: "", wantZone: `""`, wantSource: `"` + TZSourceNone + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: tc.defaultTZ})
+			patch := patchTZ(t)
+			require.Equal(t, tc.wantZone, string(patch["resolvedTimezone"]), "PATCH resolvedTimezone")
+			require.Equal(t, tc.wantSource, string(patch["timezoneSource"]), "PATCH timezoneSource")
+
+			for _, path := range routes {
+				body := getTZ(t, alice, path)
+				zone, hasZone := body["resolvedTimezone"]
+				source, hasSource := body["timezoneSource"]
+				require.True(t, hasZone, "%s: env-view caller must get resolvedTimezone", path)
+				require.True(t, hasSource, "%s: env-view caller must get timezoneSource", path)
+				assert.Equal(t, string(patch["resolvedTimezone"]), string(zone), "%s: GET resolvedTimezone matches PATCH", path)
+				assert.Equal(t, string(patch["timezoneSource"]), string(source), "%s: GET timezoneSource matches PATCH", path)
+			}
+		})
+	}
+
+	t.Run("reader without env view gets neither key", func(t *testing.T) {
+		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: "Asia/Tokyo"})
+		for _, path := range routes {
+			body := getTZ(t, bob, path)
+			assert.NotContains(t, body, "resolvedTimezone", "%s: no env view, no resolvedTimezone", path)
+			assert.NotContains(t, body, "timezoneSource", "%s: no env view, no timezoneSource", path)
+		}
+	})
+
+	t.Run("list responses do not carry the keys", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/agents?projectId="+project.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var listResp struct {
+			Agents []map[string]json.RawMessage `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+		found := false
+		for _, a := range listResp.Agents {
+			if string(a["id"]) != `"`+agent.ID+`"` {
+				continue
+			}
+			found = true
+			assert.NotContains(t, a, "resolvedTimezone")
+			assert.NotContains(t, a, "timezoneSource")
+		}
+		assert.True(t, found, "expected the agent in the list")
 	})
 }

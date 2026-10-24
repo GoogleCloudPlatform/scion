@@ -39,6 +39,29 @@ export function browserPath(path: string): string {
 }
 
 /**
+ * The browser URL for a full-page load of `target`. An app path (starting
+ * with a single `/`, query allowed) gets the base path through
+ * {@link browserPath}; anything else (an absolute or protocol-relative URL)
+ * is returned unchanged. Pass app paths, not paths already under the base.
+ */
+export function fullPageUrl(target: string): string {
+  return target.startsWith('/') && !target.startsWith('//') ? browserPath(target) : target;
+}
+
+/**
+ * Leave the app with a full page load of `target` (see {@link fullPageUrl}),
+ * for a target outside the client router (a server route such as
+ * `/auth/...` or `/login` after the session expired) or where the app must
+ * boot afresh (access or onboarding state changed). For an app route that
+ * needs no reload, use {@link navigateTo}. Assigning an absolute path to
+ * `window.location.href` directly drops the base path; an ESLint rule
+ * flags it (ptone/scion#5535).
+ */
+export function loadPage(target: string): void {
+  window.location.href = fullPageUrl(target);
+}
+
+/**
  * Strip the Vite base path prefix from a URL pathname so the client-side
  * router can match application routes when served behind a reverse proxy.
  * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.

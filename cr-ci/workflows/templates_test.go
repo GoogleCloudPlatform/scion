@@ -104,9 +104,9 @@ func TestSnippetLintEnv(t *testing.T) {
 	for _, want := range []string{
 		"GOFLAGS: ${{ runner.environment != 'self-hosted' && '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1' || '' }}",
 		`--concurrency="$LINT_CONCURRENCY"`,
-		"LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '4' || '2' }}",
+		"LINT_CONCURRENCY: ${{ runner.environment == 'self-hosted' && '8' || '2' }}",
 		"GOMEMLIMIT: ${{ runner.environment == 'self-hosted' && '24GiB' || '8GiB' }}",
-		"GOGC: '25'",
+		"GOGC: ${{ runner.environment == 'self-hosted' && '100' || '25' }}",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("snippet lacks %q", want)
@@ -162,7 +162,10 @@ func TestPoCWorkflow(t *testing.T) {
 		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
 		// memory.peak is NA under gVisor: the lint step samples memory and /scratch.
 		"/proc/meminfo", "df -k --output=used /scratch", "sample peaks:",
-		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '4' }}",
+		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '8' }}",
+		"GOGC: '100'", "GOMEMLIMIT: '24GiB'",
+		// P6b sampler: CPU from /proc/stat, the memory guard on the lint's process group, -v timings.
+		"/proc/stat", "setsid golangci-lint run -v ", `kill -TERM -- "-$lint"`, "min avail_mb=",
 		"id: restore",
 	} {
 		if !strings.Contains(s, want) {
