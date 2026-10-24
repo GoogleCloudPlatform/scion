@@ -679,9 +679,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// On success the agent runs, holds capacity, and the conditional
 	// releases would keep everything anyway.
 	releaseCapacityOnExit := true
+	// releaseIdleOnExit widens the release to the agent's idle slots: set
+	// where the move's quota handling may have restored a source broker
+	// slot the agent did not hold (a refused move).
+	releaseIdleOnExit := false
 	defer func() {
 		if releaseCapacityOnExit {
-			s.releaseFailedReincarnationCapacity(ctx, agentID, move != nil, owned)
+			s.releaseFailedReincarnationCapacity(ctx, agentID, releaseIdleOnExit, owned)
 		}
 	}()
 	if move != nil {
@@ -703,6 +707,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// target has no room the source reservation is restored and the
 		// agent stays stopped on the source.
 		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
+			// moveBrokerQuota restored a source slot without the cap
+			// check, also for an agent that held none: once the failure
+			// is recorded, the agent's idle slots are released.
+			releaseIdleOnExit = true
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 			return
 		}

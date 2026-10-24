@@ -120,17 +120,17 @@ func (s *Server) releaseReservationIfIdleAt(ctx context.Context, limitName, agen
 
 // releaseFailedReincarnationCapacity runs when a reincarnation failed after
 // its stop step succeeded and no container can exist (any failure other than
-// an ambiguous start), once the failure is recorded (phase error). A move
-// releases the agent's idle broker and project slots: the move's quota
-// handling may have restored a source broker slot the agent did not hold
-// before. A reincarnation that stays on its broker releases only the rows
-// it created (owned). Every release is conditional on the agent, as read at
+// an ambiguous start), once the failure is recorded (phase error). It
+// releases the rows the reincarnation created (owned). With idle set (a
+// refused move, whose quota handling may have restored a source broker slot
+// the agent did not hold) it releases the agent's idle broker and project
+// slots instead. Every release is conditional on the agent, as read at
 // release time, holding no capacity and no start-kind claim, so a start
 // that claimed it since keeps them.
-func (s *Server) releaseFailedReincarnationCapacity(ctx context.Context, agentID string, isMove bool, owned reincarnationCapacity) {
+func (s *Server) releaseFailedReincarnationCapacity(ctx context.Context, agentID string, idle bool, owned reincarnationCapacity) {
 	ctx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
 	defer cancel()
-	if isMove {
+	if idle {
 		s.releaseSlotIfIdle(ctx, agentID)
 		s.releaseProjectSlotIfIdle(ctx, agentID)
 		return
