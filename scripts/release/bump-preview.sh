@@ -124,10 +124,7 @@ MINOR="${BRANCH_VERSION#*.}"
 
 # --- Find the highest preview tag for this release ------------------------
 
-LATEST_PREVIEW_TAG=""
-for tag in $(git tag -l --sort=v:refname "v${MAJOR}.${MINOR}.*-preview.*"); do
-  LATEST_PREVIEW_TAG="$tag"
-done
+LATEST_PREVIEW_TAG=$(git tag -l --sort=v:refname "v${MAJOR}.${MINOR}.*-preview.*" | tail -n 1)
 
 if [ -z "$LATEST_PREVIEW_TAG" ]; then
   die "no existing preview tags found for ${RELEASE_BRANCH}. Use cut-preview.sh to create the first one."
