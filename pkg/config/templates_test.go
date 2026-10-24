@@ -1585,8 +1585,10 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 		if got.Telemetry.Cloud.TLS.CertFile != "/etc/ssl/certs/override-client.pem" {
 			t.Errorf("expected CertFile override, got %q", got.Telemetry.Cloud.TLS.CertFile)
 		}
-		if got.Telemetry.Cloud.TLS.KeyFile != "/etc/ssl/private/base-client-key.pem" {
-			t.Errorf("expected KeyFile preserved from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
+		// cert_file and key_file merge as a pair: the override sets only
+		// the certificate, so the base key is not carried over.
+		if got.Telemetry.Cloud.TLS.KeyFile != "" {
+			t.Errorf("expected KeyFile not mixed in from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
 		}
 		// Batch max_size overridden, timeout preserved
 		if got.Telemetry.Cloud.Batch.MaxSize != 256 {
