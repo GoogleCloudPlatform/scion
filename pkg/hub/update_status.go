@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -180,8 +182,9 @@ func updateOutcome(p PendingUpdate, running string) string {
 
 // reconcilePendingUpdate runs at startup, before AbortRunningMaintenanceOps.
 // When system.pending_update exists it completes the update run it names:
-// "completed" with system.last_update status "verified" when the hub now
-// runs the target version, "failed" otherwise. It then clears the row. It
+// "completed" with system.last_update status "verified" (and the
+// update-available notification cleared) when the hub now runs the target
+// version, "failed" otherwise (the notification stays). It then clears the row. It
 // is idempotent (a re-run after a partial failure converges), tolerates a
 // missing run row, and fails any other update-binary run still left
 // "restarting" (its restart was never confirmed), so no stale run blocks
@@ -215,6 +218,15 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 		}
 		if err := s.writeHubSettingJSON(ctx, HubSettingSectionLastUpdate, last); err != nil {
 			return err
+		}
+		// The update is confirmed only now; the update-binary hook leaves
+		// the banner in place so a failed or rolled-back attempt can be
+		// retried from it. A newer release, if any, is announced again by
+		// the next scheduled check.
+		if status == LastUpdateVerified {
+			if err := s.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil && !errors.Is(err, store.ErrNotFound) {
+				log.Warn("Failed to clear update_available after a verified update", "error", err)
+			}
 		}
 		log.Info("Reconciled pending update", "run_id", p.RunID, "from", p.From, "to", p.To,
 			"running", running, "status", status)
@@ -414,19 +426,47 @@ const repoPathPlaceholder = "<maintenance repo>"
 // installer's reason and hint: update-status reports only whether a repo is
 // configured, never its path (installer detection builds its reasons from
 // host paths and sudo argv, which include it).
+//
+// Every spelling is redacted: the configured value (installers format it
+// verbatim), its cleaned form (filepath.Join output) and its
+// symlink-resolved form (the resolved running binary can lie inside the
+// repo). Only whole path segments match, so /srv/repo does not touch
+// /srv/repository. A relative repo path is not redacted: it names no
+// location and would match unrelated words.
 func redactInstallerStatus(st maintenance.InstallerStatus, repoPath string) maintenance.InstallerStatus {
-	if repoPath == "" {
-		return st
+	for _, re := range repoPathPatterns(repoPath) {
+		st.Reason = re.ReplaceAllString(st.Reason, repoPathPlaceholder+"${1}")
+		st.MigrateHint = re.ReplaceAllString(st.MigrateHint, repoPathPlaceholder+"${1}")
 	}
-	// The cleaned path also covers the configured spelling with a trailing
-	// slash, which only adds a separator after it.
-	p := filepath.Clean(repoPath)
-	if p == "/" || p == "." {
-		return st
-	}
-	st.Reason = strings.ReplaceAll(st.Reason, p, repoPathPlaceholder)
-	st.MigrateHint = strings.ReplaceAll(st.MigrateHint, p, repoPathPlaceholder)
 	return st
+}
+
+// repoPathPatterns returns, longest spelling first, a pattern per spelling
+// of repoPath that matches it as whole path segments.
+func repoPathPatterns(repoPath string) []*regexp.Regexp {
+	if !filepath.IsAbs(repoPath) {
+		return nil
+	}
+	clean := filepath.Clean(repoPath)
+	spellings := []string{strings.TrimRight(repoPath, "/"), clean}
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		spellings = append(spellings, resolved)
+	}
+	seen := map[string]bool{}
+	var uniq []string
+	for _, p := range spellings {
+		if p == "" || p == "/" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		uniq = append(uniq, p)
+	}
+	sort.Slice(uniq, func(i, j int) bool { return len(uniq[i]) > len(uniq[j]) })
+	res := make([]*regexp.Regexp, 0, len(uniq))
+	for _, p := range uniq {
+		res = append(res, regexp.MustCompile(regexp.QuoteMeta(p)+`($|[^A-Za-z0-9._-])`))
+	}
+	return res
 }
 
 // handleUpdateStatus handles GET /api/v1/admin/maintenance/update-status.

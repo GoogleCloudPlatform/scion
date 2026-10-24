@@ -143,8 +143,8 @@ func waitForRunStatus(t *testing.T, s store.Store, runID string, done func(*stor
 }
 
 // waitForRestartRecorded waits until the before-restart hook of run has
-// finished: the run is "restarting", system.pending_update names it and
-// system.update_available is gone. The runner writes nothing after that.
+// finished: system.pending_update names it and the run is "restarting"
+// (the hook's last write). The runner writes nothing after that.
 func waitForRestartRecorded(t *testing.T, s store.Store, runID string) *store.MaintenanceOperationRun {
 	t.Helper()
 	ctx := context.Background()
@@ -155,9 +155,8 @@ func waitForRestartRecorded(t *testing.T, s store.Store, runID string) *store.Ma
 			t.Fatal(err)
 		}
 		pending, perr := s.GetHubSetting(ctx, HubSettingSectionPendingUpdate)
-		_, uerr := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable)
 		if run.Status == store.MaintenanceStatusRestarting && perr == nil &&
-			strings.Contains(string(pending.Value), runID) && errors.Is(uerr, store.ErrNotFound) {
+			strings.Contains(string(pending.Value), runID) {
 			return run
 		}
 		if time.Now().After(deadline) {

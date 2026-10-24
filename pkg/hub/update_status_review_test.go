@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -131,11 +132,88 @@ func TestRedactInstallerStatus(t *testing.T) {
 	if strings.Contains(got.Reason+got.MigrateHint, "/srv/repo") {
 		t.Fatalf("not redacted: %+v", got)
 	}
-	if got.Strategy != "unsupported" {
-		t.Errorf("strategy changed: %+v", got)
+	if got.Reason != "path <maintenance repo> is bad; <maintenance repo>/scion.rebuild" || got.Strategy != "unsupported" {
+		t.Errorf("redacted = %+v", got)
 	}
 	if same := redactInstallerStatus(st, ""); same != st {
 		t.Errorf("no repo path must leave the status alone: %+v", same)
+	}
+
+	t.Run("raw non-canonical spelling", func(t *testing.T) {
+		raw := maintenance.InstallerStatus{Reason: "maintenance repo path /srv//repo is not writable; `install -m 755 /srv/repo/scion.rebuild /usr/local/bin/scion`"}
+		got := redactInstallerStatus(raw, "/srv//repo")
+		if strings.Contains(got.Reason, "/srv//repo") || strings.Contains(got.Reason, "/srv/repo") {
+			t.Fatalf("not redacted: %q", got.Reason)
+		}
+	})
+
+	t.Run("whole path segments only", func(t *testing.T) {
+		other := maintenance.InstallerStatus{Reason: "running binary /srv/repository/scion is not under /opt/scion/releases"}
+		if got := redactInstallerStatus(other, "/srv/repo"); got != other {
+			t.Fatalf("a different path was touched: %q", got.Reason)
+		}
+	})
+
+	t.Run("relative repo path is left alone", func(t *testing.T) {
+		rel := maintenance.InstallerStatus{Reason: "running binary /usr/local/bin/scion is not under /opt/scion/releases"}
+		if got := redactInstallerStatus(rel, "scion"); got != rel {
+			t.Fatalf("relative path over-matched: %q", got.Reason)
+		}
+	})
+
+	t.Run("symlink-resolved repo and resolved executable", func(t *testing.T) {
+		base := t.TempDir()
+		realDir := filepath.Join(base, "data", "scion")
+		if err := os.MkdirAll(realDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(base, "home-scion")
+		if err := os.Symlink(realDir, link); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := filepath.EvalSymlinks(realDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := maintenance.InstallerStatus{Reason: fmt.Sprintf(
+			"symlink layout: running binary %s/scion is not under /opt/scion/releases; sudo-install: maintenance repo path %s is not writable", resolved, link)}
+		got := redactInstallerStatus(in, link)
+		if strings.Contains(got.Reason, resolved) || strings.Contains(got.Reason, link) {
+			t.Fatalf("not redacted: %q", got.Reason)
+		}
+		if !strings.Contains(got.Reason, "running binary <maintenance repo>/scion") {
+			t.Errorf("reason = %q", got.Reason)
+		}
+	})
+}
+
+// Boot reconciliation clears the update-available notification only when the
+// update is verified; a failed update keeps it for a retry.
+func TestReconcilePendingUpdate_UpdateAvailable(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		running   string
+		wantClear bool
+	}{
+		{"nightly-20261024", true},
+		{"nightly-20261023", false},
+	} {
+		t.Run(tt.running, func(t *testing.T) {
+			srv, s := newTestServerWithStore(t)
+			if _, err := s.UpsertHubSetting(ctx, HubSettingSectionUpdateAvailable, json.RawMessage(`{"version":"nightly-20261024"}`), "test", -1, "managed"); err != nil {
+				t.Fatal(err)
+			}
+			run := newRestartingRun(t, s)
+			putPendingUpdate(t, s, PendingUpdate{RunID: run.ID, From: "nightly-20261023", To: "nightly-20261024"})
+			if err := srv.reconcilePendingUpdate(ctx, tt.running); err != nil {
+				t.Fatal(err)
+			}
+			_, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable)
+			cleared := errors.Is(err, store.ErrNotFound)
+			if cleared != tt.wantClear {
+				t.Fatalf("update_available cleared = %v (err %v), want %v", cleared, err, tt.wantClear)
+			}
+		})
 	}
 }
 
