@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -284,21 +285,13 @@ func (f *uspFixture) userSecret(t *testing.T, scopeID, key, createdBy string, al
 // ancestry and role.
 func (f *uspFixture) agentChild(t *testing.T, name string, ancestry []string, role AgentRole) string {
 	t.Helper()
-	id := tid("usp-agent-" + name)
+	id := tid("usp-child-" + name)
 	require.NoError(t, f.base.CreateAgent(context.Background(), &store.Agent{
 		ID: id, Slug: "slug-" + id[:8], Name: "name-" + id[:8], ProjectID: f.projectID, Phase: "running",
 		CreatedBy: ancestry[len(ancestry)-1], OwnerID: ancestry[0],
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)}, Ancestry: ancestry,
 	}))
 	return id
-}
-
-func (f *uspFixture) setAncestry(t *testing.T, agentID string, ancestry []string) {
-	t.Helper()
-	ag, err := f.base.GetAgent(context.Background(), agentID)
-	require.NoError(t, err)
-	ag.Ancestry = ancestry
-	require.NoError(t, f.base.UpdateAgent(context.Background(), ag))
 }
 
 func (f *uspFixture) identity(agentID string, ancestry []string) AgentIdentity {
@@ -421,8 +414,8 @@ func TestUserSecretParentCeiling_DevLocalWithDevAuthAllows(t *testing.T) {
 func TestUserSecretParentCeiling_SuperAdminRootTakesTheSamePath(t *testing.T) {
 	f := newUSPFixture(t, "superadmin")
 	admin := tid("usp-superadmin")
-	createTestUserWithRole(t, f.base, admin, "usp-superadmin@test.com", "member", store.SystemRoleSuperAdmin)
-	createDCUser(t, f.base, admin, "usp-superadmin@test.com", f.projectID, store.ProjectRoleOwner)
+	createTestUserWithRole(t, f.base, admin, "usp-root-admin@test.com", "member", store.SystemRoleSuperAdmin)
+	createDCUser(t, f.base, admin, "usp-root-admin@test.com", f.projectID, store.ProjectRoleOwner)
 	ag := f.agentChild(t, "sa", []string{admin}, AgentRoleFull)
 	f.recordEdge(t, store.DelegationPrincipalUser, admin, ag, boundedCeiling("project.read"), nil)
 	sec := f.userSecret(t, admin, "USP_SA_KEY", admin, true, store.SecretTypeEnvironment)
@@ -582,31 +575,38 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			return base(f)
 		}, DenyCauseCeilingDelegatorLacksPermission, "source_restricted"},
 		{"caged test-admin terminal user", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
+			// The admin test tier is on and U reads as an admin-kind test
+			// identity. Declared overlap: the test-identity clamp may also
+			// withdraw U's project admission (S4a), with the same cause.
 			f.st.userKind = map[string]string{f.userID: store.UserKindTestHubAdmin}
+			setAuthzTestAdminTier(f.a, func(string) bool { return true }, time.Now)
 			return base(f)
-		}, DenyCauseCeilingDelegatorLacksPermission, "source_caged"},
+		}, DenyCauseCeilingDelegatorLacksPermission, ""},
 		// T13
 		{"author is not the owner", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			other := tid("usp-author")
 			createDCUser(t, f.base, other, "usp-author@test.com", f.projectID, store.ProjectRoleOwner)
-			f.setAncestry(t, f.agentID, []string{f.userID, other})
+			ag := f.agentChild(t, "author", []string{f.userID, other}, AgentRoleFull)
+			f.recordEdge(t, store.DelegationPrincipalUser, f.userID, ag, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 			sec := f.userSecret(t, f.userID, "USP_AUTHOR_KEY", other, true, store.SecretTypeEnvironment)
-			return f.identity(f.agentID, []string{f.userID, other}), userSecretResource(sec, f.userID)
+			return f.identity(ag, []string{f.userID, other}), userSecretResource(sec, f.userID)
 		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
 		// T14a: the terminal user is neither the author nor the head of the ancestry.
 		{"terminal user is not the author", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			other := tid("usp-owner-v")
 			createDCUser(t, f.base, other, "usp-owner-v@test.com", f.projectID, store.ProjectRoleOwner)
-			f.setAncestry(t, f.agentID, []string{other})
+			ag := f.agentChild(t, "owner-v", []string{other}, AgentRoleFull)
+			f.recordEdge(t, store.DelegationPrincipalUser, f.userID, ag, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 			sec := f.userSecret(t, other, "USP_V_KEY", other, true, store.SecretTypeEnvironment)
-			return f.identity(f.agentID, []string{other}), userSecretResource(sec, other)
+			return f.identity(ag, []string{other}), userSecretResource(sec, other)
 		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
 		// T26: author = terminal user, but the stored ancestry's head is another user.
 		{"ancestry head is not the terminal user", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			other := tid("usp-head")
 			createDCUser(t, f.base, other, "usp-head@test.com", f.projectID, store.ProjectRoleOwner)
-			f.setAncestry(t, f.agentID, []string{other, f.userID})
-			return f.identity(f.agentID, []string{other, f.userID}), f.resource()
+			ag := f.agentChild(t, "head", []string{other, f.userID}, AgentRoleFull)
+			f.recordEdge(t, store.DelegationPrincipalUser, f.userID, ag, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+			return f.identity(ag, []string{other, f.userID}), f.resource()
 		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
 	}
 	for _, r := range rows {
@@ -1142,6 +1142,7 @@ func TestUserSecretParentCeiling_DecideDenyPoints(t *testing.T) {
 		}, true, DenyCauseCeilingDelegatorLacksPermission},
 		{"D7 dev_local with dev auth off", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			createDCUser(t, f.base, DevUserID, "dev@localhost", f.projectID, store.ProjectRoleOwner)
+			f.srv.authzService.setDevLocalAuthorityEnabled(false)
 			dev := f.agentChild(t, "d-dev", []string{DevUserID}, AgentRoleFull)
 			f.recordEdge(t, store.DelegationPrincipalUser, DevUserID, dev, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, func(e *store.DelegationEdge) {
 				e.SourceCredentialKind = store.SourceCredentialDevLocal

@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/require"
 )
 
@@ -261,8 +260,9 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 }
 
 // TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
-// user-scope read never calls Decide(project.secret_read) — the
-// delegation ceiling and its edge lookup are never consulted.
+// user-scope read never calls Decide(project.secret_read). Every decision
+// is audited (sample rate 1), and a project-scope read in the same setup
+// shows the observation works.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
 	ctx := context.Background()
@@ -272,16 +272,35 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
 	})
 	require.NoError(t, err)
+	seedSecret(t, f.Server.secretBackend, "PROJECT_ONLY_KEY", "v", "", "", f.ProjectID)
 
-	counting := &callCountingStore{Store: f.Store}
-	f.Server.authzService = NewAuthzService(counting, logging.Subsystem("hub.auth"))
+	emitter := &recordingDecisionAuditEmitter{}
+	f.Server.authzService.DecisionAuditSampleRate = 1.0
+	f.Server.authzService.SetDecisionAuditEmitter(emitter)
+	projectDecisions := func() int {
+		n := 0
+		for _, r := range emitter.records {
+			if r.Permission == "project.secret_read" {
+				n++
+			}
+		}
+		return n
+	}
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/USER_ONLY_KEY?scope=user", nil, f.Token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if counting.getDelegationEdgesForDelegateCalls != 0 {
-		t.Fatalf("expected no project decision for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)
+	if n := projectDecisions(); n != 0 {
+		t.Fatalf("expected no project decision for a user-scope read, got %d", n)
+	}
+
+	rec = doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/PROJECT_ONLY_KEY", nil, f.Token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project read: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if projectDecisions() == 0 {
+		t.Fatalf("a project-scope read must record its project decision (control)")
 	}
 }
 
