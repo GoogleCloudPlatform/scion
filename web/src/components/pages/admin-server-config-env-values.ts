@@ -78,7 +78,6 @@ export function envValueFor(
   return null;
 }
 
-/** The env_values entries at prefix or below it, sorted by key. */
 /**
  * Whether the server reported the in-effect state of an entry (it does not
  * for a masked entry).
@@ -87,6 +86,7 @@ export function hasInEffect(ev: EnvKeyValue): ev is EnvKeyValue & { in_effect: b
   return typeof ev.in_effect === 'boolean' && !ev.masked;
 }
 
+/** The env_values entries at prefix or below it, sorted by key. */
 export function envValuesUnder(
   envValues: Record<string, EnvKeyValue> | null | undefined,
   prefix: string
