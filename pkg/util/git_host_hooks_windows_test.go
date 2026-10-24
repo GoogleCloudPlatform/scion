@@ -109,8 +109,9 @@ func TestHostGitRunsNoHooksWindows(t *testing.T) {
 		t.Fatalf("host-side git checkout -b subject: %v\n%s", err, out)
 	}
 
-	// Subject: a read-only command with HostGitArgs and HostGitEnv, as
-	// production runs one-off queries.
+	// A read-only command with HostGitArgs and HostGitEnv, as production runs
+	// one-off queries. ls-files runs no hook, so this is not a second hook
+	// check; it shows that core.hooksPath=NUL does not break such a command.
 	lsFiles := exec.CommandContext(t.Context(), "git", append(HostGitArgs(), "-C", repo, "ls-files")...)
 	lsFiles.Env = HostGitEnv(os.Environ())
 	out, err := lsFiles.CombinedOutput()
