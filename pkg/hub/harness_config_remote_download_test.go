@@ -59,7 +59,7 @@ func localStorageHarnessConfigWithContent(t *testing.T, files map[string][]byte)
 		}
 		hc.Files = append(hc.Files, store.TemplateFile{Path: p, Size: int64(len(c)), Hash: "sha256:placeholder"})
 	}
-	hc.ContentHash = computeContentHash(hc.Files)
+	hc.ContentHash = defaultContentHash(hc.Files)
 	if err := s.CreateHarnessConfig(context.Background(), hc); err != nil {
 		t.Fatalf("CreateHarnessConfig: %v", err)
 	}

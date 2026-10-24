@@ -179,6 +179,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
+	// Project configuration identity on shared backends (non-critical).
+	s.checkProjectConfigIdentityHealth(checks)
+
 	// Audit log writer (non-critical: degraded, never unhealthy).
 	s.checkAuditWriterHealth(checks)
 
@@ -337,8 +340,7 @@ type workspaceHealthProbeKey struct {
 // and its goroutine holds an OS thread in the syscall. Without deduplication
 // every health probe would add one more stuck thread. With it, there is at
 // most one stuck stat per mount: later probes wait on the existing stat, with
-// their own timeout, instead of starting a new one. This mirrors
-// workspaceProbesInFlight on the request path.
+// their own timeout, instead of starting a new one.
 var workspaceHealthProbesInFlight sync.Map
 
 // workspaceHealthProbeBeforeDone, when non-nil, is called by the stat
@@ -449,6 +451,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
 			"reason": "shutting down",
+		})
+		return
+	}
+
+	// An instance whose keyring signing ring cannot issue (its active
+	// generation reached sign_until, or it has none) is not ready
+	// (ptone/scion#1530 §2); verification of eligible generations continues
+	// until verify_until.
+	if reason := s.signingNotReadyReason(); reason != "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": reason,
 		})
 		return
 	}

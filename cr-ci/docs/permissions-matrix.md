@@ -95,6 +95,17 @@ runs and jobs) use the App's installation access token. That token expires
 after one hour [GH17] and is minted from a JWT valid for at most 10 minutes
 [GH18]. No human role is involved at runtime.
 
+**Operator reads (F-G, seen in P6).** Two reads that the setup and the PoC
+checklist need are **not** available to a personal access token without admin
+rights; both returned 403:
+
+- the fork-PR approval setting (`GET /repos/{o}/{r}/actions/permissions/fork-pr-contributor-approval`, G8);
+- the repository's self-hosted runners (`GET /repos/{o}/{r}/actions/runners`, needs repository Administration read; poc-checklist C5, D8).
+
+Check them in the UI as the repo owner or an admin (**Settings**, **Actions**,
+**General**, and **Settings**, **Actions**, **Runners**), or with a token that
+has those permissions.
+
 ## 2. GCP steps
 
 All GCP steps are the same for both GitHub targets. Every principal below is a
@@ -117,7 +128,7 @@ step says otherwise. Resource names come from `config.example.env`.
 | C12 | Deploy the mediator service `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME`, reachable by GitHub without Google auth | `roles/run.developer` + `roles/iam.serviceAccountUser` on `MEDIATOR_SA_NAME`; **plus** `roles/run.admin` (service) to bind `allUsers` as invoker | Public ingress is required because GitHub cannot present Google credentials. HMAC is the authentication. An org policy restricting allowed member domains blocks `allUsers`; then deploy with `--no-invoker-iam-check` instead (item U6). | [GC1] |
 | C13 | Grant `SCHEDULER_SA_NAME` `roles/run.invoker` on `MEDIATOR_SERVICE_NAME` only | `roles/run.admin` (service) | `/reconcile` additionally checks the OIDC token in code (P2), because the service is public | [GC1] |
 | C14 | Create the Cloud Scheduler job `RECONCILER_JOB_NAME` with an OIDC token for `SCHEDULER_SA_NAME` | `roles/cloudscheduler.admin` (project) + `roles/iam.serviceAccountUser` on `SCHEDULER_SA_NAME` | | [GC8] |
-| C15 | **Quota increase**: Cloud Run regional ephemeral-disk (default 100 GiB, auto-granted) to cover `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS`, plus regional CPU and memory if needed | `roles/cloudquotas.admin` (project), or the legacy `roles/servicemanagement.quotaAdmin`; Google approves the request | Only needed when `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS` exceeds 100 GiB (more than 10 runners at the 10 GiB default) | [GC9] |
+| C15 | **Quota increase**: Cloud Run **per-instance** ephemeral disk (`run.googleapis.com/max_per_instance_ephemeral_disk`, default 10 GiB) when `RUNNER_DISK_GI` > 10, and the **regional** ephemeral-disk allocation (`run.googleapis.com/ephemeral_disk_allocation`, default 100 GiB, auto-granted) to cover `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS`, plus regional CPU and memory if needed | `roles/cloudquotas.admin` (project), or the legacy `roles/servicemanagement.quotaAdmin`; Google approves the request | Needed when `RUNNER_DISK_GI` > 10 (per instance), or when `RUNNER_DISK_GI` x `MAX_CONCURRENT_RUNNERS` > 100 GiB (regional). A warm golangci-lint needs at least 20 GiB per runner (P6b: 16.5 GB peak), so the per-instance increase is needed for it; the granted limit is per region (us-west2: 23 GiB). At 23-25 GiB the default regional 100 GiB allows `MAX_CONCURRENT_RUNNERS` 4. **Reading** the quotas (`gcloud beta quotas info list`) needs `cloudquotas.quotas.get` (`roles/cloudquotas.viewer`, project); the deployer in us-west2 lacked it, so only the job create checked the limit | [GC9] |
 | C16 | Read logs, executions and metrics (operations) | `roles/logging.viewer` + `roles/run.viewer` (project) | `roles/run.viewer` can see execution env overrides. That is why the JIT config is passed by a claim token, never as an env override (design 3.2), and why the claim also requires the runner identity's ID token (claim contract v2). Grant it narrowly. | [GC1] |
 | C17 | Create alerting policies (launch failures, queue starvation) | `roles/monitoring.alertPolicyEditor` (project) | P4 or operations | [GC10] |
 | C18 | Teardown (delete everything above) | The admin role for each resource above (C2-C14, C19) | `scripts/teardown.sh` (P4) | Same sources as C2-C14 |
@@ -340,8 +351,10 @@ Still UNVERIFIED (to settle in P2, P4 or P6). Each item's runtime check is in
   `--add-volume=name=scratch,type=ephemeral-disk,size=<n>Gi` with
   `--add-volume-mount` (verified in deploy-demo-test; no `gcloud beta`
   needed). The same deploy showed that the Cloud Run server rejects
-  ephemeral-disk totals above 10 GiB per instance, so `RUNNER_DISK_GI` is
-  limited to 10 (default 10). Update: **UNVERIFIED** that `--clear-volumes
+  ephemeral-disk totals above 10 GiB per instance: that is the default of the
+  per-instance quota `run.googleapis.com/max_per_instance_ephemeral_disk`,
+  raisable on request (C15). `RUNNER_DISK_GI` accepts 1-100 (default 10).
+  Update: **UNVERIFIED** that `--clear-volumes
   --clear-volume-mounts` and the same `--add-volume` flags combine in one
   `gcloud run jobs update` call (the P6 deploy ran only creates). Checked by
   [poc-checklist B2](poc-checklist.md) on a second `deploy-job.sh --apply`.

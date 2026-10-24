@@ -29,7 +29,7 @@
  */
 
 import * as crypto from 'node:crypto';
-import { execFileSync, execSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFileSync, execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -55,12 +55,24 @@ export interface HubState {
   port: number;
   baseURL: string;
   dbDir: string;
-  /** Dev-auth token for API calls (super-admin). */
+  /**
+   * Dev-auth token for API calls (super-admin). Empty after
+   * restartHubWithoutDevAuth: that hub no longer accepts it.
+   */
   devToken: string;
+  /** False after restartHubWithoutDevAuth; unset (dev auth on) otherwise. */
+  devAuth?: boolean;
   /** Hub id of a member-level test hub (testIdentities), else unset. */
   hubId?: string;
   /** Private HOME of a member-level test hub (under dbDir), else unset. */
   homeDir?: string;
+  /** The `server start` flags, by name only (no values), in start order. */
+  startFlags?: string[];
+}
+
+/** The flag names of a command line (`--name` or `--name=value` gives `--name`); values are dropped. */
+export function flagNames(args: readonly string[]): string[] {
+  return args.filter((a) => a.startsWith('--')).map((a) => a.split('=')[0]);
 }
 
 /** Options of startHub. The defaults start the hub the main suite uses. */
@@ -99,6 +111,13 @@ export interface StartHubOptions {
   runtimeBroker?: boolean;
   /** Hub binary to run. Default: build/scion. For the harness's own tests. */
   binary?: string;
+  /**
+   * Experiments the hub reads only at process start (such as hub.conduit,
+   * whose relay starts only if it is on at startup). Each one is turned on
+   * through the admin experiments API, and then the hub is restarted on
+   * the same database, port, HOME and hub id. Default: none (one start).
+   */
+  startupExperiments?: string[];
 }
 
 /**
@@ -282,6 +301,157 @@ async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void>
   );
 }
 
+/** How a hub started by startHub in this process was launched (by state file). */
+interface HubLaunch {
+  binary: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  baseURL: string;
+  child: ChildProcess;
+}
+const launches = new Map<string, HubLaunch>();
+
+/** A started hub process and the dev token it printed. */
+interface LaunchedHub {
+  hubProcess: ChildProcess;
+  devToken: string;
+}
+
+/**
+ * Spawns the hub (its own process group), echoes its output with any dev
+ * token redacted, waits for health and reads the dev token from the file
+ * the hub printed.
+ */
+async function launchHub(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  baseURL: string,
+  onSpawn?: (child: ChildProcess) => void,
+  requireDevToken = true
+): Promise<LaunchedHub> {
+  const hubProcess = spawn(binary, args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    env,
+  });
+  onSpawn?.(hubProcess);
+
+  // Capture the dev token file path from hub startup logs; the token is
+  // read from that file once the hub is healthy.
+  let devTokenFile = '';
+  const captureDevTokenFile = (line: string) => {
+    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
+    if (match) {
+      devTokenFile = unquoteShellSingle(match[1]);
+    }
+  };
+
+  // Log hub output for debugging and capture the dev token file path
+  hubProcess.stdout?.on('data', (data: Buffer) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      console.log(`[hub:stdout] ${redact(line)}`);
+      captureDevTokenFile(line);
+    }
+  });
+
+  hubProcess.stderr?.on('data', (data: Buffer) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      console.log(`[hub:stderr] ${redact(line)}`);
+      captureDevTokenFile(line);
+    }
+  });
+
+  hubProcess.on('error', (err) => {
+    console.error(`[hub] Process error: ${err.message}`);
+  });
+
+  hubProcess.on('exit', (code, signal) => {
+    console.log(`[hub] Process exited: code=${code}, signal=${signal}`);
+  });
+
+  // Wait for health
+  await waitForHealth(baseURL);
+
+  // A hub started without --dev-auth prints no dev token.
+  if (!requireDevToken) return { hubProcess, devToken: '' };
+
+  if (!devTokenFile) {
+    throw new Error(
+      'Failed to capture the dev token file path from hub output. ' +
+        'Ensure the hub is started with --dev-auth.'
+    );
+  }
+  // A relative path is relative to the hub's working directory.
+  const devToken = readDevTokenFile(path.resolve(cwd, devTokenFile));
+
+  console.log(`[hub] Dev token captured.`);
+  return { hubProcess, devToken };
+}
+
+/** Turns each named experiment on through the admin experiments API. */
+async function setExperimentOverrides(
+  baseURL: string,
+  devToken: string,
+  names: string[]
+): Promise<void> {
+  const url = `${baseURL}/api/v1/admin/experiments`;
+  const headers = { Authorization: `Bearer ${devToken}`, 'Content-Type': 'application/json' };
+  const read = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+  if (read.status !== 200) {
+    throw new Error(`startHub: GET /api/v1/admin/experiments answered ${read.status}`);
+  }
+  const { revision } = (await read.json()) as { revision: number };
+  const overrides = Object.fromEntries(names.map((name) => [name, true]));
+  const put = await fetch(url, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ overrides, expected_revision: revision }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (put.status !== 200) {
+    throw new Error(`startHub: PUT /api/v1/admin/experiments answered ${put.status}`);
+  }
+}
+
+/** SIGKILLs a hub started by launchHub (its process group); a gone process is fine. */
+function killProcessGroup(child: ChildProcess): void {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[hub] Could not kill the hub (PID ${child.pid}): ${String(err)}`);
+    }
+  }
+}
+
+/** Stops a hub started by launchHub (its process group) and waits for its exit. */
+async function stopProcessGroup(child: ChildProcess, timeoutMs = 30_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  try {
+    process.kill(-child.pid!, 'SIGTERM');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return;
+    throw err;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  const result = await Promise.race([exited, timedOut]);
+  clearTimeout(timer);
+  if (result === 'timeout') {
+    throw new Error(`startHub: the hub (PID ${child.pid}) did not exit within ${timeoutMs}ms`);
+  }
+}
+
 /**
  * Build assets and start the hub. Returns the hub state (port, PID, dev token, etc.).
  * The state is also written to a temp file for the teardown script.
@@ -389,61 +559,31 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
   if (testIdentities) args.push(`--test-mode=member:${hubId}`);
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
-  const hubProcess = spawn(binary, args, {
-    cwd: homeDir ?? WORKSPACE_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-    env,
-  });
+  const cwd = homeDir ?? WORKSPACE_ROOT;
+  let { hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL);
 
-  // Capture the dev token file path from hub startup logs; the token is
-  // read from that file once the hub is healthy.
-  let devTokenFile = '';
-  const captureDevTokenFile = (line: string) => {
-    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
-    if (match) {
-      devTokenFile = unquoteShellSingle(match[1]);
+  // Startup-read experiments: set the overrides through the admin API,
+  // then restart the hub on the same database, port, HOME and hub id, so
+  // they apply from process start.
+  const startupExperiments = options.startupExperiments ?? [];
+  if (startupExperiments.length > 0) {
+    // No state file exists yet, so stopHub could not find a hub left
+    // running by a failure here: kill whichever process is current.
+    let current: ChildProcess = hubProcess;
+    try {
+      await setExperimentOverrides(baseURL, devToken, startupExperiments);
+      console.info(
+        `[hub] Restarting the hub for startup experiments: ${startupExperiments.join(', ')}`
+      );
+      await stopProcessGroup(hubProcess);
+      ({ hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL, (child) => {
+        current = child;
+      }));
+    } catch (err) {
+      killProcessGroup(current);
+      throw err;
     }
-  };
-
-  // Log hub output for debugging and capture the dev token file path
-  hubProcess.stdout?.on('data', (data: Buffer) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      console.log(`[hub:stdout] ${redact(line)}`);
-      captureDevTokenFile(line);
-    }
-  });
-
-  hubProcess.stderr?.on('data', (data: Buffer) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      console.log(`[hub:stderr] ${redact(line)}`);
-      captureDevTokenFile(line);
-    }
-  });
-
-  hubProcess.on('error', (err) => {
-    console.error(`[hub] Process error: ${err.message}`);
-  });
-
-  hubProcess.on('exit', (code, signal) => {
-    console.log(`[hub] Process exited: code=${code}, signal=${signal}`);
-  });
-
-  // Wait for health
-  await waitForHealth(baseURL);
-
-  if (!devTokenFile) {
-    throw new Error(
-      'Failed to capture the dev token file path from hub output. ' +
-        'Ensure the hub is started with --dev-auth.'
-    );
   }
-  // A relative path is relative to the hub's working directory.
-  const devToken = readDevTokenFile(path.resolve(homeDir ?? WORKSPACE_ROOT, devTokenFile));
-
-  console.log(`[hub] Dev token captured.`);
 
   const state: HubState = {
     pid: hubProcess.pid!,
@@ -453,6 +593,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     devToken,
     ...(hubId ? { hubId } : {}),
     ...(homeDir ? { homeDir } : {}),
+    startFlags: flagNames(args),
   };
 
   // Write state file for teardown. It holds the dev token: owner-only, and
@@ -464,7 +605,73 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // Unref so the parent process can exit cleanly
   hubProcess.unref();
 
+  launches.set(path.resolve(stateFile), { binary, args, env, cwd, baseURL, child: hubProcess });
   return state;
+}
+
+/**
+ * Restarts a hub that startHub started in this process on the same
+ * database, port, HOME and hub id, with the same arguments except
+ * --dev-auth: requests without a credential are then no longer signed in
+ * as the dev user, as on a hub in production. Run the setup that needs the
+ * dev token (test identities, memberships, fixtures) before this; the dev
+ * token is not accepted afterwards. Test identity web sessions and
+ * web-login codes, agent and broker credentials keep working (they live in
+ * the database). The state file is rewritten with the new PID, an empty
+ * devToken and devAuth: false. If the restarted hub does not get healthy,
+ * it is killed, the state file is rewritten the same way with the killed
+ * process's PID, and the call throws.
+ */
+export async function restartHubWithoutDevAuth(stateFile: string = STATE_FILE): Promise<HubState> {
+  const key = path.resolve(stateFile);
+  const launch = launches.get(key);
+  const state = readHubState(stateFile);
+  if (!launch || !state) {
+    throw new Error(
+      'restartHubWithoutDevAuth: no hub started by startHub in this process for that state file'
+    );
+  }
+  if (!launch.args.includes('--dev-auth')) {
+    throw new Error('restartHubWithoutDevAuth: the hub already runs without dev auth');
+  }
+  const args = launch.args.filter((arg) => arg !== '--dev-auth');
+  console.info('[hub] Restarting the hub without dev auth...');
+  await stopProcessGroup(launch.child);
+  let current: ChildProcess | undefined;
+  let hubProcess: ChildProcess;
+  try {
+    ({ hubProcess } = await launchHub(
+      launch.binary,
+      args,
+      launch.env,
+      launch.cwd,
+      launch.baseURL,
+      (child) => {
+        current = child;
+      },
+      false
+    ));
+  } catch (err) {
+    if (current) killProcessGroup(current);
+    launches.delete(key);
+    // Rewritten so it names the last hub process (now stopped) and no
+    // longer offers the dev token; stopHub still removes the temp dir.
+    const failed: HubState = {
+      ...state,
+      pid: current?.pid ?? state.pid,
+      devToken: '',
+      devAuth: false,
+    };
+    fs.rmSync(stateFile, { force: true });
+    fs.writeFileSync(stateFile, JSON.stringify(failed, null, 2), { mode: 0o600, flag: 'wx' });
+    throw err;
+  }
+  const next: HubState = { ...state, pid: hubProcess.pid!, devToken: '', devAuth: false };
+  fs.rmSync(stateFile, { force: true });
+  fs.writeFileSync(stateFile, JSON.stringify(next, null, 2), { mode: 0o600, flag: 'wx' });
+  hubProcess.unref();
+  launches.set(key, { ...launch, args, child: hubProcess });
+  return next;
 }
 
 /** Read the hub state from the temp file (used by teardown and tests). */

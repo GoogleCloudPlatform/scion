@@ -324,10 +324,14 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 		Status:    store.BrokerSecretStatusActive,
 	}))
 	for _, p := range []*store.Project{f.proj, f.other} {
+		// The fixture broker is remote (not the embedded one) and serves the
+		// hub-managed project from its own checkout (LocalPath); a remote
+		// broker without one is refused at create (ptone/scion#5813).
 		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 			ProjectID:  p.ID,
 			BrokerID:   f.broker.ID,
 			BrokerName: f.broker.Name,
+			LocalPath:  fixtureProviderCheckout(t),
 			Status:     store.BrokerStatusOnline,
 		}))
 		p.DefaultRuntimeBrokerID = f.broker.ID

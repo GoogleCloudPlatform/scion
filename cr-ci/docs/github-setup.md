@@ -45,7 +45,8 @@ in [gcp-setup.md](gcp-setup.md).
 
 **Already done** (README quick start): `bootstrap-gcp.sh`,
 `build-runner-image.sh` and `deploy-job.sh`. `cr-ci/config.env` holds
-`TARGET_REPOS`, `GITHUB_APP_INSTALLATION_SCOPE`, `GCP_PROJECT` and `REGION`.
+`TARGET_REPOS`, `GCP_PROJECT` and `REGION` (`GITHUB_APP_INSTALLATION_SCOPE`
+defaults to `repo`, right for the fork).
 Every script validates the whole config, and `GITHUB_APP_ID` is required, so
 until the App exists `config.env` carries the placeholder `GITHUB_APP_ID=1`.
 The GCP-side scripts do not use the value. Step 2.3 replaces it before
@@ -68,7 +69,9 @@ echo "MEDIATOR_URL=https://cr-runner-mediator-${project_number}.${REGION}.run.ap
 
 Use your `MEDIATOR_SERVICE_NAME` in place of `cr-runner-mediator` if you
 changed it. Put the printed line into `config.env` and check it with
-`scripts/check-config.sh`. The webhook URL is `MEDIATOR_URL` + `/webhook`.
+`scripts/check-config.sh`. **The App's webhook URL is `MEDIATOR_URL` +
+`/webhook`**, never the bare `MEDIATOR_URL`: the mediator answers deliveries to
+`/` with 404 (seen in the P6 deploy, when a readiness note gave the bare URL).
 
 `MEDIATOR_URL` is also the audience of every ID token the mediator accepts
 (claims and `/reconcile`). The runners and the scheduler use whatever is in
@@ -306,7 +309,10 @@ event type, so a redelivered `ping` tests the URL and the webhook secret
 end to end. It never starts a runner.
 
 1. App settings, **Advanced**, **Recent Deliveries**. Open the `ping`
-   delivery (or any other) and click **Redeliver**.
+   delivery and click **Redeliver**. Later, when the ping is buried (after a
+   webhook URL change), redeliver a `workflow_job` delivery whose action is
+   `completed` or `in_progress`, never `queued`
+   ([operations](operations.md#webhook-url-change)).
 2. Read the response code:
 
    | Response | Meaning | Fix |
@@ -349,6 +355,10 @@ It is what bounds the residual risk of a fork job reaching a cr-ci runner
   ([GitHub docs](https://docs.github.com/en/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization)).
 - The first two options ("first-time contributors ...") are **not** enough:
   anyone with one merged commit would bypass approval.
+- **Check it in the UI.** The REST endpoint for this setting
+  (`GET /repos/OWNER/REPO/actions/permissions/fork-pr-contributor-approval`)
+  needs admin access: a personal access token without it gets 403 (seen in P6).
+  The repo owner or an admin reads it on the settings page above.
 
 The other preconditions are on the GCP and workflow side: the routing
 expression with the fork guard (step 8), `max-instances=1` (set by
@@ -358,16 +368,17 @@ expression with the fork guard (step 8), `max-instances=1` (set by
 ## 7. PoC run (before any routing)
 
 The PoC exercises the whole path (webhook, fork guard, JIT runner, Cloud Run
-execution, claim, job) on a `workflow_dispatch` job, before any CI job is
-routed. The template is
-[`workflows/cr-runner-poc.yml`](../workflows/cr-runner-poc.yml).
-`workflow_dispatch` only lists workflows on the default branch, so running it
-means committing a copy to `.github/workflows/` on the target's default
-branch. That is a P6 step and needs ptone's go-ahead.
+execution, claim, job) before any CI job is routed. The template is
+[`workflows/cr-runner-poc.yml`](../workflows/cr-runner-poc.yml). It runs from a
+**push to a throwaway `cr-ci-poc-*` branch** that adds it under
+`.github/workflows/`: `workflow_dispatch` would need the file on the default
+branch, and the fork's main must mirror upstream. This is a P6 step and needs
+ptone's go-ahead. The exact commands and the cleanup (branch and caches) are in
+[workflows/README.md](../workflows/README.md#running-the-poc-a-push-triggered-throwaway-branch):
 
 ```bash
-gh workflow run cr-runner-poc.yml --repo ptone/scion -f runner-label=scion-cr-8c32g
-gh run watch --repo ptone/scion "$(gh run list --repo ptone/scion --workflow cr-runner-poc.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+git push origin cr-ci-poc-1             # a branch whose only change is .github/workflows/cr-ci-poc.yml
+gh run watch --repo ptone/scion "$(gh run list --repo ptone/scion --branch cr-ci-poc-1 --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
 What to check is listed in [step 9](#9-verify-a-routed-job). The complete P6
@@ -428,9 +439,13 @@ uninstall the App (G17): the App's installation page, **Suspend** or
 After the PoC dispatch, or after setting the variable and pushing to a
 branch with an open same-repo pull request:
 
-1. **GitHub:** the job leaves "Waiting for a runner" within about 20 s.
-   **Settings**, **Actions**, **Runners** briefly shows `cr-job-<job id>`,
-   and the runner disappears by itself after the job.
+1. **GitHub:** the job leaves "Waiting for a runner" (P6b in us-west2: 17-18 s warm;
+   P6 in us-central1: 40-67 s, mostly Cloud Run's start). **Settings**, **Actions**, **Runners** briefly shows
+   `cr-job-<job id>`, and the runner disappears by itself after the job. Use the
+   UI (repo admin) for this: the runners API
+   (`gh api repos/OWNER/REPO/actions/runners`) needs repository Administration
+   read, and a personal access token without it gets 403 (seen in P6). The
+   mediator's `reconcile` lines (`runners_reaped`) show its own view.
 2. **Mediator log:** a `dispatch` line for the job, then `claim_consumed`:
 
    ```bash

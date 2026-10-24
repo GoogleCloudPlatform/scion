@@ -422,7 +422,7 @@ func TestCloudRunSandboxStarting_WriteFailureNoRun(t *testing.T) {
 func TestCloudRunSandboxStarting_SelfFailedNoDelete(t *testing.T) {
 	rt, env := newStartingRuntime(t, startScripts{run: `echo "sandbox dev already exists" >&2; exit 1`})
 	_, err := rt.Run(context.Background(), startingCfg(t, "run-a"))
-	if err == nil || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run failed: ") || !strings.Contains(err.Error(), "already exists") {
+	if err == nil || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run of sandbox ") || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("Run = %v, want the unchanged run-failed error", err)
 	}
 	wantDeletes(t, env.log, 0)
@@ -481,7 +481,7 @@ func TestCloudRunSandboxStarting_NeverStartedNoDelete(t *testing.T) {
 		}
 	})
 	_, err := rt.Run(context.Background(), startingCfg(t, "run-a"))
-	if !errors.Is(err, fs.ErrNotExist) || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run failed: ") {
+	if !errors.Is(err, fs.ErrNotExist) || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run of sandbox ") {
 		t.Fatalf("Run = %v, want the run-failed error wrapping not-exist", err)
 	}
 	wantDeletes(t, env.log, 0)
@@ -554,7 +554,7 @@ func TestCloudRunSandboxStarting_SyncCancelForcedDelete(t *testing.T) {
 				if !errors.Is(err, context.Canceled) || err.Error() != context.Canceled.Error() {
 					t.Errorf("Run = %v, want bare context.Canceled", err)
 				}
-			} else if err == nil || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run failed: ") {
+			} else if err == nil || !strings.HasPrefix(err.Error(), "cloudrun-sandbox: run of sandbox ") {
 				t.Errorf("Run = %v, want the run-failed error", err)
 			}
 			wantDeletes(t, env.log, 1)

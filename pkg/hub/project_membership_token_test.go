@@ -315,6 +315,48 @@ func TestMembershipToken_CannotGrantRoleAboveCaller(t *testing.T) {
 	assert.Len(t, mmrBindingsFor(t, f.store, "user", viaPut.ID, f.projectID), 2)
 }
 
+// TestMembershipToken_ProjectMemberGrantNeedsChatPostSelector pins that a
+// token grants the built-in project-member role only when it carries the
+// project:chat_post selector (ptone/scion#5518): the role holds
+// project.chat_post, and a token keeps it for delegation only through that
+// selector. Without it the grant is refused and nothing is written.
+func TestMembershipToken_ProjectMemberGrantNeedsChatPostSelector(t *testing.T) {
+	f := setupMMRFixture(t)
+	project := projectBoundary(f.projectID)
+	require.Contains(t, f.memberRD.Permissions, "project.chat_post", "project-member holds project.chat_post")
+
+	var selectors, withoutChatPost []string
+	for _, p := range f.memberRD.Permissions {
+		sel := bearerMatrixSelector(p)
+		require.NotEmpty(t, sel, "%s maps to a selector", p)
+		if !projectBoundaryEligible(p) {
+			continue
+		}
+		selectors = append(selectors, sel)
+		if sel != "project:chat_post" {
+			withoutChatPost = append(withoutChatPost, sel)
+		}
+	}
+	require.Contains(t, selectors, "project:chat_post")
+	require.Len(t, withoutChatPost, len(selectors)-1)
+
+	lacksChatPost := mtMint(t, f.srv, f.owner.ID, project, append(withoutChatPost, "project:manage")...)
+	refused := grpUser(t, f.store, t.Name()+"-refused", "Refused")
+	rec := doRequestWithUAT(t, f.srv, lacksChatPost, http.MethodPost, legacyMembersPath(f.projectID),
+		addProjectMemberRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: refused.ID})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeTargetRoleProtected, mtErrCode(rec), rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project.chat_post", "the refusal names the uncovered permission")
+	assert.Empty(t, mmrBindingsFor(t, f.store, "user", refused.ID, f.projectID), "nothing is written")
+
+	withChatPost := mtMint(t, f.srv, f.owner.ID, project, append(selectors, "project:manage")...)
+	granted := grpUser(t, f.store, t.Name()+"-granted", "Granted")
+	rec = doRequestWithUAT(t, f.srv, withChatPost, http.MethodPost, legacyMembersPath(f.projectID),
+		addProjectMemberRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: granted.ID})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", granted.ID, f.projectID), 1)
+}
+
 // TestMembershipToken_LastOwnerProtected pins that the sole owner's token
 // cannot remove or demote the last owner on any membership route.
 func TestMembershipToken_LastOwnerProtected(t *testing.T) {

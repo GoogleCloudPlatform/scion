@@ -129,6 +129,10 @@ type CascadeSummary struct {
 	// DelegationEdgeOpID is the operation ID stamped on every edge
 	// deactivated by the delete; empty when no edge was deactivated.
 	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
+	// AgentDelegationGrants is the number of agent delegation grants of
+	// the project's agents revoked by the delete; their credentials are
+	// revoked with them.
+	AgentDelegationGrants int `json:"agent_delegation_grants_revoked"`
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +405,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 // DB settings overlay, if installed) so this can never be influenced by a
 // project's own settings.yaml.
 func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, projectID string) {
-	// Mirrors resolveNFSSharedDirPath's fail-closed rule. Deletion is
+	// Mirrors the shared-dir browser's fail-closed rule. Deletion is
 	// best-effort by design (it never blocks or rolls back the DB deletion),
 	// so "fail closed" here means logging an ERROR instead of silently
 	// skipping cleanup, rather than refusing the request outright.
@@ -780,6 +784,18 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		}
 	}
 
+	// 16b. Agent delegation grants — every unrevoked grant bound to an
+	// agent of the project (soft-deleted ones included) and the
+	// credentials exchanged from it. The project delete runs no agent
+	// lifecycle hooks, and grant rows have no foreign key to the agent, so
+	// they are revoked here, each with its own revocation audit
+	// (.design/agent-delegation.md §16.3).
+	if n, err := revokeProjectAgentDelegationGrantsTx(ctx, tx, projectID, auditActorFromContext(ctx), svc.nowFunc().UTC()); err != nil {
+		return cs, err
+	} else {
+		cs.AgentDelegationGrants = n
+	}
+
 	// ---------------------------------------------------------------------------
 	// Cascade inventory disposition — complete project-linked table audit
 	//
@@ -804,6 +820,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// |   (DB: project_contributors — store layer uses "provider" vocabulary)              |          |
 	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
 	// | delegation_edges       | Transactional: deactivated, rows kept (step 16)          | Auth     |
+	// | agent_delegation_grants| Transactional: revoked, rows kept (step 16b)             | Auth     |
+	// |   (+ agent_delegated_credentials, revoked with each grant)                          |          |
 	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 17)  | Runtime  |
 	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | notification_subs      | Explicit code in CompositeStore.DeleteProject            | Data     |

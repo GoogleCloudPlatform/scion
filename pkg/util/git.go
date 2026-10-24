@@ -18,9 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +39,7 @@ func IsGitRepo() bool {
 // IsGitRepoDir returns true if the specified directory is inside a git repository.
 func IsGitRepoDir(dir string) bool {
 	args := []string{"rev-parse", "--is-inside-work-tree"}
-	cmd := exec.Command("git", args...)
+	cmd := hostGit(args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -84,12 +84,12 @@ func (e *GitOwnershipError) Is(target error) bool {
 // case it returns false and a *GitOwnershipError. Any other git failure
 // returns (false, nil), as IsGitRepoDir does.
 func CheckGitRepoDir(dir string) (bool, error) {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd := hostGit("rev-parse", "--is-inside-work-tree")
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	// Force untranslated git messages so the stderr match is locale-stable.
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -240,8 +240,7 @@ func RepoRoot() (string, error) {
 
 // RepoRootDir returns the absolute path to the root of the git repository for the specified directory.
 func RepoRootDir(dir string) (string, error) {
-	args := []string{"rev-parse", "--show-toplevel"}
-	cmd := exec.Command("git", args...)
+	cmd := hostGit("rev-parse", "--show-toplevel")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -262,8 +261,7 @@ func RepoRootDir(dir string) (string, error) {
 
 // GetCommonGitDir returns the absolute path to the common git directory (the main .git dir).
 func GetCommonGitDir(dir string) (string, error) {
-	args := []string{"rev-parse", "--git-common-dir"}
-	cmd := exec.Command("git", args...)
+	cmd := hostGit("rev-parse", "--git-common-dir")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -287,7 +285,7 @@ func GetCommonGitDir(dir string) (string, error) {
 
 // IsIgnored returns true if the given path is ignored by git.
 func IsIgnored(dir, path string) bool {
-	cmd := exec.Command("git", "check-ignore", "-q", path)
+	cmd := hostGit("check-ignore", "-q", path)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -319,17 +317,28 @@ func CreateWorktree(path, branch string) error {
 	// git worktree add --relative-paths -b <branch> <path>
 	// We run from root to ensure --relative-paths are calculated from root.
 	// LC_ALL=C keeps git's messages in English, so the matches below hold.
-	gitEnv := append(os.Environ(), "LC_ALL=C")
-	cmd := exec.Command("git", "worktree", "add", "--relative-paths", "-b", branch, path)
-	cmd.Dir = root
-	cmd.Env = gitEnv
+	// The checkout runs without repository hooks or repository-defined
+	// filter commands (HostGitCommand): agents can write this repository.
+	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	ctx := context.Background()
+	// git-lfs on a host-side checkout would otherwise take its endpoint from
+	// a tracked .lfsconfig; pin the endpoint from the trusted origin remote
+	// instead (lfs.url via -c outranks .lfsconfig). When the endpoint cannot
+	// be derived (for example an ssh remote), skip the smudge and warn.
+	lfsOpt := lfsOptionForLinkedCheckout(root)
+	opts := HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked, SkipLFSSmudge: lfsOpt.skipSmudge, LFSURL: lfsOpt.url}
+	cmd, err := HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", "-b", branch, path)
+	if err != nil {
+		return fmt.Errorf("failed to create worktree: %w", err)
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		outputStr := string(output)
 		// If branch already exists, try to just add it
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.Command("git", "worktree", "add", "--relative-paths", path, branch)
-			cmd.Dir = root
-			cmd.Env = gitEnv
+			cmd, err = HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", path, branch)
+			if err != nil {
+				return fmt.Errorf("failed to create worktree: %w", err)
+			}
 			if output, err := cmd.CombinedOutput(); err != nil {
 				outputStr = string(output)
 				if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
@@ -338,11 +347,174 @@ func CreateWorktree(path, branch string) error {
 				}
 				return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 			}
+			if lfsOpt.skipSmudge {
+				warnLFSPointersNotFetched(path)
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 	}
+	if lfsOpt.skipSmudge {
+		warnLFSPointersNotFetched(path)
+	}
 	return nil
+}
+
+// lfsCheckoutOption is how a host-side linked checkout handles git-lfs.
+type lfsCheckoutOption struct {
+	url        string // pinned lfs.url (empty when none)
+	skipSmudge bool   // skip the LFS smudge instead
+}
+
+// lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
+// checkout at root:
+//   - pin the endpoint (and its auth mode to basic) derived from the origin
+//     remote URL when the origin is http(s) AND the checked-out .lfsconfig
+//     neither names its own endpoint nor sets any lfs.<url>.access; otherwise
+//   - skip the smudge (an ssh/scp or absent origin, or a tracked .lfsconfig
+//     that names an endpoint or an access mode — its objects may legitimately
+//     live on a separate server, or it may select an auth mode we will not
+//     use; either way we do not pin and never contact it).
+func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
+	// A tracked .lfsconfig that sets an endpoint or an access mode: do not pin
+	// (the origin endpoint may not serve these objects, and an access key could
+	// select ambient credentials) and do not contact it; skip.
+	if lfsConfigNamesEndpoint(root) {
+		return lfsCheckoutOption{skipSmudge: true}
+	}
+	remote := strings.TrimSpace(GetGitRemoteDir(root))
+	if remote == "" {
+		return lfsCheckoutOption{skipSmudge: true}
+	}
+	if endpoint, ok := DeriveLFSEndpoint(remote); ok {
+		return lfsCheckoutOption{url: endpoint}
+	}
+	return lfsCheckoutOption{skipSmudge: true}
+}
+
+// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD names
+// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or sets any
+// per-endpoint lfs.<url>.access. It reads HEAD:.lfsconfig as data (host-side
+// git with the fixed pins); a missing file means no endpoint.
+func lfsConfigNamesEndpoint(root string) bool {
+	out, err := hostGit("-C", root, "show", "HEAD:.lfsconfig").Output()
+	if err != nil {
+		return false
+	}
+	vars, err := parseGitConfigFile(out)
+	if err != nil {
+		return false
+	}
+	for _, v := range vars {
+		if v.Section == "lfs" && !v.HasSubsection && (v.Name == "url" || v.Name == "pushurl") {
+			return true
+		}
+		if v.Section == "remote" && v.HasSubsection && v.Name == "lfsurl" {
+			return true
+		}
+		// Any per-endpoint lfs.<url>.access in the committed .lfsconfig: skip the
+		// smudge rather than pin. git-lfs matches lfs.<url>.access keys by URL
+		// equivalence (explicit :443, trailing slash, …), so a pinned
+		// lfs.<endpoint>.access=basic cannot reliably override one spelled
+		// differently; refusing to pin (and never contacting the endpoint)
+		// closes that without reimplementing git-lfs's URL normalisation.
+		if v.Section == "lfs" && v.HasSubsection && v.Name == "access" {
+			return true
+		}
+	}
+	return false
+}
+
+// warnLFSPointersNotFetched scans the checkout at path for git-lfs pointer
+// files (left in place when the smudge was skipped) and logs a warning that
+// names them and says how to fetch the objects. It only runs when the
+// repository tracks LFS content (a .gitattributes assigns filter=lfs), looks
+// only at regular files (never following a symlink or opening a device/FIFO),
+// and reads a bounded prefix. It is best effort and never fails the checkout.
+func warnLFSPointersNotFetched(path string) {
+	if !repoTracksLFS(path) {
+		return
+	}
+	var pointers []string
+	const maxList = 50
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Regular files only: WalkDir's DirEntry is lstat-based, so a symlink
+		// reports a non-regular type and is skipped without being followed.
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if isLFSPointerFile(p) {
+			if rel, relErr := filepath.Rel(path, p); relErr == nil {
+				pointers = append(pointers, rel)
+			} else {
+				pointers = append(pointers, p)
+			}
+			if len(pointers) >= maxList {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if len(pointers) == 0 {
+		return
+	}
+	slog.Warn("git-lfs objects were not fetched on the host checkout; the files hold LFS pointers. Fetch them yourself with 'git lfs pull' in the checkout",
+		"path", path, "pointer_files", pointers, "command", "git lfs pull")
+}
+
+// repoTracksLFS reports whether a .gitattributes in the checkout root assigns
+// the lfs filter to anything. A cheap gate so a non-LFS checkout is not
+// scanned file by file. It reads the file safely (regular files only, never
+// following a symlink or blocking on a FIFO/device), so a tracked
+// .gitattributes that is a symlink to a FIFO cannot hang the checkout.
+func repoTracksLFS(path string) bool {
+	data, ok := readRegularFilePrefix(filepath.Join(path, ".gitattributes"), 1<<16)
+	if !ok {
+		return false
+	}
+	return strings.Contains(string(data), "filter=lfs")
+}
+
+// isLFSPointerFile reports whether the regular file at p begins with the
+// git-lfs pointer header.
+func isLFSPointerFile(p string) bool {
+	data, ok := readRegularFilePrefix(p, 64)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(string(data), "version https://git-lfs.")
+}
+
+// readRegularFilePrefix reads up to limit bytes from a regular file at path.
+// On unix it opens with O_NOFOLLOW|O_NONBLOCK (so a symlink cannot redirect it
+// and a FIFO/device cannot block it); on other platforms it refuses a symlink
+// or non-regular file with Lstat before opening. On every platform it then
+// confirms via fstat that the opened file is regular. ok is false for a
+// symlink, a non-regular file, or any error.
+func readRegularFilePrefix(path string, limit int64) ([]byte, bool) {
+	f, err := openRegularFileNoFollow(path)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // WorktreeBranchHeldError reports that branch cannot be checked out because
@@ -409,15 +581,29 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 // path (e.g. one sourced from stored/discovered state rather than freshly
 // created here) must not have it silently honored.
 //
+// repoRoot and branch come from the caller, never from the worktree: no git
+// command runs inside the worktree, and its own metadata files (the .git
+// pointer, the admin directory's commondir and HEAD) never choose which
+// repository is changed or which branch is deleted. repoRoot is the main
+// repository the worktree belongs to; when it is empty, or is not a main
+// repository (see BaseRepoGitCommand), the worktree entry and the branch
+// are left alone. branch is the branch to delete; when it is empty no
+// branch is deleted. The branch is deleted only when the worktree's admin
+// directory in repoRoot shows the worktree checked out on exactly that
+// branch (worktreeOnBranch), and only through DeleteBranchIn.
+//
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
 // container-internal paths), this function:
-//  1. Gathers git metadata (branch name, repo root) while the worktree exists.
+//  1. Checks, while the worktree exists, whether it is on branch in repoRoot.
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
 //  3. Removes the now-stale record of this worktree only
 //     (RemoveWorktreeEntryIn), never a repository-wide prune.
-func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
+//  4. Deletes branch, if step 1 matched.
+//
+// It reports whether the branch was deleted.
+func RemoveWorktree(base, path, repoRoot, branch string) (bool, error) {
 	// Every failure from here through the containment check is a pre-removal
 	// validation failure, not a removal-mechanics failure — none of them have
 	// proven path safe to act on, so all of them wrap ErrPathNotContained
@@ -448,29 +634,22 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 		return false, fmt.Errorf("RemoveWorktree: %q does not resolve under %q: %w", path, base, ErrPathNotContained)
 	}
 
-	var branchName string
-	var repoRoot string
-	branchDeleted := false
-
-	// Get the common git dir (main repo's .git dir) — needed for both
-	// pruning and optional branch deletion.
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
-	if err == nil {
-		commonDir := strings.TrimSpace(string(output))
-		if !filepath.IsAbs(commonDir) {
-			// If relative, it's relative to the worktree root
-			commonDir = filepath.Join(path, commonDir)
+	if repoRoot != "" {
+		if _, err := baseRepoGitDir(repoRoot); err != nil {
+			slog.Warn("remove worktree: not a main repository; leaving its worktree entry and branch alone",
+				"path", resolvedPath, "repo_root", repoRoot, "error", err)
+			repoRoot = ""
 		}
-		repoRoot = filepath.Dir(commonDir)
 	}
 
-	if deleteBranch {
-		// Get branch name
-		cmd = exec.Command("git", "-C", path, "branch", "--show-current")
-		output, err = cmd.Output()
-		if err == nil {
-			branchName = strings.TrimSpace(string(output))
+	// Read before the directory (which holds the .git pointer) is removed.
+	onBranch := false
+	if repoRoot != "" && branch != "" {
+		var reason string
+		onBranch, reason = worktreeOnBranch(resolvedPath, repoRoot, branch)
+		if !onBranch {
+			slog.Warn("remove worktree: worktree is not on the expected branch of the repository; the branch is not deleted",
+				"path", resolvedPath, "repo_root", repoRoot, "branch", branch, "reason", reason)
 		}
 	}
 
@@ -502,19 +681,133 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 		}
 	}
 
-	if deleteBranch && branchName != "" && repoRoot != "" {
-		// Now delete the branch from the main repo
-		Debugf("RemoveWorktree: deleting branch %s", branchName)
-		branchDeleteStart := time.Now()
-		cmd := exec.Command("git", "-C", repoRoot, "branch", "-D", branchName)
-		if err := cmd.Run(); err == nil {
-			branchDeleted = true
-			Debugf("RemoveWorktree: branch delete completed in %v", time.Since(branchDeleteStart))
-		} else {
-			Debugf("RemoveWorktree: branch delete failed in %v: %v", time.Since(branchDeleteStart), err)
-		}
+	if !onBranch {
+		return false, nil
 	}
-	return branchDeleted, nil
+	Debugf("RemoveWorktree: deleting branch %s", branch)
+	branchDeleteStart := time.Now()
+	deleted := DeleteBranchIn(repoRoot, branch)
+	Debugf("RemoveWorktree: branch delete (deleted: %v) completed in %v", deleted, time.Since(branchDeleteStart))
+	return deleted, nil
+}
+
+// worktreeOnBranch reports whether the worktree at path is a linked
+// worktree of the main repository at repoRoot checked out on branch, reading
+// the files git would read but without running git in the worktree. Each
+// file is read with readSmallRegularFile: a symlink, a FIFO or other special
+// file, or content over smallGitFileMax bytes fails the check. All of these
+// must hold:
+//   - path/.git is a "gitdir:" file naming a directory directly under
+//     repoRoot/.git/worktrees (compared with symlinks resolved);
+//   - that admin directory's commondir file names repoRoot/.git;
+//   - its HEAD file is exactly "ref: refs/heads/<branch>".
+//
+// The reason names the first check that failed.
+func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
+	data, err := readSmallRegularFile(filepath.Join(path, ".git"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read worktree .git file: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	gitdir, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok || strings.ContainsAny(line, "\n") {
+		return false, "worktree .git is not a single gitdir line"
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(path, gitdir)
+	}
+	adminDir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return false, fmt.Sprintf("resolve worktree gitdir: %v", err)
+	}
+	commonDir, err := filepath.EvalSymlinks(filepath.Join(repoRoot, ".git"))
+	if err != nil {
+		return false, fmt.Sprintf("resolve repository .git: %v", err)
+	}
+	if filepath.Dir(adminDir) != filepath.Join(commonDir, "worktrees") {
+		return false, "worktree gitdir is not an admin directory of the repository"
+	}
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "commondir"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read commondir: %v", err)
+	}
+	named := strings.TrimSpace(string(data))
+	if !filepath.IsAbs(named) {
+		named = filepath.Join(adminDir, named)
+	}
+	if resolved, err := filepath.EvalSymlinks(named); err != nil || resolved != commonDir {
+		return false, "commondir does not name the repository"
+	}
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "HEAD"), smallGitFileMax)
+	if err != nil {
+		return false, fmt.Sprintf("read HEAD: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "ref: refs/heads/"+branch {
+		return false, "HEAD is not the expected branch"
+	}
+	return true, ""
+}
+
+// baseRepoGitTimeout bounds each git command RemoveWorktreeEntryIn and
+// DeleteBranchIn run, so a repository file that makes git wait (for
+// example a FIFO) cannot hold the caller forever.
+var baseRepoGitTimeout = 2 * time.Minute
+
+// baseRepoGitDir returns repoRoot's .git directory once repoRoot is shown to
+// be a main repository: an absolute path whose .git is a directory (not a
+// gitdir file) without a commondir file. It returns an error otherwise.
+func baseRepoGitDir(repoRoot string) (string, error) {
+	if repoRoot == "" || !filepath.IsAbs(repoRoot) {
+		return "", fmt.Errorf("repository root %q must be an absolute path", repoRoot)
+	}
+	gitDir := filepath.Join(repoRoot, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil {
+		return "", fmt.Errorf("repository root %q: %w", repoRoot, err)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("repository root %q: .git is not a directory", repoRoot)
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		return "", fmt.Errorf("repository root %q: .git has a commondir file", repoRoot)
+	}
+	return gitDir, nil
+}
+
+// BaseRepoGitCommand returns a git command that acts on the main repository
+// at repoRoot and nothing else. GIT_DIR and GIT_COMMON_DIR are pinned to
+// repoRoot/.git, so git does not discover the repository from the current
+// directory or follow any worktree's metadata; GIT_* variables inherited
+// from the process are dropped except the set HostGitEnv keeps (the host
+// user's own config and transport/auth — GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM,
+// GIT_SSH*, GIT_ASKPASS, GIT_SSL_CA*, GIT_ALLOW_PROTOCOL,
+// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set; core.hooksPath points at an empty
+// location (os.DevNull), so hook files in the repository are not run; and
+// the file-system monitor is off. It returns an error, and no command, when
+// repoRoot is not a main repository (baseRepoGitDir).
+//
+// git still reads the repository's own configuration. core.hooksPath does
+// not cover hooks defined in configuration (hook.<name>.command with
+// hook.<name>.event, directly or through include.path), so such a hook in
+// the repository's configuration still runs for the commands built here
+// (for example reference-transaction on branch -D). Making the repository
+// configuration read-only from agent containers is a follow-up.
+func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	gitDir, err := baseRepoGitDir(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	// Host-side git on the base repository runs with the fixed settings and the
+	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
+	// hooks, no fsmonitor, and credential helpers supplied through the environment
+	// are dropped, with the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than
+	// by anything the worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir, "LC_ALL=C")
+	return cmd, nil
 }
 
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
@@ -548,8 +841,10 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if repoRoot == "" || path == "" {
 		return nil
 	}
-	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...), nil
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	return RemoveWorktreeEntry(ctx, path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return BaseRepoGitCommand(ctx, repoRoot, args...)
 	})
 }
 
@@ -693,10 +988,21 @@ func resolveMissingPath(path string) (resolved string, state resolveState, err e
 	return filepath.Join(append([]string{resolvedDir}, tail...)...), resolvedWithin, nil
 }
 
-// DeleteBranchIn deletes a git branch from the specified repository root.
-// Returns true if the branch was deleted, false otherwise.
+// DeleteBranchIn deletes a git branch from the main repository at repoRoot,
+// through BaseRepoGitCommand (repository pinned, hook files not run; see
+// there for configuration-defined hooks) with "--" before
+// the branch name. A branch name that is empty or starts with "-" is
+// refused. Returns true if the branch was deleted, false otherwise.
 func DeleteBranchIn(repoRoot, branchName string) bool {
-	cmd := exec.Command("git", "-C", repoRoot, "branch", "-D", branchName)
+	if branchName == "" || strings.HasPrefix(branchName, "-") {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	cmd, err := BaseRepoGitCommand(ctx, repoRoot, "branch", "-D", "--", branchName)
+	if err != nil {
+		return false
+	}
 	return cmd.Run() == nil
 }
 
@@ -709,7 +1015,7 @@ func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 	if repoRoot == "" {
 		return "", fmt.Errorf("find worktree for branch %q: no repository directory given", branchName)
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	cmd := hostGit("-C", repoRoot, "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -787,7 +1093,7 @@ func IsRegisteredWorktree(repoRoot, path string) (bool, error) {
 	}
 	worktreesDir := filepath.Join(resolvedCommonDir, "worktrees")
 
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	cmd := hostGit("-C", repoRoot, "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git worktree list: %w", err)
@@ -915,7 +1221,7 @@ func BranchExistsIn(repoRoot, branchName string) bool {
 	if repoRoot == "" {
 		return false
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
+	cmd := hostGit("-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
 	err := cmd.Run()
 	return err == nil
 }
@@ -928,7 +1234,7 @@ func GetGitRemote() string {
 
 // GetGitRemoteDir returns the origin remote URL of the repository at the specified directory.
 func GetGitRemoteDir(dir string) string {
-	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd := hostGit("remote", "get-url", "origin")
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -1280,61 +1586,48 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 	return parts[len(parts)-2], parts[len(parts)-1]
 }
 
-// authenticatedCloneURL embeds OAuth2 credentials in an HTTPS clone URL.
-//
-// It parses the URL rather than substituting on the scheme prefix: a remote
-// that already carries userinfo (Azure DevOps emits
-// "https://org@dev.azure.com/org/project/_git/repo") would otherwise end up
-// with two "@" separators and fail to resolve. url.UserPassword also escapes
-// tokens containing reserved characters.
-//
-// Only https remotes are rewritten. The previous implementation keyed off the
-// literal "https://" prefix, so ssh:// and git:// remotes were left alone;
-// url.Parse alone would happily inject an OAuth token into those, so the
-// scheme is checked explicitly to preserve that behaviour.
-//
-// The original URL is returned unchanged when there is no token, when it
-// cannot be parsed, and when it is not https.
-func authenticatedCloneURL(cloneURL, token string) string {
-	if token == "" {
-		return cloneURL
-	}
-	parsed, err := url.Parse(cloneURL)
-	if err != nil || parsed.Scheme != "https" {
-		return cloneURL
-	}
-	parsed.User = url.UserPassword("oauth2", token)
-	return parsed.String()
-}
-
 // CloneSharedWorkspace clones a git repository into the specified workspace path
-// for use as a shared workspace project. It configures git identity and optionally
-// uses a token for authentication.
+// for use as a shared workspace project. It configures git identity and
+// optionally authenticates with a token.
+//
+// The token is never embedded in the clone URL (which would persist it in the
+// workspace .git/config, readable by agents). Instead it is supplied through a
+// credential helper scoped to the clone URL's host (ScopedCredentialHelperEnv),
+// and only for an http(s) URL; for any other URL the token is ignored. The
+// clone runs with the LFS smudge skipped, so git-lfs never contacts an endpoint
+// from a tracked .lfsconfig with the host's credentials.
 //
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
-	authURL := authenticatedCloneURL(cloneURL, token)
+	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	env := baseEnv
+	if token != "" {
+		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+			env = scoped
+		}
+		// Non-http(s) URL: the token is ignored, matching the previous
+		// behaviour where it was only ever injected for https.
+	}
+
+	runClone := func(args ...string) ([]byte, error) {
+		cmd := hostGit(args...)
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
 
 	args := []string{"clone"}
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, authURL, workspacePath)
-
-	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	output, err := cmd.CombinedOutput()
+	args = append(args, cloneURL, workspacePath)
+	output, err := runClone(args...)
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
 		_ = os.RemoveAll(workspacePath)
-
-		fallbackArgs := []string{"clone", authURL, workspacePath}
-		fallbackCmd := exec.Command("git", fallbackArgs...)
-		fallbackCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		output, err = fallbackCmd.CombinedOutput()
+		output, err = runClone("clone", cloneURL, workspacePath)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 			gitErr := ClassifyGitError(sanitized)
@@ -1344,8 +1637,9 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 		}
 
-		// Create the requested branch locally
-		checkoutCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branch)
+		// Create the requested branch locally.
+		checkoutCmd := hostGit("-C", workspacePath, "checkout", "-b", branch)
+		checkoutCmd.Env = env
 		if checkoutOut, checkoutErr := checkoutCmd.CombinedOutput(); checkoutErr != nil {
 			return fmt.Errorf("failed to create local branch %q: %s", branch, strings.TrimSpace(string(checkoutOut)))
 		}
@@ -1365,10 +1659,11 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return fmt.Errorf("failed to configure git user.email: %w", err)
 	}
 
-	if token != "" {
-		if err := gitConfig(workspacePath, "remote.origin.url", cloneURL); err != nil {
-			Debugf("CloneSharedWorkspace: failed to sanitize remote URL: %v", err)
-		}
+	// Pin remote.origin.url to the clean clone URL. The token was never in the
+	// URL, so this is belt-and-braces; a failure to assert it is FATAL rather
+	// than logged, so a credential can never be left in the shared .git/config.
+	if err := gitConfig(workspacePath, "remote.origin.url", cloneURL); err != nil {
+		return fmt.Errorf("failed to set a clean remote.origin.url: %w", err)
 	}
 
 	return nil
@@ -1394,40 +1689,91 @@ type PullResult struct {
 	Commits []PullCommitInfo `json:"commits,omitempty"`
 }
 
-// PullSharedWorkspace runs `git pull` in the specified workspace path to update
-// it from the remote. It optionally uses a token for authentication and sanitizes
-// credentials from error output. Returns structured commit information.
-func PullSharedWorkspace(workspacePath, token string) (*PullResult, error) {
-	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+// PullSharedWorkspace updates the current branch of the shared workspace
+// at workspacePath from cloneURL, the project's clone URL as the hub knows
+// it, fast-forward only. It optionally uses a token for authentication and
+// sanitizes credentials from error output. Returns structured commit
+// information.
+//
+// Agents can write the workspace's .git, so the remote is cloneURL rather
+// than the workspace's configured remote, and git runs through
+// HostGitCommand: no repository hooks, no repository-defined filter
+// commands, and a workspace config that sets transport, credential or
+// include keys is refused (RepoConfigRefusedError). The branch fetched is the
+// current branch's configured upstream branch, or the current branch's own
+// name; it is fetched into refs/remotes/origin/<branch>.
+func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, error) {
+	pullErr := func(msg string) error {
+		msg = sanitizeGitOutput(msg, token)
+		gitErr := ClassifyGitError(msg)
+		if guidance := gitErr.UserGuidance(); guidance != "" {
+			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s (%s)", msg, guidance)}
+		}
+		return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s", msg)}
+	}
+	if cloneURL == "" {
+		return nil, pullErr("the shared workspace has no clone URL")
+	}
 
-	// If a token is provided, configure a temporary credential helper via env
+	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+
+	// The fetch talks to the clone URL and may need the token. Scope the
+	// credential helper to that URL's host only, so git never offers the
+	// token to any other endpoint — in particular an LFS endpoint a tracked
+	// .lfsconfig might name. The merge/checkout step below gets no credential
+	// config at all and skips the LFS smudge, so no host-side checkout can
+	// leak the token to an agent-chosen endpoint.
+	fetchEnv := baseEnv
 	if token != "" {
-		// Use a one-shot credential helper that provides the token
-		helper := fmt.Sprintf("!f() { echo username=oauth2; echo password=%s; }; f", token)
-		env = append(env,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=credential.helper",
-			"GIT_CONFIG_VALUE_0="+helper,
-		)
+		// Only an http(s) clone URL can carry a host-scoped credential helper.
+		// For an ssh/scp or local-path URL the token is ignored (git uses its
+		// own transport auth), rather than failing the pull.
+		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+			fetchEnv = scoped
+		}
+	}
+
+	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		return nil, pullErr("the workspace is not on a branch: " + strings.TrimSpace(string(branchOut)))
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	remoteBranch := branch
+	if merge, err := hostGit("-C", workspacePath, "config", "--get", "branch."+branch+".merge").Output(); err == nil {
+		if name := strings.TrimPrefix(strings.TrimSpace(string(merge)), "refs/heads/"); name != "" {
+			remoteBranch = name
+		}
+	}
+	trackingRef := "refs/remotes/origin/" + remoteBranch
+	if out, err := hostGit("check-ref-format", trackingRef).CombinedOutput(); err != nil {
+		return nil, pullErr(fmt.Sprintf("invalid branch name %q: %s", remoteBranch, strings.TrimSpace(string(out))))
 	}
 
 	// Capture HEAD before pulling so we can enumerate new commits afterward.
-	oldHead, _ := exec.Command("git", "-C", workspacePath, "rev-parse", "HEAD").Output()
+	oldHead, _ := hostGit("-C", workspacePath, "rev-parse", "HEAD").Output()
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
-	cmd := exec.Command("git", "-C", workspacePath, "pull", "--ff-only")
-	cmd.Env = env
-	output, err := cmd.CombinedOutput()
-	sanitized := sanitizeGitOutput(strings.TrimSpace(string(output)), token)
+	ctx := context.Background()
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true},
+		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
-		gitErr := ClassifyGitError(sanitized)
-		if guidance := gitErr.UserGuidance(); guidance != "" {
-			return nil, &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s (%s)", sanitized, guidance)}
-		}
-		return nil, &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s", sanitized)}
+		return nil, pullErr(err.Error())
+	}
+	if output, err := fetch.CombinedOutput(); err != nil {
+		return nil, pullErr(strings.TrimSpace(string(output)))
+	}
+	// The merge writes the work tree. It gets no credential config (baseEnv,
+	// not fetchEnv) and skips the LFS smudge, so git-lfs never contacts an
+	// endpoint from a tracked .lfsconfig with the host's credentials.
+	merge, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: baseEnv, SkipLFSSmudge: true}, "merge", "--ff-only", trackingRef)
+	if err != nil {
+		return nil, pullErr(err.Error())
+	}
+	if output, err := merge.CombinedOutput(); err != nil {
+		return nil, pullErr(strings.TrimSpace(string(output)))
 	}
 
-	newHead, _ := exec.Command("git", "-C", workspacePath, "rev-parse", "HEAD").Output()
+	newHead, _ := hostGit("-C", workspacePath, "rev-parse", "HEAD").Output()
 	newHeadStr := strings.TrimSpace(string(newHead))
 
 	result := &PullResult{}
@@ -1437,7 +1783,12 @@ func PullSharedWorkspace(workspacePath, token string) (*PullResult, error) {
 
 	result.Updated = true
 
-	logCmd := exec.Command("git", "-C", workspacePath, "log", "--oneline", "--no-decorate",
+	// git log runs no repository-defined command here (no pager, no
+	// signature display): this relies on the fetch above, whose network
+	// check refuses gpg.*, include and other repository keys outside the
+	// allowlist, and on the merge's config check having passed. Keep it
+	// after both.
+	logCmd := hostGit("-c", "log.showSignature=false", "-C", workspacePath, "log", "--oneline", "--no-decorate",
 		oldHeadStr+".."+newHeadStr)
 	logOut, err := logCmd.Output()
 	if err != nil {
@@ -1463,7 +1814,7 @@ func PullSharedWorkspace(workspacePath, token string) (*PullResult, error) {
 
 // gitConfig sets a git config value in the specified repository.
 func gitConfig(repoPath, key, value string) error {
-	cmd := exec.Command("git", "-C", repoPath, "config", key, value)
+	cmd := hostGit("-C", repoPath, "config", key, value)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s", key, strings.TrimSpace(string(output)))
@@ -1562,7 +1913,9 @@ var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 //
 // NOTE: Project IDs are random UUIDs (see config.GenerateProjectID).  This
 // function is NOT used for project-ID generation — it is retained for other
-// deterministic identifier needs such as cache keys.
+// deterministic identifier needs such as cache keys. LegacyGitProjectID
+// derives the same value for a normalized git remote, but pins its own copy
+// of the namespace, so it does not depend on this function.
 func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
 }
@@ -1578,7 +1931,7 @@ func AppendGitExcludeLine(dir, line string) (string, error) {
 	// Without --path-format=absolute, which would resolve symbolic links,
 	// so that the checks below see a link at info or info/exclude. The
 	// result is relative to dir unless the git directory is elsewhere.
-	cmd := exec.Command("git", "rev-parse", "--git-path", "info/exclude")
+	cmd := hostGit("rev-parse", "--git-path", "info/exclude")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -1643,7 +1996,7 @@ func AppendGitExcludeLine(dir, line string) (string, error) {
 // no existing rule already ignores it. Outside a work tree, or without git,
 // it does nothing.
 func EnsureGitIgnoresFile(dir, name string) error {
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd := hostGit("rev-parse", "--is-inside-work-tree")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != "true" {
@@ -1660,4 +2013,92 @@ func EnsureGitIgnoresFile(dir, name string) error {
 		return fmt.Errorf("the repository at %s un-ignores %s; the rule in %s has no effect", dir, name, excludePath)
 	}
 	return nil
+}
+
+// smallGitFileMax caps how much of a small git metadata file (HEAD, a .git
+// pointer file, commondir) is read. Used by readSmallRegularFile callers.
+const smallGitFileMax = 4096
+
+// ReadSmallRegularFile reads the file at path when it is a regular file of at
+// most limit bytes, rejecting anything else. On unix it opens with O_NOFOLLOW
+// and O_NONBLOCK, so a symlink or FIFO at the path cannot redirect or block the
+// read; on other platforms it rejects a symlink with an Lstat check before
+// opening. It is exported for callers outside this package that read small,
+// broker-owned metadata files.
+func ReadSmallRegularFile(path string, limit int64) ([]byte, error) {
+	return readSmallRegularFile(path, limit)
+}
+
+// hardenedGitCommand returns a git command that reads no system or global
+// configuration and never prompts, for checks whose answer the broker
+// relies on about a repository an agent may be able to write.
+func hardenedGitCommand(dir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
+// IsRegisteredLinkedWorktree reports whether path is a linked worktree (not
+// the main worktree) that git has registered for the repository at
+// repoRoot, matched by resolved path equality like IsRegisteredWorktree.
+// It runs git with hardenedGitCommand. A failure to list returns
+// (false, err); callers must treat that as not verified.
+func IsRegisteredLinkedWorktree(repoRoot, path string) (bool, error) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	out, err := hardenedGitCommand(repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return false, fmt.Errorf("git common dir for %s: %w", repoRoot, err)
+	}
+	resolvedCommonDir, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	worktreesDir := filepath.Join(resolvedCommonDir, "worktrees")
+	output, err := hardenedGitCommand(repoRoot, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return false, fmt.Errorf("git worktree list: %w", err)
+	}
+	for _, record := range splitPorcelainRecords(string(output)) {
+		var wtPath string
+		prunable := false
+		for _, line := range strings.Split(record, "\n") {
+			switch {
+			case strings.HasPrefix(line, "worktree "):
+				wtPath = strings.TrimPrefix(line, "worktree ")
+				if strings.HasPrefix(wtPath, "\"") {
+					if unquoted, uerr := strconv.Unquote(wtPath); uerr == nil {
+						wtPath = unquoted
+					}
+				}
+			case strings.HasPrefix(line, "prunable"):
+				prunable = true
+			}
+		}
+		if wtPath == "" || prunable {
+			continue
+		}
+		resolvedWt, err := filepath.EvalSymlinks(wtPath)
+		if err != nil || resolvedWt != resolvedPath {
+			continue
+		}
+		if isMainWorktreeOf(wtPath, resolvedCommonDir) {
+			return false, nil
+		}
+		return isLinkedWorktreeOf(wtPath, worktreesDir), nil
+	}
+	return false, nil
+}
+
+// HardenedRepoRootDir is RepoRootDir (git rev-parse --show-toplevel run in
+// dir) with hardenedGitCommand, without walking up on failure.
+func HardenedRepoRootDir(dir string) (string, error) {
+	out, err := hardenedGitCommand(dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("git toplevel for %s: %w", dir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

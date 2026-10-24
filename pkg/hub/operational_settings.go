@@ -2241,6 +2241,27 @@ func (o *OperationalSettings) ReadinessMarks() bool {
 	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
 }
 
+// AgentDelegationPolicy returns the narrowing of the hub agent-delegation
+// policy (the "agent_delegation_policy" section). An absent section narrows
+// nothing. A stored document that is unreadable or that the code cannot
+// fully parse returns an error: callers deny rather than treat it as "no
+// narrowing" (.design/agent-delegation.md §11.2 step 9).
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AgentDelegationPolicy() (opsettings.AgentDelegationPolicySettings, error) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.AgentDelegationPolicySectionName]
+	if !ok {
+		return opsettings.AgentDelegationPolicySettings{}, nil
+	}
+	if state.Malformed {
+		return opsettings.AgentDelegationPolicySettings{}, fmt.Errorf("agent_delegation_policy settings: unreadable document")
+	}
+	return opsettings.ParseAgentDelegationPolicyDoc(state.Value)
+}
+
 // Artifacts returns the resolved artifact service settings (the
 // "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
 // the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:

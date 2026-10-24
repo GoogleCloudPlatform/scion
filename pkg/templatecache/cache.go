@@ -168,8 +168,8 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 // exactly the mode modes names for it (ptone/scion#5652), independent of
 // the process umask. A path modes does not name is written 0644, as Put
 // writes every file. Callers normalise modes first (transfer.NormalizeMode)
-// and key entries whose files carry an executable bit with EntryKey, so an
-// entry written before modes were carried is not reused for them.
+// and key entries with EntryKey, which covers the modes, so an entry
+// written with other modes is not reused for them.
 func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes map[string]os.FileMode) (string, error) {
 	if err := validateEntryName(contentHash); err != nil {
 		return "", fmt.Errorf("invalid contentHash: %w", err)
@@ -246,39 +246,32 @@ func (c *Cache) PutWithModes(contentHash string, files map[string][]byte, modes 
 }
 
 // EntryKey returns the cache entry name for a resource with the given
-// content hash and file modes. The content hash does not cover file modes,
-// so a resource with an executable file is keyed by a hash derived from the
-// content hash and its sorted executable paths: entries cached before modes
-// were carried (every file 0644) and entries for the same content with other
-// executable bits are then never reused for it. A resource with no
-// executable file keeps the bare content hash, so its existing entries stay
-// valid.
+// files: transfer.ComputeContentHashV2 over each file's path, normalised
+// mode and content hash (ptone/scion#5658). Two file sets share an entry
+// only when they have the same paths, contents and executable bits, so a
+// rename-only or chmod-only change is never served from the entry of the
+// version before it.
 //
-// The derived key has the same "sha256:<64 hex>" form as a content hash
+// The broker computes the key itself, from the metadata manifest for a
+// lookup and from the downloaded files for a store, so it does not depend
+// on which content hash version the hub records (v1 while the
+// hub.content_hash_v2 experiment is off, on a hub before ptone/scion#5658,
+// or for a row not committed since; v2 otherwise). For the
+// same reason it replaces the interim key of ptone/scion#5652, which
+// derived a key from the hub's content hash and the executable paths.
+// Entries stored under the earlier keys (a bare v1 content hash, or that
+// interim key) are never looked up again; they stay until LRU eviction
+// removes them, so a lookup by an agent's recorded TemplateHash still
+// finds them meanwhile.
+//
+// The key has the "sha256:<64 hex>" form of a content hash
 // (transfer.IsContentHash), because the broker treats a hydrated template
 // directory's name as the template hash it records for the agent
-// (agent-info TemplateHash) and later looks up in this cache. For a
-// resource with executables that recorded hash is therefore this key,
-// not the hub's ContentHash; it is only ever used as a cache key.
-func EntryKey(contentHash string, modes map[string]os.FileMode) string {
-	var exec []string
-	for p, m := range modes {
-		if m&0o111 != 0 {
-			exec = append(exec, p)
-		}
-	}
-	if len(exec) == 0 {
-		return contentHash
-	}
-	sort.Strings(exec)
-	var b strings.Builder
-	b.WriteString("scion-cache-entry-v1\x00")
-	b.WriteString(contentHash)
-	for _, p := range exec {
-		b.WriteString("\x00x:")
-		b.WriteString(p)
-	}
-	return transfer.HashBytes([]byte(b.String()))
+// (agent-info TemplateHash) and later looks up in this cache. That recorded
+// hash is therefore this key, which equals the hub's ContentHash only when
+// the hub records v2; it is only ever used as a cache key.
+func EntryKey(files []transfer.FileInfo) string {
+	return transfer.ComputeContentHashV2(files)
 }
 
 // writeFilesInDir writes files beneath the directory name inside parent,

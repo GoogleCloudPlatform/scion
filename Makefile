@@ -12,11 +12,15 @@ LDFLAGS            := $(shell ./hack/version.sh)
 SCIONTOOL_LDFLAGS  := $(shell ./hack/version.sh github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands)
 CONTAINER_OS  := linux
 CONTAINER_ARCH := $(shell if [ "$$(uname -m)" = "x86_64" ]; then echo amd64; else echo arm64; fi)
-GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
+# golangci-lint built from source with the go-tools#1839 patch, the same
+# binary CI runs (cr-ci/runner/golangci-lint/README.md). Override with
+# GOLANGCI_LINT=/path/to/golangci-lint to use another binary.
+GOLANGCI_LINT_PATCHED := $(BUILD_DIR)/tools/golangci-lint
+GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-custom golangci-lint web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -588,11 +592,13 @@ test-launch-store-postgres: test-store-postgres
 # database): the project-delete lock-order test, the two-replica scheduled
 # send test, the membership loss and test identity concurrency tests, and
 # the broker presence registry test (its conduit registry runs on the ent
-# test database).
+# test database), and the agent delegation issuance vs reincarnation claim
+# race.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
 	TestBrokerPresence_LiveRegistrySession \
+	TestAgentDelegationIssuanceVsReincarnateClaim_Postgres \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas
@@ -653,6 +659,7 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
 	TestScheduledStore_Postgres \
+	TestMessageStarStore_Postgres \
 	TestWebChatStore_Postgres_MessagesInOtherSchema \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
 	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
@@ -822,6 +829,11 @@ check-hub-store-reassign:
 check-store-delete-callers:
 	@./hack/check-store-delete-callers.sh
 
+## check-scan-coverage: Every enumeration call in a pkg/hub source-scanning test needs a pkg/hub-wide scan-covers claim (self-test first)
+check-scan-coverage:
+	@./hack/check-scan-coverage.sh --self-test
+	@./hack/check-scan-coverage.sh
+
 ## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
 check-security-marker-gates:
 	@./hack/check-security-marker-gates.sh
@@ -882,19 +894,32 @@ check-sqlite-coverage:
 	@./hack/check-sqlite-coverage.sh --self-test
 	@./hack/check-sqlite-coverage.sh
 
+## check-extras-go-images: Verify each extras/ Dockerfile's golang image meets its module's go version
+check-extras-go-images:
+	@./hack/check-extras-go-images.sh --self-test
+	@./hack/check-extras-go-images.sh
+
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults check-sqlite-coverage
+check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates check-image-go-dirs check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults check-sqlite-coverage check-extras-go-images
 	@echo "All custom checks passed."
 
-## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
-golangci-lint:
+## golangci-lint-build: Build the patched golangci-lint CI uses into ./build/tools/ (skipped when up to date)
+golangci-lint-build:
+	@./cr-ci/runner/golangci-lint/build.sh $(GOLANGCI_LINT_PATCHED)
+
+## golangci-lint: Run golangci-lint on new issues only (builds the patched binary first, unless GOLANGCI_LINT is set)
+golangci-lint: $(if $(filter $(GOLANGCI_LINT_PATCHED),$(GOLANGCI_LINT)),golangci-lint-build)
 	@if [ ! -x "$(GOLANGCI_LINT)" ]; then \
-		echo "ERROR: golangci-lint not found. Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
+		echo "ERROR: golangci-lint not found at $(GOLANGCI_LINT)"; \
 		exit 1; \
 	fi
-	@echo "Running golangci-lint (new issues vs main)..."
-	@GOGC=50 $(GOLANGCI_LINT) run --new-from-rev=main ./...
+	@echo "Running golangci-lint (new issues vs main; two passes, see hack/golangci-lint-split.sh)..."
+	@GOLANGCI_LINT=$(GOLANGCI_LINT) ./hack/golangci-lint-split.sh --new-from-rev=main
 	@echo "golangci-lint passed."
+
+## golangci-lint-split-selftest: Test hack/golangci-lint-split.sh (bash only, stubs; no lint)
+golangci-lint-split-selftest:
+	@./hack/test-golangci-lint-split.sh
 
 ## web: Build the web frontend
 web:
@@ -991,7 +1016,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast test-fixture-coverage build
+ci-full: fmt-check web web-budget web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint-split-selftest golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 

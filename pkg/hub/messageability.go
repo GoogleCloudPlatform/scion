@@ -314,6 +314,16 @@ func (s *Server) getSenderMode(ctx context.Context, identity Identity) string {
 			return string(store.MessageModeProject)
 		}
 		return agent.MessageMode
+	case string(PrincipalKindAgentDelegated):
+		// A delegated sender sends as its actor agent: that agent's mode.
+		agent := s.delegatedActorAgent(ctx, identity)
+		if agent == nil {
+			return "unknown"
+		}
+		if agent.MessageMode == "" {
+			return string(store.MessageModeProject)
+		}
+		return agent.MessageMode
 	default:
 		return "unknown"
 	}

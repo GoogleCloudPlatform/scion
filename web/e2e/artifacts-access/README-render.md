@@ -54,7 +54,12 @@ anchor.
   render each inner browser action and its error, so the render config uses only the list reporter (and github in
   CI).
 - A frame request whose Cookie header could not be read counts as unknown, which fails the session check. It never
-  counts as "no session".
+  counts as "no session". An Authorization header on a frame-started request fails it as well.
+- The frame's own navigation to the hub API path is graded on what it carried: no Cookie and no Authorization header.
+  Its HTTP status depends on how the hub is configured to sign users in, so it is recorded, never graded; a status that
+  means something needs a hub configured as production is (no development sign-in). The Set-Cookie cookie names (names
+  only) of responses to frame-started document requests, and the hub's start flags (names only, `hubStartFlags`), are
+  recorded.
 - The session checks count requests started by the frame's content. They exclude exactly one class: the iframe
   element's own document load started by the app page, recognised only when Sec-Fetch-Site is same-origin,
   Sec-Fetch-Dest iframe, Sec-Fetch-Mode navigate and the URL is exactly a frame src the app set for a mint. Its cookie
@@ -73,6 +78,8 @@ anchor.
   means unknown, never clean, and raises the restricted `frameSessionAlert` like a session-bearing or unread request.
 - R2-17b (view expiry) is declared and skipped with a `NOT RUN` annotation: the view lifetime is a fixed constant.
 - R2-20x and R2b-11x are recorded only (status `observed`).
+- Text polls are bounded exactly: each read's timeout is capped by the time left in the poll. Every poll is recorded
+  (`polls`: step, what, bound, elapsed, reads, matched).
 
 ## The HTML bundle in the chat preview (R2b)
 
@@ -83,6 +90,11 @@ in the same journey, after R2-20, so the R2 rows act as a regression check in ev
   unpinned and pinned to v1 (`scion://artifact/<id>@1`). The sender side through the composer is not tested. A second
   project, which the member is not in, holds an artifact published through New artifact; a second message references
   it. The owner also sends the outsider a direct message with the bundle's reference.
+- Each R2b row opens the thread on its legacy route (`/chat/space/<projectId>/thread/<topicId>`), which the chat page
+  rewrites in place to `/chat/<slug>/<topicId>` once it knows the project's slug. The row waits (bounded) until the
+  address bar shows the canonical route before it captures anything, and "the page stays on the thread" compares the
+  thread (slug and topic id), not the raw URL. Both routes and the settle time are recorded (`chatHtml.routes`, ids
+  only).
 - The member opens the references through real clicks on the linkified text (R2b-01..R2b-09): the dialog, the
   frame's sandbox against the artifact page's (R2-13), the bundle's CSS, image and relative link, the frame's
   isolation (R2b-06, one generic verdict like R2-05), closing the dialog, the pinned version, and Open in artifact

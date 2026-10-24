@@ -1015,7 +1015,10 @@ digest), the registry rewrite, the pull policy or the profile override:
   with `409 Conflict`. The start's own profile (below) is this profile too.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
   template path (every start or restart), the harness-config
-  directories searched for the file tier come from this template.
+  directories searched for the file tier, the template chain whose job keys `GetAgent` merges under
+  `scion-agent.json`, cleared-field inheritance (`clearedFieldsInheritance`), and the template
+  reported in the agent's `Info` come from this template (falling back to `agent-info.json` only
+  for agents provisioned before `image-provenance.json` existed).
 - `templateImage` / `templateImagePullPolicy`: read-only legacy fields. New agents record none,
   because a template no longer sets an image. For an agent provisioned before this release they
   hold the template chain's **own** values, with nothing else folded in, and `Start` replays them
@@ -1025,7 +1028,10 @@ digest), the registry rewrite, the pull policy or the profile override:
   the template's value.
 
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
-`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
+`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for status inside the container only. `List`
+and the early harness-config policy check read the profile and template from `image-provenance.json`
+and the harness config from `scion-agent.json` in the broker-side agent directory, never from
+`agent-info.json`.
 
 If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, the
 start or restart fails with an error asking you to re-provision the agent (`scion reincarnate`, or

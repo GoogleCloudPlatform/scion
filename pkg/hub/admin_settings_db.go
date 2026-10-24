@@ -237,12 +237,19 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
+	// And the server keyring file path (ptone/scion#1530).
+	if resp.Server != nil {
+		resp.Server.KeyringFile = ""
+		resp.Server.KeyringFileAllowWorldReadable = false
+	}
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
-	overrides := ops.EnvOverriddenKeys()
+	// Never-API-writable keys are not listed: GET does not reveal which of
+	// them are set.
+	overrides := withoutNeverAPIWritableKeys(ops.EnvOverriddenKeys())
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
 	// How the hub endpoint was resolved at startup (ptone/scion#3905).
@@ -1025,7 +1032,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// body that held nothing else is not an empty request: it still
 	// answers as an update that changes nothing.
 	sentBody := rawBody
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	// The read-only image_registry provenance of a GET body sent back is
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
@@ -2232,6 +2239,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
 			}
+			if hub.CSPReportRawSamples != nil {
+				keys = append(keys, "server.hub.csp_report_raw_samples")
+			}
 			if hub.MembershipSweepReportOnly != nil {
 				keys = append(keys, "server.hub.membership_sweep_report_only")
 			}
@@ -3177,6 +3187,8 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
+
+	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey
