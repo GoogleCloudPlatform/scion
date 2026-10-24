@@ -28,10 +28,17 @@ on:
         required: true
         type: string
 
+# Fork guard: forks (e.g. ptone/scion) mirror upstream tags, so without this every
+# upstream tag push would also run this pipeline on the fork, publishing a fork
+# release, moving the fork's channel branch, and merging a LATEST.json PR into fork
+# main. Every job carries the guard (not just the roots) so nothing relies solely on
+# skip propagation through `needs`. Same pattern as build-nightly.yml. When called
+# via workflow_call, `github` is the caller's context, so upstream callers still run.
 jobs:
   build:
     name: Build Multi-Arch Binaries
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: read     # Only needs to read code for building
     strategy:
@@ -127,6 +134,7 @@ jobs:
   build-plugins:
     name: Build Plugin Binaries
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: read     # Only needs to read code for building
     strategy:
@@ -228,6 +236,7 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: write    # Needs to create releases and push branches
     outputs:
@@ -334,6 +343,7 @@ jobs:
     name: Update LATEST.json
     needs: release
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: write
       pull-requests: write    # Needed to create and merge PRs
