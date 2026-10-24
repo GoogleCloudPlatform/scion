@@ -509,7 +509,11 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		StartedAt:    now,
 		StartedBy:    user.Email(),
 	}
-	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); err != nil {
+	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); errors.Is(err, errHubRestartPending) {
+		log.Debug("Rejected: hub restart in progress", maintenanceLogAttrs(key, "user", user.Email())...)
+		writeHubRestartPending(w, key)
+		return
+	} else if err != nil {
 		log.Error("Failed to create run record", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to create run record", nil)
 		return
@@ -902,6 +906,29 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	log := s.maintenanceLog
 	installer := s.updateInstaller()
 
+	// Restart Hub is part of the hub-binary exclusive group: it is refused
+	// while an update or rebuild is in flight (a restart between an
+	// update's Activate and its before-restart hook would boot the new
+	// binary with no pending update), and once reserved it refuses new
+	// update and rebuild runs until this process exits.
+	if blocking, err := s.reserveHubRestart(r.Context()); err != nil {
+		log.Error("Failed to check for in-flight maintenance runs", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
+		return
+	} else if blocking != nil {
+		log.Info("Hub restart refused: an update or rebuild is in flight",
+			"user", user.Email(), "run_id", blocking.ID, "operation_key", blocking.OperationKey, "status", blocking.Status)
+		writeError(w, http.StatusConflict, errCodeOperationInProgress,
+			fmt.Sprintf("Cannot restart the hub while %s is in progress (run %s, %s); wait for it to finish",
+				blocking.OperationKey, blocking.ID, blocking.Status),
+			map[string]interface{}{
+				"runId":        blocking.ID,
+				"operationKey": blocking.OperationKey,
+				"status":       blocking.Status,
+			})
+		return
+	}
+
 	switch installer.Name() {
 	case maintenance.StrategySymlink:
 		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
@@ -912,6 +939,7 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			time.Sleep(adminRestartSignalDelay)
 			if err := installer.Restart(context.Background()); err != nil {
+				s.releaseHubRestart()
 				log.Error("Failed to restart the hub", "error", err, "installer", installer.Name())
 			}
 		}()
@@ -925,6 +953,7 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		// way. In both cases the response is written before the hub stops,
 		// or the graceful shutdown lets it finish.
 		if err := installer.Restart(r.Context()); err != nil {
+			s.releaseHubRestart()
 			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email(), "installer", installer.Name())
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to initiate restart", nil)
@@ -949,6 +978,7 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// killed.
 	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
 	if err := cmd.Run(); err != nil {
+		s.releaseHubRestart()
 		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to initiate restart", nil)

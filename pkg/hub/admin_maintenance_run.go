@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -95,15 +96,79 @@ func (s *Server) maintenanceGroupInFlight(ctx context.Context, key string) (*sto
 
 // createExclusiveMaintenanceRun creates run unless an operation in its
 // exclusive group is in flight, in which case that run is returned and
-// nothing is created.
+// nothing is created. A run of the hub-binary group (update-binary,
+// rebuild-server) is also refused with errHubRestartPending while a Restart
+// Hub request is under way.
 func (s *Server) createExclusiveMaintenanceRun(ctx context.Context, run *store.MaintenanceOperationRun) (*store.MaintenanceOperationRun, error) {
 	maintenanceRunCreateMu.Lock()
 	defer maintenanceRunCreateMu.Unlock()
+	if hubBinaryOperation(run.OperationKey) && s.hubRestartPending() {
+		return nil, errHubRestartPending
+	}
 	blocking, err := s.maintenanceGroupInFlight(ctx, run.OperationKey)
 	if err != nil || blocking != nil {
 		return blocking, err
 	}
 	return nil, s.store.CreateMaintenanceRun(ctx, run)
+}
+
+// errCodeOperationInProgress is the API error code of a request refused
+// because a conflicting hub-binary operation (update, rebuild, or Restart
+// Hub) is under way.
+const errCodeOperationInProgress = "operation_in_progress"
+
+// errHubRestartPending refuses a hub-binary run while Restart Hub is under
+// way.
+var errHubRestartPending = errors.New("a hub restart is in progress; retry once the hub is back")
+
+// hubRestartHold is how long a Restart Hub reservation blocks hub-binary
+// runs. The restart normally ends this process well within it; the bound
+// only matters when a requested restart never happens.
+const hubRestartHold = 2 * time.Minute
+
+// hubBinaryOperation reports whether key installs the hub binary (the
+// update-binary/rebuild-server exclusive group), which Restart Hub must not
+// interleave with.
+func hubBinaryOperation(key string) bool {
+	_, ok := maintenanceExclusiveGroups[key]
+	return ok
+}
+
+// hubRestartPending reports whether a Restart Hub reservation is active.
+func (s *Server) hubRestartPending() bool {
+	at := s.hubRestartReservedAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) < hubRestartHold
+}
+
+// reserveHubRestart puts Restart Hub in the hub-binary exclusive group:
+// unless an update-binary or rebuild-server run is in flight (running, or
+// restarting after installing a binary), in which case that run is returned,
+// it records a reservation that refuses new hub-binary runs until the
+// process exits (or hubRestartHold passes, or releaseHubRestart). The check
+// and the reservation happen under the run-creation lock, so a restart can
+// never fall between an update's Activate and its before-restart hook.
+func (s *Server) reserveHubRestart(ctx context.Context) (*store.MaintenanceOperationRun, error) {
+	maintenanceRunCreateMu.Lock()
+	defer maintenanceRunCreateMu.Unlock()
+	blocking, err := s.maintenanceGroupInFlight(ctx, "update-binary")
+	if err != nil || blocking != nil {
+		return blocking, err
+	}
+	s.hubRestartReservedAt.Store(time.Now().UnixNano())
+	return nil, nil
+}
+
+// releaseHubRestart drops the Restart Hub reservation (the restart could not
+// be requested).
+func (s *Server) releaseHubRestart() {
+	s.hubRestartReservedAt.Store(0)
+}
+
+// writeHubRestartPending writes the 409 for a hub-binary run refused while
+// Restart Hub is under way.
+func writeHubRestartPending(w http.ResponseWriter, key string) {
+	writeError(w, http.StatusConflict, errCodeOperationInProgress,
+		fmt.Sprintf("A hub restart is in progress; %s cannot start until the hub is back", key), nil)
 }
 
 // writeMaintenanceInFlight writes the 409 for a request blocked by an

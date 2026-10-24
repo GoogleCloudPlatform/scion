@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -200,7 +201,10 @@ func (s *Server) autoApplyUpdate(ctx context.Context, channel string, executor M
 		StartedAt:    time.Now(),
 		StartedBy:    autoUpdateStartedBy,
 	}
-	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); err != nil {
+	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); errors.Is(err, errHubRestartPending) {
+		log.Info("Hub restart in progress, skipping auto update")
+		return
+	} else if err != nil {
 		log.Error("Failed to create run record", "error", err)
 		return
 	} else if blocking != nil {
