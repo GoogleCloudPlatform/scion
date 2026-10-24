@@ -1561,6 +1561,43 @@ var (
 			},
 		},
 	}
+	// HubEncryptionMigrationsColumns holds the columns for the "hub_encryption_migrations" table.
+	HubEncryptionMigrationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "source_generation", Type: field.TypeInt64},
+		{Name: "target_kid", Type: field.TypeString},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"running", "interrupted", "verified"}},
+		{Name: "last_scanned_id", Type: field.TypeString, Default: ""},
+		{Name: "plaintext_read_admitted", Type: field.TypeBool, Default: false},
+		{Name: "scanned", Type: field.TypeInt64, Default: 0},
+		{Name: "rewritten", Type: field.TypeInt64, Default: 0},
+		{Name: "failures", Type: field.TypeInt64, Default: 0},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// HubEncryptionMigrationsTable holds the schema information for the "hub_encryption_migrations" table.
+	HubEncryptionMigrationsTable = &schema.Table{
+		Name:       "hub_encryption_migrations",
+		Columns:    HubEncryptionMigrationsColumns,
+		PrimaryKey: []*schema.Column{HubEncryptionMigrationsColumns[0]},
+	}
+	// HubEncryptionPolicyColumns holds the columns for the "hub_encryption_policy" table.
+	HubEncryptionPolicyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "generation", Type: field.TypeInt64},
+		{Name: "min_reader_version", Type: field.TypeInt, Default: 2},
+		{Name: "allowed_write_kids", Type: field.TypeJSON},
+		{Name: "required_read_kids", Type: field.TypeJSON},
+		{Name: "migration_id", Type: field.TypeString, Nullable: true},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"prepared", "rewrapping", "verified"}},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// HubEncryptionPolicyTable holds the schema information for the "hub_encryption_policy" table.
+	HubEncryptionPolicyTable = &schema.Table{
+		Name:       "hub_encryption_policy",
+		Columns:    HubEncryptionPolicyColumns,
+		PrimaryKey: []*schema.Column{HubEncryptionPolicyColumns[0]},
+	}
 	// HubInstancesColumns holds the columns for the "hub_instances" table.
 	HubInstancesColumns = []*schema.Column{
 		{Name: "instance_id", Type: field.TypeString},
@@ -2354,6 +2391,7 @@ var (
 		{Name: "started_at", Type: field.TypeTime},
 		{Name: "last_seen", Type: field.TypeTime},
 		{Name: "draining", Type: field.TypeBool, Default: false},
+		{Name: "features", Type: field.TypeString, Nullable: true, Size: 2147483647},
 	}
 	// RelayInstancesTable holds the schema information for the "relay_instances" table.
 	RelayInstancesTable = &schema.Table{
@@ -3251,6 +3289,8 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		HubEncryptionMigrationsTable,
+		HubEncryptionPolicyTable,
 		HubInstancesTable,
 		HubSettingsTable,
 		IntegrationConfigsTable,
@@ -3391,6 +3431,12 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	HubEncryptionMigrationsTable.Annotation = &entsql.Annotation{
+		Table: "hub_encryption_migrations",
+	}
+	HubEncryptionPolicyTable.Annotation = &entsql.Annotation{
+		Table: "hub_encryption_policy",
 	}
 	HubInstancesTable.Annotation = &entsql.Annotation{
 		Table: "hub_instances",

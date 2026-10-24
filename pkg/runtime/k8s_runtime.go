@@ -607,6 +607,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		config.Workspace = resolvedWorkspace
 	}
 
+	// The scion.* annotations below are added to a copy, so the caller's
+	// config.Annotations is not modified (ptone/scion#5970).
+	config.Annotations = maps.Clone(config.Annotations)
+
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
@@ -2112,6 +2116,10 @@ func applyKubernetesBlockIdentity(pod *corev1.Pod) {
 }
 
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
+	// The pod's annotations start from a copy, so the annotations added
+	// below do not modify the caller's config.Annotations.
+	config.Annotations = maps.Clone(config.Annotations)
+
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command

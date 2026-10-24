@@ -383,6 +383,11 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 // which derives the cookie keys from it, or generates a random per-process
 // key when it is empty.
 func webSessionKeySource(sessionSecret string) string {
+	if serverKeyringFromFile() != nil {
+		// Deployment-wide keyring generations (not hub-local, so the test
+		// admin tier's G7 still refuses).
+		return hub.SigningKeySourceKeyring
+	}
 	if sessionSecret == "" {
 		return "generated"
 	}

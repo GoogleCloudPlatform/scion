@@ -18,6 +18,8 @@ package provision
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -100,12 +102,17 @@ func fakeGit(t *testing.T) string {
 		"for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '" + record + "'\n" +
 		"printf 'ALLOW=%s\\n' \"$GIT_ALLOW_PROTOCOL\" >> '" + record + "'\n" +
 		"printf 'TOKEN=%s\\n' \"$GITHUB_TOKEN\" >> '" + record + "'\n" +
+		"printf 'SCOPED=%s\\n' \"$SCION_SCOPED_GIT_CREDENTIAL\" >> '" + record + "'\n" +
 		"printf 'CFG=%s\\n' \"$GIT_CONFIG_COUNT\" >> '" + record + "'\n" +
 		"exit 1\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_ALLOW_PROTOCOL", "")
 	t.Setenv(GitTokenEnv, "")
+	// The token is delivered through util.ScopedCredentialHelperEnv, which carries
+	// it in SCION_SCOPED_GIT_CREDENTIAL (not GITHUB_TOKEN) and installs a
+	// host-scoped credential helper; clear any inherited value first.
+	t.Setenv("SCION_SCOPED_GIT_CREDENTIAL", "")
 	t.Setenv("GIT_CONFIG_COUNT", "")
 	return record
 }
@@ -119,7 +126,7 @@ func readArgv(t *testing.T, record string) (argv []string, allow string) {
 			allow = v
 			continue
 		}
-		if strings.HasPrefix(l, "TOKEN=") || strings.HasPrefix(l, "CFG=") {
+		if strings.HasPrefix(l, "TOKEN=") || strings.HasPrefix(l, "SCOPED=") || strings.HasPrefix(l, "CFG=") {
 			continue
 		}
 		argv = append(argv, l)
@@ -238,26 +245,13 @@ func TestCloneTokenHost_BoundToRecordedRemote(t *testing.T) {
 	}
 }
 
-func TestHostScopedTokenHelperEnv(t *testing.T) {
-	got := hostScopedTokenHelperEnv([]string{"PATH=/bin", "GIT_CONFIG_COUNT=2"}, "ghe.example.com")
-	assert.Equal(t, []string{
-		"GIT_CONFIG_COUNT=4",
-		"GIT_CONFIG_KEY_2=credential.helper",
-		"GIT_CONFIG_VALUE_2=",
-		"GIT_CONFIG_KEY_3=credential.https://ghe.example.com.helper",
-		"GIT_CONFIG_VALUE_3=" + GitTokenCredentialHelper,
-	}, got)
-	for _, e := range got {
-		assert.NotContains(t, e, testCloneToken, "the helper text never holds the token")
-	}
-}
-
 // tlsGitServer serves bareRepo over https (dumb HTTP) at /org/<name>,
 // demanding the test token, and records every request and whether any
 // request presented the token.
 type tlsGitServer struct {
 	url      string
 	host     string
+	cert     *x509.Certificate
 	requests atomic.Int32
 	sawToken atomic.Bool
 }
@@ -285,7 +279,17 @@ func newTLSGitServer(t *testing.T, bareRepo string) *tlsGitServer {
 	require.NoError(t, err)
 	g.url = srv.URL + "/org/" + filepath.Base(bareRepo)
 	g.host = u.Host
+	g.cert = srv.Certificate()
 	return g
+}
+
+// writeTLSCA writes cert to a PEM file and returns its path, for GIT_SSL_CAINFO.
+func writeTLSCA(t *testing.T, cert *x509.Certificate) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "ca.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	require.NoError(t, os.WriteFile(f, pemBytes, 0o644))
+	return f
 }
 
 // hardenedTokenClone clones cloneURL as the hub does at create: hardened,
@@ -315,11 +319,15 @@ func remoteOf(cloneURL string) string {
 // is not followed, so its target never sees the token.
 func TestRunGitClone_TokenBoundToRecordedRemoteAndNoRedirects(t *testing.T) {
 	isolateGitConfig(t)
-	t.Setenv("GIT_SSL_NO_VERIFY", "1")
 	t.Setenv(GitTokenEnv, "")
 	bare := initBareGitRepo(t)
 
 	own := newTLSGitServer(t, bare)
+	// HostGitEnv scrubs GIT_SSL_NO_VERIFY (host clones always verify TLS), so the
+	// test trusts the httptest cert through GIT_SSL_CAINFO, which HostGitEnv keeps.
+	// Every httptest TLS server shares the same certificate, so one CA covers all.
+	t.Setenv("GIT_SSL_CAINFO", writeTLSCA(t, own.cert))
+
 	dest, err := hardenedTokenClone(t, own.url, remoteOf(own.url))
 	require.NoError(t, err, "the recorded remote's clone gets the token")
 	assert.FileExists(t, filepath.Join(dest, "README.md"))
@@ -370,9 +378,11 @@ func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 		return string(data)
 	}
 	got := clone("http://git.example.com/org/repo.git")
-	assert.Contains(t, got, "TOKEN=\n", "no token in the environment")
+	assert.Contains(t, got, "SCOPED=\n", "a non-https URL gets no token")
 	assert.Contains(t, got, "CFG=\n", "no credential helper")
+	assert.Contains(t, got, "TOKEN=\n", "the token never rides in GITHUB_TOKEN")
 	got = clone("https://git.example.com/org/repo.git")
-	assert.Contains(t, got, "TOKEN="+testCloneToken+"\n", "fixture check: the matching URL gets the token")
-	assert.Contains(t, got, "CFG=2\n")
+	assert.Contains(t, got, "SCOPED="+testCloneToken+"\n", "fixture check: the matching https URL gets the token via the scoped helper env")
+	assert.Contains(t, got, "CFG=2\n", "the host-scoped credential helper is installed")
+	assert.Contains(t, got, "TOKEN=\n", "the token is delivered via the scoped helper, never GITHUB_TOKEN")
 }

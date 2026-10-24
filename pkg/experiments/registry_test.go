@@ -542,3 +542,25 @@ func TestAgentEditHeld_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("held edits experiment metadata mismatch: %+v", entry)
 	}
 }
+
+// TestSecretRotationExperimentRegistered pins server.secret_rotation
+// (ptone/scion#1530): it gates hub startup with a keyring file only, so it
+// is server-layer only, and it ships off.
+func TestSecretRotationExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(SecretRotation)
+	if !ok {
+		t.Fatalf("%s is not registered", SecretRotation)
+	}
+	if SecretRotation != "server.secret_rotation" {
+		t.Fatalf("frozen name changed: %q", SecretRotation)
+	}
+	if e.Default {
+		t.Fatal("secret rotation must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#1530" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

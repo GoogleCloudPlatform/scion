@@ -24,20 +24,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 func setupTestNonceCacheStore(t *testing.T) *NonceCacheStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
-
-	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
-
-	return NewNonceCacheStore(client)
+	return NewNonceCacheStore(enttest.NewClient(t))
 }
 
 func TestNonceCacheStore_NewNonce(t *testing.T) {

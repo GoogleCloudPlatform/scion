@@ -142,8 +142,8 @@ export default defineConfig([
   // Playwright suites. The suites that load src share one lint-only TS
   // project (e2e/tsconfig.eslint.json) so ESLint builds one program for
   // them, not one per suite. Each suite's tsconfig.json still owns its
-  // typecheck. terminal-lifecycle and terminal-owner do not load src and
-  // keep their own project.
+  // typecheck. terminal-lifecycle, terminal-owner and port-proxy do not
+  // load src and keep their own project.
   project(
     [
       'e2e/agent-store-count/*.ts',
@@ -178,6 +178,7 @@ export default defineConfig([
   ),
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
+  project(['e2e/port-proxy/*.ts'], './e2e/port-proxy/tsconfig.json'),
   project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
 
   // Test files: a looser type-aware rule set than sources. Tests reach
@@ -261,16 +262,16 @@ export default defineConfig([
     },
   },
 
-  // Client requests go through apiFetch() in src/client/api.ts
-  // (ptone/scion#353): credentials, the hub clock sample and the global
-  // 401/403 handling (or `authErrors: 'caller'` to opt out) live in one
-  // place. A direct fetch() needs an explicit, commented exception
-  // (eslint-disable-next-line ... -- reason). Tests and fixtures stub
-  // fetch and are exempt. src/components and src/utils are not covered
-  // yet (follow-up of ptone/scion#5613).
+  // Requests go through apiFetch() in src/client/api.ts (ptone/scion#353):
+  // credentials, the hub clock sample and the global 401/403 handling (or
+  // `authErrors: 'caller'` to opt out) live in one place. A direct fetch()
+  // needs an explicit, commented exception (eslint-disable-next-line ...
+  // -- reason). Covers all of src: client, components, utils, lib and
+  // shared (ptone/scion#5641). Tests and fixtures stub fetch and are
+  // exempt.
   {
-    files: ['src/client/**/*.ts'],
-    ignores: ['src/client/**/*.test.ts', 'src/client/__fixtures__/**'],
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/**/__fixtures__/**'],
     rules: {
       'no-restricted-globals': [
         'error',

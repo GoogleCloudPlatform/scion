@@ -163,6 +163,14 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteSecret":               "delete-resource",
 	"DeleteSecretsByScope":       "delete-resource",
 	"GetSecretValue":             "read-secret",
+	// Secret encryption (ptone/scion#1530 §6): the privileged payload
+	// scan, ciphertext-only replacement, policy transitions and
+	// migration records.
+	"ScanSecretPayloads":        "read-secret",
+	"ReplaceSecretCiphertext":   "update-resource",
+	"UpdateEncryptionPolicy":    "update-resource",
+	"CreateEncryptionMigration": "create-resource",
+	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
 	"CreateBrokerSecret":     "create-resource",
@@ -775,8 +783,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/entadapter/agent_deletion_finalize.go", Function: "finalizeAgentDeletionOnce", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: finalize-hard removes the agent's group memberships before tx.Agent.Delete(), in the same transaction; the caller (FinalizeAgentDeletion via the delete engine) authorizes (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject implementation", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject re-enters itself on the transactional store so the cascade and the row deletes commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to CreateSecret", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to UpdateSecret", Scope: "pkg/store/entadapter"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/store/storetest/ — store interface conformance test fixtures
@@ -809,6 +815,16 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain update", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "ProjectDomain", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: project domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encCreate", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpdate", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpsert", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encValueIfVersion", Symbol: "UpdateSecretValueIfVersion", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encDelete", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encScan", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encReplace", Symbol: "ReplaceSecretCiphertext", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encSetPolicy", Symbol: "UpdateEncryptionPolicy", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encCreateMigration", Symbol: "CreateEncryptionMigration", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpdateMigration", Symbol: "UpdateEncryptionMigration", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},

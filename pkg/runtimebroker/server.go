@@ -417,6 +417,10 @@ type Server struct {
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// ownedHolds counts the in-flight holds on each owned run
+	// (holdOwnedRun), guarded by ownedHoldsMu.
+	ownedHoldsMu sync.Mutex
+	ownedHolds   map[ownedRunKey]int
 	// unmirroredUIDs holds the object UIDs from the journals of this
 	// instance's launches whose ownership recording failed; launch cleanup
 	// may delete them although the record may lack them (launchHandleOwned).
