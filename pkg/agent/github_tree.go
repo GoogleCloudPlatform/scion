@@ -35,6 +35,18 @@ const (
 // GitHub itself stops listing (and sets truncated) at about 7 MB.
 const maxGitHubTreeBytes = 16 * 1024 * 1024
 
+// MaxGitHubSkillFiles is the most regular files a gh:// skill may have,
+// counted after symlinks are skipped. The Contents API listing the
+// resolvers used before was bounded by GitHub at 1000 entries per
+// directory; the recursive tree listing is not, so this restores that
+// bound for the whole skill. Both resolvers check it before downloading
+// anything.
+const MaxGitHubSkillFiles = 1000
+
+// ErrGitHubSkillTooManyFiles is returned when a skill directory holds more
+// than MaxGitHubSkillFiles regular files.
+var ErrGitHubSkillTooManyFiles = fmt.Errorf("skill has more than %d files", MaxGitHubSkillFiles)
+
 // ErrGitHubTreeTruncated is returned when GitHub truncated the tree of a
 // skill directory. The tree is the skill's file list, so a truncated one
 // would install an incomplete skill; the resolve fails instead.
@@ -86,6 +98,8 @@ func GitHubSkillTreePath(owner, repo, skillPath, commitSHA string) string {
 //     ErrGitHubTreeSubmodule. GitHub has no content for it; before, the
 //     listing reported it as a "file" whose download then failed.
 //   - A truncated listing fails with ErrGitHubTreeTruncated.
+//   - More than MaxGitHubSkillFiles regular files fails with
+//     ErrGitHubSkillTooManyFiles.
 //   - A file path that could leave the skill directory (see
 //     validateGitHubTreePath) fails the whole listing; it is never
 //     cleaned into a different path.
@@ -125,6 +139,9 @@ func DecodeGitHubSkillTree(body io.Reader) ([]GitHubTreeFile, error) {
 			Size: e.Size,
 			Mode: transfer.NormalizedModeString(e.Mode),
 		})
+		if len(files) > MaxGitHubSkillFiles {
+			return nil, ErrGitHubSkillTooManyFiles
+		}
 	}
 	return files, nil
 }

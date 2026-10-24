@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -85,6 +86,61 @@ func TestDecodeGitHubSkillTree_Rejects(t *testing.T) {
 				t.Fatalf("err = %v, want %v (files %+v)", err, tc.want, files)
 			}
 		})
+	}
+}
+
+// manyBlobsTree is a git trees API response listing n regular files plus
+// a symlink, which does not count toward MaxGitHubSkillFiles.
+func manyBlobsTree(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"truncated":false,"tree":[{"path":"link","mode":"120000","type":"blob","sha":"l","size":1}`)
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, `,{"path":"f%04d.md","mode":"100644","type":"blob","sha":"a","size":1}`, i)
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+func TestDecodeGitHubSkillTree_FileLimit(t *testing.T) {
+	files, err := DecodeGitHubSkillTree(strings.NewReader(manyBlobsTree(MaxGitHubSkillFiles)))
+	if err != nil || len(files) != MaxGitHubSkillFiles {
+		t.Fatalf("at the limit: %d files, err %v; want %d, nil", len(files), err, MaxGitHubSkillFiles)
+	}
+	_, err = DecodeGitHubSkillTree(strings.NewReader(manyBlobsTree(MaxGitHubSkillFiles + 1)))
+	if !errors.Is(err, ErrGitHubSkillTooManyFiles) {
+		t.Fatalf("over the limit: err %v, want ErrGitHubSkillTooManyFiles", err)
+	}
+	if want := "skill has more than 1000 files"; err.Error() != want {
+		t.Fatalf("error text %q, want %q", err.Error(), want)
+	}
+}
+
+// TestGitHubSkillResolver_FileLimitBeforeDownload pins that the local
+// resolver refuses a skill over MaxGitHubSkillFiles without downloading
+// any of its files.
+func TestGitHubSkillResolver_FileLimitBeforeDownload(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	mux.HandleFunc("/repos/owner/repo/git/trees/"+testCommitSHA+":skills/tool", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(manyBlobsTree(MaxGitHubSkillFiles + 1)))
+	})
+	var downloads atomic.Int64
+	mux.HandleFunc("/raw/", func(w http.ResponseWriter, _ *http.Request) {
+		downloads.Add(1)
+		_, _ = w.Write([]byte("x"))
+	})
+	r := newTestGitHubResolver(server)
+	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: "gh://owner/repo/tool@" + testCommitSHA}}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Resolved) != 0 || len(res.Errors) != 1 {
+		t.Fatalf("want one error, got %+v", res)
+	}
+	if msg := res.Errors[0].Message; !strings.Contains(msg, "skill has more than 1000 files") {
+		t.Fatalf("error %q does not name the file limit", msg)
+	}
+	if n := downloads.Load(); n != 0 {
+		t.Fatalf("%d files downloaded before the limit was checked, want 0", n)
 	}
 }
 

@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -158,6 +160,11 @@ func TestGHListTree_RejectsUnusableTrees(t *testing.T) {
 			want: agent.ErrGitHubTreeSubmodule,
 		},
 		{
+			name: "more than the file limit",
+			body: ghManyFilesTree(agent.MaxGitHubSkillFiles + 1),
+			want: agent.ErrGitHubSkillTooManyFiles,
+		},
+		{
 			name: "parent segment",
 			body: `{"truncated":false,"tree":[{"path":"../SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
 			want: agent.ErrGitHubTreeUnsafePath,
@@ -175,6 +182,20 @@ func TestGHListTree_RejectsUnusableTrees(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
+}
+
+// ghManyFilesTree is a git trees API response listing n regular files.
+func ghManyFilesTree(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"truncated":false,"tree":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"path":"f%04d.md","mode":"100644","type":"blob","sha":"a","size":1}`, i)
+	}
+	b.WriteString("]}")
+	return b.String()
 }
 
 // TestGHListTree_RawBaseOverride confirms the raw origin is configurable,
