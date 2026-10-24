@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -70,6 +71,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
@@ -568,8 +570,9 @@ type MaintenanceConfig struct {
 
 	// DeploymentTier selects the update strategy: "source" (git-based) or "binary" (release-based).
 	DeploymentTier string
-	// ReleaseChannel selects which release channel to track: "stable" or "preview".
-	// When empty, derived from the running binary's version string.
+	// ReleaseChannel selects which release channel to track: "nightly",
+	// "preview" or "stable". When empty, derived from the running binary's
+	// version string.
 	ReleaseChannel string
 	// UpdatePolicy controls automatic update behavior: "auto", "notify", or "disabled".
 	UpdatePolicy string
@@ -579,6 +582,14 @@ type MaintenanceConfig struct {
 	// GitHubRepo is the GitHub repository for release lookups.
 	// Default: "GoogleCloudPlatform/scion".
 	GitHubRepo string
+	// InstallRoot is the versioned install root of the symlink layout
+	// (server.maintenance.install_root, SCION_MAINTENANCE_INSTALL_ROOT;
+	// default /opt/scion).
+	InstallRoot string
+	// Installer installs release binaries and restarts the hub. It is
+	// detected once at startup (DetectMaintenanceInstaller); nil means
+	// unsupported.
+	Installer maintenance.Installer
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -3203,8 +3214,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		slog.Warn("Failed to seed github_resolution_cache settings", "error", err)
 	}
 
+	// Reconcile an update whose hub restart was pending (the restart that
+	// started this process, usually) before the abort sweep below: the run
+	// is completed or failed from the version this binary reports.
+	if err := srv.reconcilePendingUpdate(ctx, version.Version); err != nil {
+		slog.Warn("Failed to reconcile the pending update", "error", err)
+	}
+
 	// Abort any maintenance operations/migrations left in "running" state from
-	// a previous server instance that was restarted mid-operation.
+	// a previous server instance that was restarted mid-operation. Runs left
+	// "restarting" are not touched; reconcilePendingUpdate settles them.
 	if runs, migrations, err := s.AbortRunningMaintenanceOps(ctx); err != nil {
 		slog.Warn("Failed to abort stalled maintenance operations", "error", err)
 	} else if runs > 0 || migrations > 0 {
@@ -6569,10 +6588,10 @@ func (s *Server) registerSchedulerHandlers() {
 		s.scheduler.RegisterRecurringSingleton("github-app-health-check", interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
 	}
 
-	// Register scheduled release update check for binary-tier deployments.
-	// Conditional on deployment tier and update policy (design doc §6).
+	// Register the scheduled release update check unless the update policy
+	// is disabled. The handler skips hubs whose effective mode is git.
 	mc := s.config.MaintenanceConfig
-	if mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled" {
+	if shouldRegisterReleaseUpdateCheck(mc) {
 		intervalHours := mc.CheckIntervalHours
 		if intervalHours < 1 {
 			intervalHours = 6 // default
@@ -7277,6 +7296,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.guarded("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))

@@ -9467,6 +9467,7 @@
 | http_route | POST | `/api/v1/admin/maintenance/migrations/{id}/run` |
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
+| http_route | GET | `/api/v1/admin/maintenance/update-status` |
 
 **Principals:** `user`
 

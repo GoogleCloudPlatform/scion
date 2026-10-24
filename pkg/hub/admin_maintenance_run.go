@@ -126,19 +126,6 @@ func maintenanceRunInFlight(status string) bool {
 	return status == store.MaintenanceStatusRunning || status == store.MaintenanceStatusRestarting
 }
 
-// detectUpdateInstaller picks the update-binary Installer for this host from
-// the maintenance config, with the default install root.
-func (s *Server) detectUpdateInstaller() maintenance.Installer {
-	mc := s.config.MaintenanceConfig
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	return maintenance.Detect(ctx, maintenance.DetectOptions{
-		RepoPath:    mc.RepoPath,
-		BinaryDest:  mc.BinaryDest,
-		ServiceName: mc.ServiceName,
-	})
-}
-
 // maintenanceRunTimeouts bounds whole runs of the listed operations.
 // update-binary's own steps are bounded (10 min download phase plus short
 // install/hook/restart deadlines); this is the backstop. Other operations
@@ -160,9 +147,11 @@ func maintenanceRunContext(key string) (context.Context, context.CancelFunc) {
 //
 // An executor that restarts the hub (maintenance.RestartingExecutor) is given
 // a before-restart hook that records the run as "restarting", with its log
-// and result, before the restart is requested; the run then stays
-// "restarting" for boot reconciliation instead of being marked completed by
-// a goroutine racing the shutdown.
+// and result, and the system.pending_update row, before the restart is
+// requested; the run then stays "restarting" for boot reconciliation
+// (reconcilePendingUpdate) instead of being marked completed by a goroutine
+// racing the shutdown. If the run fails after the hook (the restart could
+// not be requested), the pending update is cleared again.
 func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, executor MaintenanceExecutor, params map[string]string) {
 	log := s.maintenanceLog
 	key, runID := run.OperationKey, run.ID
@@ -218,12 +207,18 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			}
 			resultJSON, _ := json.Marshal(result)
 			run.Result = string(resultJSON)
+			if restarting {
+				s.clearPendingUpdateFor(context.Background(), runID)
+			}
 			log.Error("Operation failed", maintenanceLogAttrs(key, "run_id", runID, "error", execErr, "duration", finishedAt.Sub(run.StartedAt))...)
 			log.Debug("Operation failure log output", maintenanceLogAttrs(key, "run_id", runID, "log", run.Log)...)
 		case restarting:
-			// Status and result were written before the restart; only the
-			// log tail is added. Boot reconciliation completes the run.
+			// Status, result and log were written before the restart, and
+			// boot reconciliation completes the run. Nothing more is
+			// written: a late write from this (exiting) process must never
+			// overwrite the outcome the restarted hub records.
 			log.Info("Operation installed an update, hub restart requested", maintenanceLogAttrs(key, "run_id", runID)...)
+			return
 		default:
 			run.CompletedAt = &finishedAt
 			run.Status = store.MaintenanceStatusCompleted
@@ -236,8 +231,10 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 	}()
 }
 
-// markRunRestarting records run as "restarting" with the log so far and the
-// update's from/to/strategy. It runs as the before-restart hook, so a failure aborts the restart.
+// markRunRestarting writes system.pending_update for boot reconciliation,
+// then records run as "restarting" with the log so far and the update's
+// from/to/strategy. It runs as the before-restart hook, so a failure of
+// either write aborts the restart (the runner then fails the run).
 func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOperationRun, buf *runLogBuffer, p maintenance.PendingRestart) error {
 	result := map[string]interface{}{
 		"from":     p.From,
@@ -252,12 +249,28 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 		return fmt.Errorf("encode run result: %w", err)
 	}
 
+	// pending_update is written first: a page that finds the run
+	// "restarting" can then always find the pending update naming it.
+	pending := PendingUpdate{
+		RunID:    run.ID,
+		From:     p.From,
+		To:       p.To,
+		Snapshot: p.Snapshot,
+		Strategy: p.Strategy,
+		At:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := s.writeHubSettingJSON(ctx, HubSettingSectionPendingUpdate, pending); err != nil {
+		return fmt.Errorf("record pending update: %w", err)
+	}
+
 	prevStatus, prevResult, prevLog := run.Status, run.Result, run.Log
 	run.Status = store.MaintenanceStatusRestarting
 	run.Result = string(resultJSON)
 	run.Log = buf.String()
 	if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 		run.Status, run.Result, run.Log = prevStatus, prevResult, prevLog
+		// No restart follows, so the pending update must not survive.
+		s.clearPendingUpdateFor(ctx, run.ID)
 		return fmt.Errorf("record run as restarting: %w", err)
 	}
 	// system.update_available is deliberately left alone: the update is not

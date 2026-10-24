@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -44,13 +45,12 @@ func newTestServerForReleaseUpdate(t *testing.T) (*Server, store.Store) {
 func TestStoreUpdateAvailable(t *testing.T) {
 	srv, s := newTestServerForReleaseUpdate(t)
 
-	result := &ReleaseUpdateCheckResult{
+	result := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
 		LatestVersion:   "v0.4.0",
 		Channel:         "stable",
-		DownloadURL:     "https://example.com/scion-linux-amd64.tar.gz",
 		ReleaseURL:      "https://example.com/releases/tag/v0.4.0",
 	}
 
@@ -73,9 +73,6 @@ func TestStoreUpdateAvailable(t *testing.T) {
 	if info.Channel != "stable" {
 		t.Errorf("Channel = %q, want %q", info.Channel, "stable")
 	}
-	if info.DownloadURL != "https://example.com/scion-linux-amd64.tar.gz" {
-		t.Errorf("DownloadURL = %q, want expected URL", info.DownloadURL)
-	}
 	if info.ReleaseURL != "https://example.com/releases/tag/v0.4.0" {
 		t.Errorf("ReleaseURL = %q, want expected URL", info.ReleaseURL)
 	}
@@ -88,7 +85,7 @@ func TestStoreUpdateAvailable_Upsert(t *testing.T) {
 	srv, s := newTestServerForReleaseUpdate(t)
 
 	// Store first version.
-	result1 := &ReleaseUpdateCheckResult{
+	result1 := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
@@ -98,7 +95,7 @@ func TestStoreUpdateAvailable_Upsert(t *testing.T) {
 	srv.storeUpdateAvailable(context.Background(), result1)
 
 	// Store newer version — should overwrite.
-	result2 := &ReleaseUpdateCheckResult{
+	result2 := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
@@ -126,7 +123,7 @@ func TestClearUpdateAvailable(t *testing.T) {
 	srv, s := newTestServerForReleaseUpdate(t)
 
 	// First store a notification.
-	result := &ReleaseUpdateCheckResult{
+	result := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
@@ -183,13 +180,12 @@ func TestHandleGetUpdateAvailable_WithUpdate(t *testing.T) {
 	srv, _ := newTestServerForReleaseUpdate(t)
 
 	// Store an update notification first.
-	result := &ReleaseUpdateCheckResult{
+	result := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
 		LatestVersion:   "v0.4.0",
 		Channel:         "stable",
-		DownloadURL:     "https://example.com/dl.tar.gz",
 		ReleaseURL:      "https://example.com/release",
 	}
 	srv.storeUpdateAvailable(context.Background(), result)
@@ -227,7 +223,7 @@ func TestHandleDismissUpdateAvailable(t *testing.T) {
 	srv, s := newTestServerForReleaseUpdate(t)
 
 	// Store a notification.
-	result := &ReleaseUpdateCheckResult{
+	result := &maintenance.ReleaseUpdateCheckResult{
 		Tier:            "binary",
 		UpdateAvailable: true,
 		CurrentVersion:  "v0.3.0",
@@ -289,65 +285,35 @@ func TestJitterIntervalFloor(t *testing.T) {
 	}
 }
 
-func TestReleaseUpdateCheckNotRegistered_DisabledPolicy(t *testing.T) {
-	// Verify that the handler is not registered when policy is "disabled".
-	// We can't directly test scheduler registration, but we can verify
-	// the condition logic.
-	mc := MaintenanceConfig{
-		DeploymentTier: "binary",
-		UpdatePolicy:   "disabled",
+func TestShouldRegisterReleaseUpdateCheck(t *testing.T) {
+	tests := []struct {
+		tier, policy string
+		want         bool
+	}{
+		{"binary", "notify", true},
+		{"binary", "auto", true},
+		{"binary", "disabled", false},
+		// The tier no longer gates registration; the handler skips git mode.
+		{"source", "notify", true},
+		{"source", "auto", true},
+		{"source", "disabled", false},
+		{"", "notify", true},
+		{"", "disabled", false},
 	}
-
-	shouldRegister := mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled"
-	if shouldRegister {
-		t.Error("should not register handler when policy is disabled")
-	}
-}
-
-func TestReleaseUpdateCheckNotRegistered_SourceTier(t *testing.T) {
-	// Verify that the handler is not registered for source tier.
-	mc := MaintenanceConfig{
-		DeploymentTier: "source",
-		UpdatePolicy:   "notify",
-	}
-
-	shouldRegister := mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled"
-	if shouldRegister {
-		t.Error("should not register handler for source tier")
-	}
-}
-
-func TestReleaseUpdateCheckRegistered_NotifyPolicy(t *testing.T) {
-	mc := MaintenanceConfig{
-		DeploymentTier: "binary",
-		UpdatePolicy:   "notify",
-	}
-
-	shouldRegister := mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled"
-	if !shouldRegister {
-		t.Error("should register handler when policy is notify")
-	}
-}
-
-func TestReleaseUpdateCheckRegistered_AutoPolicy(t *testing.T) {
-	mc := MaintenanceConfig{
-		DeploymentTier: "binary",
-		UpdatePolicy:   "auto",
-	}
-
-	shouldRegister := mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled"
-	if !shouldRegister {
-		t.Error("should register handler when policy is auto")
+	for _, tt := range tests {
+		got := shouldRegisterReleaseUpdateCheck(MaintenanceConfig{DeploymentTier: tt.tier, UpdatePolicy: tt.policy})
+		if got != tt.want {
+			t.Errorf("tier=%q policy=%q: register = %v, want %v", tt.tier, tt.policy, got, tt.want)
+		}
 	}
 }
 
 func TestUpdateAvailableInfo_JSON(t *testing.T) {
 	info := UpdateAvailableInfo{
-		Version:     "v0.4.0",
-		Channel:     "stable",
-		DownloadURL: "https://example.com/dl.tar.gz",
-		ReleaseURL:  "https://example.com/release",
-		DetectedAt:  "2026-09-22T18:00:00Z",
+		Version:    "v0.4.0",
+		Channel:    "stable",
+		ReleaseURL: "https://example.com/release",
+		DetectedAt: "2026-09-22T18:00:00Z",
 	}
 
 	data, err := json.Marshal(info)
@@ -366,8 +332,8 @@ func TestUpdateAvailableInfo_JSON(t *testing.T) {
 	if decoded["channel"] != "stable" {
 		t.Errorf("channel = %v, want %q", decoded["channel"], "stable")
 	}
-	if decoded["download_url"] != "https://example.com/dl.tar.gz" {
-		t.Errorf("download_url = %v, want expected URL", decoded["download_url"])
+	if _, ok := decoded["download_url"]; ok {
+		t.Errorf("download_url must not be stored: %v", decoded)
 	}
 	if decoded["detected_at"] != "2026-09-22T18:00:00Z" {
 		t.Errorf("detected_at = %v, want expected timestamp", decoded["detected_at"])

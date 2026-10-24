@@ -399,7 +399,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			ObjectPath: harnessConfigFileObjectPath,
 		}), nil
 	case "update-binary":
-		installer := s.detectUpdateInstaller()
+		installer := s.updateInstaller()
 		log.Debug("Resolved update-binary executor",
 			"installer", installer.Name(), "github_repo", mc.GitHubRepo,
 			"release_channel", mc.ReleaseChannel)
@@ -746,7 +746,7 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
 // It dispatches to the appropriate update checker based on the deployment tier:
-//   - "binary": checks for release updates via LATEST.json manifest
+//   - "binary": checks the effective channel's latest release (LATEST.json)
 //   - "source" (default): checks for git updates via origin fetch
 //
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
@@ -760,7 +760,16 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 
 	switch mc.DeploymentTier {
 	case "binary":
-		result, err := CheckForReleaseUpdates(r.Context(), version.Version, mc.ReleaseChannel, mc.GitHubRepo)
+		channel, _ := effectiveReleaseChannel(mc, version.Version)
+		opts := maintenance.ReleaseCheckOptions{
+			CurrentVersion: version.Version,
+			Channel:        channel,
+			Repo:           mc.GitHubRepo,
+		}
+		if t, err := time.Parse(time.RFC3339, version.BuildTime); err == nil {
+			opts.CurrentBuildTime = t
+		}
+		result, err := maintenance.CheckForReleaseUpdates(r.Context(), opts)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to check for release updates: "+err.Error(), nil)
@@ -772,7 +781,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 		// Source tier: existing git-based check.
 		if mc.RepoPath == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"No repository path configured; set maintenance.repo_path in settings", nil)
+				"No maintenance repository path configured; set SCION_MAINTENANCE_REPO_PATH (or workspace_path in settings)", nil)
 			return
 		}
 
@@ -873,9 +882,15 @@ func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
-// It initiates a graceful systemd restart of the hub service. The
-// --no-block flag lets systemd schedule the restart asynchronously,
-// so the response is sent before the restart takes effect.
+//
+// With a supported update installer the restart goes through it: the
+// symlink layout exits the hub (SIGTERM to itself; systemd Restart=always
+// starts it again), which is requested only after the response is written;
+// sudo-install runs its allowed `sudo -n systemctl restart` rule. Where the
+// installer is unsupported the previous behaviour is kept: `sudo systemctl
+// restart --no-block <service>`, which works only where the hub user has
+// such a sudo rule.
+//
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -884,14 +899,43 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := GetUserIdentityFromContext(r.Context())
+	log := s.maintenanceLog
+	installer := s.updateInstaller()
+
+	switch installer.Name() {
+	case maintenance.StrategySymlink:
+		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
+		writeRestartAccepted(w)
+		// The restart signals this process; it is sent once the response
+		// is on the wire. A graceful shutdown would let it finish anyway,
+		// but nothing depends on that.
+		go func() {
+			time.Sleep(adminRestartSignalDelay)
+			if err := installer.Restart(context.Background()); err != nil {
+				log.Error("Failed to restart the hub", "error", err, "installer", installer.Name())
+			}
+		}()
+		return
+	case maintenance.StrategySudoInstall:
+		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
+		// systemctl restart is queued by systemd (--no-block, or started
+		// without waiting), so the response is written before the stop.
+		if err := installer.Restart(r.Context()); err != nil {
+			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email(), "installer", installer.Name())
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to initiate restart", nil)
+			return
+		}
+		writeRestartAccepted(w)
+		return
+	}
 
 	serviceName := s.config.MaintenanceConfig.ServiceName
 	if serviceName == "" {
 		serviceName = "scion-hub"
 	}
-
-	log := s.maintenanceLog
-	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName)
+	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName,
+		"installer", installer.Name())
 
 	// Use --no-block so systemd schedules the restart asynchronously.
 	// Without it, "systemctl restart" waits for the service to fully
@@ -907,8 +951,20 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeRestartAccepted(w)
+}
+
+// adminRestartSignalDelay is how long Restart Hub waits after writing its
+// response before the symlink installer signals the hub.
+const adminRestartSignalDelay = 250 * time.Millisecond
+
+// writeRestartAccepted writes the Restart Hub response and flushes it.
+func writeRestartAccepted(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "restarting",
 		"message": "Hub restart initiated",
 	})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

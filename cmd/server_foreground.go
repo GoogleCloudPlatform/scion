@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -2990,6 +2991,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)
 	// server.shared_dir_storage, read once from the global settings file
 	// through the same env-free loader the brokers use, so the hub's
 	// shared-dir browser and the agents resolve shared dirs from one source.
@@ -4799,6 +4801,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	// Pull from versioned settings if available.
+	var maint *config.V1MaintenanceConfig
 	if vs, err := loadServerVersionedSettings(); err == nil {
 		// The maintenance build registry is resolved at build time
 		// (hub.Server.maintenanceImageRegistry), not here.
@@ -4813,6 +4816,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		// Read new binary auto-update fields from server.maintenance.
 		if vs.Server != nil && vs.Server.Maintenance != nil {
 			m := vs.Server.Maintenance
+			maint = m
 			if m.DeploymentTier != "" {
 				mc.DeploymentTier = m.DeploymentTier
 			}
@@ -4863,6 +4867,9 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	if v := os.Getenv("SCION_MAINTENANCE_SERVICE_NAME"); v != "" {
 		mc.ServiceName = v
 	}
+	// SCION_MAINTENANCE_INSTALL_ROOT > server.maintenance.install_root >
+	// /opt/scion.
+	mc.InstallRoot = config.MaintenanceInstallRoot(maint)
 
 	// Apply deployment tier defaults if not explicitly configured.
 	if mc.DeploymentTier == "" {
@@ -4873,10 +4880,11 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		}
 	}
 
-	// Apply update policy default based on deployment tier.
+	// Apply update policy default based on deployment tier. Binary-tier
+	// hubs only notify by default; an explicit "auto" is honoured.
 	if mc.UpdatePolicy == "" {
 		if mc.DeploymentTier == "binary" {
-			mc.UpdatePolicy = "auto"
+			mc.UpdatePolicy = "notify"
 		} else {
 			mc.UpdatePolicy = "disabled"
 		}
@@ -4888,6 +4896,24 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	return mc
+}
+
+// detectUpdateInstaller detects, once at startup, how this hub installs
+// release binaries and restarts itself (symlink, sudo-install or
+// unsupported), and logs the result. The update-binary operation, the
+// auto-update policy and Restart Hub all use it.
+func detectUpdateInstaller(ctx context.Context, mc hub.MaintenanceConfig) maintenance.Installer {
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	inst := hub.DetectMaintenanceInstaller(dctx, mc)
+	st := inst.Status()
+	if st.Supported {
+		slog.Info("Release update installer detected", "strategy", st.Strategy, "install_root", mc.InstallRoot)
+	} else {
+		slog.Info("Release self-update is not supported on this host", "strategy", st.Strategy,
+			"install_root", mc.InstallRoot, "reason", st.Reason)
+	}
+	return inst
 }
 
 // requireImageRegistryForBroker checks that an image registry is available from

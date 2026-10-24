@@ -794,6 +794,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
+	"/api/v1/admin/maintenance/update-status": {
+		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/scheduler": {
 		Pattern: "/api/v1/admin/scheduler", RouteID: "admin.scheduler",
 		Classification: RouteHubAdmin,

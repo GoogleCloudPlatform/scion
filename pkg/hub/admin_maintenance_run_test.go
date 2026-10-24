@@ -142,6 +142,31 @@ func waitForRunStatus(t *testing.T, s store.Store, runID string, done func(*stor
 	}
 }
 
+// waitForRestartRecorded waits until the before-restart hook of run has
+// finished: the run is "restarting", system.pending_update names it and
+// system.update_available is gone. The runner writes nothing after that.
+func waitForRestartRecorded(t *testing.T, s store.Store, runID string) *store.MaintenanceOperationRun {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := s.GetMaintenanceRun(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending, perr := s.GetHubSetting(ctx, HubSettingSectionPendingUpdate)
+		_, uerr := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable)
+		if run.Status == store.MaintenanceStatusRestarting && perr == nil &&
+			strings.Contains(string(pending.Value), runID) && errors.Is(uerr, store.ErrNotFound) {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restart of run %s not recorded: run=%+v pending err=%v", runID, run, perr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func newRun(t *testing.T, s store.Store) *store.MaintenanceOperationRun {
 	t.Helper()
 	run := &store.MaintenanceOperationRun{
@@ -164,9 +189,7 @@ func TestLaunchMaintenanceRun_RecordsRestartingBeforeRestart(t *testing.T) {
 	run := newRun(t, s)
 	srv.launchMaintenanceRun(run, &restartingExecutor{}, map[string]string{})
 
-	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
-		return strings.Contains(r.Log, "restart requested")
-	})
+	got := waitForRestartRecorded(t, s, run.ID)
 	if got.Status != store.MaintenanceStatusRestarting {
 		t.Fatalf("status = %q, want restarting", got.Status)
 	}

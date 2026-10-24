@@ -2552,7 +2552,7 @@
       "x-since": "1",
       "properties": {
         "deployment_tier": { "type": "string", "description": "Update strategy: \"source\" (git-based) or \"binary\" (release-based)." },
-        "release_channel": { "type": "string", "description": "Release channel to track: \"stable\" or \"preview\"." },
+        "release_channel": { "type": "string", "description": "Release channel to track: \"nightly\", \"preview\" or \"stable\". When unset, the running version's channel is used." },
         "update_policy": { "type": "string", "description": "Automatic update behavior: \"auto\", \"notify\", or \"disabled\". Unknown values are treated as \"notify\"." },
         "check_interval_hours": { "type": "integer", "minimum": 0, "description": "Hours between release checks." },
         "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." },
