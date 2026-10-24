@@ -1179,6 +1179,11 @@ type resolvedTemplate struct {
 	HarnessConfigName string
 	// HarnessConfigDir is the loaded harness-config directory.
 	HarnessConfigDir *config.HarnessConfigDir
+	// TemplateWarnings are the deprecated-field warnings for the template
+	// chain's own merged config: no inline config and no harness-config
+	// layer, so a value the harness-config supplies is never reported as
+	// set by the template.
+	TemplateWarnings []string
 }
 
 // resolveTemplateAndHarnessConfig resolves templateName's template chain and
@@ -1225,6 +1230,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, templateJobConfig(ctx, tpl, tplCfg))
 	}
+	templateWarnings := config.WarnDeprecatedTemplateFields(finalScionCfg)
 
 	if inlineCfg != nil {
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
@@ -1261,6 +1267,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		TemplatePaths:     templatePaths,
 		HarnessConfigName: harnessConfigName,
 		HarnessConfigDir:  hcDir,
+		TemplateWarnings:  templateWarnings,
 	}, nil
 }
 
@@ -2055,6 +2062,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	finalScionCfg.Harness = hcDir.Config.Harness
 	finalScionCfg.HarnessConfig = harnessConfigName
 
+	// Warn once about deprecated harness-specific fields the template chain
+	// itself sets, before the harness-config layer is merged in.
+	config.PrintDeprecationWarnings(rt.TemplateWarnings)
+
 	// Merge harness-config scalars into finalScionCfg (harness-config is base, template overrides)
 	hcCfg := &api.ScionConfig{}
 
@@ -2107,9 +2118,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Ensure harness and harness_config fields are not overridden by the merge
 	finalScionCfg.Harness = hcDir.Config.Harness
 	finalScionCfg.HarnessConfig = harnessConfigName
-
-	// Warn about deprecated harness-specific fields in template config
-	config.PrintDeprecationWarnings(config.WarnDeprecatedTemplateFields(finalScionCfg))
 
 	// Resolve model size aliases (small/medium/large → concrete model name)
 	if finalScionCfg.Model != "" && hcDir.Config.ModelAliases != nil {
