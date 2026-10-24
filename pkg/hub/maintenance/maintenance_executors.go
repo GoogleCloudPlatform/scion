@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1391,10 +1392,50 @@ func CheckForUpdates(ctx context.Context, repoPath string) (*UpdateCheckResult, 
 	return result, nil
 }
 
-// ExtractScionBinary extracts a .tar.gz archive and returns the path to the
-// scion binary found within it. It looks for a file named "scion" at any
-// depth in the archive.
+// DefaultMaxExtractBytes caps the decompressed size of a release tarball
+// read by ExtractScionBinary. It matches DefaultMaxDownloadBytes (512 MiB):
+// a release archive holds one scion binary of a few hundred MB at most, so
+// anything larger is refused instead of being inflated (gzip bomb).
+const DefaultMaxExtractBytes int64 = 512 << 20
+
+// ExtractScionBinary extracts the scion binary from a release .tar.gz into
+// destDir/extracted and returns its path. Release archives
+// (build-release.yml: tar -czf … -C dist scion) hold exactly one regular
+// file named "scion" at the archive root; that is the only accepted layout:
+//   - a second root-level scion entry, a scion entry in a subdirectory, or a
+//     root-level scion that is not a regular file is an error;
+//   - other entries are skipped, never written to disk;
+//   - reading stops with an error once more than DefaultMaxExtractBytes have
+//     been decompressed.
 func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
+	return extractScionBinary(tarballPath, destDir, logger, DefaultMaxExtractBytes)
+}
+
+// errExtractTooLarge reports a tarball that decompresses past the cap.
+var errExtractTooLarge = errors.New("release archive exceeds the extraction size limit")
+
+// cappedReader returns errExtractTooLarge once more than n bytes were read.
+type cappedReader struct {
+	r io.Reader
+	n int64 // bytes still allowed
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.n < 0 {
+		return 0, errExtractTooLarge
+	}
+	if int64(len(p)) > c.n+1 {
+		p = p[:c.n+1]
+	}
+	n, err := c.r.Read(p)
+	c.n -= int64(n)
+	if c.n < 0 {
+		return n, errExtractTooLarge
+	}
+	return n, err
+}
+
+func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes int64) (string, error) {
 	f, err := os.Open(tarballPath)
 	if err != nil {
 		return "", fmt.Errorf("open tarball: %w", err)
@@ -1407,74 +1448,71 @@ func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, 
 	}
 	defer func() { _ = gz.Close() }()
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(&cappedReader{r: gz, n: maxBytes})
 	extractDir := filepath.Join(destDir, "extracted")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return "", fmt.Errorf("create extract directory: %w", err)
 	}
+	binPath := filepath.Join(extractDir, "scion")
 
-	var scionBinaryPath string
-
+	found := false
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, errExtractTooLarge) {
+				return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+			}
 			return "", fmt.Errorf("read tarball entry: %w", err)
 		}
 
-		// Sanitize: skip entries that try to escape the extract directory.
-		cleanName := filepath.Clean(header.Name)
-		if strings.HasPrefix(cleanName, "..") || strings.HasPrefix(cleanName, "/") {
-			continue
-		}
-
-		targetPath := filepath.Join(extractDir, cleanName)
-		if !strings.HasPrefix(targetPath, extractDir+string(os.PathSeparator)) && targetPath != extractDir {
-			continue
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return "", fmt.Errorf("create directory %q: %w", cleanName, err)
+		name := path.Clean(strings.TrimPrefix(header.Name, "./"))
+		switch {
+		case name == "scion":
+			if found {
+				return "", fmt.Errorf("release archive has more than one %q entry", "scion")
 			}
-
-		case tar.TypeReg:
-			// Ensure parent directory exists.
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return "", fmt.Errorf("create parent for %q: %w", cleanName, err)
+			if header.Typeflag != tar.TypeReg {
+				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
 			}
-
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
-			if err != nil {
-				return "", fmt.Errorf("create file %q: %w", cleanName, err)
+			found = true
+			if err := writeExtracted(binPath, tr); err != nil {
+				if errors.Is(err, errExtractTooLarge) {
+					return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
+				}
+				return "", err
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				_ = outFile.Close()
-				return "", fmt.Errorf("write file %q: %w", cleanName, err)
-			}
-			_ = outFile.Close()
-
-			// Track the scion binary — look for a file named "scion" (base name).
-			if filepath.Base(cleanName) == "scion" {
-				scionBinaryPath = targetPath
-				_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", cleanName)
-			}
+			_, _ = fmt.Fprintf(logger, "Found scion binary: %s\n", header.Name)
+		case path.Base(name) == "scion":
+			return "", fmt.Errorf("release archive has a nested %q entry (%s); only a root-level scion is accepted", "scion", header.Name)
+		default:
+			// Not extracted. Its content is still read (and counted against
+			// the cap) by the next tr.Next.
 		}
 	}
 
-	if scionBinaryPath == "" {
-		return "", fmt.Errorf("no 'scion' binary found in tarball")
+	if !found {
+		return "", fmt.Errorf("no 'scion' binary found at the root of the tarball")
 	}
+	return binPath, nil
+}
 
-	// Ensure the extracted binary is executable.
-	if err := os.Chmod(scionBinaryPath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod extracted binary: %w", err)
+// writeExtracted writes r to dst with mode 0755.
+func writeExtracted(dst string, r io.Reader) error {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
 	}
-
-	return scionBinaryPath, nil
+	if _, err := io.Copy(out, r); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	return os.Chmod(dst, 0o755)
 }
 
 // VerifyScionBinary runs the extracted binary to confirm it reports the

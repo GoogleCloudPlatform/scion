@@ -19,8 +19,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,31 +92,14 @@ func TestExtractScionBinary(t *testing.T) {
 		}
 	})
 
-	t.Run("finds scion in nested directory", func(t *testing.T) {
-		content := []byte("nested scion binary")
+	t.Run("rejects scion in a nested directory", func(t *testing.T) {
 		tarball := createTestTarball(t, map[string][]byte{
-			"scion-v1.0.0/scion":  content,
+			"scion-v1.0.0/scion":  []byte("nested scion binary"),
 			"scion-v1.0.0/README": []byte("readme"),
 		})
-
-		tmpDir := t.TempDir()
-		tarballPath := filepath.Join(tmpDir, "release.tar.gz")
-		if err := os.WriteFile(tarballPath, tarball, 0o644); err != nil {
-			t.Fatalf("write tarball: %v", err)
-		}
-
-		var logBuf bytes.Buffer
-		binaryPath, err := ExtractScionBinary(tarballPath, tmpDir, &logBuf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		data, err := os.ReadFile(binaryPath)
-		if err != nil {
-			t.Fatalf("read extracted binary: %v", err)
-		}
-		if !bytes.Equal(data, content) {
-			t.Errorf("extracted content = %q, want %q", data, content)
+		_, err := extractTarball(t, tarball, DefaultMaxExtractBytes)
+		if err == nil || !strings.Contains(err.Error(), "nested") {
+			t.Fatalf("err = %v, want nested-entry error", err)
 		}
 	})
 
@@ -249,71 +234,155 @@ echo '{"version":"v1.0.0","commit":"abc123","buildTime":"2026-01-01","short":"v1
 	})
 }
 
-func TestExtractScionBinary_SubdirectoryStructure(t *testing.T) {
-	// Simulate the real release tarball structure:
-	// scion-linux-amd64/
-	// scion-linux-amd64/scion
-	// scion-linux-amd64/LICENSE
+// tarEntry is one entry for orderedTarball.
+type tarEntry struct {
+	name     string
+	typeflag byte
+	body     []byte
+	linkname string
+}
+
+// orderedTarball builds a .tar.gz with the entries in order (duplicates
+// allowed, unlike createTestTarball's map).
+func orderedTarball(t *testing.T, entries ...tarEntry) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
+	for _, e := range entries {
+		tf := e.typeflag
+		if tf == 0 {
+			tf = tar.TypeReg
+		}
+		hdr := &tar.Header{Name: e.name, Typeflag: tf, Mode: 0o755, Linkname: e.linkname}
+		if tf == tar.TypeReg {
+			hdr.Size = int64(len(e.body))
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if tf == tar.TypeReg {
+			if _, err := tw.Write(e.body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
-	// Directory entry.
-	_ = tw.WriteHeader(&tar.Header{
-		Name:     "scion-linux-amd64/",
-		Typeflag: tar.TypeDir,
-		Mode:     0o755,
+// extractTarball writes tarball to a temp dir and extracts it with maxBytes.
+// It returns the extract directory's entries on success, for assertions.
+func extractTarball(t *testing.T, tarball []byte, maxBytes int64) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "release.tar.gz")
+	if err := os.WriteFile(p, tarball, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return extractScionBinary(p, dir, &bytes.Buffer{}, maxBytes)
+}
+
+func TestExtractScionBinary_ReleaseLayout(t *testing.T) {
+	bin := []byte("#!/bin/sh\necho '{\"version\":\"v1.0.0\"}'")
+
+	for _, name := range []string{"scion", "./scion"} {
+		t.Run("root entry "+name, func(t *testing.T) {
+			got, err := extractTarball(t, orderedTarball(t,
+				tarEntry{name: "LICENSE", body: []byte("Apache 2.0")},
+				tarEntry{name: "docs/", typeflag: tar.TypeDir},
+				tarEntry{name: "docs/README", body: []byte("readme")},
+				tarEntry{name: name, body: bin},
+			), DefaultMaxExtractBytes)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			data, err := os.ReadFile(got)
+			if err != nil || !bytes.Equal(data, bin) {
+				t.Fatalf("binary = %q, %v", data, err)
+			}
+			if fi, _ := os.Stat(got); fi.Mode().Perm() != 0o755 {
+				t.Fatalf("mode = %v", fi.Mode().Perm())
+			}
+			// Only the scion entry is written.
+			entries, err := os.ReadDir(filepath.Dir(got))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != "scion" {
+				var names []string
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("extracted entries = %v, want only scion", names)
+			}
+		})
+	}
+}
+
+func TestExtractScionBinary_Rejections(t *testing.T) {
+	bin := []byte("binary")
+	tests := []struct {
+		name    string
+		entries []tarEntry
+		want    string
+	}{
+		{"duplicate root entry", []tarEntry{{name: "scion", body: bin}, {name: "scion", body: []byte("second")}}, "more than one"},
+		{"duplicate via ./", []tarEntry{{name: "./scion", body: bin}, {name: "scion", body: []byte("second")}}, "more than one"},
+		{"nested after root", []tarEntry{{name: "scion", body: bin}, {name: "x/scion", body: bin}}, "nested"},
+		{"nested before root", []tarEntry{{name: "x/scion", body: bin}, {name: "scion", body: bin}}, "nested"},
+		{"traversal named scion", []tarEntry{{name: "../scion", body: bin}}, "nested"},
+		{"root scion symlink", []tarEntry{{name: "scion", typeflag: tar.TypeSymlink, linkname: "/bin/sh"}}, "not a regular file"},
+		{"root scion directory", []tarEntry{{name: "scion/", typeflag: tar.TypeDir}}, "not a regular file"},
+		{"no scion", []tarEntry{{name: "README", body: bin}}, "no 'scion' binary"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := extractTarball(t, orderedTarball(t, tt.entries...), DefaultMaxExtractBytes)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractScionBinary_SizeCap(t *testing.T) {
+	// A gzip bomb in miniature: 4 MiB of zeros compresses to a few KB.
+	zeros := make([]byte, 4<<20)
+	const testCap = 1 << 20
+
+	t.Run("oversize scion entry", func(t *testing.T) {
+		tarball := orderedTarball(t, tarEntry{name: "scion", body: zeros})
+		if len(tarball) > 64<<10 {
+			t.Fatalf("test tarball unexpectedly large: %d", len(tarball))
+		}
+		_, err := extractTarball(t, tarball, testCap)
+		if !errors.Is(err, errExtractTooLarge) {
+			t.Fatalf("err = %v, want size-limit error", err)
+		}
 	})
 
-	// Binary entry.
-	binaryContent := []byte("#!/bin/sh\necho '{\"version\":\"v1.0.0\"}'")
-	_ = tw.WriteHeader(&tar.Header{
-		Name: "scion-linux-amd64/scion",
-		Mode: 0o755,
-		Size: int64(len(binaryContent)),
+	t.Run("oversize skipped entry counts too", func(t *testing.T) {
+		tarball := orderedTarball(t, tarEntry{name: "padding", body: zeros}, tarEntry{name: "scion", body: []byte("bin")})
+		_, err := extractTarball(t, tarball, testCap)
+		if !errors.Is(err, errExtractTooLarge) {
+			t.Fatalf("err = %v, want size-limit error", err)
+		}
 	})
-	_, _ = tw.Write(binaryContent)
 
-	// License entry.
-	licenseContent := []byte("Apache 2.0")
-	_ = tw.WriteHeader(&tar.Header{
-		Name: "scion-linux-amd64/LICENSE",
-		Mode: 0o644,
-		Size: int64(len(licenseContent)),
+	t.Run("under the cap", func(t *testing.T) {
+		tarball := orderedTarball(t, tarEntry{name: "scion", body: zeros[:testCap/2]})
+		if _, err := extractTarball(t, tarball, testCap); err != nil {
+			t.Fatalf("extract: %v", err)
+		}
 	})
-	_, _ = tw.Write(licenseContent)
 
-	_ = tw.Close()
-	_ = gw.Close()
-
-	tmpDir := t.TempDir()
-	tarballPath := filepath.Join(tmpDir, "release.tar.gz")
-	if err := os.WriteFile(tarballPath, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("write tarball: %v", err)
-	}
-
-	var logBuf bytes.Buffer
-	binaryPath, err := ExtractScionBinary(tarballPath, tmpDir, &logBuf)
-	if err != nil {
-		t.Fatalf("extraction failed: %v", err)
-	}
-
-	// Verify the binary was found in the subdirectory.
-	data, err := os.ReadFile(binaryPath)
-	if err != nil {
-		t.Fatalf("read extracted binary: %v", err)
-	}
-	if !bytes.Equal(data, binaryContent) {
-		t.Errorf("content mismatch: got %q", data)
-	}
-
-	// Verify LICENSE was also extracted.
-	extractDir := filepath.Dir(binaryPath)
-	licPath := filepath.Join(extractDir, "LICENSE")
-	licData, err := os.ReadFile(licPath)
-	if err != nil {
-		t.Logf("LICENSE file not found at %s (may be in different location)", licPath)
-	} else if !bytes.Equal(licData, licenseContent) {
-		t.Errorf("LICENSE content = %q, want %q", licData, licenseContent)
+	if DefaultMaxExtractBytes != DefaultMaxDownloadBytes {
+		t.Fatalf("DefaultMaxExtractBytes = %d, documented to match the 512 MiB download cap", DefaultMaxExtractBytes)
 	}
 }

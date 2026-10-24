@@ -131,8 +131,8 @@ func (f *fakeGitHub) addRelease(tag, published, reportVersion string) []byte {
 	f.t.Helper()
 	script := fmt.Sprintf("#!/bin/sh\necho '{\"version\":\"%s\"}'\n", reportVersion)
 	tarball := createTestTarball(f.t, map[string][]byte{
-		"scion-linux/scion":   []byte(script),
-		"scion-linux/LICENSE": []byte("license"),
+		"scion":   []byte(script),
+		"LICENSE": []byte("license"),
 	})
 	sum := sha256.Sum256(tarball)
 	asset := BinaryAssetName()
