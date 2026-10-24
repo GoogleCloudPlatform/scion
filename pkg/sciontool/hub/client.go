@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -945,6 +946,146 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 
 	recOK = true
 	return result.Token, expiresAt, nil
+}
+
+// DelegatedTokenPrefix is the fixed prefix of a delegated credential
+// (.design/agent-delegation.md §9.1).
+const DelegatedTokenPrefix = "scion_adt_"
+
+// maxExchangeResponseBytes bounds the exchange response body read.
+const maxExchangeResponseBytes = 1 << 20
+
+// DelegatedCredential is a delegated credential returned by exchange. Its
+// Token is a bearer: keep it in memory only, and never log, persist or pass
+// it to another process. String and GoString redact it, so formatting the
+// value with %v or %#v does not print it.
+type DelegatedCredential struct {
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	GrantID      string    `json:"grantId"`
+	CredentialID string    `json:"credentialId"`
+	Audience     string    `json:"audience"`
+	Permissions  []string  `json:"permissions"`
+}
+
+// String describes the credential without its token.
+func (d DelegatedCredential) String() string {
+	return fmt.Sprintf("delegated credential %s (grant %s, expires %s)",
+		d.CredentialID, d.GrantID, d.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+// GoString describes the credential without its token.
+func (d DelegatedCredential) GoString() string { return d.String() }
+
+// ExchangeError is a refused delegated credential exchange: the hub's HTTP
+// status and the code of its structured error body ("" when the body was
+// not one).
+type ExchangeError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *ExchangeError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("delegation exchange failed with status %d", e.StatusCode)
+	}
+	return fmt.Sprintf("delegation exchange failed with status %d (%s): %s", e.StatusCode, e.Code, e.Message)
+}
+
+// Reauthenticate reports whether the hub refused the agent credential the
+// exchange was made with. Both 401 answers mean this (§8.2 step 2): the
+// middleware's unauthorized for a revoked agent credential, and the
+// handler's agent_credential_invalid for a missing or expired one. The
+// same agent credential must not be retried; exchange again only after the
+// agent credential changes.
+func (e *ExchangeError) Reauthenticate() bool {
+	return e.StatusCode == http.StatusUnauthorized
+}
+
+// Retryable reports whether the same exchange may be retried, after a
+// backoff, with the same agent credential: the hub answered 5xx (503
+// unavailable is a credential-status lookup fault).
+func (e *ExchangeError) Retryable() bool {
+	return e.StatusCode >= 500
+}
+
+// ExchangeDelegation exchanges the delegation grant grantID for a delegated
+// credential, authenticated with the agent's current credential
+// (POST /api/v1/agents/{agentId}/delegations/{grantId}/exchange). audience
+// must be the hub's delegated-credential audience ("scion-hub:<hub ID>",
+// or "scion-hub" for a hub without an ID). The request asks for the whole
+// grant ceiling and the grant's maximum lifetime.
+//
+// A refusal is an *ExchangeError. A delegated credential cannot be
+// refreshed: to extend it, call ExchangeDelegation again (re-exchange),
+// which the hub checks in full each time.
+func (c *Client) ExchangeDelegation(ctx context.Context, grantID, audience string) (*DelegatedCredential, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+	if grantID == "" {
+		return nil, fmt.Errorf("delegation exchange: grant ID is required")
+	}
+	if audience == "" {
+		return nil, fmt.Errorf("delegation exchange: audience is required")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/delegations/%s/exchange",
+		strings.TrimSuffix(c.hubURL, "/"), url.PathEscape(c.agentID), url.PathEscape(grantID))
+	body, err := json.Marshal(struct {
+		Audience string `json:"audience"`
+	}{Audience: audience})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode exchange request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAgentAuth(req.Header, c.AuthToken())
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("delegation exchange request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxExchangeResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read exchange response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		xe := &ExchangeError{StatusCode: resp.StatusCode}
+		var hubErr struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &hubErr) == nil {
+			xe.Code = hubErr.Error.Code
+			xe.Message = hubErr.Error.Message
+		}
+		return nil, xe
+	}
+
+	var cred DelegatedCredential
+	if err := json.Unmarshal(respBody, &cred); err != nil {
+		return nil, fmt.Errorf("failed to parse exchange response")
+	}
+	if !strings.HasPrefix(cred.Token, DelegatedTokenPrefix) || len(cred.Token) == len(DelegatedTokenPrefix) {
+		return nil, fmt.Errorf("exchange response carries no delegated credential")
+	}
+	if cred.GrantID != grantID {
+		return nil, fmt.Errorf("exchange response names grant %q, not %q", cred.GrantID, grantID)
+	}
+	if cred.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("exchange response has no expiry")
+	}
+	return &cred, nil
 }
 
 // applyRefreshTokens processes the tokens[] array from a refresh response,
