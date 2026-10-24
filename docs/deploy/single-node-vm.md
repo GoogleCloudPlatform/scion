@@ -268,7 +268,9 @@ If something goes wrong, the command stops at that step:
   a real directory) and re-run. `deploy.sh --version` refuses in the same
   way. The exception is an `/opt/scion` that is still owned by root because
   an earlier first run stopped partway. The next run finishes setting it up
-  and hands it to `scion`.
+  and hands it to `scion`. Its parent, `/opt`, must be owned by root and not
+  writable by group or others (the image default, `root 0755`). Otherwise
+  `/opt/scion` is neither created nor resumed.
 - **The settings edit is refused.** This happens if the file has a shape the
   script cannot edit safely (for example a flow-style `maintenance: {...}`),
   or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this

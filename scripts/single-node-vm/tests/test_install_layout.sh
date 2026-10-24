@@ -1664,3 +1664,94 @@ test_layout_as_owner_step_refuses_direct_root_use() {
   assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created"
   rm -rf "$LH_DIR"
 }
+
+# =====================================================================
+# Fix-delta audit F2/F3
+# =====================================================================
+
+# F2: adopt where <bin-link> leads through <root> (<root>/current is a
+# plain directory, so the host is not "converted"). The owner swaps
+# <root>/current/scion for a symlink to another file right after its
+# version is read (the fake binary does the swap while answering
+# `version`, which binary_tag runs as the owner). Root must never read
+# through that path: its copy command (install, stubbed to log) is never
+# pointed into <root>, and the owner step gets the path to read itself.
+test_layout_adopt_never_reads_owner_path_as_root() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log" secret="${LH_DIR}/secret"
+  _layout_root_stubs "$stub" "$log"
+  printf '#!/usr/bin/env bash\necho "install $*" >> "%s"\nexec /usr/bin/install "$@"\n' "$log" > "${stub}/install"
+  chmod 0755 "${stub}/install"
+  echo "not-a-scion-binary" > "$secret"
+  mkdir -p "$(dirname "$LH_ROOT")"
+  mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases" "$LH_ROOT/snapshots" "$LH_ROOT/current"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/bin/sh\nif [ "$1" = version ]; then\n  rm -f "%s" && ln -s "%s" "%s"\n  printf %s\nfi\n' \
+    "$LH_ROOT/current/scion" "$secret" "$LH_ROOT/current/scion" \
+    "'{\n  \"commit\": \"0123456789abcdef0123456789abcdef01234567\",\n  \"version\": \"nightly-20261020\"\n}\n'" \
+    > "$LH_ROOT/current/scion"
+  chmod 0755 "$LH_ROOT/current/scion"
+  ln -s "$LH_ROOT/current/scion" "$LH_BIN"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
+  LAYOUT_RC=$?
+  local calls
+  calls="$(cat "$log" 2>/dev/null)"
+  assert_true "$([[ -L "$LH_ROOT/current/scion" ]] && echo true || echo false)" \
+    "sanity: the owner's swap must have happened after the version was read (output: ${LAYOUT_OUT})"
+  assert_not_contains "$calls" "install -m 0755 -- ${LH_ROOT}/" "root must not copy (read) a file reached through <root>"
+  assert_contains "$calls" "__as-owner nightly-20261020 ${LH_ROOT}/current/scion" \
+    "the owner step must be given the path to read itself"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" \
+    "the adopt must still stop: a plain-directory current is refused by the owner step"
+  assert_contains "$LAYOUT_OUT" "current exists but is not a symlink" "the refusal must come from the owner step"
+  rm -rf "$LH_DIR"
+}
+
+# F2, the normal old-layout case: <bin-link> is a plain binary in root's
+# own directory, so root copies it (it may be 0700) for the owner step.
+test_layout_adopt_plain_bin_link_is_copied_by_root() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log"
+  _layout_root_stubs "$stub" "$log"
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
+  assert_eq "0" "$?" "adopt of a plain binary must succeed (output: ${LAYOUT_OUT})"
+  assert_contains "$(cat "$log")" "__as-owner nightly-20261001 ${TMPDIR:-/tmp}/scion-layout-input." \
+    "a plain <bin-link> is copied by root and handed over as a 0755 copy"
+  assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/current")" "the adopted release must be current"
+  rm -rf "$LH_DIR"
+}
+
+# F3: the fresh-create path checks <root>'s parent like the resume path:
+# it must not be writable by group or others, nor owned by another user.
+test_layout_fresh_create_requires_safe_parent() {
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  chmod 0775 "$(dirname "$LH_ROOT")"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a group-writable parent must be refused"
+  assert_contains "$LAYOUT_OUT" "not writable by group or others" "the refusal must say why"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created under an unsafe parent"
+  rm -rf "$LH_DIR"
+
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  local stub="${LH_DIR}/stub" parent
+  parent="$(dirname "$LH_ROOT")"
+  mkdir -p "$stub"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/mallory}"; fi\nprintf "%%s\\n" "$out"\n' \
+    "$parent" > "${stub}/stat"
+  chmod 0755 "${stub}/stat"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a parent owned by another user must be refused (output: ${LAYOUT_OUT})"
+  assert_contains "$LAYOUT_OUT" "must be owned by root" "the refusal must say why"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created under a parent owned by another user"
+  rm -rf "$LH_DIR"
+}

@@ -116,7 +116,8 @@ owner_user() {
 #   - all changes inside <root> (staging a release, current/previous,
 #     missing subdirs) run as the owner (run_as_owner -> __as-owner);
 #   - root itself only writes outside the tree: <bin-link>, and readable
-#     copies of the input binaries in a root-owned temp dir (stage_inputs),
+#     copies of input binaries it may read in a root-owned temp dir (stage_inputs;
+#     a binary reached through a symlink is read by the owner instead),
 #     so the owner step can always read its input.
 
 # verify_owned_dir PATH -- PATH must be a real directory (not a symlink),
@@ -144,6 +145,7 @@ ensure_root() {
   parent="$(dirname "$INSTALL_ROOT")"
   if [[ ! -e "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]]; then
     mkdir -p "$parent"
+    parent_is_safe "$parent" || die "$parent (the parent of $INSTALL_ROOT) must be owned by root and not writable by group or others; refusing to create $INSTALL_ROOT there"
     mkdir -m 0755 "$INSTALL_ROOT"
     build_and_hand_over "created"
     return 0
@@ -154,7 +156,7 @@ ensure_root() {
   # root may safely finish the job.
   if [[ "$(owner_user)" != "root" \
         && "$(stat -c '%F|%U' -- "$INSTALL_ROOT")" == "directory|root" \
-        && "$(stat -c '%U' -- "$parent")" == "root" ]]; then
+        && "$(stat -c '%U' -- "$parent")" == "root" ]] && parent_is_safe "$parent"; then
     build_and_hand_over "resumed the handover of"
     return 0
   fi
@@ -164,6 +166,21 @@ ensure_root() {
       verify_owned_dir "$INSTALL_ROOT/$d"
     fi
   done
+}
+
+# parent_is_safe DIR -- DIR (the parent of <root>) is a real directory
+# owned by root (or by the user running this, for unprivileged tests) and
+# not writable by group or others, so the owner cannot replace <root>
+# while root builds it. /opt on the VM image is root 0755.
+parent_is_safe() {
+  local info owner mode
+  info="$(stat -c '%F|%U|%a' -- "$1")" || return 1
+  [[ "${info%%|*}" == "directory" ]] || return 1
+  owner="$(cut -d'|' -f2 <<< "$info")"
+  mode="${info##*|}"
+  [[ "$owner" == "root" || "$owner" == "$(id -un)" ]] || return 1
+  # No group (020) or other (002) write bit.
+  (( (8#$mode & 8#022) == 0 ))
 }
 
 # build_and_hand_over VERB -- with <root> a real directory only root can
@@ -194,23 +211,50 @@ cleanup_input_dirs() {
 }
 trap cleanup_input_dirs EXIT
 
-# stage_inputs TAG BINARY [TAG BINARY...] -- copy each BINARY (which root
-# can read, but the owner may not: a 0750 file under umask 027, a relative
-# path, a 0700 hand-installed binary) to a 0755 file in a fresh root-owned
-# 0711 directory outside <root>, and set STAGED_PAIRS to the same pairs
-# with those absolute paths. Root writes nothing inside <root> here.
+# stage_inputs TAG SRC WHO [TAG SRC WHO...] -- build STAGED_PAIRS, the
+# TAG/BINARY pairs handed to the owner step, in order. WHO says who reads
+# SRC:
+#   root  -- root copies SRC (which root can read, but the owner may not: a
+#            0750 file under umask 027, a relative path, a 0700 hand-installed
+#            binary) to a 0755 file in a fresh root-owned 0711 directory
+#            outside <root>, and the owner step gets that absolute path;
+#   owner -- SRC is passed through unchanged and only the owner step reads
+#            it, with the owner's own permissions. Used for any source root
+#            must not read through (see adopt_reader).
+# Root writes nothing inside <root> here.
 stage_inputs() {
-  local dir
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/scion-layout-input.XXXXXX")"
-  INPUT_DIRS+=("$dir")
-  chmod 0711 "$dir"
+  local dir=""
   STAGED_PAIRS=()
   while [[ $# -gt 0 ]]; do
-    install -m 0755 -- "$2" "$dir/$1"
-    cmp -s "$2" "$dir/$1" || die "copy of $2 to $dir is incomplete (disk full?); nothing was changed"
-    STAGED_PAIRS+=("$1" "$dir/$1")
-    shift 2
+    if [[ "$3" == "owner" ]]; then
+      STAGED_PAIRS+=("$1" "$2")
+    else
+      if [[ -z "$dir" ]]; then
+        dir="$(mktemp -d "${TMPDIR:-/tmp}/scion-layout-input.XXXXXX")"
+        INPUT_DIRS+=("$dir")
+        chmod 0711 "$dir"
+      fi
+      install -m 0755 -- "$2" "$dir/$1"
+      cmp -s "$2" "$dir/$1" || die "copy of $2 to $dir is incomplete (disk full?); nothing was changed"
+      STAGED_PAIRS+=("$1" "$dir/$1")
+    fi
+    shift 3
   done
+}
+
+# adopt_reader -- who may read the binary being adopted: "root" only when
+# <bin-link> is a plain file, i.e. in root's own directory where only root
+# can replace it. If <bin-link> is a symlink it can lead anywhere, including
+# through <root> (e.g. <root>/current/scion with current a directory),
+# where the owner can swap the file after its version was read; that copy
+# is then made by the owner step ("owner"), so root never reads through an
+# owner-controlled path.
+adopt_reader() {
+  if [[ -L "$BIN_LINK" ]]; then
+    echo owner
+  else
+    echo root
+  fi
 }
 
 # run_as_owner ARGS... -- run this script's internal __as-owner step with
@@ -395,12 +439,12 @@ cmd_install() {
     old_tag="$(binary_tag "$src")"
     if [[ -n "$old_tag" ]]; then
       log "adopting $src as releases/$old_tag"
-      pairs+=("$old_tag" "$src")
+      pairs+=("$old_tag" "$src" "$(adopt_reader)")
     else
       echo "scion-layout: WARNING: could not read the version of $src; not keeping it as a release" >&2
     fi
   fi
-  pairs+=("$tag" "$bin")
+  pairs+=("$tag" "$bin" root)
   stage_inputs "${pairs[@]}"
   run_as_owner "${STAGED_PAIRS[@]}"
   link_bin
@@ -422,7 +466,7 @@ cmd_adopt() {
   fi
   log "adopting $src as releases/$tag"
   ensure_root
-  stage_inputs "$tag" "$src"
+  stage_inputs "$tag" "$src" "$(adopt_reader)"
   run_as_owner "${STAGED_PAIRS[@]}"
   link_bin
 }
