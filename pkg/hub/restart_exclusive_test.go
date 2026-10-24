@@ -40,7 +40,7 @@ func createRunWithStatus(t *testing.T, s store.Store, key, status string) *store
 	return run
 }
 
-type apiErrorBody struct {
+type restartAPIErrorBody struct {
 	Error struct {
 		Code    string         `json:"code"`
 		Message string         `json:"message"`
@@ -48,9 +48,9 @@ type apiErrorBody struct {
 	} `json:"error"`
 }
 
-func decodeAPIError(t *testing.T, body []byte) apiErrorBody {
+func decodeRestartAPIError(t *testing.T, body []byte) restartAPIErrorBody {
 	t.Helper()
-	var e apiErrorBody
+	var e restartAPIErrorBody
 	if err := json.Unmarshal(body, &e); err != nil {
 		t.Fatalf("error body %s: %v", body, err)
 	}
@@ -74,7 +74,7 @@ func TestHandleAdminRestart_RefusedWhileHubBinaryRunInFlight(t *testing.T) {
 			if rr.Code != http.StatusConflict {
 				t.Fatalf("response = %d %s, want 409", rr.Code, rr.Body.String())
 			}
-			e := decodeAPIError(t, rr.Body.Bytes())
+			e := decodeRestartAPIError(t, rr.Body.Bytes())
 			if e.Error.Code != ErrCodeConflict || e.Error.Details["runId"] != blocking.ID ||
 				e.Error.Details["operationKey"] != tt.key || e.Error.Details["status"] != tt.status ||
 				!strings.Contains(e.Error.Message, "Cannot restart the hub while "+tt.key) {
@@ -143,7 +143,7 @@ func TestHubRestartReservation_RefusesHubBinaryRuns(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("update during restart = %d %s, want 409", rr.Code, rr.Body.String())
 	}
-	if e := decodeAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
+	if e := decodeRestartAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
 		!strings.Contains(e.Error.Message, "hub restart is in progress") {
 		t.Fatalf("error = %+v", e.Error)
 	}
@@ -151,7 +151,7 @@ func TestHubRestartReservation_RefusesHubBinaryRuns(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("rebuild during restart = %d %s, want 409", rr.Code, rr.Body.String())
 	}
-	if e := decodeAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
+	if e := decodeRestartAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
 		!strings.Contains(e.Error.Message, "hub restart is in progress") {
 		t.Fatalf("rebuild error = %+v", e.Error)
 	}
