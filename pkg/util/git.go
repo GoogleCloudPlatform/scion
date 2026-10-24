@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -496,11 +495,13 @@ func isLFSPointerFile(p string) bool {
 }
 
 // readRegularFilePrefix reads up to limit bytes from a regular file at path.
-// It opens with O_NOFOLLOW|O_NONBLOCK (so a symlink cannot redirect it and a
-// FIFO/device cannot block it) and confirms via fstat that the opened file is
-// regular. ok is false for a symlink, a non-regular file, or any error.
+// On unix it opens with O_NOFOLLOW|O_NONBLOCK (so a symlink cannot redirect it
+// and a FIFO/device cannot block it); on other platforms it refuses a symlink
+// or non-regular file with Lstat before opening. On every platform it then
+// confirms via fstat that the opened file is regular. ok is false for a
+// symlink, a non-regular file, or any error.
 func readRegularFilePrefix(path string, limit int64) ([]byte, bool) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openRegularFileNoFollow(path)
 	if err != nil {
 		return nil, false
 	}

@@ -46,3 +46,17 @@ func readSmallRegularFile(path string, max int64) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// openRegularFileNoFollow opens path read-only after an Lstat check refuses a
+// symlink or any non-regular file at path. The caller must still confirm with
+// fstat that the opened file is regular.
+func openRegularFileNoFollow(path string) (*os.File, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return os.Open(path)
+}
