@@ -71,14 +71,36 @@ func ResourceParentCeilingFor(permissionID string) (ResourceParentCeiling, bool)
 	return ResourceParentCeiling{}, false
 }
 
+// ParentProofKind names what a ParentProof proves.
+type ParentProofKind string
+
+const (
+	// ParentProofKindParentPermission: the recorded source live-holds a
+	// registered parent permission on the resource (Permission).
+	ParentProofKindParentPermission ParentProofKind = "parent_permission"
+	// ParentProofKindOwnershipFact: no registered permission expresses the
+	// parent authority, so the proof is the live ownership fact of the
+	// resource (ResourceID) by the recorded source; Permission is the
+	// decision permission.
+	ParentProofKindOwnershipFact ParentProofKind = "ownership_fact"
+)
+
 // ParentProof describes the parent authority a parent-ceiling decision
-// checked: the permission, the recorded source and the assignment.
+// checked: the permission, the recorded source and the resource.
+//   - Kind parent_permission (the service-account ceiling): Permission is
+//     the parent permission the source holds, AssignmentID and
+//     ServiceAccountID name the assignment and the account.
+//   - Kind ownership_fact (the user-scope secret ceiling): Permission is the
+//     decision permission (secret.use), and ResourceID is the secret whose
+//     ownership by the source was proved.
 type ParentProof struct {
+	Kind                 ParentProofKind
 	Permission           string
 	SourcePrincipal      ProvenancePrincipal
 	SourceCredentialKind store.SourceCredentialKind
 	AssignmentID         string
 	ServiceAccountID     string
+	ResourceID           string
 }
 
 // ParentCeilingDecision is the result of a parent-ceiling evaluation.
@@ -203,7 +225,7 @@ func checkAssignmentSourcePrincipal(row store.AgentServiceAccountAssignment) err
 // error, does not read the assignment's Origin, does not check actAs, writes
 // nothing and emits no audit record.
 func (a *AuthzService) EvaluateServiceAccountParentCeiling(ctx context.Context, agentID, serviceAccountID string) ParentCeilingDecision {
-	proof := ParentProof{Permission: gcpServiceAccountAssignPermission, ServiceAccountID: serviceAccountID}
+	proof := ParentProof{Kind: ParentProofKindParentPermission, Permission: gcpServiceAccountAssignPermission, ServiceAccountID: serviceAccountID}
 	if a == nil || a.store == nil || agentID == "" || serviceAccountID == "" {
 		return parentCeilingDeny(DenyCauseCeilingError, "invalid parent ceiling request", proof)
 	}
@@ -363,4 +385,487 @@ func (a *AuthzService) parentCeilingSourceIdentity(ctx context.Context, row stor
 		}}, "", ""
 	}
 	return nil, DenyCauseCeilingOrphaned, "recorded source is inconsistent"
+}
+
+// ---- user-scope secret parent ceiling ---------------------------------------
+//
+// An agent's use of a user-scope secret (secret.use with ActionUse on a
+// secret whose parent is a user) has no registered parent permission: no
+// role or relationship grants a user secret.use on their own secret. The
+// parent proof is instead the live ownership fact: the user at the end of the
+// agent's recorded delegation chain is active, admitted to the agent's
+// project, not restricted by an access constraint or the test-admin policy,
+// and is the owner and author of the exact secret, which they have shared
+// with their progeny. Every hop of the chain carries recorded provenance
+// and an effect ceiling that allows secret.use.
+//
+// The evaluation has two steps, so a caller that evaluates many secrets for
+// one agent can run the first once:
+//   - the chain verdict (userSecretChainVerdict): the principal, the stored
+//     agent, every hop, and the terminal user;
+//   - the source check (userSecretSourceCheck): the exact secret, against
+//     inputs loaded once per request (loadUserSecretSourceInputs).
+//
+// It proves neither the requesting agent's credential scope nor the
+// requesting agent's own access constraints: Decide applies those (steps 7b
+// and 7c), and a caller outside Decide applies them itself.
+
+const secretUsePermission = "secret.use"
+
+// errUserSecretParentCeiling is returned by the step-10 arm when the
+// evaluation could not be completed; Decide denies with ceiling_error.
+var errUserSecretParentCeiling = errors.New("user secret parent ceiling could not be evaluated")
+
+// userSecretParentProofApplies reports whether step 10 evaluates the
+// user-scope secret parent ceiling instead of the generic chain walk: the
+// permission is secret.use, the action is use, the resource is a secret
+// whose parent is a user, and the principal is not the hub delivery
+// credential. It is the only definition of that test. An empty resource ID
+// or parent ID is not part of it: such a request takes the parent ceiling
+// and denies there, never the generic walk.
+func userSecretParentProofApplies(req AuthzRequest, permissionID string) bool {
+	if permissionID != secretUsePermission {
+		return false
+	}
+	if req.Action != ActionUse {
+		return false
+	}
+	if req.Resource.Type != "secret" {
+		return false
+	}
+	if req.Resource.ParentType != "user" {
+		return false
+	}
+	if _, ok := req.Principal.Identity.(*hubDeliveryIdentity); ok {
+		return false
+	}
+	return true
+}
+
+// userSecretResource is the resource for an agent's use of the user-scope
+// secret meta. Check 8 and the agent secret list both build it here, so the
+// read and the list evaluate the same resource.
+func userSecretResource(id, scopeID string) Resource {
+	return Resource{Type: "secret", ID: id, OwnerID: scopeID, ParentType: "user", ParentID: scopeID}
+}
+
+// userSecretChain is the result of the chain verdict. When decision is
+// allowed, agent is the stored agent row, user the terminal user and
+// sourceCredential the credential kind recorded on the terminal hop.
+type userSecretChain struct {
+	decision         ParentCeilingDecision
+	agent            *store.Agent
+	user             *store.User
+	sourceCredential store.SourceCredentialKind
+	// note is filled from a ceiling_unrecorded deny, as the generic walk
+	// fills it (logUnrecordedHop).
+	note unrecordedHopNote
+	// unrecorded is set when the deny came from a hop that carries no
+	// recorded provenance: no active edge, more than one, the migration
+	// sentinel, an unrecorded ceiling or unknown provenance version, or an
+	// edge whose recorded principal does not type-check.
+	unrecorded bool
+}
+
+func (c userSecretChain) deny(cause DenyCause, reason string) userSecretChain {
+	c.decision = parentCeilingDeny(cause, reason, c.decision.Proof)
+	return c
+}
+
+// userSecretSourceInputs are the inputs of the source check, loaded once per
+// request: the access-constraint table, the terminal user's principal
+// closure and the progeny secrets of the stored agent's ancestry.
+type userSecretSourceInputs struct {
+	constraints []*store.AccessConstraint
+	userClosure map[string]struct{}
+	progeny     []store.Secret
+}
+
+// secretParentStep appends a secret_parent_ceiling_* step when explain is
+// non-nil.
+func secretParentStep(explain *[]DecisionStep, step, detail string) {
+	if explain != nil {
+		*explain = append(*explain, DecisionStep{Step: "secret_parent_ceiling_" + step, Detail: detail})
+	}
+}
+
+// EvaluateUserSecretParentCeiling proves that principal, a local agent, may
+// use the user-scope secret resource under its recorded delegation chain.
+// Clauses, in order, each denying with the given cause:
+//   - the request names a principal (ceiling_error) and a secret and its
+//     parent user (ceiling_resource_missing);
+//   - S1 the principal's ancestry is hub-attested (ceiling_source_not_allowed);
+//   - S2 the stored agent exists, is not deleted or held, and is in the
+//     principal's project (ceiling_orphaned);
+//   - per hop, walking up in the agent's project: S3 exactly one active edge
+//     (ceiling_provenance_missing, ceiling_provenance_ambiguous); S3s not the
+//     migration sentinel (ceiling_orphaned); S3a a known provenance version
+//     and a principal or bounded ceiling (ceiling_unrecorded); S3f the
+//     recorded principal type-checks (ceiling_orphaned); S3b a local
+//     development hop needs dev auth and the local development user
+//     (ceiling_source_not_allowed); S3c a bounded ceiling allows secret.use,
+//     with no self-operation exception (ceiling_effect_exceeded); S3d an
+//     agent delegator is live and holds secret.use through its role
+//     (ceiling_orphaned, ceiling_delegator_lacks_permission); S3e depth and
+//     cycles (ceiling_orphaned);
+//   - S4 the terminal user exists and is active (ceiling_orphaned); S4a it
+//     is admitted to the agent's project for secret.use; S4c it is not a
+//     caged test admin (both ceiling_delegator_lacks_permission);
+//   - S5 exactly one progeny secret of the stored ancestry has the resource
+//     ID (ceiling_resource_missing, ceiling_provenance_ambiguous); S6 it is
+//     user-scoped to the resource's parent, shared with progeny and not
+//     internal (ceiling_provenance_stale for another parent, otherwise
+//     ceiling_resource_missing); S4b the terminal user's access constraints
+//     allow secret.use on it (ceiling_delegator_lacks_permission); S7 its
+//     author is its owner; S8 the terminal user is its author and the head
+//     of the stored ancestry (both ceiling_source_not_allowed).
+//
+// Any lookup error denies with ceiling_error. It never returns Allowed on an
+// error, writes nothing and emits no audit record. The stored agent row is
+// the only source of the agent's project and ancestry.
+func (a *AuthzService) EvaluateUserSecretParentCeiling(ctx context.Context, principal AgentIdentity, resource Resource) ParentCeilingDecision {
+	d, _ := a.evaluateUserSecretParentCeiling(ctx, principal, resource, nil)
+	return d
+}
+
+// evaluateUserSecretParentCeiling is EvaluateUserSecretParentCeiling with
+// explain steps and the unrecorded-hop note.
+func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, principal AgentIdentity, resource Resource, explain *[]DecisionStep) (ParentCeilingDecision, unrecordedHopNote) {
+	proof := ParentProof{Kind: ParentProofKindOwnershipFact, Permission: secretUsePermission, ResourceID: resource.ID}
+	if a == nil || a.store == nil || isNilIdentity(principal) || principal.ID() == "" {
+		secretParentStep(explain, "error", "invalid parent ceiling request")
+		return parentCeilingDeny(DenyCauseCeilingError, "invalid parent ceiling request", proof), unrecordedHopNote{}
+	}
+	if resource.ID == "" || resource.ParentID == "" {
+		secretParentStep(explain, "invalid_resource", "the request names no secret or no parent user")
+		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "invalid resource: no secret or parent user", proof), unrecordedHopNote{}
+	}
+	ctx = maskAuthzInputs(ctx)
+	chain := a.userSecretChainVerdict(ctx, principal, explain)
+	if !chain.decision.Allowed {
+		d := chain.decision
+		d.Proof.ResourceID = resource.ID
+		return d, chain.note
+	}
+	in, err := a.loadUserSecretSourceInputs(ctx, chain)
+	if err != nil {
+		secretParentStep(explain, "error", "source input lookup failed")
+		d := parentCeilingDeny(DenyCauseCeilingError, "source input lookup failed", chain.decision.Proof)
+		d.Proof.ResourceID = resource.ID
+		return d, unrecordedHopNote{}
+	}
+	return userSecretSourceCheck(chain, in, resource, explain), unrecordedHopNote{}
+}
+
+// userSecretChainVerdict runs clauses S1-S4c for principal (see
+// EvaluateUserSecretParentCeiling). It masks the request's authorization
+// inputs itself, so it can be called on its own.
+func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal AgentIdentity, explain *[]DecisionStep) userSecretChain {
+	chain := userSecretChain{decision: ParentCeilingDecision{Proof: ParentProof{Kind: ParentProofKindOwnershipFact, Permission: secretUsePermission}}}
+	if a == nil || a.store == nil || isNilIdentity(principal) || principal.ID() == "" {
+		secretParentStep(explain, "error", "invalid parent ceiling request")
+		return chain.deny(DenyCauseCeilingError, "invalid parent ceiling request")
+	}
+	ctx = maskAuthzInputs(ctx)
+
+	// S1
+	if !AncestryIsHubAttested(principal) {
+		secretParentStep(explain, "not_attested", "principal ancestry is not hub-attested")
+		return chain.deny(DenyCauseCeilingSourceNotAllowed, "principal ancestry is not hub-attested")
+	}
+
+	// S2
+	agent, err := a.store.GetAgent(ctx, principal.ID())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			secretParentStep(explain, "agent_not_live", "agent does not exist")
+			return chain.deny(DenyCauseCeilingOrphaned, "agent does not exist")
+		}
+		secretParentStep(explain, "error", "agent lookup failed")
+		return chain.deny(DenyCauseCeilingError, "agent lookup failed")
+	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		secretParentStep(explain, "agent_not_live", "agent does not exist")
+		return chain.deny(DenyCauseCeilingOrphaned, "agent does not exist")
+	}
+	held, err := a.store.HasActiveAgentHold(ctx, agent.ID)
+	if err != nil {
+		secretParentStep(explain, "error", "agent hold lookup failed")
+		return chain.deny(DenyCauseCeilingError, "agent hold lookup failed")
+	}
+	if held {
+		secretParentStep(explain, "agent_not_live", "agent is held")
+		return chain.deny(DenyCauseCeilingOrphaned, "agent is not live")
+	}
+	if agent.ProjectID == "" || agent.ProjectID != principal.ProjectID() {
+		secretParentStep(explain, "agent_project", "agent project does not match the principal's project")
+		return chain.deny(DenyCauseCeilingOrphaned, "agent project does not match the principal's project")
+	}
+
+	// S3-S3e
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := agent.ID
+	var terminal *store.DelegationEdge
+	for depth := 0; terminal == nil; depth++ {
+		if depth > maxDelegationDepth {
+			secretParentStep(explain, "depth", "delegation chain exceeded maximum depth")
+			return chain.deny(DenyCauseCeilingOrphaned, "delegation chain exceeded maximum depth")
+		}
+		if visited[delegateID] {
+			secretParentStep(explain, "cycle", fmt.Sprintf("delegate %s repeats in the chain", delegateID))
+			return chain.deny(DenyCauseCeilingOrphaned, "delegation chain contains a cycle")
+		}
+		visited[delegateID] = true
+
+		active, err := a.activeProjectEdges(ctx, delegateID, agent.ProjectID)
+		if err != nil {
+			secretParentStep(explain, "error", "delegation edge lookup failed")
+			return chain.deny(DenyCauseCeilingError, "delegation edge lookup failed")
+		}
+		switch len(active) {
+		case 0:
+			secretParentStep(explain, "no_edge", fmt.Sprintf("no active delegation edge for agent:%s", delegateID))
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingProvenanceMissing, "no recorded delegation for agent "+delegateID)
+		case 1:
+		default:
+			secretParentStep(explain, "duplicate_edges", fmt.Sprintf("%d active edges for agent:%s", len(active), delegateID))
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingProvenanceAmbiguous, "more than one active delegation for agent "+delegateID)
+		}
+		edge := active[0]
+
+		// S3s
+		if isMigrationSentinel(edge) {
+			secretParentStep(explain, "migration_edge", fmt.Sprintf("migration-provenance edge for agent:%s", delegateID))
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingOrphaned, "migration-provenance delegation supplies no source")
+		}
+		// S3a
+		if !knownProvenanceVersion(edge.ProvenanceVersion) ||
+			(edge.Kind != store.EffectCeilingPrincipal && edge.Kind != store.EffectCeilingBounded) {
+			secretParentStep(explain, "unrecorded", fmt.Sprintf("edge %s has no recorded provenance", edge.ID))
+			a.logUnrecordedHop(&chain.note, DenyCauseCeilingUnrecorded, edge, secretUsePermission)
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingUnrecorded, "secret.use requires recorded provenance")
+		}
+		// S3f
+		if err := checkEdgePrincipal(edge); err != nil {
+			secretParentStep(explain, "principal_mismatch", fmt.Sprintf("edge %s: recorded principal is inconsistent", edge.ID))
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingOrphaned, "recorded delegation principal is inconsistent")
+		}
+		// S3b
+		if hasDevLocalProvenance(edge) {
+			if !a.devLocalAuthorityEnabled() {
+				secretParentStep(explain, "dev_local", fmt.Sprintf("edge %s: %s", edge.ID, reasonDevLocalDisabled))
+				return chain.deny(DenyCauseCeilingSourceNotAllowed, reasonDevLocalDisabled)
+			}
+			if edge.DelegatorType != store.DelegationPrincipalUser || edge.DelegatorID != DevUserID {
+				secretParentStep(explain, "dev_local", fmt.Sprintf("edge %s: local development provenance with another delegator", edge.ID))
+				return chain.deny(DenyCauseCeilingSourceNotAllowed, "local development provenance with another delegator")
+			}
+		}
+		// S3c
+		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, secretUsePermission, false) {
+			secretParentStep(explain, "effect_exceeded", fmt.Sprintf("edge %s: secret.use is outside the recorded effect ceiling", edge.ID))
+			return chain.deny(DenyCauseCeilingEffectExceeded, "secret.use is outside the recorded effect ceiling")
+		}
+
+		switch edge.DelegatorType {
+		case store.DelegationPrincipalUser:
+			terminal = edge
+		case store.DelegationPrincipalAgent:
+			// S3d, before the next hop's edges are loaded.
+			ok, _, err := a.checkAgentHoldsPermission(ctx, edge.DelegatorID, secretUsePermission, edge.ScopeType, edge.ScopeID)
+			switch {
+			case err != nil && errors.Is(err, errCeilingHoldLookup):
+				secretParentStep(explain, "error", "delegator agent hold lookup failed")
+				return chain.deny(DenyCauseCeilingError, "delegator agent lookup failed")
+			case err != nil && errors.Is(err, store.ErrNotFound):
+				secretParentStep(explain, "delegator_not_live", fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID))
+				return chain.deny(DenyCauseCeilingOrphaned, "delegator agent "+edge.DelegatorID+" is not live")
+			case err != nil:
+				secretParentStep(explain, "error", "delegator agent lookup failed")
+				return chain.deny(DenyCauseCeilingError, "delegator agent lookup failed")
+			case !ok:
+				secretParentStep(explain, "delegator_lacks_permission", fmt.Sprintf("delegator agent %s does not hold secret.use", edge.DelegatorID))
+				return chain.deny(DenyCauseCeilingDelegatorLacksPermission, "delegator agent "+edge.DelegatorID+" does not hold secret.use")
+			}
+			secretParentStep(explain, "link_allowed", fmt.Sprintf("delegator agent %s holds secret.use; continuing", edge.DelegatorID))
+			delegateID = edge.DelegatorID
+		default:
+			// checkEdgePrincipal admits only user and agent delegators.
+			secretParentStep(explain, "principal_mismatch", fmt.Sprintf("edge %s has delegator type %q", edge.ID, edge.DelegatorType))
+			chain.unrecorded = true
+			return chain.deny(DenyCauseCeilingOrphaned, "recorded delegation principal is inconsistent")
+		}
+	}
+	chain.decision.Proof.SourcePrincipal = ProvenancePrincipal{Kind: store.DelegationPrincipalUser, ID: terminal.DelegatorID}
+	chain.decision.Proof.SourceCredentialKind = terminal.SourceCredentialKind
+
+	// S4
+	user, err := a.store.GetUser(ctx, terminal.DelegatorID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			secretParentStep(explain, "source_not_live", "terminal user does not exist")
+			return chain.deny(DenyCauseCeilingOrphaned, "recorded source does not exist")
+		}
+		secretParentStep(explain, "error", "terminal user lookup failed")
+		return chain.deny(DenyCauseCeilingError, "source lookup failed")
+	}
+	if user == nil {
+		secretParentStep(explain, "source_not_live", "terminal user does not exist")
+		return chain.deny(DenyCauseCeilingOrphaned, "recorded source does not exist")
+	}
+	if user.Status != store.UserStatusActive {
+		secretParentStep(explain, "source_not_live", "terminal user is not active")
+		return chain.deny(DenyCauseCeilingOrphaned, reasonPrincipalInactive)
+	}
+
+	// S4a
+	admitted, _, err := a.sourceUserExecutionAdmission(ctx, user, agent.ProjectID, secretUsePermission)
+	if err != nil {
+		secretParentStep(explain, "error", "terminal user project admission check failed")
+		return chain.deny(DenyCauseCeilingError, "source project admission check failed")
+	}
+	if !admitted {
+		secretParentStep(explain, "source_not_admitted", "terminal user lacks admission to the agent's project")
+		return chain.deny(DenyCauseCeilingDelegatorLacksPermission, "recorded source lacks admission to the agent's project")
+	}
+
+	// S4c: the error first, since a kind-read error also reports caged.
+	if testAdminPermissionDenied(secretUsePermission) {
+		caged, err := a.principalIsCagedTestAdmin(ctx, user.ID)
+		if err != nil {
+			secretParentStep(explain, "error", "terminal user kind lookup failed")
+			return chain.deny(DenyCauseCeilingError, "source kind lookup failed")
+		}
+		if caged {
+			secretParentStep(explain, "source_caged", "terminal user is subject to the test-admin policy")
+			return chain.deny(DenyCauseCeilingDelegatorLacksPermission, "recorded source is subject to the test-admin policy")
+		}
+	}
+
+	secretParentStep(explain, "chain_allowed", fmt.Sprintf("recorded chain ends at active user %s", user.ID))
+	chain.agent = agent
+	chain.user = user
+	chain.sourceCredential = terminal.SourceCredentialKind
+	chain.decision.Allowed = true
+	return chain
+}
+
+// loadUserSecretSourceInputs loads the source check's inputs for an allowed
+// chain, once per request. The constraint table is loaded uncached, so no
+// mint-eligibility cache or request memo is read, and the terminal user's
+// closure is built on a masked ctx.
+func (a *AuthzService) loadUserSecretSourceInputs(ctx context.Context, chain userSecretChain) (*userSecretSourceInputs, error) {
+	if a == nil || a.store == nil || !chain.decision.Allowed || chain.agent == nil || chain.user == nil {
+		return nil, errUserSecretParentCeiling
+	}
+	ctx = maskAuthzInputs(ctx)
+	constraints, err := a.loadAllAccessConstraintsUncached(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("access constraint lookup: %w", err)
+	}
+	identity := NewAuthenticatedUser(chain.user.ID, chain.user.Email, chain.user.DisplayName, chain.user.Role, "")
+	principals, err := a.authorizationPrincipals(ctx, identity)
+	if err != nil {
+		return nil, fmt.Errorf("source principal lookup: %w", err)
+	}
+	closure := make(map[string]struct{}, len(principals))
+	for _, p := range principals {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	var progeny []store.Secret
+	if len(chain.agent.Ancestry) > 0 {
+		progeny, err = a.store.ListProgenySecrets(ctx, chain.agent.Ancestry)
+		if err != nil {
+			return nil, fmt.Errorf("progeny secret lookup: %w", err)
+		}
+	}
+	return &userSecretSourceInputs{constraints: constraints, userClosure: closure, progeny: progeny}, nil
+}
+
+// userSecretSourceCheck runs clauses S5, S6, S4b, S7 and S8 (see
+// EvaluateUserSecretParentCeiling) for resource, against an allowed chain
+// and its request-scoped inputs. It does no I/O.
+func userSecretSourceCheck(chain userSecretChain, in *userSecretSourceInputs, resource Resource, explain *[]DecisionStep) ParentCeilingDecision {
+	proof := chain.decision.Proof
+	proof.ResourceID = resource.ID
+	if !chain.decision.Allowed || chain.agent == nil || chain.user == nil || in == nil {
+		secretParentStep(explain, "error", "source check without an allowed chain")
+		return parentCeilingDeny(DenyCauseCeilingError, "source check without an allowed chain", proof)
+	}
+	if resource.ID == "" || resource.ParentID == "" {
+		secretParentStep(explain, "invalid_resource", "the request names no secret or no parent user")
+		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "invalid resource: no secret or parent user", proof)
+	}
+
+	// S5
+	var matches []store.Secret
+	for _, sec := range in.progeny {
+		if sec.ID == resource.ID {
+			matches = append(matches, sec)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		secretParentStep(explain, "resource_missing", "the secret is not a progeny secret of the agent's ancestry")
+		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "secret is not shared with this agent's lineage", proof)
+	case 1:
+	default:
+		secretParentStep(explain, "resource_ambiguous", "more than one progeny secret has the ID")
+		return parentCeilingDeny(DenyCauseCeilingProvenanceAmbiguous, "secret is ambiguous", proof)
+	}
+	r := matches[0]
+
+	// S6
+	if r.Scope != store.ScopeUser {
+		secretParentStep(explain, "resource_missing", "the secret is not user-scoped")
+		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "secret is not user-scoped", proof)
+	}
+	if r.ScopeID != resource.ParentID {
+		secretParentStep(explain, "resource_stale", "the secret's owner is not the requested parent")
+		return parentCeilingDeny(DenyCauseCeilingProvenanceStale, "secret owner does not match the requested parent", proof)
+	}
+	if !r.AllowProgeny || r.SecretType == store.SecretTypeInternal {
+		secretParentStep(explain, "resource_missing", "the secret is not shared with progeny")
+		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "secret is not shared with progeny", proof)
+	}
+
+	// S4b
+	for _, rs := range restrictionsFromConstraints(in.constraints, in.userClosure, ResourceContext{
+		ResourceType: "secret",
+		ResourceID:   r.ID,
+		OwnerID:      r.ScopeID,
+	}) {
+		if rs.Check == nil || !rs.Check(secretUsePermission) {
+			secretParentStep(explain, "source_restricted", "an access constraint on the terminal user restricts secret.use")
+			return parentCeilingDeny(DenyCauseCeilingDelegatorLacksPermission, "recorded source is restricted by an access constraint", proof)
+		}
+	}
+
+	// S7
+	if r.CreatedBy != r.ScopeID {
+		secretParentStep(explain, "source_not_allowed", "the secret's author is not its owner")
+		return parentCeilingDeny(DenyCauseCeilingSourceNotAllowed, "secret author is not its owner", proof)
+	}
+	// S8
+	ancestry := chain.agent.Ancestry
+	inAncestry := false
+	for _, id := range ancestry {
+		if id == r.CreatedBy {
+			inAncestry = true
+			break
+		}
+	}
+	if chain.user.ID != r.CreatedBy || !inAncestry || len(ancestry) == 0 || ancestry[0] != chain.user.ID {
+		secretParentStep(explain, "source_not_allowed", "the recorded source is not the secret's author at the head of the ancestry")
+		return parentCeilingDeny(DenyCauseCeilingSourceNotAllowed, "recorded source is not the secret's author", proof)
+	}
+
+	// S9
+	secretParentStep(explain, "allowed", fmt.Sprintf("user %s owns and shares secret %s", chain.user.ID, r.ID))
+	return ParentCeilingDecision{Allowed: true, Proof: proof}
 }

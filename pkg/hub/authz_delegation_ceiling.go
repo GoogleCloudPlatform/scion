@@ -174,6 +174,13 @@ func (a *AuthzService) checkDelegationCeiling(
 		return a.checkHubDeliveryCeiling(ctx, req, h, permissionID, agentID, explain, cause)
 	}
 
+	// An agent's use of a user-scope secret takes the user-scope secret
+	// parent ceiling instead of the generic walk below. Whether it applies
+	// is decided only by userSecretParentProofApplies.
+	if userSecretParentProofApplies(req, permissionID) {
+		return a.checkUserSecretParentCeiling(ctx, req, agentID, explain, cause, note...)
+	}
+
 	// scopeType is fixed to RoleScopeProject: delegation edges are
 	// project-scoped.
 	scopeType := store.RoleScopeProject
@@ -207,6 +214,46 @@ func (a *AuthzService) checkDelegationCeiling(
 		descendantRead = descendantStatusReadHolds(caller, req.Resource, req.Action, permissionID)
 	}
 	return a.walkDelegationChainCore(ctx, req.Resource, req.Action, permissionID, agentID, attested, descendantRead, scopeType, scopeID, explain, cause, note...)
+}
+
+// checkUserSecretParentCeiling is checkDelegationCeiling's arm for an
+// agent's use of a user-scope secret (userSecretParentProofApplies): it
+// evaluates EvaluateUserSecretParentCeiling for the request's principal and
+// resource. The principal must be a non-nil AgentIdentity whose ID is
+// agentID. A ceiling_error decision is returned as an error, so Decide
+// denies with ceiling_error; any other deny sets cause and, for
+// ceiling_unrecorded, note.
+func (a *AuthzService) checkUserSecretParentCeiling(
+	ctx context.Context,
+	req AuthzRequest,
+	agentID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+	note ...*unrecordedHopNote,
+) (bool, string, error) {
+	setCause := func(c DenyCause) {
+		if cause != nil {
+			*cause = c
+		}
+	}
+	principal, ok := req.Principal.Identity.(AgentIdentity)
+	if !ok || isNilIdentity(principal) || principal.ID() == "" || principal.ID() != agentID {
+		secretParentStep(explain, "error", "the principal is not the agent under evaluation")
+		setCause(DenyCauseCeilingError)
+		return false, "user secret parent ceiling: invalid principal", errUserSecretParentCeiling
+	}
+	d, hop := a.evaluateUserSecretParentCeiling(ctx, principal, req.Resource, explain)
+	if d.Allowed {
+		return true, "user secret parent ceiling passed", nil
+	}
+	setCause(d.DenyCause)
+	if d.DenyCause == DenyCauseCeilingError {
+		return false, "user secret parent ceiling: " + d.Reason, fmt.Errorf("%w: %s", errUserSecretParentCeiling, d.Reason)
+	}
+	if len(note) > 0 && note[0] != nil && d.DenyCause == DenyCauseCeilingUnrecorded {
+		*note[0] = hop
+	}
+	return false, "user secret parent ceiling: " + d.Reason, nil
 }
 
 // descendantReadReasonMarker is appended to the reason of a delegation
