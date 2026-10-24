@@ -666,7 +666,7 @@ func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntr
 			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
 		} `yaml:"runtimes" json:"runtimes"`
 	}
-	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
 		return false
 	}
 	if profileName != "" {
@@ -5138,7 +5138,7 @@ func detectDirSettingsFormat(dir string) (hasVersioned bool, missingSchemaVersio
 	}
 	var raw map[string]interface{}
 	hasExplicitVersion := false
-	if err := yamlv3.Unmarshal(data, &raw); err == nil && raw != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err == nil && raw != nil {
 		_, hasExplicitVersion = raw["schema_version"]
 	}
 	return true, !hasExplicitVersion
@@ -5245,7 +5245,7 @@ func unrecognizedSettingsFormatWarnings(projectPath string) []string {
 		}
 		// Parse to check for real keys.
 		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err != nil || len(raw) == 0 {
+		if err := unmarshalSettingsYAML(data, &raw); err != nil || len(raw) == 0 {
 			continue
 		}
 		warnings = append(warnings, fmt.Sprintf(
@@ -5502,7 +5502,7 @@ func loadSingleFileVersioned(held *SettingsLock, dir string) (*VersionedSettings
 			return nil, fmt.Errorf("failed to parse JSON settings at %s: %w", settingsPath, err)
 		}
 	} else {
-		if err := yamlv3.Unmarshal(data, &vs); err != nil {
+		if err := unmarshalSettingsYAML(data, &vs); err != nil {
 			return nil, fmt.Errorf("failed to parse YAML settings at %s: %w", settingsPath, err)
 		}
 	}
@@ -5683,7 +5683,7 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 	}
 	// Refuse to edit a file the struct loader would reject, as before.
 	var vs VersionedSettings
-	if err := doc.Decode(&vs); err != nil {
+	if err := decodeSettingsYAMLNode(doc, &vs); err != nil {
 		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
 	}
 	root := doc.Content[0]
@@ -5760,7 +5760,7 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 // VersionedSettings, as LoadSingleFileVersioned decodes a YAML file.
 func decodeVersionedSettingsYAML(data []byte) error {
 	var vs VersionedSettings
-	return yamlv3.Unmarshal(data, &vs)
+	return unmarshalSettingsYAML(data, &vs)
 }
 
 // encodeSettingsYAML is encodeYAMLDocument. It is a variable so tests can
@@ -6551,7 +6551,7 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 			return nil, fmt.Errorf("failed to parse JSON settings: %w", err)
 		}
 	} else {
-		if err := yamlv3.Unmarshal(data, &legacy); err != nil {
+		if err := unmarshalSettingsYAML(data, &legacy); err != nil {
 			return nil, fmt.Errorf("failed to parse YAML settings: %w", err)
 		}
 	}

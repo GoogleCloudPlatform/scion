@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -1099,6 +1100,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var tokenRefreshDone <-chan struct{}
 	var ghTokenRefreshCancel context.CancelFunc
 	var ghTokenRefreshDone <-chan struct{}
+	var delegationHelper *delegation.Helper
 	var readyWatchCancel context.CancelFunc
 	var readyWatchDone chan struct{}
 
@@ -1284,6 +1286,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 					},
 				})
 			}
+
+			// Serve the delegation socket, through which processes in the
+			// agent make hub requests with a delegation grant.
+			delegationHelper = startDelegationHelper(hubClient, targetUID, targetGID)
 		} else {
 			log.Debug("Hub client not configured - skipping status report")
 		}
@@ -1508,6 +1514,12 @@ waitLoop:
 		tokenRefreshCancel()
 		<-tokenRefreshDone
 		log.Debug("Token refresh loop stopped")
+	}
+	if delegationHelper != nil {
+		if err := delegationHelper.Close(); err != nil {
+			log.Debug("Delegation helper stop: %v", err)
+		}
+		log.Debug("Delegation helper stopped")
 	}
 	if heartbeatCancel != nil {
 		heartbeatCancel()

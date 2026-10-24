@@ -57108,6 +57108,8 @@ type MessageMutation struct {
 	conversation_id         *uuid.UUID
 	sender_project_id       *uuid.UUID
 	recipient_project_id    *uuid.UUID
+	authorizing_user_id     *string
+	delegation_grant_id     *string
 	created                 *time.Time
 	clearedFields           map[string]struct{}
 	done                    bool
@@ -58082,6 +58084,104 @@ func (m *MessageMutation) ResetRecipientProjectID() {
 	delete(m.clearedFields, message.FieldRecipientProjectID)
 }
 
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (m *MessageMutation) SetAuthorizingUserID(s string) {
+	m.authorizing_user_id = &s
+}
+
+// AuthorizingUserID returns the value of the "authorizing_user_id" field in the mutation.
+func (m *MessageMutation) AuthorizingUserID() (r string, exists bool) {
+	v := m.authorizing_user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorizingUserID returns the old "authorizing_user_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldAuthorizingUserID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorizingUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorizingUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorizingUserID: %w", err)
+	}
+	return oldValue.AuthorizingUserID, nil
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (m *MessageMutation) ClearAuthorizingUserID() {
+	m.authorizing_user_id = nil
+	m.clearedFields[message.FieldAuthorizingUserID] = struct{}{}
+}
+
+// AuthorizingUserIDCleared returns if the "authorizing_user_id" field was cleared in this mutation.
+func (m *MessageMutation) AuthorizingUserIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldAuthorizingUserID]
+	return ok
+}
+
+// ResetAuthorizingUserID resets all changes to the "authorizing_user_id" field.
+func (m *MessageMutation) ResetAuthorizingUserID() {
+	m.authorizing_user_id = nil
+	delete(m.clearedFields, message.FieldAuthorizingUserID)
+}
+
+// SetDelegationGrantID sets the "delegation_grant_id" field.
+func (m *MessageMutation) SetDelegationGrantID(s string) {
+	m.delegation_grant_id = &s
+}
+
+// DelegationGrantID returns the value of the "delegation_grant_id" field in the mutation.
+func (m *MessageMutation) DelegationGrantID() (r string, exists bool) {
+	v := m.delegation_grant_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDelegationGrantID returns the old "delegation_grant_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDelegationGrantID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDelegationGrantID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDelegationGrantID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDelegationGrantID: %w", err)
+	}
+	return oldValue.DelegationGrantID, nil
+}
+
+// ClearDelegationGrantID clears the value of the "delegation_grant_id" field.
+func (m *MessageMutation) ClearDelegationGrantID() {
+	m.delegation_grant_id = nil
+	m.clearedFields[message.FieldDelegationGrantID] = struct{}{}
+}
+
+// DelegationGrantIDCleared returns if the "delegation_grant_id" field was cleared in this mutation.
+func (m *MessageMutation) DelegationGrantIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldDelegationGrantID]
+	return ok
+}
+
+// ResetDelegationGrantID resets all changes to the "delegation_grant_id" field.
+func (m *MessageMutation) ResetDelegationGrantID() {
+	m.delegation_grant_id = nil
+	delete(m.clearedFields, message.FieldDelegationGrantID)
+}
+
 // SetCreated sets the "created" field.
 func (m *MessageMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -58152,7 +58252,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 23)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -58213,6 +58313,12 @@ func (m *MessageMutation) Fields() []string {
 	if m.recipient_project_id != nil {
 		fields = append(fields, message.FieldRecipientProjectID)
 	}
+	if m.authorizing_user_id != nil {
+		fields = append(fields, message.FieldAuthorizingUserID)
+	}
+	if m.delegation_grant_id != nil {
+		fields = append(fields, message.FieldDelegationGrantID)
+	}
 	if m.created != nil {
 		fields = append(fields, message.FieldCreated)
 	}
@@ -58264,6 +58370,10 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.SenderProjectID()
 	case message.FieldRecipientProjectID:
 		return m.RecipientProjectID()
+	case message.FieldAuthorizingUserID:
+		return m.AuthorizingUserID()
+	case message.FieldDelegationGrantID:
+		return m.DelegationGrantID()
 	case message.FieldCreated:
 		return m.Created()
 	}
@@ -58315,6 +58425,10 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldSenderProjectID(ctx)
 	case message.FieldRecipientProjectID:
 		return m.OldRecipientProjectID(ctx)
+	case message.FieldAuthorizingUserID:
+		return m.OldAuthorizingUserID(ctx)
+	case message.FieldDelegationGrantID:
+		return m.OldDelegationGrantID(ctx)
 	case message.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -58466,6 +58580,20 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRecipientProjectID(v)
 		return nil
+	case message.FieldAuthorizingUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorizingUserID(v)
+		return nil
+	case message.FieldDelegationGrantID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDelegationGrantID(v)
+		return nil
 	case message.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -58536,6 +58664,12 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldRecipientProjectID) {
 		fields = append(fields, message.FieldRecipientProjectID)
 	}
+	if m.FieldCleared(message.FieldAuthorizingUserID) {
+		fields = append(fields, message.FieldAuthorizingUserID)
+	}
+	if m.FieldCleared(message.FieldDelegationGrantID) {
+		fields = append(fields, message.FieldDelegationGrantID)
+	}
 	return fields
 }
 
@@ -58582,6 +58716,12 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldRecipientProjectID:
 		m.ClearRecipientProjectID()
+		return nil
+	case message.FieldAuthorizingUserID:
+		m.ClearAuthorizingUserID()
+		return nil
+	case message.FieldDelegationGrantID:
+		m.ClearDelegationGrantID()
 		return nil
 	}
 	return fmt.Errorf("unknown Message nullable field %s", name)
@@ -58650,6 +58790,12 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldRecipientProjectID:
 		m.ResetRecipientProjectID()
+		return nil
+	case message.FieldAuthorizingUserID:
+		m.ResetAuthorizingUserID()
+		return nil
+	case message.FieldDelegationGrantID:
+		m.ResetDelegationGrantID()
 		return nil
 	case message.FieldCreated:
 		m.ResetCreated()

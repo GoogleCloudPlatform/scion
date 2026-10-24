@@ -1375,7 +1375,7 @@
         "hub_name": {
           "type": "string",
           "pattern": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
-          "description": "Human-readable hub display name for HA deployments. All nodes in a cluster should share the same hub_name. Defaults to os.Hostname() if not set.",
+          "description": "Hub name for HA deployments: a lowercase DNS label (letters, digits and hyphens, at most 63 characters, starting with a letter and not ending with a hyphen), used in log labels, telemetry and secret labels. All nodes in a cluster should share the same hub_name. Defaults to the machine hostname if not set.",
           "x-env-var": "SCION_SERVER_HUB_HUBNAME",
           "x-scope": "global"
         },

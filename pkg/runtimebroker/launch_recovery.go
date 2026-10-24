@@ -381,7 +381,7 @@ func (s *Server) deleteRecoveredRun(ctx context.Context, mgr agent.Manager, jr *
 		return nil
 	}
 	ref := scionrt.RunRef{ID: scionrt.AgentOperationID(target), RunID: target.RunID}
-	if _, err := mgr.DeleteTarget(ctx, jr.AgentName, ref, false, jr.ProjectPath, false); err != nil {
+	if _, err := mgr.DeleteTarget(ctx, jr.AgentName, "", ref, false, jr.ProjectPath, false); err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: failed to delete the launch's runtime entry",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "error", err)
 		return failCleanup(nil, cleanupFailRunDelete)
