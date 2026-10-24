@@ -445,9 +445,15 @@ func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Pro
 
 	for _, p := range providers {
 		if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
+			workspaceRoot := filepath.Clean(p.LocalPath)
+			// Providers may register either the checkout or its .scion directory.
+			// Keep the global project confined to its existing root.
+			if !isGlobalHubProject(project.Slug) && filepath.Base(workspaceRoot) == config.DotScion {
+				workspaceRoot = filepath.Dir(workspaceRoot)
+			}
 			return projectfs.Resolved{
 				Backend:  projectfs.BackendLocal,
-				HostPath: p.LocalPath,
+				HostPath: workspaceRoot,
 				Target:   projectfs.DefaultContainerWorkspace,
 				Kind:     projectfs.KindWorkspace,
 				Name:     "workspace",
