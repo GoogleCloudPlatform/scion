@@ -176,12 +176,21 @@ func (f *adtFixture) insertCredential(t *testing.T, a *store.Agent, grantID, aud
 // storeGrant writes a grant for agent a, issued by Alice, directly.
 func (f *adtFixture) storeGrant(t *testing.T, a *store.Agent, expires time.Time) *store.AgentDelegationGrant {
 	t.Helper()
+	return f.storeGrantWith(t, a, func(g *store.AgentDelegationGrant) { g.ExpiresAt = expires })
+}
+
+// storeGrantWith writes a grant for agent a, issued by Alice, directly,
+// after change has adjusted it. It reaches row shapes issuance never
+// writes.
+func (f *adtFixture) storeGrantWith(t *testing.T, a *store.Agent, change func(g *store.AgentDelegationGrant)) *store.AgentDelegationGrant {
+	t.Helper()
 	g := &store.AgentDelegationGrant{
 		AgentID: a.ID, AgentProjectID: a.ProjectID, AgentGeneration: a.Generation, AgentStateVersion: a.StateVersion,
 		IssuerUserID: f.alice.ID, BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
-		Name: "stored", MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: expires,
+		Name: "stored", MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: time.Now().Add(time.Hour),
 		IssuanceAuditID: "00000000-0000-0000-0000-000000000001",
 	}
+	change(g)
 	require.NoError(t, f.store.CreateAgentDelegationGrant(context.Background(), g))
 	return g
 }

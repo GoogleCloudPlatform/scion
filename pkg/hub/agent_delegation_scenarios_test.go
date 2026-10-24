@@ -33,22 +33,6 @@ import (
 // through the real middleware, route guard and handlers, for the flows the
 // per-slice tests leave below the HTTP layer or do not reach.
 
-// storeGrantWith writes a grant for agent a, issued by Alice, directly,
-// after change has adjusted it. It reaches row shapes issuance never
-// writes.
-func (f *adtFixture) storeGrantWith(t *testing.T, a *store.Agent, change func(g *store.AgentDelegationGrant)) *store.AgentDelegationGrant {
-	t.Helper()
-	g := &store.AgentDelegationGrant{
-		AgentID: a.ID, AgentProjectID: a.ProjectID, AgentGeneration: a.Generation, AgentStateVersion: a.StateVersion,
-		IssuerUserID: f.alice.ID, BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
-		Name: "stored", MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: time.Now().Add(time.Hour),
-		IssuanceAuditID: "00000000-0000-0000-0000-000000000001",
-	}
-	change(g)
-	require.NoError(t, f.store.CreateAgentDelegationGrant(context.Background(), g))
-	return g
-}
-
 // adtHubReadBody is the body of a hub-bounded agent:read issuance.
 func adtHubReadBody() map[string]interface{} {
 	return map[string]interface{}{"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "g"}
