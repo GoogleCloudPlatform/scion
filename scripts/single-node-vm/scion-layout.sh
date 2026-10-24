@@ -676,16 +676,22 @@ cmd_set_maintenance() {
   esac
   refuse_symlink "$file"
   [[ -f "$file" ]] || die "settings file not found: $file"
-  # Edit as the file's owner, not as root: the file (and its directory)
-  # belong to the hub user, so root gains nothing by editing it and must
-  # not write through anything that user could plant next to it. The
-  # script re-runs itself from stdin (its temp file is not readable by the
-  # owner) with the same settings.
+  # The settings file must belong to the install owner (the hub user):
+  # deploy.sh only ever creates it as that user. Anything else -- a
+  # root-owned file, or one owned by another user -- is refused, so the
+  # edit below never runs as root in a directory someone else controls.
+  # As root, the edit runs as that owner: the script re-runs itself from
+  # stdin (its temp file is not readable by the owner) with the same
+  # settings.
   local file_owner
-  file_owner="$(stat -c %U "$file")"
+  file_owner="$(stat -c %U -- "$file")"
+  if [[ "$file_owner" != "$(owner_user)" ]]; then
+    die "$file is owned by $file_owner, not by $(owner_user) (the install owner); refusing to edit it. Make it owned by $(owner_user), or set the keys by hand."
+  fi
   if [[ "$(id -u)" == "0" && "$file_owner" != "root" ]]; then
     exec runuser -u "$file_owner" -- env \
       SCION_INSTALL_ROOT="$INSTALL_ROOT" \
+      SCION_INSTALL_OWNER="$OWNER" \
       SCION_LAYOUT_YAML_TO_JSON="${SCION_LAYOUT_YAML_TO_JSON:-}" \
       bash -s -- set-maintenance "$file" "$policy" < "${BASH_SOURCE[0]}"
   fi

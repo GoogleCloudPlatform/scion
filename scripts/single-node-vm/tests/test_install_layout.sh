@@ -724,8 +724,8 @@ layout_run_migrate() {
 # --command body of the compute ssh call that carries `adopt`).
 _layout_migrate_cmd() {
   printf '%s\n' "$1" | awk '
-    /^compute ssh .*--command=$/ { buf = ""; on = 1; next }
     /^compute / { if (on && buf ~ /SCION_LAYOUT_SH" adopt/) { printf "%s", buf; done = 1; exit } on = 0 }
+    /^compute ssh .*--command=$/ { buf = ""; on = 1; next }
     on { buf = buf $0 "\n" }
     END { if (!done && on && buf ~ /SCION_LAYOUT_SH" adopt/) printf "%s", buf }
   '
@@ -2024,6 +2024,113 @@ test_layout_resume_requires_strictly_safe_root() {
     else
       assert_eq "" "$(ls -A "$real")" "nothing may be created through the symlinked <root>"
     fi
+    rm -rf "$LH_DIR"
+  done
+}
+
+# =====================================================================
+# Fix3: hub.env install, settings file owner
+# =====================================================================
+
+# _layout_ssh_cmd_with LOG MARKER -- the --command body of the (first)
+# compute ssh call whose command contains MARKER.
+_layout_ssh_cmd_with() {
+  printf '%s\n' "$1" | awk -v marker="$2" '
+    /^compute / { if (on && index(buf, marker)) { printf "%s", buf; done = 1; exit } on = 0 }
+    /^compute ssh .*--command=$/ { buf = ""; on = 1; next }
+    on { buf = buf $0 "\n" }
+    END { if (!done && on && index(buf, marker)) printf "%s", buf }
+  '
+}
+
+# hub.env is staged in a fresh private directory on the VM (never the
+# fixed /tmp/hub.env) and written into ~scion/.scion by the scion user;
+# root never moves, chowns or chmods it there.
+test_layout_hub_env_staged_privately_and_written_by_scion() {
+  fresh_gcloud_state
+  layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "deploy must reach the settings write (log: ${DEPLOY_LOG: -400})"
+  local log cmd
+  log="$(gcloud_log)"
+  cmd="$(_layout_ssh_cmd_with "$log" "hub.env.new")"
+  assert_contains "$log" "--command=mktemp -d /tmp/scion-hubenv.XXXXXX" "a private staging dir must be created on the VM"
+  assert_contains "$log" "scion-hub-${HUB}:/tmp/scion-hubenv.STUB01/hub.env" "hub.env must be copied into the private dir"
+  assert_not_contains "$log" "/tmp/hub.env" "the fixed /tmp/hub.env name must not be used anywhere"
+  assert_contains "$cmd" "sudo -u scion sh -c 'umask 077 && cat > /home/scion/.scion/hub.env.new" \
+    "the scion user must write hub.env itself"
+  assert_contains "$cmd" "< /tmp/scion-hubenv.STUB01/hub.env" "the content must come from the private dir"
+  assert_contains "$cmd" "trap 'rm -rf /tmp/scion-hubenv.STUB01' EXIT" "the private dir must be removed on exit"
+  assert_not_contains "$log" "sudo mv /tmp" "root must not move a /tmp file into place"
+  assert_not_contains "$log" "sudo chown scion:scion /home/scion/.scion/hub.env" "root must not chown hub.env"
+}
+
+test_layout_hub_env_refuses_unexpected_staging_dir() {
+  local bad
+  for bad in "" "/tmp/../etc" "/tmp/hub.env"; do
+    fresh_gcloud_state
+    export GCLOUD_STUB_SSH_HUBENV_DIR="$bad"
+    layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+    unset GCLOUD_STUB_SSH_HUBENV_DIR
+    assert_eq "false" "$LAYOUT_REACHED_SETTINGS" "staging dir '${bad}': deploy must stop"
+    assert_contains "$DEPLOY_LOG" "Could not create a private staging directory" "staging dir '${bad}': the reason must be given"
+    assert_not_contains "$(gcloud_log)" "hub.env.new" "staging dir '${bad}': nothing may be written"
+  done
+}
+
+# Run the generated hub.env command for real (a sudo shim drops "-u
+# scion"; /tmp and ~scion/.scion point into a work dir) with the old fixed
+# name /tmp/hub.env pre-planted as a symlink to a victim file: it must be
+# ignored, the real content must land with mode 0600, and the private dir
+# must be removed.
+test_layout_hub_env_command_ignores_planted_tmp_name() {
+  fresh_gcloud_state
+  layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  local cmd work
+  cmd="$(_layout_ssh_cmd_with "$(gcloud_log)" "hub.env.new")"
+  work="$(mktemp -d)"
+  mkdir -p "${work}/tmp/scion-hubenv.STUB01" "${work}/home/.scion" "${work}/shim"
+  printf 'SCION_SERVER_SESSION_SECRET=real\n' > "${work}/tmp/scion-hubenv.STUB01/hub.env"
+  echo "victim" > "${work}/victim"
+  ln -s "${work}/victim" "${work}/tmp/hub.env"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/usr/bin/env bash\n[[ "$1" == "-u" ]] && shift 2\nexec "$@"\n' > "${work}/shim/sudo"
+  chmod 0755 "${work}/shim/sudo"
+  # /tmp first: WORK itself lives under /tmp, so rewriting /tmp after the
+  # home path would mangle it.
+  cmd="${cmd//\/tmp\//${work}/tmp/}"
+  cmd="${cmd//\/home\/scion\/.scion/${work}/home/.scion}"
+  local out rc
+  out="$(PATH="${work}/shim:${PATH}" bash -c "$cmd" 2>&1)"
+  rc=$?
+  assert_eq "0" "$rc" "the generated hub.env command must succeed (output: ${out})"
+  assert_eq "SCION_SERVER_SESSION_SECRET=real" "$(cat "${work}/home/.scion/hub.env" 2>/dev/null)" "hub.env must hold the staged content"
+  assert_eq "600" "$(stat -c %a "${work}/home/.scion/hub.env" 2>/dev/null)" "hub.env must be 0600"
+  assert_eq "victim" "$(cat "${work}/victim")" "the planted /tmp/hub.env symlink target must be untouched"
+  assert_false "$([[ -e "${work}/tmp/scion-hubenv.STUB01" ]] && echo true || echo false)" "the private staging dir must be removed"
+  rm -rf "$work"
+}
+
+# set-maintenance edits only a settings file owned by the install owner:
+# a root-owned one (deploy.sh never creates such a file) or one owned by
+# another user is refused and left unchanged. (stat stub reports the owner.)
+test_layout_settings_refuses_file_not_owned_by_install_owner() {
+  local who
+  for who in root mallory; do
+    _layout_new_host
+    _deploy_rendered_settings auto > "${LH_DIR}/settings.yaml"
+    cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+    local stub="${LH_DIR}/stub"
+    mkdir -p "$stub"
+    # shellcheck disable=SC2016 # script text written to a stub file
+    printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/%s}"; fi\nprintf "%%s\\n" "$out"\n' \
+      "${LH_DIR}/settings.yaml" "$who" > "${stub}/stat"
+    chmod 0755 "${stub}/stat"
+    LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+      SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a settings file owned by ${who} must be refused"
+    assert_contains "$LAYOUT_OUT" "is owned by ${who}, not by" "the ${who} refusal must say why"
+    assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "${who}: the file must be unchanged"
     rm -rf "$LH_DIR"
   done
 }

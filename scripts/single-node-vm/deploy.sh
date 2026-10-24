@@ -2837,17 +2837,33 @@ else
     "${SCRIPT_DIR}/config-templates/hub.env.template" > "${HUB_ENV_TMPFILE}"
   unset session_secret
 
+  # On the VM, the file is staged in a fresh private directory made by the
+  # SSH user (mktemp -d, 0700) -- never a fixed /tmp name, which any local
+  # user could pre-create -- and written into ~scion/.scion by the scion
+  # user itself (umask 077, from the SSH user's stdin), so root never
+  # writes, moves or chowns anything there.
+  HUB_ENV_REMOTE_DIR="$(gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="mktemp -d /tmp/scion-hubenv.XXXXXX" 2>/dev/null)" || true
+  HUB_ENV_REMOTE_DIR="${HUB_ENV_REMOTE_DIR%%$'\n'*}"
+  HUB_ENV_REMOTE_DIR="${HUB_ENV_REMOTE_DIR//$'\r'/}"
+  if [[ ! "$HUB_ENV_REMOTE_DIR" =~ ^/tmp/scion-hubenv\.[A-Za-z0-9]+$ ]]; then
+    rm -f "${HUB_ENV_TMPFILE}"
+    err "Could not create a private staging directory on ${INSTANCE_NAME} for hub.env (got '${HUB_ENV_REMOTE_DIR}')."
+    exit 1
+  fi
+
   gcloud compute scp "${HUB_ENV_TMPFILE}" \
-    "${INSTANCE_NAME}:/tmp/hub.env" \
+    "${INSTANCE_NAME}:${HUB_ENV_REMOTE_DIR}/hub.env" \
     --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
   rm -f "${HUB_ENV_TMPFILE}"
 
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
-      sudo mv /tmp/hub.env /home/scion/.scion/hub.env
-      sudo chown scion:scion /home/scion/.scion/hub.env
-      sudo chmod 600 /home/scion/.scion/hub.env
+      set -euo pipefail
+      trap 'rm -rf ${HUB_ENV_REMOTE_DIR}' EXIT
+      sudo -u scion sh -c 'umask 077 && cat > /home/scion/.scion/hub.env.new && chmod 600 /home/scion/.scion/hub.env.new && mv -f /home/scion/.scion/hub.env.new /home/scion/.scion/hub.env' < ${HUB_ENV_REMOTE_DIR}/hub.env
     "
 fi
 

@@ -1360,6 +1360,10 @@ STUBERR
         # it prints exactly "SQUASH_UID:SCION_GID" on success.
         echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
         ;;
+      "mktemp -d /tmp/scion-hubenv.XXXXXX")
+        # deploy.sh's private hub.env staging directory on the VM.
+        echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
+        ;;
       *"test -f /home/scion/.scion/hub.env"*)
         echo "no"
         ;;
