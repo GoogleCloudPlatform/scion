@@ -130,6 +130,8 @@ What to configure:
 | `scion hub delegation revoke-all --mine --yes` | `POST /api/v1/users/me/delegations/revoke-all` | your own issued grants |
 | `scion hub delegation revoke-all <agent> --yes` | `POST /api/v1/agents/{agentId}/delegations/revoke-all` | per grant: the issuer and the agent's current owner, and holders of `agent.delegation.revoke_all` (hub admins, for any grant) |
 
+- **Names:** the revoke-all permission is `agent.delegation.revoke_all`. Its catalog operation is
+  `agent.delegation.revokeall`, because operation IDs take no underscore.
 - **A hub-bounded grant is out of reach for project admins,** whichever project the agent lives in.
 - **Revoke** ends the grant and every credential exchanged from it, in one transaction with its
   audit record. Revoking an already revoked grant answers `204` and records nothing new.
