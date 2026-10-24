@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// conversationsTableDDL is the schema for the Ent-managed conversations table,
+// ConversationsTableDDL is the schema for the Ent-managed conversations table,
 // reproduced here for testing the dual-write paths that depend on it.
 const ConversationsTableDDL = `
 CREATE TABLE IF NOT EXISTS conversations (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 )
 `
 
-// getTopicConvID reads conversation_id directly from the webchat_topic table.
+// GetTopicConvID reads conversation_id directly from the webchat_topic table.
 func GetTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
 	t.Helper()
 	var convID string
@@ -53,6 +53,8 @@ func GetTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
 	return convID
 }
 
+// RawText runs query, which must return one row with one column, and
+// returns that column as a string.
 func RawText(t *testing.T, db *sql.DB, query string, args ...any) string {
 	t.Helper()
 	var s string
@@ -60,12 +62,16 @@ func RawText(t *testing.T, db *sql.DB, query string, args ...any) string {
 	return s
 }
 
+// RequireUTCInstant asserts that got is the same instant as want and is in
+// UTC.
 func RequireUTCInstant(t *testing.T, got, want time.Time) {
 	t.Helper()
 	assert.True(t, got.Equal(want), "got %v, want %v", got, want)
 	assert.Equal(t, time.UTC, got.Location(), "got %v", got)
 }
 
+// RequirePostgresDSN returns SCION_TEST_POSTGRES_DSN, and skips the test
+// when it is not set.
 func RequirePostgresDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
