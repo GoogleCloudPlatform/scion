@@ -919,19 +919,32 @@ Configuring a modest concurrency limit (such as the default `2`) is highly recom
 
 ### Maintenance (`server.maintenance`)
 
-Controls how the Hub checks for and applies its own updates. The Hub dispatches update checks by **deployment tier**: a `binary` Hub reads the `LATEST.json` release manifest and the GitHub Releases API, while a `source` Hub checks its git checkout for new commits.
+Controls how the Hub checks for and applies its own updates. The **deployment tier** sets the update mode: a `binary` Hub updates from release binaries (it checks the effective channel's latest release in the `LATEST.json` manifest), while a `source` Hub rebuilds from its git checkout.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update strategy. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
-| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
-| `update_policy` | string | `auto` for `binary`, `disabled` for `source` | `auto` checks on a schedule and installs updates automatically. `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
+| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update mode. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
+| `release_channel` | string | Detected from the running version | Release channel to track: `nightly`, `preview`, or `stable`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. A Hub configured for another channel than the one it runs is offered that channel's latest release once it was published after the running one (for example, a nightly Hub set to `preview`). |
+| `update_policy` | string | `notify` for `binary`, `disabled` for `source` | `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `auto` checks on a schedule and installs the channel's latest release automatically, through the same installer as the admin UI. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
 | `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
 | `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
+| `install_root` | string | `/opt/scion` | Versioned install root (`releases/<tag>/scion`, `current`, `previous`) used by release self-update. `SCION_MAINTENANCE_INSTALL_ROOT` overrides it. The single-node VM deploy script writes it. |
 
-Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
+Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `source` mode skips them. Before `update_policy` defaulted to `notify`, a `binary` Hub defaulted to `auto`; set `auto` explicitly to keep unattended updates.
 
-The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
+**How a release is installed.** At startup the Hub detects an installer strategy for its host, shown on the Maintenance page:
+
+- `symlink`: the running binary lives under `<install_root>/releases/` and `<install_root>/current` is a symlink owned by the Hub's user (the single-node VM layout). The Hub verifies the release, places it in `releases/<tag>/`, switches `current` atomically (the old release becomes `previous`), then exits so that systemd restarts it on the new binary. **Restart Hub** also restarts this way.
+- `sudo-install`: a repository path is configured and the Hub user has the starter hub's exact sudoers rules. The verified binary is staged at `<repo>/scion.rebuild` and installed with `sudo -n install`, then the service is restarted with `sudo -n systemctl restart`. No other sudo rights are used.
+- `unsupported`: anything else. The update and the automatic policy stop before anything is downloaded, and the Maintenance page shows the reason and how to fix it.
+
+Every installed release is downloaded only from the configured repository's GitHub release, and checked against its `SHA256SUMS` and its own `version` output. The Hub records the update before it restarts and verifies, on the next start, that it came back on the target version. See [Binary layout and updates](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#binary-layout-and-updates) for the layout and for converting an existing VM.
+
+:::caution[Behaviour change for single-node VMs]
+Hubs with no repository path used to update through whatever `sudo` the `scion` user happened to have (for example a GCE `google-sudoers` grant). They now report `unsupported` until the VM is converted to the `/opt/scion` layout with `deploy.sh migrate-layout`.
+:::
+
+The related admin endpoints are `GET /api/v1/admin/maintenance/update-status` (running version, update mode, effective channel, installer, and the pending and last update), `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). All require the `hub.maintenance.execute` permission.
 
 ```yaml
 server:
