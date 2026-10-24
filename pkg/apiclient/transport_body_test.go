@@ -53,6 +53,116 @@ func (f requestBodyRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, 
 	return f(req)
 }
 
+func TestTransport_AuthErrorClosesBody(t *testing.T) {
+	authErr := errors.New("credentials unavailable")
+	for _, method := range []string{"Do", "DoNoRetry"} {
+		for _, name := range []string{"body", "empty_body", "close_error", "nil_body", "no_body"} {
+			t.Run(method+"/"+name, func(t *testing.T) {
+				tracked := &trackedRequestBody{Reader: strings.NewReader("payload")}
+				var body io.ReadCloser = tracked
+				switch name {
+				case "empty_body":
+					tracked.Reader = strings.NewReader("")
+				case "close_error":
+					tracked.closeErr = errors.New("close failed")
+				case "nil_body":
+					body = nil
+				case "no_body":
+					body = http.NoBody
+				}
+				authCalls := 0
+				auth := requestBodyAuthFunc(func(*http.Request) error {
+					authCalls++
+					return authErr
+				})
+				base := requestBodyRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					t.Fatal("failed authentication must not reach the underlying transport")
+					return nil, nil
+				})
+				transport := NewTransport("https://hub.invalid", WithAuth(auth), WithRetry(3, 0),
+					WithHTTPClient(&http.Client{Transport: base}))
+				send := transport.Do
+				if method == "DoNoRetry" {
+					send = transport.DoNoRetry
+				}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://hub.invalid/upload", body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := send(t.Context(), req)
+				if resp != nil || !errors.Is(err, authErr) {
+					t.Fatalf("response = %v, error = %v; want original auth error", resp, err)
+				}
+				if authCalls != 1 || tracked.reads != 0 {
+					t.Errorf("auth calls = %d, body reads = %d; want 1, 0", authCalls, tracked.reads)
+				}
+				wantCloses := 0
+				if body == tracked {
+					wantCloses = 1
+				}
+				if tracked.closes != wantCloses {
+					t.Errorf("body close calls = %d, want %d", tracked.closes, wantCloses)
+				}
+			})
+		}
+	}
+}
+
+func TestTransport_DelegatesBodyOwnership(t *testing.T) {
+	for _, method := range []string{"Do", "DoNoRetry"} {
+		for _, name := range []string{"no_auth", "authenticated", "transport_error"} {
+			t.Run(method+"/"+name, func(t *testing.T) {
+				body := &trackedRequestBody{Reader: strings.NewReader("payload")}
+				transportErr := errors.New("transport failed")
+				calls := 0
+				base := requestBodyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if body.closes != 0 || req.Body != body {
+						t.Fatal("request body closed or replaced before delegation")
+					}
+					data, err := io.ReadAll(req.Body)
+					_ = req.Body.Close()
+					if err != nil || string(data) != "payload" {
+						t.Fatalf("request body = %q, error = %v", data, err)
+					}
+					if name == "transport_error" {
+						return nil, transportErr
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+				})
+				var auth Authenticator
+				if name != "no_auth" {
+					auth = &BearerAuth{Token: "test-token"}
+				}
+				transport := NewTransport("https://hub.invalid", WithAuth(auth),
+					WithHTTPClient(&http.Client{Transport: base}))
+				send := transport.Do
+				if method == "DoNoRetry" {
+					send = transport.DoNoRetry
+				}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://hub.invalid/upload", body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := send(t.Context(), req)
+				if name == "transport_error" {
+					if resp != nil || !errors.Is(err, transportErr) {
+						t.Fatalf("response = %v, error = %v; want transport error", resp, err)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					_ = resp.Body.Close()
+				}
+				if calls != 1 || body.closes != 1 {
+					t.Errorf("transport calls = %d, body closes = %d; want 1, 1", calls, body.closes)
+				}
+			})
+		}
+	}
+}
+
 func TestAuthenticatedHTTPClient_AuthErrorClosesBody(t *testing.T) {
 	authErr := errors.New("credentials unavailable")
 	for _, name := range []string{"body", "empty_body", "close_error", "nil_body", "no_body"} {
