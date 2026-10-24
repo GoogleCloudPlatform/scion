@@ -1008,7 +1008,9 @@ does not change that schema.
 
 A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
 `SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
-plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID` (stored as
+`authorizing_user_id` and `delegation_grant_id`, returned as `authorizingUserId` and
+`delegationGrantId`, empty on every other message). Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 
@@ -1076,7 +1078,14 @@ These cascades are best-effort, because use-time checks are authoritative:
   does. Revoke-all is the way to end grants.
 - **Project delete** (`ProjectDeletionService`): it runs no agent lifecycle hooks. G adds an
   explicit step that revokes grants and credentials of the project's agents to the project deletion
-  cascade.
+  cascade. The step runs inside the cascade transaction, like every other cascade step, so a
+  revocation failure fails the project delete.
+- **Revoke reasons of these paths:** `agent_suspended` (agent suspend and auto-suspend),
+  `issuer_suspended` (`updateUser` setting the status to suspended), `issuer_deleted` (after
+  `deleteUser` or the test identity purge commits) and `project_deleted`. The best-effort paths run
+  in a transaction of their own after the change has committed; a failure is logged and never fails
+  the change. Each revoked grant gets one `agent_delegation_grant_revoke` mutation record, as in §7,
+  attributed to the principal whose action caused it (the hub when there is none).
 - **Purge of soft-deleted agents:** no hooks. Grants were already revoked at soft delete.
 - **Failed-create cleanup** (`compensateAgentCreate`, `agent_create_tx.go`): no hooks. If a grant
   was issued for an agent whose create is later rolled back, the agent row is removed, so exchange
