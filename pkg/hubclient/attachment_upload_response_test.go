@@ -141,3 +141,41 @@ func TestUploadAttachments_ResponseContract(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadAttachments_TruncatedResponse(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusTemporaryRedirect, http.StatusBadRequest, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "a.txt")
+			if err := os.WriteFile(path, []byte("alpha"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				const body = `{"failures":[{"name":"a.txt","error":"refused"}]}`
+				w.Header().Set("Content-Type", "application/json")
+				// Even a complete JSON value is not a complete HTTP response
+				// when the connection closes before its advertised length.
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)+1))
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			client, err := New(srv.URL, WithRetry(3, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := client.(AttachmentUploader).UploadAttachments(context.Background(), []string{path})
+			if got != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("UploadAttachments() = %+v, %v; want nil, error wrapping unexpected EOF", got, err)
+			}
+			if !strings.Contains(err.Error(), strconv.Itoa(status)) {
+				t.Errorf("error %q does not identify status %d", err, status)
+			}
+			if requests.Load() != 1 {
+				t.Errorf("upload requests = %d, want exactly one", requests.Load())
+			}
+		})
+	}
+}
