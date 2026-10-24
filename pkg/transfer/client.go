@@ -196,7 +196,7 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 			continue // Skip files without URLs (may be existing)
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("failed to upload file %s: %w", file.Path, err)
 		}
 
 		f, err := os.Open(file.FullPath)

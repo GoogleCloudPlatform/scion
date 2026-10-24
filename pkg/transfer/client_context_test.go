@@ -106,6 +106,9 @@ func TestClient_CanceledBatchBeforeFileAccess(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error = %v, want cancellation before opening the source", err)
 		}
+		if !strings.Contains(err.Error(), "failed to upload file file.txt:") {
+			t.Errorf("cancellation error lacks file context: %v", err)
+		}
 	})
 	t.Run("download", func(t *testing.T) {
 		dir := t.TempDir()
@@ -166,6 +169,9 @@ func TestClient_TransferCancelBetweenFiles(t *testing.T) {
 					wantCount, wantSecond = 1, "keep"
 					if !errors.Is(err, context.Canceled) {
 						t.Errorf("error = %v, want context.Canceled", err)
+					}
+					if operation == "upload" && (err == nil || !strings.Contains(err.Error(), "failed to upload file second.txt:")) {
+						t.Errorf("cancellation error lacks file context: %v", err)
 					}
 				} else if err != nil {
 					t.Errorf("active transfer failed: %v", err)
