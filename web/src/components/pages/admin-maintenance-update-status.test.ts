@@ -78,6 +78,8 @@ interface Options {
   operations?: () => Json[] | 'down' | Promise<Json[]>;
   /** Body of POST check-updates, or an HTTP status to fail with. */
   checkUpdates?: Json | number;
+  /** Response to POST restart: 'down' rejects; text is a non-JSON body. */
+  restart?: 'down' | { status: number; body?: Json; text?: string };
 }
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -115,6 +117,16 @@ function handler(opts: Options) {
       runBodies.push(JSON.parse(init?.body as string));
       const r = opts.run ?? { status: 200, body: { runId: 'run-1', status: 'running' } };
       return json(r.body, r.status);
+    }
+    if (path === '/api/v1/admin/maintenance/restart' && opts.restart) {
+      const r = opts.restart;
+      if (r === 'down') return Promise.reject(new TypeError('Failed to fetch'));
+      if (r.text !== undefined) {
+        return Promise.resolve(
+          new Response(r.text, { status: r.status, headers: { 'Content-Type': 'text/html' } })
+        );
+      }
+      return json(r.body ?? {}, r.status);
     }
     if (path === '/api/v1/admin/maintenance/check-updates') {
       const c = opts.checkUpdates ?? {};
@@ -999,5 +1011,60 @@ describe('Restart Hub', () => {
     expect(waitForHubRestart).toHaveBeenCalledTimes(1);
     expect(vi.mocked(waitForHubRestart).mock.calls[0][0]?.expectVersion).toBeUndefined();
     expect(showToast).toHaveBeenCalledWith('Server restarted successfully.', 'success');
+  });
+
+  async function restartHub(e: Page): Promise<void> {
+    findButton(root(e), 'Restart')!.click();
+    await settle(e);
+    root(e)
+      .querySelector<HTMLElement>('sl-dialog[label="Restart Hub"] sl-button[variant="warning"]')!
+      .click();
+    await settle(e);
+  }
+
+  it('shows the hub refusal and does not wait when restart returns 409', async () => {
+    const message =
+      'Cannot restart the hub while update-binary is in progress (run run-1, running); wait for it to finish';
+    el = await mount({
+      restart: {
+        status: 409,
+        body: {
+          error: {
+            code: 'operation_in_progress',
+            message,
+            details: { runId: 'run-1', operationKey: 'update-binary', status: 'running' },
+          },
+        },
+      },
+    });
+    await restartHub(el);
+
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(`Restart refused: ${message}`, 'warning');
+    expect((el as unknown as { restartLoading: boolean }).restartLoading).toBe(false);
+    expect(findButton(root(el), 'Restart')).toBeDefined();
+  });
+
+  it('still waits when the restart request fails at the network', async () => {
+    vi.mocked(waitForHubRestart).mockResolvedValue({
+      ok: true,
+      observed: { version: 'v1', uptime: '2s', uptimeSeconds: 2 },
+    });
+    el = await mount({ restart: 'down' });
+    await restartHub(el);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith('Server restarted successfully.', 'success');
+  });
+
+  it('still waits on a reverse proxy 502 page', async () => {
+    vi.mocked(waitForHubRestart).mockResolvedValue({
+      ok: true,
+      observed: { version: 'v1', uptime: '2s', uptimeSeconds: 2 },
+    });
+    el = await mount({ restart: { status: 502, text: '<html>502 Bad Gateway</html>' } });
+    await restartHub(el);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
   });
 });

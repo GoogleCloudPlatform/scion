@@ -230,6 +230,27 @@ interface TrackedUpdate {
   lastStatus: string;
 }
 
+/**
+ * The hub's own error envelope ({error: {code, message}}) of a failed
+ * response, or null when the body is something else, such as a reverse
+ * proxy's 502 page while the hub is down.
+ */
+export async function hubErrorEnvelope(
+  res: Response
+): Promise<{ code: string; message: string } | null> {
+  try {
+    const body = (await res.json()) as { error?: { code?: unknown; message?: unknown } };
+    const err = body?.error;
+    if (err && typeof err === 'object' && typeof err.code === 'string' && err.code) {
+      const message = typeof err.message === 'string' && err.message ? err.message : err.code;
+      return { code: err.code, message };
+    }
+  } catch {
+    // Not JSON: not the hub's envelope.
+  }
+  return null;
+}
+
 /** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
 interface MaintenanceStateResponse {
   enabled: boolean;
@@ -2456,9 +2477,17 @@ export class ScionPageAdminMaintenance extends LitElement {
     // Fire the restart request. The server will restart and likely drop the
     // connection before a response arrives, so we expect a network error or
     // 502 from the reverse proxy. Either outcome means the restart was
-    // initiated — not that it failed.
+    // initiated — not that it failed. Only the hub's own error envelope
+    // (for example 409 operation_in_progress while an update runs) means
+    // it refused, and then there is nothing to wait for.
     try {
-      await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const res = await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const refusal = res.ok ? null : await hubErrorEnvelope(res);
+      if (refusal) {
+        showToast(`Restart refused: ${refusal.message}`, 'warning');
+        this.restartLoading = false;
+        return;
+      }
     } catch {
       // Expected — the server went away.
     }
