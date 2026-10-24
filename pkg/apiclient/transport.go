@@ -59,7 +59,8 @@ func WithTimeout(d time.Duration) TransportOption {
 
 // WithRetry configures automatic retry behavior for Do: up to maxRetries
 // further attempts after a transport error or a 5xx response, waiting wait
-// between attempts. Retries are off by default (MaxRetries 0). A retry
+// between attempts. Retries are off by default (MaxRetries 0); negative
+// values also disable retries, without skipping the initial request. A retry
 // replays the whole request, body included, so only enable this for
 // transports whose Do callers are idempotent; DoNoRetry is never retried.
 // Pinning non-idempotent callers is tracked in ptone/scion#2955.
@@ -153,8 +154,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		client.Timeout = d
 	}
 	canRewind := bodyRewindable(req)
-	attempts := t.MaxRetries + 1
-	for i := 0; i < attempts; i++ {
+	for i := 0; ; i++ {
 		if i > 0 {
 			timer := time.NewTimer(t.RetryWait)
 			select {
