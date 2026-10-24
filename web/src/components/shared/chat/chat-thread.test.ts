@@ -4002,7 +4002,9 @@ describe('scion-chat-thread unread-divider open anchor', () => {
         globalThis.requestAnimationFrame = (() => {
           throw new Error('frame request failed');
         }) as typeof requestAnimationFrame;
-        return () => (globalThis.requestAnimationFrame = stubbedRaf);
+        return (): void => {
+          globalThis.requestAnimationFrame = stubbedRaf;
+        };
       },
       'frame request failed'
     );
@@ -4046,7 +4048,7 @@ describe('scion-chat-thread unread-divider open anchor', () => {
             throw new Error('scroll write failed');
           },
         });
-        return () => {
+        return (): void => {
           delete (container as unknown as Record<string, unknown>).scrollTop;
         };
       },
