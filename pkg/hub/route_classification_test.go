@@ -171,6 +171,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/chat/user-prefs":                        "authenticated:chat-prefs",
 	"/api/v1/chat/presence":                          "authenticated:chat-presence",
 	"/api/v1/chat/search":                            "policy:chat",
+	"/api/v1/chat/stars":                             "policy:chat",
+	"/api/v1/chat/stars/":                            "policy:chat",
 	"/api/v1/chat/attachments":                       "policy:chat-attachment",
 	"/api/v1/chat/attachments/":                      "policy:chat-attachment",
 	"/api/v1/runtime-brokers/connect":                "broker-hmac:control-channel",

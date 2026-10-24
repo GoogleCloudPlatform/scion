@@ -698,6 +698,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.stars and chat.stars.byId serve the caller's own starred
+	// messages; every read and add also needs read access to the message's
+	// thread (project.read), checked per conversation by the handler.
+	"/api/v1/chat/stars": {
+		Pattern: "/api/v1/chat/stars", RouteID: "chat.stars",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	"/api/v1/chat/stars/": {
+		Pattern: "/api/v1/chat/stars/", RouteID: "chat.stars.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	// chat.attachments.list and chat.attachments.byId are wrapped by
 	// chatAttachmentRoute: an agent credential is admitted on the collection
 	// only, for POST (upload) and GET (the capability probe), and must pass

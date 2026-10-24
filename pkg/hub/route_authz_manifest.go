@@ -263,6 +263,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search
+	"/api/v1/chat/stars":          "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
+	"/api/v1/chat/stars/":         "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
 	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
 	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
 
