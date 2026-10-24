@@ -23,7 +23,8 @@ import (
 // for platforms without O_NOFOLLOW. Lstat must report a regular file, so a
 // symlink is refused before opening. After opening, fstat must report a
 // regular file that os.SameFile matches, so a path swapped for a symlink or
-// other reparse point before the open is refused. On unix the comparison is
+// other link (a name-surrogate reparse point, such as a junction) before
+// the open is refused. On unix the comparison is
 // with the file Lstat saw. On Windows, os.SameFile reads the Lstat side's
 // identity lazily, by re-opening path without following a reparse point, so
 // it compares with the file at path at check time and a regular file renamed
