@@ -496,6 +496,7 @@ export class ScionPageAdminMaintenance extends LitElement {
    * Target of the update run this page started, for the reconnect version
    * check. Null when unknown (for example `latest:<channel>` targets).
    */
+  @state()
   private updateExpectVersion: string | null = null;
 
   /** True while waiting for the hub to come back after an update restart. */
@@ -1265,12 +1266,17 @@ export class ScionPageAdminMaintenance extends LitElement {
    */
   private async reconnectAfterUpdate(): Promise<void> {
     if (this.updateReconnecting) return;
-    const pendingTo = this.updateStatus?.pendingUpdate?.to;
-    const expectVersion = this.updateExpectVersion ?? pendingTo ?? undefined;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
     try {
+      // For a latest:<channel> run, or a page opened mid-update, the
+      // concrete target is only in pendingUpdate, written before the restart.
+      if (!this.updateExpectVersion) {
+        await this.fetchUpdateStatus();
+        this.updateExpectVersion = this.updateStatus?.pendingUpdate?.to ?? null;
+      }
+      const expectVersion = this.updateExpectVersion ?? undefined;
       const result = await waitForHubRestart({ expectVersion });
       if (!result.ok) {
         this.updateReconnectError =
