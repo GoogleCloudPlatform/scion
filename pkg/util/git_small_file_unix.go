@@ -50,3 +50,10 @@ func readSmallRegularFile(path string, max int64) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// openRegularFileNoFollow opens path read-only with O_NOFOLLOW|O_NONBLOCK, so
+// a symlink at path cannot redirect it and a FIFO/device cannot block it. The
+// caller must still confirm with fstat that the opened file is regular.
+func openRegularFileNoFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+}

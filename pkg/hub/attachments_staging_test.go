@@ -18,47 +18,84 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // hostDir names the staging directory as a path on the hub host. Production
-// code has no use for it — stage() resolves through an os.Root, and a host path
-// is exactly what must not be handed to a path-based os call — but a test
+// code has no use for it — stage() resolves through Resolved.Open, and a host
+// path is exactly what must not be handed to a path-based os call — but a test
 // asserting on the result has to stand outside the root to look in.
 func (a *attachmentStaging) hostDir() string {
-	return filepath.Join(a.sharedDir, filepath.FromSlash(a.relDir))
+	return filepath.Join(a.resolved.HostPath, projectfs.AttachmentsDir, a.channel)
+}
+
+// stage is stageFrom with the bytes read from a host file (test helper; the
+// production legacy path reads the hub-private store through
+// LocalDiskAttachmentStore.Get).
+func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) {
+	return a.stageFrom(func() (io.ReadCloser, error) { return os.Open(srcPath) }, id, filename)
+}
+
+// agentDir is the container directory staged files of this target land in.
+func (a *attachmentStaging) agentDir() string {
+	return path.Join(a.mount.Target, projectfs.AttachmentsDir, a.channel)
+}
+
+// newLocalTestStaging builds a staging target on a local-backend scratchpad
+// at dir, as resolveAttachmentStaging does for a workstation hub.
+func newLocalTestStaging(dir string, inWorkspace bool) *attachmentStaging {
+	mount := projectfs.SharedDirMount(api.SharedDir{Name: attachmentSharedDirName, InWorkspace: inWorkspace}, "")
+	return newAttachmentStaging(projectfs.Resolved{
+		Backend: projectfs.BackendLocal, HostPath: dir,
+		Target: mount.Target, Kind: mount.Kind, Name: mount.Name,
+	}, mount, false)
 }
 
 func TestNewAttachmentStaging_Paths(t *testing.T) {
-	st := newAttachmentStaging("/home/scion/.scion/project-configs/proj__abcd1234/shared-dirs/scratchpad", false)
+	st := newLocalTestStaging("/home/scion/.scion/project-configs/proj__abcd1234/shared-dirs/scratchpad", false)
 	require.NotNil(t, st)
 	assert.Equal(t,
 		"/home/scion/.scion/project-configs/proj__abcd1234/shared-dirs/scratchpad/.attachments/_webchat",
 		st.hostDir())
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", st.agentDir)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", st.agentDir())
 }
 
 func TestNewAttachmentStaging_InWorkspace(t *testing.T) {
-	st := newAttachmentStaging("/host/shared-dirs/scratchpad", true)
+	st := newLocalTestStaging("/host/shared-dirs/scratchpad", true)
 	require.NotNil(t, st)
-	assert.Equal(t, "/workspace/.scion-volumes/scratchpad/.attachments/_webchat", st.agentDir)
+	assert.Equal(t, "/workspace/.scion-volumes/scratchpad/.attachments/_webchat", st.agentDir())
+	p, err := st.agentPath("att-1", "a.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "/workspace/.scion-volumes/scratchpad/.attachments/_webchat/att-1/a.txt", p)
 }
 
-func TestNewAttachmentStaging_EmptyHostPath(t *testing.T) {
-	assert.Nil(t, newAttachmentStaging("", false))
+// TestAttachmentStaging_LocalDirMissingNotCreated: on the local backend a
+// staging target never vivifies the scratchpad (create is false).
+func TestAttachmentStaging_LocalDirMissingNotCreated(t *testing.T) {
+	src := writeTempFile(t, "notes.txt", "hello agent")
+	dir := filepath.Join(t.TempDir(), "scratchpad")
+	st := newLocalTestStaging(dir, false)
+	_, err := st.stage(src, "att-1", "notes.txt")
+	require.Error(t, err)
+	assert.NoDirExists(t, dir)
 }
 
 func TestAttachmentStaging_StageCopiesFile(t *testing.T) {
 	src := writeTempFile(t, "notes.txt", "hello agent")
-	st := newAttachmentStaging(t.TempDir(), false)
+	st := newLocalTestStaging(t.TempDir(), false)
 	require.NotNil(t, st)
 
 	agentPath, err := st.stage(src, "att-1", "notes.txt")
@@ -73,7 +110,7 @@ func TestAttachmentStaging_StageCopiesFile(t *testing.T) {
 
 func TestAttachmentStaging_StageIsIdempotent(t *testing.T) {
 	src := writeTempFile(t, "notes.txt", "hello agent")
-	st := newAttachmentStaging(t.TempDir(), false)
+	st := newLocalTestStaging(t.TempDir(), false)
 
 	first, err := st.stage(src, "att-1", "notes.txt")
 	require.NoError(t, err)
@@ -86,10 +123,141 @@ func TestAttachmentStaging_StageIsIdempotent(t *testing.T) {
 	assert.Equal(t, "hello agent", string(content))
 }
 
+// TestAttachmentStaging_ReusesOnlyIdenticalCopy: an existing file at the
+// destination is reused only when it holds the attachment's exact bytes;
+// a planted file with other content is refused and left as it is.
+func TestAttachmentStaging_ReusesOnlyIdenticalCopy(t *testing.T) {
+	src := writeTempFile(t, "notes.txt", "hello agent")
+	st := newLocalTestStaging(t.TempDir(), false)
+	dest := filepath.Join(st.hostDir(), "att-1", "notes.txt")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	require.NoError(t, os.WriteFile(dest, []byte("planted by an agent"), 0o644))
+	_, err := st.stage(src, "att-1", "notes.txt")
+	require.ErrorIs(t, err, errStagedCopyMismatch)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, "planted by an agent", string(got), "the planted file is not touched")
+
+	// Same length, other bytes: still refused.
+	require.NoError(t, os.WriteFile(dest, []byte("HELLO AGENT"), 0o644))
+	_, err = st.stage(src, "att-1", "notes.txt")
+	require.ErrorIs(t, err, errStagedCopyMismatch)
+
+	// A prefix of the attachment: refused.
+	require.NoError(t, os.WriteFile(dest, []byte("hello"), 0o644))
+	_, err = st.stage(src, "att-1", "notes.txt")
+	require.ErrorIs(t, err, errStagedCopyMismatch)
+
+	// The exact bytes: reused.
+	require.NoError(t, os.WriteFile(dest, []byte("hello agent"), 0o644))
+	p, err := st.stage(src, "att-1", "notes.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", p)
+
+	// A directory planted at the name: refused.
+	dirDest := filepath.Join(st.hostDir(), "att-2", "notes.txt")
+	require.NoError(t, os.MkdirAll(dirDest, 0o755))
+	_, err = st.stage(src, "att-2", "notes.txt")
+	require.Error(t, err)
+}
+
+// errReader returns some bytes, then fails.
+type errReader struct{ sent bool }
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, "partial"), nil
+	}
+	return 0, errors.New("planted read failure")
+}
+
+// TestAttachmentStaging_InterruptedCopyLeavesNoFinalName: a copy that fails
+// part-way never leaves a file under the final name (it is written to a
+// temporary name and linked into place only when complete), so a retry
+// stages the attachment; a temporary file left by an earlier crash does not
+// block it either.
+func TestAttachmentStaging_InterruptedCopyLeavesNoFinalName(t *testing.T) {
+	st := newLocalTestStaging(t.TempDir(), false)
+	dest := filepath.Join(st.hostDir(), "att-1", "notes.txt")
+
+	_, err := st.stageFrom(func() (io.ReadCloser, error) { return io.NopCloser(&errReader{}), nil }, "att-1", "notes.txt")
+	require.Error(t, err)
+	assert.NoFileExists(t, dest, "no partial file under the final name")
+	entries, err := os.ReadDir(filepath.Dir(dest))
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the temporary file is removed")
+
+	// A temporary file left by a crash.
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(dest), ".notes.txt.tmp-0011223344556677"), []byte("part"), 0o644))
+
+	src := writeTempFile(t, "notes.txt", "hello agent")
+	p, err := st.stage(src, "att-1", "notes.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", p)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, "hello agent", string(got))
+}
+
+// TestAttachmentStaging_ConcurrentStagingAtLink: when the final name is
+// taken between the existence check and the link (another staging of the
+// same attachment, or a planted file), the link never replaces it: an
+// identical copy is reused, anything else is refused and left untouched,
+// and the temporary file is removed either way.
+func TestAttachmentStaging_ConcurrentStagingAtLink(t *testing.T) {
+	for _, tc := range []struct {
+		name, planted string
+		wantErr       bool
+	}{
+		{"identical copy reused", "hello agent", false},
+		{"different file refused", "planted by an agent", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newLocalTestStaging(t.TempDir(), false)
+			dest := filepath.Join(st.hostDir(), "att-1", "notes.txt")
+			stagingAfterTemp = func() {
+				require.NoError(t, os.WriteFile(dest, []byte(tc.planted), 0o644))
+			}
+			t.Cleanup(func() { stagingAfterTemp = nil })
+
+			p, err := st.stage(writeTempFile(t, "notes.txt", "hello agent"), "att-1", "notes.txt")
+			if tc.wantErr {
+				require.ErrorIs(t, err, errStagedCopyMismatch)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/att-1/notes.txt", p)
+			}
+			got, err := os.ReadFile(dest)
+			require.NoError(t, err)
+			assert.Equal(t, tc.planted, string(got), "the existing file is never replaced")
+			entries, err := os.ReadDir(filepath.Dir(dest))
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "the temporary file is removed")
+		})
+	}
+}
+
+func TestSameContent(t *testing.T) {
+	big := strings.Repeat("x", 70<<10)
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true}, {"a", "a", true}, {"a", "b", false}, {"a", "", false}, {"", "a", false},
+		{"ab", "a", false}, {big, big, true}, {big, big + "y", false}, {big + "y", big, false},
+	} {
+		got, err := sameContent(strings.NewReader(tc.a), strings.NewReader(tc.b))
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got, "%d vs %d bytes", len(tc.a), len(tc.b))
+	}
+}
+
 func TestAttachmentStaging_StageRejectsTraversal(t *testing.T) {
 	src := writeTempFile(t, "notes.txt", "hello agent")
 	base := t.TempDir()
-	st := newAttachmentStaging(base, false)
+	st := newLocalTestStaging(base, false)
 
 	_, err := st.stage(src, "../escape", "notes.txt")
 	require.Error(t, err)
@@ -105,7 +273,7 @@ func TestAttachmentStaging_StageRejectsTraversal(t *testing.T) {
 }
 
 func TestAttachmentStaging_StageMissingSource(t *testing.T) {
-	st := newAttachmentStaging(t.TempDir(), false)
+	st := newLocalTestStaging(t.TempDir(), false)
 	_, err := st.stage(filepath.Join(t.TempDir(), "gone.txt"), "att-1", "gone.txt")
 	require.Error(t, err)
 	// A failed copy must not leave a truncated file behind.
@@ -115,13 +283,13 @@ func TestAttachmentStaging_StageMissingSource(t *testing.T) {
 func TestAttachmentStaging_StageDoesNotFollowSymlink(t *testing.T) {
 	src := writeTempFile(t, "notes.txt", "hello agent")
 	target := writeTempFile(t, "secret.txt", "do not overwrite")
-	st := newAttachmentStaging(t.TempDir(), false)
+	st := newLocalTestStaging(t.TempDir(), false)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(st.hostDir(), "att-1"), 0o755))
 	require.NoError(t, os.Symlink(target, filepath.Join(st.hostDir(), "att-1", "notes.txt")))
 
 	_, err := st.stage(src, "att-1", "notes.txt")
-	require.NoError(t, err) // treated as already staged
+	require.ErrorIs(t, err, errStagedCopyMismatch, "a planted link is never reused as the staged copy")
 
 	content, err := os.ReadFile(target)
 	require.NoError(t, err)
@@ -170,11 +338,27 @@ func TestResolveAttachmentStaging_UsesProjectConfigsSharedDir(t *testing.T) {
 	staging := srv.resolveAttachmentStaging(context.Background(), project.ID)
 	require.NotNil(t, staging)
 	assert.Equal(t, filepath.Join(sharedDir, ".attachments", "_webchat"), staging.hostDir())
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", staging.agentDir)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat", staging.agentDir())
 }
 
 func TestResolveAttachmentStaging_UnknownProject(t *testing.T) {
 	srv, _, _ := newStagingTestProject(t, []api.SharedDir{{Name: "scratchpad"}})
 	assert.Nil(t, srv.resolveAttachmentStaging(context.Background(), "no-such-project"))
 	assert.Nil(t, srv.resolveAttachmentStaging(context.Background(), ""))
+}
+
+// TestStageChatAttachments_LegacyOnLocal_DMStillStaged: on the local backend
+// (the workstation) the scratchpad copy is the recipient's only way to read
+// a legacy attachment, so it is staged for a direct conversation too (the
+// documented workstation limitation, unchanged).
+func TestStageChatAttachments_LegacyOnLocal_DMStillStaged(t *testing.T) {
+	srv, _, project, sharedDir := agentAttachmentServer(t)
+	ref := saveLegacyAttachment(t, srv, project.ID, "dm.txt", "dm bytes")
+	paths, mounts := srv.stageChatAttachments(context.Background(), "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{ref})
+	require.Len(t, paths, 1)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+ref.ID+"/dm.txt", paths[0])
+	assert.Equal(t, attachmentSharedDirName, mounts[paths[0]])
+	got, err := os.ReadFile(filepath.Join(sharedDir, ".attachments", "_webchat", ref.ID, "dm.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "dm bytes", string(got))
 }
