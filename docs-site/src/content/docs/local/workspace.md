@@ -109,8 +109,8 @@ When a Scion Hub is enabled, workspace strategy changes depending on the project
 
 ### Hub-Managed Projects (no git repository)
 Hub-Managed projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
-- The Hub automatically initializes a seeded `.scion` structure.
-- Workspace files are managed locally by the Hub and its distributed runtime brokers.
+- The Hub automatically initializes a seeded `.scion` structure (`projects/<uuid>/.scion` on shared workspace storage).
+- Workspace files live in `projects/<uuid>/workspace` on shared workspace storage (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on local storage, and are reached by Runtime Brokers through shared storage (`nfs`) or a co-located Runtime Broker.
 - You can directly download individual workspace files or generate ZIP archives of entire projects using the Hub API or Web Dashboard, making it easy to export your data.
 
 ### Git Projects (clone-based, Hub-managed)
@@ -247,7 +247,11 @@ the next section) until you re-link it to a new hub project. Running `scion hub 
    records on the Hub for every broker.
 3. In the repository, run `scion hub link` (or any agent command, which links automatically). The
    new project is registered with the `worktree-per-agent` mode; check with
-   `scion hub projects info <name> --format json` (the text output does not show labels).
+   `scion hub projects info <name> --format json` (the text output does not show labels). When a
+   git checkout that already has a local project directory (`~/.scion/project-configs/<slug>__<short-id>`)
+   is linked to a new Hub project, `scion list`, `start`, `stop`, `resume` and `delete` resolve the
+   Hub project from the link (`settings.yaml` `project_id`) rather than the earlier local project ID
+   in `.scion/project-id`.
 
 #### On a remote Hub: a clone per agent
 
@@ -259,7 +263,7 @@ project, whichever broker an agent lands on.
 **What this means in practice:**
 
 - **SSH credentials are not used** for workspace provisioning. Agents clone via HTTPS using `GITHUB_TOKEN`.
-- **A `GITHUB_TOKEN` is required** for private repositories. Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it; a non-interactive `scion start` sends it only with `--send-env`):
+- **A `GITHUB_TOKEN` is required** for private repositories. Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it; a non-interactive `scion start` or `scion resume` sends it only with `--send-env`, and fails without it naming the missing keys and `--send-env`):
   ```bash
   scion hub secret set --project=my-project GITHUB_TOKEN ghp_xxxxxxxxxxxx
   ```
@@ -276,13 +280,14 @@ the Hub and cannot be changed later.
 
 #### Git that Scion runs on the host
 
-The broker and the Hub run git on the host in repositories that agent containers can also write:
-your linked checkout (when it creates or removes an agent's worktree), the shared clone of a
-`worktree-per-agent` project, and the clone of a shared-workspace project. Before each of these
-commands, Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`)
-as data and **refuses the command, naming the key**, if the config contains an `include`/`includeIf`
-directive or any key outside an allow-list. This is deny-by-default: a key that is not known to be
-safe stops the command rather than being ignored.
+The broker and the Hub run git on the host during provisioning clones and in repositories that
+agent containers can also write: your linked checkout (when it creates or removes an agent's
+worktree), the shared clone of a `worktree-per-agent` project, and the clone of a shared-workspace
+project (including shared-workspace pulls). Before each of these commands in an existing repository,
+Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`) as data and
+**refuses the command, naming the key**, if the config contains an `include`/`includeIf` directive
+or any key outside an allow-list. This is deny-by-default: a key that is not known to be safe stops
+the agent start or workspace pull rather than being ignored.
 
 - **A repository Scion manages** (the shared checkout of a `worktree-per-agent` project, the clone
   of a shared-workspace project) allows only the keys git and Scion write for it: the core
@@ -335,8 +340,8 @@ safe stops the command rather than being ignored.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 
-Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
-upcoming change gives each agent its own private copy of `.git/config`.
+Your own git commands in your checkout are not affected. In-container git stays fully flexible: each
+worktree agent gets its own private copy of `.git/config`.
 
 ---
 

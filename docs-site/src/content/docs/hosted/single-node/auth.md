@@ -417,6 +417,7 @@ export SCION_SERVER_AUTH_DEVMODE=true
 When the Hub starts with `devMode: true`, it writes the token to `~/.scion/dev-token`.
 - **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and, when no other credential applies, print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
 - **Web**: The Web Dashboard automatically uses this token for the "Development User" login when `SCION_DEV_AUTH_ENABLED=true` is set.
+- **Agent containers**: Hub-dispatched agents authenticate with their issued agent token (`~/.scion/agent-token` or `SCION_AUTH_TOKEN`), and the Runtime Broker strips `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` from dispatched agent environments. When a Hub and Runtime Broker run co-located with dev auth enabled, the Runtime Broker offers the dev token only to a local agent bound to the co-located Hub, using an operator-derived endpoint (`server.hub.endpoint`, `server.broker.hub_endpoint`, or `http://localhost:<server.hub.port>`) rather than project settings or environment variables.
 
 Alternatively, you can set the token in your environment for a loopback Hub:
 ```bash

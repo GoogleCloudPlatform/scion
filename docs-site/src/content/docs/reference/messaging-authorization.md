@@ -674,6 +674,27 @@ This permission is intentionally restricted:
 - **Distinct from `agent.update`** because project admins hold `agent.update`;
   if mode changes were folded into update, admins could unseal agents.
 
+### `project.chat_post`
+
+| Attribute | Value |
+|-----------|-------|
+| Permission ID | `project.chat_post` |
+| Resource | `project` |
+| Action | `chat_post` |
+| Capability Kind | Scope (project-wide) |
+| Description | Post messages in project chat threads |
+| UAT Scope | `project:chat_post` |
+| Default Role | Project member, project admin, project owner, hub admin, super-admin |
+
+Posting in a project space's thread (`POST /api/v1/chat/conversations/{id}/messages` on a `space` conversation) and promoting an agent DM into a project space (`POST /api/v1/chat/conversations/{id}/promote`) require `project.chat_post` on the project, while reading project threads uses `project.read`:
+
+- **Default project roles** (`member`, `admin`, `owner`) and hub administrators hold `project.chat_post`. Custom project roles are not backfilled on upgrade, so a read-only custom role keeps read access (`canPost: false` on `GET /api/v1/chat/conversations/{id}/messages`) until an administrator adds `project.chat_post` to that role.
+- **Refused posts and promotions** return `403 chat_post_denied`.
+- **User access tokens (UATs):** posting in a project thread with a UAT requires the `inbox:write` token scope, and the Hub checks `project.chat_post` on the token holder's account. The `project:chat_post` UAT scope keeps `project.chat_post` in the token's effective project permissions so a token with `project:manage` can grant roles that include it.
+- **Scheduled chat messages:** when a `chat_message` schedule fires, the Hub re-checks `project.chat_post` for the user who created the schedule (`createdBy`) and marks the fire `failed` with `no_access` if that user no longer holds the permission.
+
+See [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
+
 ---
 
 ## Design Decisions Reference
