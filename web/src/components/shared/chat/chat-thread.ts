@@ -4566,10 +4566,12 @@ export class ScionChatThread extends LitElement {
           if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
           // This callback runs later, outside the promise chain, so the .catch
           // below never sees its throws. Stand the anchor down here too, and
-          // put the bottom pin back: applyUnreadAnchor may already have
-          // turned it off, and without the anchor nothing would correct it
-          // until the reader scrolls. Rethrow so the error still reaches the
-          // console.
+          // set the bottom pin from where the view really is: applyUnreadAnchor
+          // turns the pin off before its scrollTop write, so a throw from that
+          // write would leave a view still at the bottom unpinned, while a
+          // throw after it (the guard frame request) leaves the view at the
+          // divider, which must stay unpinned. Rethrow so the error still
+          // reaches the console.
           try {
             this._unreadAnchorPending = false;
             this.applyUnreadAnchor();
@@ -4577,7 +4579,12 @@ export class ScionChatThread extends LitElement {
           } catch (err) {
             if (this.fetchId === openToken) {
               this.deactivateUnreadAnchor();
-              this.pinnedToBottom = true;
+              const scrollEl = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+              if (scrollEl) {
+                this.pinnedToBottom =
+                  scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
+                  SCROLL_BOTTOM_THRESHOLD;
+              }
             }
             throw err;
           }
