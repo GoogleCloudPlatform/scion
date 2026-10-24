@@ -248,7 +248,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			return false, err
 		}
 		rec.Files = uploaded
-		rec.ContentHash = computeContentHash(uploaded)
+		rec.ContentHash = rs.srv.computeContentHash(uploaded)
 		rec.Status = resourceStatusActive
 		if err := p.Update(ctx, rec, dir); err != nil {
 			return false, err
@@ -262,7 +262,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	// Existing resource — short-circuit on unchanged content unless forced.
 	if !force {
-		if computeContentHash(toResourceFiles(files)) == existing.ContentHash {
+		if rs.srv.computeContentHash(toResourceFiles(files)) == existing.ContentHash {
 			return p.OnHashMatch(ctx, existing, dir)
 		}
 	}
@@ -277,7 +277,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, err
 	}
 
-	newHash := computeContentHash(uploaded)
+	newHash := rs.srv.computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
 	if changed {
 		srv.resourceLog.Info(p.Label()+": resource re-synced",

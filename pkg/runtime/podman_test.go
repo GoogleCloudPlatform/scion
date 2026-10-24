@@ -125,6 +125,48 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 	})
 }
 
+// TestPodmanRuntime_Run_MetadataInterception checks that rootless Podman,
+// whose init drops to the keep-id user before the metadata server starts,
+// never gets NET_ADMIN or a required interception marker, while rootful
+// Podman keeps both.
+func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
+	mockPodman := filepath.Join(t.TempDir(), "mock-podman")
+	if err := os.WriteFile(mockPodman, []byte("#!/bin/sh\necho \"$@\"\n"), 0755); err != nil {
+		t.Fatalf("failed to write mock podman: %v", err)
+	}
+	for _, tc := range []struct {
+		name         string
+		rootless     bool
+		wantMarker   string
+		wantNetAdmin bool
+	}{
+		{name: "rootless", rootless: true, wantMarker: "SCION_METADATA_INTERCEPTION=off", wantNetAdmin: false},
+		{name: "rootful", rootless: false, wantMarker: "SCION_METADATA_INTERCEPTION=required", wantNetAdmin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &PodmanRuntime{Command: mockPodman, Rootless: tc.rootless}
+			out, err := rt.Run(context.Background(), RunConfig{
+				Harness:              &harness.Generic{},
+				Name:                 "test-agent",
+				UnixUsername:         "scion",
+				Image:                "scion-agent:latest",
+				Task:                 "hello",
+				Env:                  []string{"SCION_METADATA_MODE=block"},
+				MetadataInterception: true,
+			})
+			if err != nil {
+				t.Fatalf("runtime.Run failed: %v", err)
+			}
+			if !strings.Contains(out, tc.wantMarker) {
+				t.Errorf("expected %q in args, got %q", tc.wantMarker, out)
+			}
+			if got := strings.Contains(out, "--cap-add NET_ADMIN"); got != tc.wantNetAdmin {
+				t.Errorf("NET_ADMIN granted = %v, want %v (args %q)", got, tc.wantNetAdmin, out)
+			}
+		})
+	}
+}
+
 func TestPodmanRuntime_Run_RootlessKeepID(t *testing.T) {
 	tmpDir := t.TempDir()
 	mockPodman := filepath.Join(tmpDir, "mock-podman")

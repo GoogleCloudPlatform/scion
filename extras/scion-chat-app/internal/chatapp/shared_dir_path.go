@@ -37,17 +37,28 @@ var resolveSharedDirHost = scionruntime.ResolveSharedDirHostPath
 // resolved path is treated the same way, so it is never used as a path
 // relative to the working directory.
 func resolveSharedDirHostPath(home, slug, projectID, name string) (string, error) {
-	gs, err := loadSharedDirSettings()
+	res, err := resolveSharedDir(home, slug, projectID, name)
 	if err != nil {
 		return "", err
+	}
+	return res.Path, nil
+}
+
+// resolveSharedDir is resolveSharedDirHostPath with the layout authority's
+// answer (res.Resolved, pkg/projectfs) for writing below the shared dir
+// through Resolved.Open.
+func resolveSharedDir(home, slug, projectID, name string) (scionruntime.SharedDirHostPath, error) {
+	gs, err := loadSharedDirSettings()
+	if err != nil {
+		return scionruntime.SharedDirHostPath{}, err
 	}
 	res, err := resolveSharedDirHost(gs, home, slug, projectID, name)
 	if err != nil {
-		return "", err
+		return scionruntime.SharedDirHostPath{}, err
 	}
 	if res.Path == "" {
-		return "", fmt.Errorf("%w: shared dir %q resolved to an empty path",
+		return scionruntime.SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q resolved to an empty path",
 			scionruntime.ErrSharedDirStorageUnavailable, name)
 	}
-	return res.Path, nil
+	return res, nil
 }

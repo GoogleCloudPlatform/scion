@@ -16,10 +16,8 @@ package provision
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -179,34 +177,4 @@ func cloneTokenHost(projectRemote, cloneURL string) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(u.Host), true
-}
-
-// hostScopedTokenHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries to
-// append to env, the environment of one git command, so that the command
-// offers the token in GitTokenEnv only to https://<host>: the first entry
-// clears the credential helpers from git's config files (none of them sees
-// or stores the credential), the second installs GitTokenCredentialHelper as
-// credential.https://<host>.helper. git uses no helper for any other host,
-// including a redirect target. Entries already counted in env are kept.
-//
-// TODO: replace with util.ScopedCredentialHelperEnv after rebasing onto the
-// upstream credential helper change.
-func hostScopedTokenHelperEnv(env []string, host string) []string {
-	base := 0
-	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
-			// The last entry is the one exec uses.
-			base = 0
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				base = n
-			}
-		}
-	}
-	return []string{
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.https://%s.helper", base+1, host),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
-	}
 }
