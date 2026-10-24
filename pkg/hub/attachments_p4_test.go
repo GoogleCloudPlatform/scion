@@ -450,7 +450,9 @@ func TestAttachmentPlan_ProjectionCopiedUnlessWithheld(t *testing.T) {
 // AttachmentRef.projectedPath/projectedMount are assigned only inside
 // stageChatAttachments, behind its projectionAudienceIsProject check.
 func TestProjection_OnlyChatV2SendPathProjects(t *testing.T) {
-	paths, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; guards stageChatAttachments call sites and projectedPath/projectedMount writes.
+	paths, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var callers, assigners []string
