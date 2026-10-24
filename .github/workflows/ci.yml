@@ -163,6 +163,30 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Runner routing (hack/check-runner-routing.sh). A fork can route jobs to its
+  # cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable, which is
+  # unset here, so every job runs on ubuntu-latest. This keeps every routed
+  # runs-on byte-identical to the canonical, fork-PR-guarded expression, keeps
+  # jobs that cannot or must not run there (services, container, docker://
+  # steps, write permissions, pull_request_target, literal self-hosted labels)
+  # off it, and requires a timeout of at most 35 min. Its own job, so a failure
+  # here does not touch the path detection in changes (which fails open).
+  runner-routing-check:
+    name: Runner routing check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check runner routing (selftest, then the workflows)
+        run: |
+          ./hack/check-runner-routing.sh --selftest
+          ./hack/check-runner-routing.sh
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -1390,7 +1414,7 @@ jobs:
 
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     # Bounds a hang only. With the patched golangci-lint and the two-pass
     # split (hack/golangci-lint-split.sh) the whole job took 4m40s-4m53s on
     # ubuntu-latest (lint step 166-177 s, plus a 46-58 s cold build of the
@@ -1753,7 +1777,7 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the tests run anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code

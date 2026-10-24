@@ -1,0 +1,14 @@
+# Fixture for hack/check-runner-routing.sh --selftest; not a workflow GitHub runs.
+name: fixture
+
+on:
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: echo ok
