@@ -231,7 +231,7 @@ var agentDelegationManagementOperations = []OperationSpec{
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
 	{
-		ID:          "agent.delegation.revoke_all",
+		ID:          "agent.delegation.revokeall",
 		Domain:      "agent.delegation",
 		Description: "Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported",
 		EntryPoints: []EntryPoint{

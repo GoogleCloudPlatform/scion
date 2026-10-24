@@ -214,7 +214,7 @@ const (
 	opAgentDelegationRead             authzop.OperationID = "agent.delegation.read"
 	opAgentDelegationRevoke           authzop.OperationID = "agent.delegation.revoke"
 	opAgentDelegationCredentialRevoke authzop.OperationID = "agent.delegation.credential.revoke"
-	opAgentDelegationRevokeAll        authzop.OperationID = "agent.delegation.revoke_all"
+	opAgentDelegationRevokeAll        authzop.OperationID = "agent.delegation.revokeall"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {

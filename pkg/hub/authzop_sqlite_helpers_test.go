@@ -883,7 +883,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
 		// Per-agent revoke-all takes the disposable agent and its grant.
-		{"agent.delegation.revoke_all", "/api/v1/agents/{id}/delegations/revoke-all"}: {"id": f.delegation.revokeAllAgent},
+		{"agent.delegation.revokeall", "/api/v1/agents/{id}/delegations/revoke-all"}: {"id": f.delegation.revokeAllAgent},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},

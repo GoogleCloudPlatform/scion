@@ -361,7 +361,7 @@
 - [agent.delegation.credential.revoke](#agentdelegationcredentialrevoke) — Revoke one delegated credential exchanged from an agent delegation grant
 - [agent.delegation.list](#agentdelegationlist) — List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
 - [agent.delegation.read](#agentdelegationread) — Read one agent delegation grant; a grant outside the caller's authority answers as missing
-- [agent.delegation.revoke_all](#agentdelegationrevoke_all) — Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
+- [agent.delegation.revokeall](#agentdelegationrevokeall) — Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
 
 ---
 
@@ -13518,7 +13518,7 @@
 
 ---
 
-## agent.delegation.revoke_all
+## agent.delegation.revokeall
 
 **Domain:** agent.delegation
 
