@@ -716,3 +716,51 @@ func TestBinaryUpdate_StepDeadlines(t *testing.T) {
 		}
 	})
 }
+
+func TestBinaryUpdate_RestartFailureRollsBackSymlink(t *testing.T) {
+	requireLinux(t)
+	gh := newFakeGitHub(t)
+	gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+
+	root := installLayout(t, "nightly-20261022", "nightly-20261021")
+	if err := os.Symlink("releases/nightly-20261021", filepath.Join(root, prevLinkName)); err != nil {
+		t.Fatal(err)
+	}
+	opts := symlinkOpts(root)
+	opts.Signal = func() error { return errors.New("kill: operation not permitted") }
+	inst := Detect(context.Background(), opts)
+	if inst.Name() != StrategySymlink {
+		t.Fatalf("Detect = %s (%s)", inst.Name(), inst.Status().Reason)
+	}
+	e := newTestExecutor(gh, inst, "nightly-20261022")
+	hooked := false
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+		func(context.Context, PendingRestart) error { hooked = true; return nil })
+	if !hooked {
+		t.Fatal("hook not called before the restart")
+	}
+	if err == nil || !strings.Contains(err.Error(), "restarting the hub failed") || !strings.Contains(err.Error(), "rolled back, nothing changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261022" {
+		t.Fatalf("current = %q after rollback", cur)
+	}
+	if prev := readLink(t, root, prevLinkName); prev != "releases/nightly-20261021" {
+		t.Fatalf("previous = %q after rollback", prev)
+	}
+}
+
+func TestBinaryUpdate_RestartFailureSudoInstallSaysNoRollback(t *testing.T) {
+	requireLinux(t)
+	gh := newFakeGitHub(t)
+	gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+	opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+	inst := Detect(context.Background(), opts)
+	r.failRun = map[string]error{ruleNoBlockTk: errors.New("exit status 1")}
+	e := newTestExecutor(gh, inst, "nightly-20261022")
+	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+		func(context.Context, PendingRestart) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "restarting the hub failed") || !strings.Contains(err.Error(), "cannot be rolled back") {
+		t.Fatalf("err = %v", err)
+	}
+}

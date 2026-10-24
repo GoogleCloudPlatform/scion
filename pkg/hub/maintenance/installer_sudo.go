@@ -16,8 +16,10 @@ package maintenance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -186,15 +188,18 @@ func (s *sudoInstaller) Restart(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(false), " "), err)
 	}
-	// The plain restart blocks until systemd has stopped this process, so a
-	// child still running after the grace period means the restart is under
-	// way. One that exits with an error in that window (rule removed, sudo
-	// misconfigured) did not restart anything: report it.
+	// The plain restart blocks while systemd stops the unit. With the
+	// default KillMode=control-group systemd SIGTERMs every process in the
+	// hub's cgroup, this sudo/systemctl child included, so a child killed by
+	// a signal (or still running after the grace period) means the restart
+	// is under way. Only a normal exit with a non-zero status (no matching
+	// sudoers rule, systemctl refusing) means nothing was restarted.
 	timer := time.NewTimer(s.restartGrace)
 	defer timer.Stop()
 	select {
 	case err := <-done:
-		if err != nil {
+		var ee *exec.ExitError
+		if err != nil && errors.As(err, &ee) && ee.Exited() {
 			return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(false), " "), err)
 		}
 		return nil

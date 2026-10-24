@@ -110,7 +110,9 @@ type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 	// Start starts the command without waiting for it, for commands that
 	// terminate this process (systemctl restart of our own unit). done
-	// receives the command's exit result (nil on success) once it exits.
+	// receives the command's exit result once it exits: nil on success,
+	// otherwise the *exec.ExitError (or equivalent) from Wait, so callers can
+	// tell a non-zero exit from death by a signal.
 	Start(name string, args ...string) (done <-chan error, err error)
 }
 

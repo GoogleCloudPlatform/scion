@@ -348,9 +348,6 @@ type fakeRunner struct {
 	starts  []string
 	failRun map[string]error // joined full command → error
 	block   map[string]bool  // joined full command → block until ctx is done
-	// startExit, when set, is the exit result of started commands, sent
-	// right away; otherwise they keep "running".
-	startExit error
 }
 
 func (f *fakeRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -379,11 +376,8 @@ func (f *fakeRunner) Start(name string, args ...string) (<-chan error, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, strings.Join(append([]string{name}, args...), " "))
-	done := make(chan error, 1)
-	if f.startExit != nil {
-		done <- f.startExit
-	}
-	return done, nil
+	// Started commands keep "running" (the restart is under way).
+	return make(chan error, 1), nil
 }
 
 func sudoOpts(t *testing.T, allowed ...string) (DetectOptions, *fakeRunner) {
@@ -445,30 +439,37 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 		}
 	})
 
-	t.Run("plain restart that fails early fails Restart", func(t *testing.T) {
+	// The plain restart is judged on real exit results: sudo is mapped to a
+	// shell script run by ExecRunner, so Wait returns genuine
+	// *exec.ExitErrors.
+	plainRestart := func(t *testing.T, script string) error {
+		t.Helper()
 		opts, r := sudoOpts(t, ruleInstall, rulePlain)
-		r.startExit = errors.New("exit status 1")
 		inst := newSudoInstaller(opts)
-		inst.restartGrace = time.Minute
 		if err := inst.Preflight(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if err := inst.Restart(ctx); err == nil || !strings.Contains(err.Error(), "exit status 1") {
-			t.Fatalf("Restart = %v, want the child's failure", err)
+		inst.restartGrace = 5 * time.Second
+		inst.runner = shellStartRunner{fakeRunner: r, script: script}
+		return inst.Restart(ctx)
+	}
+
+	t.Run("plain restart exiting non-zero fails Restart", func(t *testing.T) {
+		if err := plainRestart(t, "exit 1"); err == nil || !strings.Contains(err.Error(), "exit status 1") {
+			t.Fatalf("Restart = %v, want the child's exit status", err)
 		}
 	})
 
-	t.Run("plain restart that exits cleanly", func(t *testing.T) {
-		opts, r := sudoOpts(t, ruleInstall, rulePlain)
-		inst := newSudoInstaller(opts)
-		if err := inst.Preflight(ctx); err != nil {
-			t.Fatal(err)
+	t.Run("plain restart killed by the unit stop is under way", func(t *testing.T) {
+		// systemd's control-group kill SIGTERMs the sudo/systemctl child
+		// together with the hub.
+		if err := plainRestart(t, "kill -TERM $$; sleep 5"); err != nil {
+			t.Fatalf("Restart = %v, want nil for a signal-terminated child", err)
 		}
-		r.startExit = nil
-		inst.restartGrace = time.Minute
-		// Exit result nil arrives immediately via a closed-over channel.
-		inst.runner = exitRunner{fakeRunner: r}
-		if err := inst.Restart(ctx); err != nil {
+	})
+
+	t.Run("plain restart exiting cleanly", func(t *testing.T) {
+		if err := plainRestart(t, "exit 0"); err != nil {
 			t.Fatalf("Restart = %v", err)
 		}
 	})
@@ -643,12 +644,14 @@ func (b *blanketRunner) Start(string, ...string) (<-chan error, error) {
 	return make(chan error), nil
 }
 
-// exitRunner is a fakeRunner whose started commands exit successfully at once.
-type exitRunner struct{ *fakeRunner }
+// shellStartRunner is a fakeRunner whose started commands are replaced by
+// `sh -c script`, run for real so the exit result is a genuine exec error.
+type shellStartRunner struct {
+	*fakeRunner
+	script string
+}
 
-func (e exitRunner) Start(name string, args ...string) (<-chan error, error) {
-	_, _ = e.fakeRunner.Start(name, args...)
-	done := make(chan error, 1)
-	done <- nil
-	return done, nil
+func (r shellStartRunner) Start(name string, args ...string) (<-chan error, error) {
+	_, _ = r.fakeRunner.Start(name, args...)
+	return ExecRunner{}.Start("sh", "-c", r.script)
 }
