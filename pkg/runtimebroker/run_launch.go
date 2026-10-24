@@ -177,6 +177,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// under the same run ID. Deferred first so it runs after every other
 	// deferred step.
 	defer s.releaseOwnedMirror(lc.opts.RunID, lc.owned)
+	// A create's hold on its run, taken over from the request, is dropped
+	// when the launch ends (if its cleanup did not already drop it).
+	if lc.owned != nil {
+		defer lc.owned.hold.release()
+	}
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
 	// Runs just before Finish, after every report and cleanup.
@@ -598,10 +603,37 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 // (design §3.8.4). It returns the failed steps (cleanupFailure, each also
 // recorded on rec), or nil; a skip is not a failure.
 func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) error {
-	return errors.Join(
+	err := errors.Join(
 		s.cleanupLaunchResources(mgr, rec),
 		s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug),
 	)
+	var hold *ownedHold
+	if lc.owned != nil {
+		hold = lc.owned.hold
+	}
+	s.retireCleanedCreateLaunch(rec, err, hold)
+	return err
+}
+
+// retireCleanedCreateLaunch retires a flat create launch's record once its
+// cleanup ended the run and proved the agent's files removed
+// (ptone/scion#5768). Only create launches qualify: cleanupLaunchFiles
+// removes nothing for another kind. hold is the launch's hold on the run;
+// boot recovery passes nil and takes one here.
+func (s *Server) retireCleanedCreateLaunch(rec *launchRecord, cleanupErr error, hold *ownedHold) {
+	if s.ownership == nil || rec.Kind != store.LaunchKindCreate || cleanupErr != nil || !rec.filesRemoved.Load() {
+		return
+	}
+	rec.ownedRunMu.Lock()
+	key := rec.ownedRun
+	rec.ownedRunMu.Unlock()
+	if key.runID == "" {
+		return
+	}
+	if hold == nil {
+		hold = s.holdOwnedRun(key)
+	}
+	s.retireEndedCreate(key, true, hold)
 }
 
 // cleanupLaunchFiles deletes a create launch's agent files when its marker
@@ -648,11 +680,21 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "files_run_id", owner)
 		return nil
 	}
-	if _, err := agent.DeleteHubAgentFiles(opts.Name, startSharerKey(rec.AgentID), opts.ProjectPath, opts.HubProjectID, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
+	err = agent.DeleteStartFailureFiles(opts.Name, startSharerKey(rec.AgentID), opts.ProjectPath, opts.HubProjectID)
+	if err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 		rec.filesCleanupFailed.Store(true)
 		return failCleanup(rec, cleanupFailFilesDelete)
+	}
+	// A flat instance retires the run's record only with the files proven
+	// gone, checked under the same lock (deleteAgentFiles also returns nil
+	// when it skipped something).
+	if err == nil && s.ownership != nil {
+		rec.ownedRunMu.Lock()
+		projectID := rec.ownedRun.projectID
+		rec.ownedRunMu.Unlock()
+		rec.filesRemoved.Store(projectID != "" && s.filesRemovedAfterCleanup(projectID, slug, opts.ProjectPath, opts.HubProjectID))
 	}
 	return nil
 }

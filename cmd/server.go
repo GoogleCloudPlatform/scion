@@ -58,6 +58,12 @@ var (
 	webSessionSecret string
 	webBaseURL       string
 
+	// serverKeyringFile is --keyring-file (server.keyring_file).
+	serverKeyringFile string
+	// serverKeyringAllowWorldReadable is --keyring-file-allow-world-readable
+	// (server.keyring_file_allow_world_readable).
+	serverKeyringAllowWorldReadable bool
+
 	// Server daemon flags
 	serverStartForeground bool
 	stopForce             bool
@@ -277,6 +283,8 @@ func init() {
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
 	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")
+	serverStartCmd.Flags().StringVar(&serverKeyringFile, "keyring-file", "", "Experimental: path of the server keyring file (server.keyring_file); requires the server.secret_rotation experiment and no --session-secret")
+	serverStartCmd.Flags().BoolVar(&serverKeyringAllowWorldReadable, "keyring-file-allow-world-readable", false, "Experimental: load a server keyring file whose world-read permission bit is set, with a warning (server.keyring_file_allow_world_readable); prefer mode 0400 or 0440")
 	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects and the hub endpoint; outranks server.hub.public_url (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags

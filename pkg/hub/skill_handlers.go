@@ -1317,8 +1317,8 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		manifest[i] = r.file
 	}
 
-	// i) Compute content hash.
-	contentHash := computeContentHash(manifest)
+	// i) Compute content hash (v1: skill versions are pinned by it).
+	contentHash := computeSkillContentHash(manifest)
 
 	// j) Update version to published.
 	sv.Status = store.SkillVersionStatusPublished
@@ -2556,7 +2556,8 @@ func safeShortSHA(sha string) string {
 	return sha[:12]
 }
 
-// computeBundleHash computes the content hash from file entries.
+// computeBundleHash computes the content hash from file entries. Like every
+// skill hash it is transfer.ComputeContentHashV1 (see computeSkillContentHash).
 func computeBundleHash(files []GitHubFileEntry) string {
 	// Convert to transfer.FileInfo for hash computation
 	fileInfos := make([]transfer.FileInfo, len(files))
@@ -2566,5 +2567,5 @@ func computeBundleHash(files []GitHubFileEntry) string {
 			Hash: f.Hash,
 		}
 	}
-	return transfer.ComputeContentHash(fileInfos)
+	return transfer.ComputeContentHashV1(fileInfos)
 }

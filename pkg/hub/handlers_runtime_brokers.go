@@ -1846,6 +1846,9 @@ type BrokerProjectInfo struct {
 	GitRemote   string `json:"gitRemote,omitempty"`
 	AgentCount  int    `json:"agentCount"`
 	LocalPath   string `json:"localPath,omitempty"`
+	// IsDefault reports whether this broker is the project's default
+	// Runtime Broker. False when the project record is missing.
+	IsDefault bool `json:"isDefault"`
 }
 
 // ListBrokerProjectsResponse is the response for listing projects a broker provides.
@@ -1977,6 +1980,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		if project, ok := projectsByID[p.ProjectID]; ok {
 			info.ProjectName = project.Name
 			info.GitRemote = project.GitRemote
+			info.IsDefault = project.DefaultRuntimeBrokerID == brokerID
 		}
 
 		// Count agents for this project on this broker

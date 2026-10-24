@@ -477,3 +477,103 @@ func TestSecretRefetchDoesNotBlockValidDeliveries(t *testing.T) {
 		t.Errorf("forged delivery: %d, want 401", code)
 	}
 }
+
+// TestSwapInheritedBudget: runner_swap logs the task time the taker inherits
+// (TASK_TIMEOUT minus the execution's age), with a WARNING below 20 minutes.
+// After a restart the age comes from the execution's creation time.
+func TestSwapInheritedBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		restart bool
+		budget  string
+		low     bool
+	}{
+		{"fresh runner", 0, false, "45m0s", false},
+		{"budget just at the threshold", 25 * time.Minute, false, "20m0s", false},
+		{"old runner", 30 * time.Minute, false, "15m0s", true},
+		{"old runner after a restart", 30 * time.Minute, true, "15m0s", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, harnessOpts{})
+			h.addSameRepoRun(10)
+			h.addSameRepoRun(11)
+			h.queued(100, 10)
+			h.clock.Add(tc.age)
+			if tc.restart {
+				h = newHarness(t, harnessOpts{reuseFrom: h})
+			}
+			if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+				t.Fatalf("in_progress: %d %q", code, out)
+			}
+			logs := h.logs.String()
+			h.wantLog(logging.EventRunnerSwap)
+			if want := `"inherited_budget":"` + tc.budget + `"`; !strings.Contains(logs, want) {
+				t.Errorf("no %s in:\n%s", want, logs)
+			}
+			if want := `"execution_age":"` + tc.age.String() + `"`; !strings.Contains(logs, want) {
+				t.Errorf("no %s in:\n%s", want, logs)
+			}
+			gotLow := strings.Contains(logs, `"event":"`+logging.EventRunnerSwapLowBudget+`"`)
+			if gotLow != tc.low {
+				t.Errorf("runner_swap_low_budget logged = %v, want %v:\n%s", gotLow, tc.low, logs)
+			}
+			if tc.low && !strings.Contains(logs, `"severity":"WARNING"`) {
+				t.Errorf("low-budget line is not a WARNING:\n%s", logs)
+			}
+		})
+	}
+}
+
+// TestSwapTakerRecordAge: after a restart, the record made for the taker's own
+// runner (rebound to the displaced job) carries that runner's launch time, so a
+// later swap onto it logs the right budget.
+func TestSwapTakerRecordAge(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.addSameRepoRun(11)
+	h.addSameRepoRun(12)
+	h.queued(100, 10)
+	h.queued(101, 11) // cr-job-101, launched at t0 like cr-job-100
+	h.clock.Add(30 * time.Minute)
+	h = newHarness(t, harnessOpts{reuseFrom: h}) // restart: no records
+	if code, out := h.webhook(inProgress(101, 11, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("first swap: %d %q", code, out)
+	}
+	// Job 102 now starts on cr-job-101 (rebound to job 100): that runner is 30 min old.
+	if code, out := h.webhook(inProgress(102, 12, testRepo, "cr-job-101")); code != http.StatusOK || !strings.Contains(out, "swap") {
+		t.Fatalf("second swap: %d %q", code, out)
+	}
+	logs := h.logs.String()
+	var budgets []string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, `"event":"runner_swap"`) && strings.Contains(l, `"runner":"cr-job-101"`) {
+			budgets = append(budgets, l)
+		}
+	}
+	if len(budgets) != 1 || !strings.Contains(budgets[0], `"inherited_budget":"15m0s"`) {
+		t.Errorf("runner_swap for cr-job-101 = %q, want inherited_budget 15m0s (launched 30 min ago)", budgets)
+	}
+}
+
+// TestReconcileGuardSharesOneView: the hijack guard loop in reconcile shares
+// one view, so two swaps found in one pass list Cloud Run executions once for
+// the guard (plus once for the backfill), not once per swap.
+func TestReconcileGuardSharesOneView(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10, fakes.GitHubJob{ID: 100, Status: "queued", Labels: []string{testLabel}})
+	h.addSameRepoRun(20, fakes.GitHubJob{ID: 200, Status: "queued", Labels: []string{testLabel}})
+	h.queued(100, 10)
+	h.queued(200, 20)
+	// Both runners took another legitimate job; the webhooks were missed.
+	h.addSameRepoRun(11, fakes.GitHubJob{ID: 101, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+	h.addSameRepoRun(21, fakes.GitHubJob{ID: 201, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-200"})
+	before := h.cr.ListCalls
+	res := h.reconcile()
+	if got := h.cr.ListCalls - before; got != 2 {
+		t.Errorf("executions lists in the pass = %d, want 2 (one shared by the guard loop, one for the backfill)", got)
+	}
+	if res.HijacksKilled != 0 || h.activeFor("cr-job-101") != 1 || h.activeFor("cr-job-201") != 1 {
+		t.Errorf("result %+v; want both displaced jobs served under the takers' names: %+v", res, h.executions())
+	}
+}

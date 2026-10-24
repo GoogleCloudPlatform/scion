@@ -295,29 +295,78 @@ func TestGetIntegration_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestUpdateIntegrationByID_MethodNotAllowed_AllowsGetAndPost(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	seedRoleDefinitions(ctx, s)
-	// CO1: Admin access requires role binding.
-	createTestUserWithRole(t, s, tid("integ-admin-upd-ma"), "admin-upd-ma@example.com", "admin", store.SystemRoleSuperAdmin)
+// TestUpdateIntegrationRouting_ByIDIsGetOnly pins the update routes
+// (ptone/scion#2422): .../update/{id} is the status lookup and accepts only
+// GET, so POST, PUT and DELETE there get 405 with Allow: GET and never start
+// an update; only POST on the bare .../update starts one.
+func TestUpdateIntegrationRouting_ByIDIsGetOnly(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		t.Run(method+" by id", func(t *testing.T) {
+			mgr := newMockIntegrationManager()
+			mgr.plugins["telegram"] = map[string]string{}
+			mgr.updateErr = fmt.Errorf("update must not run")
+			srv, admin, ctx := integAdminServer(t, "upd-id-"+strings.ToLower(method))
+			srv.config.MaintenanceConfig.RepoPath = "/some/repo"
+			srv.pluginManager = mgr
 
-	admin := NewAuthenticatedUser(tid("integ-admin-upd-ma"), "admin-upd-ma@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/integrations/telegram/update/some-id", nil)
-	req = req.WithContext(integSessionContext(ctx, admin))
-	rr := httptest.NewRecorder()
-	srv.handleAdminIntegrationByName(rr, req)
+			req := httptest.NewRequest(method, "/api/v1/admin/integrations/telegram/update/"+uuid.NewString(), nil)
+			req = req.WithContext(integSessionContext(ctx, admin))
+			rr := httptest.NewRecorder()
+			srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
+			}
+			if allow := rr.Header().Get("Allow"); allow != "GET" {
+				t.Errorf("expected Allow header %q, got %q", "GET", allow)
+			}
+			if len(mgr.updateCalls) != 0 {
+				t.Errorf("%s on the by-id path started an update: %v", method, mgr.updateCalls)
+			}
+		})
 	}
-	// GET .../update/{id} is a valid status lookup (handleGetUpdateStatus) and
-	// POST .../update/{id} falls through to handleUpdateIntegration, so both
-	// methods are actually accepted on this by-id form — the Allow header
-	// must list both, not just POST as on the bare .../update path.
-	if allow := rr.Header().Get("Allow"); allow != "GET, POST" {
-		t.Errorf("expected Allow header %q, got %q", "GET, POST", allow)
-	}
+
+	t.Run("GET by id reaches the status lookup", func(t *testing.T) {
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{}
+		srv, admin, ctx := integAdminServer(t, "upd-id-get")
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/update/"+uuid.NewString(), nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		if rr.Code == http.StatusMethodNotAllowed {
+			t.Fatalf("GET on the by-id path must reach the status lookup, got 405; body: %s", rr.Body.String())
+		}
+		if len(mgr.updateCalls) != 0 {
+			t.Errorf("GET on the by-id path started an update: %v", mgr.updateCalls)
+		}
+	})
+
+	t.Run("POST on the bare path starts an update", func(t *testing.T) {
+		mgr := newMockIntegrationManager()
+		mgr.plugins["telegram"] = map[string]string{}
+		// The build fails, so the request ends at UpdatePlugin with a 500
+		// instead of going on to reconfigure the integration.
+		mgr.updateErr = fmt.Errorf("go build failed")
+		srv, admin, ctx := integAdminServer(t, "upd-bare-post")
+		srv.config.MaintenanceConfig.RepoPath = "/some/repo"
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		if rr.Code == http.StatusMethodNotAllowed {
+			t.Fatalf("POST on the bare update path got 405; body: %s", rr.Body.String())
+		}
+		if len(mgr.updateCalls) != 1 || mgr.updateCalls[0] != "telegram" {
+			t.Errorf("expected one update of telegram, got %v", mgr.updateCalls)
+		}
+	})
 }
 
 // --- Health endpoint ---

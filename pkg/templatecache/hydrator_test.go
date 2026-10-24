@@ -217,12 +217,12 @@ func TestHydrateWithHash(t *testing.T) {
 	// Pre-populate cache
 	files := map[string][]byte{"test.txt": []byte("cached content")}
 	contentHash := "known-hash"
-	cachedPath, err := cache.Put(contentHash, files)
+	cachedPath, err := cache.Put(downloadedEntryKey(files, nil), files)
 	if err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
 
-	// Create hydrator with mock that returns the current hash —
+	// Create hydrator with mock that returns the current manifest —
 	// HydrateWithHash always verifies with the hub to prevent stale cache hits.
 	getCalled := false
 	templateSvc := &mockTemplateService{
@@ -230,7 +230,8 @@ func TestHydrateWithHash(t *testing.T) {
 			getCalled = true
 			return &hubclient.Template{
 				ID:          "tmpl-999",
-				ContentHash: contentHash, // Hub confirms hash is current.
+				ContentHash: contentHash, // Hub confirms the files are current.
+				Files:       []hubclient.TemplateFile{{Path: "test.txt", Hash: transfer.HashBytes(files["test.txt"])}},
 			}, nil
 		},
 	}
@@ -433,8 +434,8 @@ func TestPrefetchTemplate(t *testing.T) {
 		t.Errorf("Expected 1 Get call, got %d", callCount)
 	}
 
-	// Verify it's cached
-	path, ok := cache.Get("prefetch-hash")
+	// Verify it's cached, under the key of the downloaded files.
+	path, ok := cache.Get(downloadedEntryKey(map[string][]byte{"test.txt": []byte("prefetch content")}, nil))
 	if !ok {
 		t.Error("Template should be cached after prefetch")
 	}
@@ -481,8 +482,9 @@ func TestHydrateHashMismatch(t *testing.T) {
 // TestHydrate_CachesUnderDownloadContentHash covers the cache-key race of
 // ptone/scion#4221: the metadata read says version H1, but a commit lands
 // before the download URLs are signed, so the files are version H2. The
-// files must be cached under H2 (the hash the download response names), not
-// H1, or a later H1 lookup would serve H2's files.
+// files must be cached under the key of the files downloaded, not H1, or a
+// later H1 lookup would serve H2's files. For a hub that records v2
+// (ptone/scion#5658) that key is H2, the hash the download response names.
 func TestHydrate_CachesUnderDownloadContentHash(t *testing.T) {
 	cache, err := New(t.TempDir(), DefaultMaxSize)
 	if err != nil {
@@ -490,7 +492,7 @@ func TestHydrate_CachesUnderDownloadContentHash(t *testing.T) {
 	}
 	v2 := []byte("harness: gemini\n")
 	h1 := transfer.HashBytes([]byte("version one"))
-	h2 := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "scion-agent.yaml", Hash: transfer.HashBytes(v2)}})
+	h2 := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "scion-agent.yaml", Hash: transfer.HashBytes(v2)}})
 
 	templateSvc := &mockTemplateService{
 		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
@@ -512,20 +514,20 @@ func TestHydrate_CachesUnderDownloadContentHash(t *testing.T) {
 		t.Errorf("version-two files were cached under the metadata hash %s", h1)
 	}
 	if _, ok := cache.Get(h2); !ok {
-		t.Errorf("files not cached under the download response's content hash %s", h2)
+		t.Errorf("files not cached under the key of the downloaded files %s", h2)
 	}
 }
 
-// TestHydrate_IgnoresMalformedDownloadContentHash: a content hash that is not
-// "sha256:<hex>" is never used as a cache directory name; the metadata hash
-// is kept, as with a hub that sends none.
+// TestHydrate_IgnoresMalformedDownloadContentHash: a content hash the hub
+// sends is never used as a cache directory name; the files are cached under
+// the key the broker computes from them.
 func TestHydrate_IgnoresMalformedDownloadContentHash(t *testing.T) {
 	cache, err := New(t.TempDir(), DefaultMaxSize)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	data := []byte("x")
-	h1 := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "a", Hash: transfer.HashBytes(data)}})
+	h1 := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "a", Hash: transfer.HashBytes(data)}})
 	templateSvc := &mockTemplateService{
 		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
 			return &hubclient.Template{ID: "tmpl-bad", Name: "bad", ContentHash: h1}, nil
@@ -543,6 +545,6 @@ func TestHydrate_IgnoresMalformedDownloadContentHash(t *testing.T) {
 		t.Fatalf("Hydrate() error = %v", err)
 	}
 	if _, ok := cache.Get(h1); !ok {
-		t.Errorf("files not cached under the metadata hash %s", h1)
+		t.Errorf("files not cached under the key of the downloaded files %s", h1)
 	}
 }
