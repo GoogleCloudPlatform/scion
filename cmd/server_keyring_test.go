@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/pflag"
@@ -345,4 +346,61 @@ func TestValidateRelayRoleFlags_RefusesKeyringAllowWorldReadable(t *testing.T) {
 	err := validateRelayRoleFlags(f)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--keyring-file-allow-world-readable")
+}
+
+// The one shared ValueCipher (ptone/scion#1530 §5): legacy mode wraps the
+// resolved session secret; ring mode wraps the keyring file's encryption
+// ring (managed, the very ring object), and an encryption ring that could
+// not read back its own v1 writes fails startup without key material.
+func TestBuildServerValueCipher(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) {
+		isolateKeyring(t)
+		oldVC := serverValueCipher
+		t.Cleanup(func() { serverValueCipher = oldVC })
+		webSessionSecret = "test-only-flag-secret"
+		require.NoError(t, loadServerKeyring(&config.GlobalConfig{}))
+		require.NoError(t, buildServerValueCipher())
+		require.NotNil(t, serverValueCipher)
+		assert.True(t, serverValueCipher.Enabled())
+		assert.False(t, serverValueCipher.Managed())
+		v, err := serverValueCipher.Encrypt("fake-value")
+		require.NoError(t, err)
+		// Byte-compatible with the legacy derivation of that secret.
+		assert.Equal(t, keyring.LegacyID, serverValueCipher.WriterID())
+		pt, err := secret.NewLegacyValueCipher("test-only-flag-secret").Decrypt(v)
+		require.NoError(t, err)
+		assert.Equal(t, "fake-value", pt)
+	})
+	t.Run("legacy without a secret is disabled", func(t *testing.T) {
+		isolateKeyring(t)
+		oldVC := serverValueCipher
+		t.Cleanup(func() { serverValueCipher = oldVC })
+		require.NoError(t, loadServerKeyring(&config.GlobalConfig{}))
+		require.NoError(t, buildServerValueCipher())
+		require.NotNil(t, serverValueCipher)
+		assert.False(t, serverValueCipher.Enabled())
+	})
+	t.Run("ring mode", func(t *testing.T) {
+		isolateKeyring(t)
+		oldVC := serverValueCipher
+		t.Cleanup(func() { serverValueCipher = oldVC })
+		require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}))
+		require.NoError(t, buildServerValueCipher())
+		require.NotNil(t, serverValueCipher)
+		assert.True(t, serverValueCipher.Managed())
+		assert.True(t, serverValueCipher.UsesRing(serverKeyringFromFile().Encryption()))
+	})
+	t.Run("ring mode writer not readable", func(t *testing.T) {
+		isolateKeyring(t)
+		oldVC := serverValueCipher
+		t.Cleanup(func() { serverValueCipher = oldVC })
+		path := writeCmdKeyring(t, func(doc map[string]any) {
+			doc["encryption"].(map[string]any)["legacy_v1_read_ids"] = []any{}
+		})
+		require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: path}))
+		err := buildServerValueCipher()
+		require.ErrorIs(t, err, secret.ErrWriterNotReadable)
+		assert.Nil(t, serverValueCipher)
+		assertNoCmdKRSecret(t, err.Error())
+	})
 }

@@ -467,6 +467,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A keyring-file instance whose startup encryption audit found an
+	// unreadable infrastructure backup is not ready (ptone/scion#1530 §5);
+	// the record is preserved, never replaced. Legacy mode reports it as an
+	// unhealthy diagnostic instead.
+	if reason := s.backupNotReadyReason(); reason != "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": reason,
+		})
+		return
+	}
+
 	// Check if database is connected and migrated
 	if err := s.store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
