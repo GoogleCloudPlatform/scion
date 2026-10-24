@@ -572,7 +572,6 @@ interface UpdateCheckResult {
   current_version?: string;
   latest_version?: string;
   channel?: string;
-  download_url?: string;
   release_url?: string;
 }
 
@@ -7302,6 +7301,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * update-binary params: the checked release tag when the check returned
+   * one, otherwise the latest release in the checked channel, which the hub
+   * resolves. The hub rejects any other param.
+   */
+  private updateBinaryParams(): Record<string, string> {
+    const r = this.updateCheckResult;
+    const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
+    return { target_version: target, pin: 'latest' };
+  }
+
   private async triggerUpdate(): Promise<void> {
     this.updateRunning = true;
     try {
@@ -7309,7 +7319,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
+        body: JSON.stringify({
+          params: opKey === 'update-binary' ? this.updateBinaryParams() : {},
+        }),
       });
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);

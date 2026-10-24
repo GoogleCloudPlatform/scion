@@ -26,8 +26,9 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
+import { waitForHubRestart } from '../../client/hub-restart.js';
 import { stateManager } from '../../client/state.js';
 import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -48,10 +49,23 @@ interface MaintenanceOperation {
   result?: string;
 }
 
+/**
+ * Run status of a maintenance operation or migration. `restarting` is in
+ * progress: an update-binary run whose binary is installed and whose hub is
+ * about to restart; the hub settles it on boot.
+ */
+export type MaintenanceRunStatus = 'pending' | 'running' | 'restarting' | 'completed' | 'failed';
+
+/** Whether a run status means the run has not finished yet. */
+export function isRunInProgress(status: string | undefined): boolean {
+  return status === 'running' || status === 'restarting';
+}
+
 interface MaintenanceRun {
   id: string;
   operationKey?: string;
-  status: string;
+  /** A {@link MaintenanceRunStatus}; unknown values render as-is. */
+  status: MaintenanceRunStatus | (string & {});
   startedAt: string;
   completedAt?: string;
   startedBy?: string;
@@ -106,7 +120,6 @@ interface BinaryUpdateCheckResult {
   current_version: string;
   latest_version: string;
   channel: string;
-  download_url?: string;
   release_url?: string;
 }
 
@@ -118,10 +131,89 @@ interface UpdateAvailableResponse {
   update?: {
     version: string;
     channel: string;
-    download_url?: string;
     release_url?: string;
     detected_at: string;
   };
+}
+
+/** Result of the last update, from the system.last_update hub setting. */
+export interface LastUpdate {
+  runId: string;
+  from: string;
+  to: string;
+  status: 'verified' | 'failed' | 'rolled_back' | (string & {});
+  at: string;
+}
+
+/** An update whose hub restart is pending, from system.pending_update. */
+export interface PendingUpdate {
+  runId: string;
+  from: string;
+  to: string;
+  snapshot?: string;
+  strategy?: string;
+  at: string;
+}
+
+/**
+ * GET /api/v1/admin/maintenance/update-status. Later phases add fields
+ * (for example downgrade); unknown fields are ignored.
+ */
+export interface UpdateStatus {
+  current: {
+    version: string;
+    channel: string;
+    commit: string;
+    buildTime?: string;
+    isGitBuild: boolean;
+  };
+  mode: { effective: 'git' | 'release'; repoConfigured: boolean; repoBranch?: string };
+  channel: { effective: string; configured?: string; source: string };
+  pin: string;
+  installer: {
+    strategy: 'symlink' | 'sudo-install' | 'unsupported' | (string & {});
+    supported: boolean;
+    reason?: string;
+    migrateHint?: string;
+  };
+  updatePolicy: string;
+  pendingUpdate: PendingUpdate | null;
+  lastUpdate: LastUpdate | null;
+}
+
+/** Whether a parsed body has the parts of an update-status the page relies on. */
+function isUpdateStatus(data: unknown): data is UpdateStatus {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Partial<UpdateStatus>;
+  return (
+    !!d.current &&
+    !!d.installer &&
+    !!d.channel &&
+    (d.mode?.effective === 'git' || d.mode?.effective === 'release')
+  );
+}
+
+const LAST_UPDATE_LABELS: Record<string, string> = {
+  verified: 'verified',
+  failed: 'failed',
+  rolled_back: 'rolled back',
+};
+
+/**
+ * A readable message for a rejected update-binary run request, by the
+ * error code the hub sends.
+ */
+export function describeUpdateRunError(code: string, message: string, target: string): string {
+  switch (code) {
+    case 'already_running':
+      return `The hub is already running ${target}. ${message}`;
+    case 'downgrade_not_yet_supported':
+      return `${target} is older than the running version; downgrades are not supported yet. ${message}`;
+    case 'unknown_param':
+      return `The hub rejected the update request (unknown parameter): ${message}`;
+    default:
+      return `Update to ${target} could not start: ${message}`;
+  }
 }
 
 /** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
@@ -276,6 +368,12 @@ function resetAuthFailureLine(f: ResetAuthAllFailure): string {
   return `${f.name || f.id}: ${f.error}${category}`;
 }
 
+/**
+ * How long Restart Hub waits for the hub to come back. Shorter than the
+ * update default: a plain restart does not install anything.
+ */
+const RESTART_HUB_TIMEOUT_MS = 60_000;
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -382,9 +480,31 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private reissueConfirmOpen = false;
 
-  /** Deployment tier: "binary" or "source" (default). */
+  /** Server version, mode and installer, from GET .../update-status. */
   @state()
-  private deploymentTier: 'binary' | 'source' = 'source';
+  private updateStatus: UpdateStatus | null = null;
+
+  /** Load error of update-status; the page does not guess the mode then. */
+  @state()
+  private updateStatusError: string | null = null;
+
+  /** Target tag of the update being confirmed in the dialog (null: closed). */
+  @state()
+  private updateConfirmTarget: string | null = null;
+
+  /**
+   * Target of the update run this page started, for the reconnect version
+   * check. Null when unknown (for example `latest:<channel>` targets).
+   */
+  private updateExpectVersion: string | null = null;
+
+  /** True while waiting for the hub to come back after an update restart. */
+  @state()
+  private updateReconnecting = false;
+
+  /** Shown when the hub did not come back on the update target in time. */
+  @state()
+  private updateReconnectError: string | null = null;
 
   /** Stored update-available notification (from scheduled check). */
   @state()
@@ -674,7 +794,8 @@ export class ScionPageAdminMaintenance extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
     }
 
-    .status-badge.running {
+    .status-badge.running,
+    .status-badge.restarting {
       background: var(--sl-color-primary-100, #dbeafe);
       color: var(--sl-color-primary-700, #1d4ed8);
     }
@@ -867,6 +988,28 @@ export class ScionPageAdminMaintenance extends LitElement {
 
     /* -- Update available banner (top-level) ------------------------------- */
 
+    .server-version sl-alert {
+      margin-top: 0.75rem;
+    }
+
+    .server-version sl-alert sl-button {
+      margin-left: 0.5rem;
+    }
+
+    .channel-badge {
+      margin-left: 0.5rem;
+    }
+
+    .last-update .status-badge {
+      margin: 0 0.25rem;
+    }
+
+    .update-reconnecting {
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
     .update-available-banner {
       display: flex;
       align-items: center;
@@ -954,6 +1097,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+    void this.fetchUpdateStatus();
     void this.fetchMaintenanceState();
     void this.fetchUpdateAvailable();
     void this.loadReissueCapability();
@@ -1014,40 +1158,142 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as UpdateAvailableResponse;
         this.updateAvailable = data;
-        // Infer deployment tier from the presence of update notification.
-        if (data.update_available) {
-          this.deploymentTier = 'binary';
-        }
       }
     } catch {
       // Silently ignore — banner will not show.
     }
   }
 
+  /**
+   * Loads GET .../update-status. On failure the page shows an error and
+   * hides the mode-specific operations rather than guessing the mode.
+   */
+  private async fetchUpdateStatus(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data: unknown = await res.json();
+      if (!isUpdateStatus(data)) {
+        throw new Error('Unexpected update-status response');
+      }
+      this.updateStatus = data;
+      this.updateStatusError = null;
+    } catch (err) {
+      this.updateStatus = null;
+      this.updateStatusError = err instanceof Error ? err.message : 'Failed to load update status';
+    }
+  }
+
+  /**
+   * The target for the update-binary operation card: the notified or
+   * checked release tag when one is known, otherwise the latest release
+   * in the effective channel, which the hub resolves.
+   */
+  private updateCardTarget(): string | null {
+    const notified = this.updateAvailable?.update_available
+      ? this.updateAvailable.update?.version
+      : undefined;
+    if (notified) return notified;
+    const checked = this.updateCheckResult;
+    if (checked?.tier === 'binary' && checked.update_available && checked.latest_version) {
+      return checked.latest_version;
+    }
+    const channel = this.updateStatus?.channel.effective;
+    return channel ? `latest:${channel}` : null;
+  }
+
+  private openUpdateConfirm(target: string | null): void {
+    if (!target) {
+      showToast('No update target is known: update status has not loaded.');
+      return;
+    }
+    this.updateConfirmTarget = target;
+  }
+
+  private closeUpdateConfirm(): void {
+    if (!this.applyUpdateLoading) {
+      this.updateConfirmTarget = null;
+    }
+  }
+
+  /**
+   * Starts update-binary for the confirmed target. The request carries only
+   * target_version and pin; the hub resolves the release assets itself.
+   */
   private async applyUpdate(): Promise<void> {
+    const target = this.updateConfirmTarget;
+    if (!target) return;
     this.applyUpdateLoading = true;
     try {
       const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
+        body: JSON.stringify({ params: { target_version: target, pin: 'latest' } }),
       });
 
       if (!response.ok) {
-        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-        throw new Error(errMsg);
+        const info = await parseApiError(response, `HTTP ${response.status}`);
+        throw new Error(describeUpdateRunError(info.code, info.message, target));
       }
 
-      showToast('Binary update started. The server will restart shortly.', 'success');
+      showToast(
+        `Update to ${target} started. The hub will restart when it is installed.`,
+        'success'
+      );
+      this.updateConfirmTarget = null;
       this.updateAvailable = null;
+      this.updateReconnectError = null;
+      this.updateExpectVersion = target.startsWith('latest:') ? null : target;
 
-      // Reload operations and start polling for status.
+      // Reload operations and poll the run; a restarting run switches to
+      // waiting for the hub (see loadData).
       await this.loadData();
       this.startPolling();
     } catch (err) {
+      // The dialog stays open so the user can read the error and cancel.
       showToast(err instanceof Error ? err.message : 'Failed to start binary update');
     } finally {
       this.applyUpdateLoading = false;
+    }
+  }
+
+  /**
+   * Waits for the hub to restart after an update run reached `restarting`,
+   * then reloads update-status to show the verified result.
+   */
+  private async reconnectAfterUpdate(): Promise<void> {
+    if (this.updateReconnecting) return;
+    const pendingTo = this.updateStatus?.pendingUpdate?.to;
+    const expectVersion = this.updateExpectVersion ?? pendingTo ?? undefined;
+    this.updateReconnecting = true;
+    this.updateReconnectError = null;
+    this.stopPolling();
+    try {
+      const result = await waitForHubRestart({ expectVersion });
+      if (!result.ok) {
+        this.updateReconnectError =
+          `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
+          'Check journalctl -u scion-hub';
+        return;
+      }
+      this.updateExpectVersion = null;
+      await this.fetchUpdateStatus();
+      await this.loadData(true);
+      const last = this.updateStatus?.lastUpdate;
+      if (last?.status === 'verified') {
+        showToast(`Hub updated to ${last.to} (verified).`, 'success');
+      } else if (last) {
+        showToast(
+          `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`,
+          'warning'
+        );
+      } else {
+        showToast('Hub restarted.', 'success');
+      }
+    } finally {
+      this.updateReconnecting = false;
     }
   }
 
@@ -1096,6 +1342,21 @@ export class ScionPageAdminMaintenance extends LitElement {
       const newUnitStatus = data.unitStatus ?? null;
       if (JSON.stringify(this.unitStatus) !== JSON.stringify(newUnitStatus)) {
         this.unitStatus = newUnitStatus;
+      }
+
+      // An update run that reached restarting is waited for through
+      // /healthz rather than by polling the list.
+      const updateRun = this.operations.find((op) => op.key === 'update-binary')?.lastRun;
+      if (updateRun?.status === 'restarting') {
+        this.stopPolling();
+        void this.reconnectAfterUpdate();
+        return;
+      }
+      if (this.updateExpectVersion && updateRun && !isRunInProgress(updateRun.status)) {
+        // The run this page started finished without a restart (for
+        // example it failed); show the hub's view of the result.
+        this.updateExpectVersion = null;
+        void this.fetchUpdateStatus();
       }
 
       // Start polling if any migration or operation run is active.
@@ -1172,6 +1433,8 @@ export class ScionPageAdminMaintenance extends LitElement {
         return 'exclamation-circle-fill';
       case 'running':
         return 'hourglass-split';
+      case 'restarting':
+        return 'arrow-repeat';
       default:
         return 'circle';
     }
@@ -1352,7 +1615,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           ? this.renderError()
           : this.renderContent()}
       ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
-      ${this.renderReissueConfirmDialog()}
+      ${this.renderReissueConfirmDialog()} ${this.renderUpdateConfirmDialog()}
     `;
   }
 
@@ -1382,9 +1645,9 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderUpdateAvailableBanner()} ${this.renderUnitDriftBanner()}
-      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
-      ${this.renderOperations()}
+      ${this.renderServerVersion()} ${this.renderUpdateAvailableBanner()}
+      ${this.renderUnitDriftBanner()} ${this.renderMaintenanceMode()} ${this.renderQuickActions()}
+      ${this.renderMigrations()} ${this.renderOperations()}
     `;
   }
 
@@ -1427,6 +1690,189 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
+  /**
+   * "Server Version & Updates": the running version, channel, commit and
+   * installer from update-status, the last update result and the state of
+   * an update restart in progress.
+   */
+  private renderServerVersion() {
+    return html`
+      <div class="section server-version">
+        <h2 class="section-title">Server Version &amp; Updates</h2>
+        ${this.updateStatusError
+          ? html`
+              <sl-alert variant="danger" open class="update-status-error">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                Could not load update status: ${this.updateStatusError}
+                <sl-button size="small" @click=${() => this.fetchUpdateStatus()}>
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  Reload status
+                </sl-button>
+              </sl-alert>
+            `
+          : this.updateStatus
+            ? this.renderServerVersionBody(this.updateStatus)
+            : html`<div class="empty-inline">Loading update status...</div>`}
+        ${this.updateReconnecting
+          ? html`
+              <div class="card-meta update-reconnecting">
+                <sl-spinner></sl-spinner>
+                <span>
+                  Waiting for the hub to
+                  restart${this.updateExpectVersion
+                    ? html` on ${this.updateExpectVersion}`
+                    : nothing}...
+                </span>
+              </div>
+            `
+          : nothing}
+        ${this.updateReconnectError
+          ? html`
+              <sl-alert variant="warning" open class="update-reconnect-error">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                ${this.updateReconnectError}
+              </sl-alert>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderServerVersionBody(st: UpdateStatus) {
+    const cur = st.current;
+    const version = cur.version || (cur.isGitBuild ? 'git build' : 'unknown');
+    const commit = cur.commit ? cur.commit.slice(0, 12) : '';
+    const inst = st.installer;
+    return html`
+      <div class="card">
+        <div class="release-info">
+          <div class="release-field">
+            <span class="release-label">Version:</span>
+            <span class="current-version">${version}</span>
+            ${cur.channel
+              ? html`<sl-badge variant="primary" pill class="channel-badge"
+                  >${cur.channel}</sl-badge
+                >`
+              : nothing}
+          </div>
+          ${commit
+            ? html`
+                <div class="release-field">
+                  <span class="release-label">Commit:</span>
+                  <code class="current-commit">${commit}</code>
+                </div>
+              `
+            : nothing}
+          <div class="release-field">
+            <span class="release-label">Updates from:</span>
+            <span class="update-mode"
+              >${st.mode.effective === 'git' ? 'Git build' : 'Release binary'}${st.channel.effective
+                ? html` (${st.channel.effective} channel)`
+                : nothing}</span
+            >
+          </div>
+          <div class="release-field">
+            <span class="release-label">Installer:</span>
+            <span class="installer-strategy">${inst.strategy}</span>
+          </div>
+          ${st.lastUpdate ? this.renderLastUpdate(st.lastUpdate) : nothing}
+        </div>
+        ${inst.supported ? nothing : this.renderInstallerUnsupported(st)}
+      </div>
+    `;
+  }
+
+  private renderInstallerUnsupported(st: UpdateStatus) {
+    return html`
+      <sl-alert variant="warning" open class="installer-unsupported">
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        <strong>This hub cannot install updates itself.</strong>
+        ${st.installer.reason
+          ? html`<div class="installer-reason">${st.installer.reason}</div>`
+          : nothing}
+        ${st.installer.migrateHint
+          ? html`<div class="installer-hint">${st.installer.migrateHint}</div>`
+          : nothing}
+      </sl-alert>
+    `;
+  }
+
+  private renderLastUpdate(last: LastUpdate) {
+    const label = LAST_UPDATE_LABELS[last.status] ?? last.status;
+    const badge =
+      last.status === 'verified' ? 'completed' : last.status === 'failed' ? 'failed' : 'pending';
+    return html`
+      <div class="release-field last-update">
+        <span class="release-label">Last update:</span>
+        <span>
+          ${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}
+          <span class="status-badge ${badge}">${label}</span>
+          ${last.at ? html`${this.formatRelativeTime(last.at)}` : nothing}
+          ${last.runId
+            ? html`<a
+                href="#"
+                class="last-update-run"
+                @click=${(e: Event) => {
+                  e.preventDefault();
+                  void this.viewRunDetail({
+                    id: last.runId,
+                    operationKey: 'update-binary',
+                    status: '',
+                    startedAt: '',
+                  });
+                }}
+                >View run</a
+              >`
+            : nothing}
+        </span>
+      </div>
+    `;
+  }
+
+  private renderUpdateConfirmDialog() {
+    const target = this.updateConfirmTarget;
+    if (!target) return nothing;
+    const latestChannel = target.startsWith('latest:') ? target.slice('latest:'.length) : null;
+    const unsupported = this.updateStatus ? !this.updateStatus.installer.supported : false;
+    return html`
+      <sl-dialog label="Update Hub" open @sl-request-close=${() => this.closeUpdateConfirm()}>
+        <div class="dialog-body">
+          <p>
+            ${latestChannel
+              ? html`Update the hub to the latest release in the
+                  <strong>${latestChannel}</strong> channel?`
+              : html`Update the hub to <strong>${target}</strong>?`}
+          </p>
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            The hub restarts once the new binary is installed. You will temporarily lose
+            connectivity; this page reconnects when the hub is back.
+          </p>
+          ${unsupported && this.updateStatus
+            ? this.renderInstallerUnsupported(this.updateStatus)
+            : nothing}
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => this.closeUpdateConfirm()}
+          ?disabled=${this.applyUpdateLoading}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="confirm-update"
+          ?loading=${this.applyUpdateLoading}
+          ?disabled=${unsupported}
+          @click=${() => this.applyUpdate()}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Update &amp; Restart
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
   private renderUpdateAvailableBanner() {
     if (!this.updateAvailable?.update_available || !this.updateAvailable.update) {
       return nothing;
@@ -1446,7 +1892,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             variant="primary"
             size="small"
             ?loading=${this.applyUpdateLoading}
-            @click=${() => this.applyUpdate()}
+            @click=${() => this.openUpdateConfirm(update.version)}
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
             Apply Update
@@ -1776,85 +2222,23 @@ export class ScionPageAdminMaintenance extends LitElement {
       // Expected — the server went away.
     }
 
-    // Poll /healthz until the server comes back with a small uptime,
-    // confirming the process actually restarted.
-    const POLL_TIMEOUT_MS = 30_000;
-    const INITIAL_DELAY_MS = 500;
-    const MAX_INTERVAL_MS = 2000;
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-    await new Promise<void>((resolve) => setTimeout(resolve, INITIAL_DELAY_MS));
-
-    let interval = 1000;
-    while (Date.now() < deadline) {
-      try {
-        const res = await apiFetch('/healthz', { authErrors: 'caller' });
-        if (res.ok) {
-          const data = (await res.json()) as { uptime?: string };
-          // The uptime field is a Go duration string like "3.12s" or "1m5s".
-          // A small uptime (< 120s) confirms a fresh restart rather than
-          // a response from a server that never went down.
-          const uptimeSeconds = this.parseGoUptimeSeconds(data.uptime);
-          if (uptimeSeconds !== null) {
-            if (uptimeSeconds < 120) {
-              showToast('Server restarted successfully.', 'success');
-            } else {
-              showToast(
-                `Server responded but appears not to have restarted (uptime: ${data.uptime}).`,
-                'warning'
-              );
-            }
-            this.restartLoading = false;
-            return;
-          }
-        }
-      } catch {
-        // Server still down — keep polling.
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, interval));
-      interval = Math.min(interval * 1.5, MAX_INTERVAL_MS);
+    // Wait for /healthz to answer with a fresh uptime, confirming the
+    // process actually restarted.
+    const result = await waitForHubRestart({ timeoutMs: RESTART_HUB_TIMEOUT_MS });
+    if (result.ok) {
+      showToast('Server restarted successfully.', 'success');
+    } else if (result.observed) {
+      showToast(
+        `Server responded but appears not to have restarted (uptime: ${result.observed.uptime ?? 'unknown'}).`,
+        'warning'
+      );
+    } else {
+      showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
+        icon: 'exclamation-triangle',
+        duration: 10000,
+      });
     }
-
-    // Timed out — server did not come back within the polling window.
-    showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
-      icon: 'exclamation-triangle',
-      duration: 10000,
-    });
     this.restartLoading = false;
-  }
-
-  /**
-   * Parse a Go duration string (e.g. "3s", "1m5s", "2h3m") into total seconds.
-   * Returns null if the format is unrecognized.
-   */
-  private parseGoUptimeSeconds(uptime: string | undefined): number | null {
-    if (!uptime) return null;
-    let total = 0;
-    let matched = false;
-    const re = /(\d+(?:\.\d+)?)(h|m|s|ms|µs|ns)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(uptime)) !== null) {
-      matched = true;
-      const val = parseFloat(m[1]);
-      switch (m[2]) {
-        case 'h':
-          total += val * 3600;
-          break;
-        case 'm':
-          total += val * 60;
-          break;
-        case 's':
-          total += val;
-          break;
-        case 'ms':
-          total += val / 1000;
-          break;
-        case 'µs':
-        case 'ns':
-          break; // negligible
-      }
-    }
-    return matched ? total : null;
   }
 
   private renderMaintenanceMode() {
@@ -1991,23 +2375,31 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
-  /** Operations hidden when deployment tier is "binary" (require git clone). */
+  /** Operations hidden in release mode (they need the git checkout). */
   private static readonly SOURCE_ONLY_OPS = new Set([
     'rebuild-server',
     'rebuild-web',
     'rebuild-container-binaries',
   ]);
 
-  /** Operations hidden when deployment tier is "source". */
+  /** Operations hidden in git mode. */
   private static readonly BINARY_ONLY_OPS = new Set(['update-binary']);
 
-  /** Filter operations based on deployment tier. */
+  /**
+   * Operations shown for the hub's effective mode from update-status. Until
+   * it loads (or when it fails), both mode-specific sets stay hidden.
+   */
   private get visibleOperations(): MaintenanceOperationWithRun[] {
-    const hidden =
-      this.deploymentTier === 'binary'
-        ? ScionPageAdminMaintenance.SOURCE_ONLY_OPS
-        : ScionPageAdminMaintenance.BINARY_ONLY_OPS;
-    return this.operations.filter((op) => !hidden.has(op.key));
+    const mode = this.updateStatus?.mode.effective;
+    const hidden = (key: string): boolean => {
+      if (mode === 'git') return ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key);
+      if (mode === 'release') return ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key);
+      return (
+        ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key) ||
+        ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key)
+      );
+    };
+    return this.operations.filter((op) => !hidden(op.key));
   }
 
   private renderOperations() {
@@ -2026,7 +2418,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderOperationCard(op: MaintenanceOperationWithRun) {
-    const isRunning = op.lastRun?.status === 'running';
+    const isRunning = isRunInProgress(op.lastRun?.status);
     const historyExpanded = this.expandedHistory.has(op.key);
     const runs = this.runHistory.get(op.key) ?? [];
     const showCheckButton = op.key === 'rebuild-server' || op.key === 'update-binary';
@@ -2054,12 +2446,17 @@ export class ScionPageAdminMaintenance extends LitElement {
               `
             : nothing}
           ${isRunning
-            ? html`<sl-button size="small" disabled loading>Running...</sl-button>`
+            ? html`<sl-button size="small" disabled loading
+                >${op.lastRun?.status === 'restarting' ? 'Restarting...' : 'Running...'}</sl-button
+              >`
             : html`
                 <sl-button
                   variant="${isDestructiveOp ? 'warning' : 'primary'}"
                   size="small"
-                  @click=${() => this.openRunDialog(op.key, 'operation')}
+                  @click=${() =>
+                    op.key === 'update-binary'
+                      ? this.openUpdateConfirm(this.updateCardTarget())
+                      : this.openRunDialog(op.key, 'operation')}
                 >
                   <sl-icon slot="prefix" name="play-circle"></sl-icon>
                   Run
@@ -2302,13 +2699,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
         return;
       }
-      const result = (await res.json()) as UpdateCheckResult;
-      this.updateCheckResult = result;
-
-      // Update deployment tier from the check-updates response.
-      if (result.tier === 'binary' || result.tier === 'source') {
-        this.deploymentTier = result.tier;
-      }
+      this.updateCheckResult = (await res.json()) as UpdateCheckResult;
     } catch {
       this.updateCheckError = 'Failed to connect to server';
     } finally {

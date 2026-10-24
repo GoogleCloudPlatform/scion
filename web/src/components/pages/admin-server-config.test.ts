@@ -131,7 +131,7 @@ function createFetchHandler(
     };
     messagingResponse?: Record<string, unknown>;
     checkUpdatesResponse?: Record<string, unknown>;
-    onOperationRun?: (path: string) => void;
+    onOperationRun?: (path: string, body: unknown) => void;
   }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -208,7 +208,7 @@ function createFetchHandler(
     }
 
     if (path.includes('/api/v1/admin/maintenance/operations/') && path.endsWith('/run')) {
-      opts?.onOperationRun?.(path);
+      opts?.onOperationRun?.(path, init?.body ? JSON.parse(init.body as string) : undefined);
       return Promise.resolve(
         new Response(JSON.stringify({ runId: 'run-1', status: 'running' }), {
           status: 200,
@@ -2816,11 +2816,13 @@ describe('scion-page-admin-server-config', () => {
   describe('Tier-based maintenance dispatch', () => {
     it('defaults to source tier and dispatches rebuild-server/run', async () => {
       let ranPath: string | null = null;
+      let ranBody: unknown = null;
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {
           checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 2 },
-          onOperationRun: (path) => {
+          onOperationRun: (path, body) => {
             ranPath = path;
+            ranBody = body;
           },
         })
       );
@@ -2834,10 +2836,12 @@ describe('scion-page-admin-server-config', () => {
 
       expect(ranPath).not.toBeNull();
       expect(ranPath).toContain('/operations/rebuild-server/run');
+      expect(ranBody).toEqual({ params: {} });
     });
 
     it('sets deploymentTier to binary and dispatches update-binary/run', async () => {
       let ranPath: string | null = null;
+      let ranBody: unknown = null;
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {
           checkUpdatesResponse: {
@@ -2847,8 +2851,9 @@ describe('scion-page-admin-server-config', () => {
             latest_version: '1.1.0',
             channel: 'stable',
           },
-          onOperationRun: (path) => {
+          onOperationRun: (path, body) => {
             ranPath = path;
+            ranBody = body;
           },
         })
       );
@@ -2862,6 +2867,25 @@ describe('scion-page-admin-server-config', () => {
 
       expect(ranPath).not.toBeNull();
       expect(ranPath).toContain('/operations/update-binary/run');
+      // Exactly the checked tag and pin; no asset URLs or current version.
+      expect(ranBody).toEqual({ params: { target_version: '1.1.0', pin: 'latest' } });
+    });
+
+    it('posts latest:<channel> for update-binary when the check has no tag', async () => {
+      let ranBody: unknown = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'binary', update_available: false, channel: 'nightly' },
+          onOperationRun: (_path, body) => {
+            ranBody = body;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).triggerUpdate();
+
+      expect(ranBody).toEqual({ params: { target_version: 'latest:nightly', pin: 'latest' } });
     });
 
     it('renders binary-tier version info in the update banner', async () => {
