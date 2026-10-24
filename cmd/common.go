@@ -111,6 +111,13 @@ func envSendOptInError(gathered map[string]string) error {
 		len(sorted), strings.Join(sorted, ", "), sendEnvFlagName, sendEnvFlagName)
 }
 
+// envSendNamesLine names the keys (never their values), sorted, that the
+// CLI sends to the hub.
+func envSendNamesLine(gathered map[string]string) string {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Sprintf("Sending %d environment value(s) to the Hub: %s", len(sorted), strings.Join(sorted, ", "))
+}
+
 // agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
 // in the agent's environment. Agents never inherit debug settings from the
 // CLI or the server; this flag is the explicit per-agent opt-in.
@@ -2109,9 +2116,10 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	}
 
 	// In interactive mode, confirm before sending env vars
-	if isInteractiveTerminal() && !autoConfirm {
+	prompted := isInteractiveTerminal() && !autoConfirm
+	if prompted {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Fprintf(os.Stderr, "\nSend %d environment variable(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
+		fmt.Fprintf(os.Stderr, "\nSend %d environment value(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -2122,7 +2130,14 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		}
 	}
 
-	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
+	// The text-mode prompt follows the list of keys found locally. In
+	// every other case (--yes, --format json, a non-interactive send
+	// with --send-env) the keys are named here, on stderr only.
+	if prompted && !isJSONOutput() {
+		statusf("Submitting %d gathered environment value(s)...\n", len(gatheredEnv))
+	} else {
+		fmt.Fprintln(os.Stderr, envSendNamesLine(gatheredEnv))
+	}
 
 	// Submit gathered env to Hub. From here the Hub may launch the agent.
 	// A context that already ended sends nothing: report it as a failure
