@@ -257,23 +257,28 @@ func TestLifecycleHeldConfig_PayloadCarriesNoRawConfig(t *testing.T) {
 
 // TestLifecycleHeldConfig_MarkedContextNeverConfigured: "never configured"
 // is structural (upmerge2 r1 O1). A caller context carrying a
-// config-resolution mark or a sync dispatch result does not make the fold a
-// config-resolution write: it is still exactly one metadata_changed.
+// config-resolution mark or a live sync dispatch result (one naming the
+// agent's current run, which the observer would otherwise treat as config
+// resolution; upmerge2 r2 R2-1) does not make the fold a config-resolution
+// write: it is still exactly one metadata_changed.
 func TestLifecycleHeldConfig_MarkedContextNeverConfigured(t *testing.T) {
+	const run = "run-held"
+	live := lifecycleevents.DispatchResult{RunID: run, BrokerEvidence: true}
 	for _, tt := range []struct {
 		name string
 		mark func(context.Context) context.Context
 	}{
 		{"WithConfigResolution", lifecycleevents.WithConfigResolution},
-		{"WithDispatchResult", func(ctx context.Context) context.Context {
-			return lifecycleevents.WithDispatchResult(ctx, lifecycleevents.DispatchResult{BrokerEvidence: true})
+		{"WithDispatchResult for the current run", func(ctx context.Context) context.Context {
+			return lifecycleevents.WithDispatchResult(ctx, live)
 		}},
 		{"both", func(ctx context.Context) context.Context {
-			return lifecycleevents.WithDispatchResult(lifecycleevents.WithConfigResolution(ctx), lifecycleevents.DispatchResult{BrokerEvidence: true})
+			return lifecycleevents.WithDispatchResult(lifecycleevents.WithConfigResolution(ctx), live)
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f, a := newHeldFixture(t, "held-marked")
+			f.mint(a.ID, run) // the dispatch result names the agent's current run
 			ctx := tt.mark(context.Background())
 			before := heldStateOf(t, f, a.ID)
 			_, err := f.cs.UpdateAgentConfig(ctx, a.ID, heldVersion(t, f, a.ID), heldApplied("m-b"), nil)
