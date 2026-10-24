@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionapi "github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -2885,7 +2885,7 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, api *Telegr
 		}
 		destPath = scratchpad.Path
 		agentPath, err = projectfs.WriteAttachment(scratchpad.Resolved, true,
-			projectfs.SharedDirMount(api.SharedDir{Name: projectfs.ScratchpadName}, ""),
+			projectfs.SharedDirMount(scionapi.SharedDir{Name: projectfs.ScratchpadName}, ""),
 			projectfs.AttachmentChannelTelegram, fmt.Sprintf("tg_%d", timestamp), fileName, body)
 		if err != nil {
 			return "", "", fmt.Errorf("write file: %w", err)
