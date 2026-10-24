@@ -548,7 +548,23 @@ func (p *ChannelEventPublisher) publishTriggered(subject string, event interface
 		}
 	}
 
-	p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	if matched > 0 && !isAgentStatusSubject(subject) {
+		p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	}
+}
+
+// isAgentStatusSubject reports whether subject is an agent status subject
+// (agent.<id>.status or project.<id>.agent.status). These carry per-agent
+// status and heartbeat events, which are not logged per event.
+func isAgentStatusSubject(subject string) bool {
+	tokens := strings.Split(subject, ".")
+	switch len(tokens) {
+	case 3:
+		return tokens[0] == "agent" && tokens[2] == "status"
+	case 4:
+		return tokens[0] == "project" && tokens[2] == "agent" && tokens[3] == "status"
+	}
+	return false
 }
 
 // PublishRaw publishes an arbitrary event on the given subject.

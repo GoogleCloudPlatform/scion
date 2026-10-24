@@ -144,6 +144,15 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("base-url") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--base-url=%s", webBaseURL))
 	}
+	// --keyring-file is a path, not key material: the foreground child
+	// reads the file itself (loadServerKeyring), so forwarding the path
+	// exposes nothing in the process list or server-args.json.
+	if cmd.Flags().Changed("keyring-file") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file=%s", serverKeyringFile))
+	}
+	if cmd.Flags().Changed("keyring-file-allow-world-readable") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file-allow-world-readable=%t", serverKeyringAllowWorldReadable))
+	}
 	if cmd.Flags().Changed("admin-emails") {
 		// Forwarded as a single comma-joined value rather than repeated flags:
 		// the daemon argv is persisted to server-args.json for restart, and the

@@ -72,6 +72,9 @@ const (
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
+	// ActionChatPost covers posting messages into a project's chat
+	// threads (project.chat_post).
+	ActionChatPost Action = "chat_post"
 	// ActionAdmin covers access constraint administration
 	// (access_constraint.admin).
 	ActionAdmin Action = "admin"

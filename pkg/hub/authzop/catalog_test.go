@@ -291,6 +291,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+		// project.chat_post is checked by chatMayPost inside the chat send
+		// and promote routes, whose base permission is inbox.write (the
+		// token selector); it is decided on the caller's account
+		// (ptone/scion#5518).
+		"project.chat_post": "Checked by chatMayPost within chat.conversation.send.topic and chat.conversation.promote, not a route base permission (ptone/scion#5518)",
 
 		// Admin test identities: the super-admin kind's capability is
 		// checked by testAdminIssuer inside testidentity.admin.create (whose

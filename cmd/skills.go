@@ -15,9 +15,8 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -249,40 +249,17 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		return newUsageError("--version is required")
 	}
 
-	// Verify SKILL.md exists
-	skillMDPath := filepath.Join(skillDir, "SKILL.md")
-	if _, err := os.Stat(skillMDPath); os.IsNotExist(err) {
-		return fmt.Errorf("SKILL.md not found in %s", skillDir)
-	}
-
 	// Collect files
-	var files []publishFile
-	err := filepath.Walk(skillDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == ".git" || base == ".DS_Store" || base == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if filepath.Base(path) == ".DS_Store" || filepath.Base(path) == ".gitignore" {
-			return nil
-		}
-		relPath, _ := filepath.Rel(skillDir, path)
-		relPath = filepath.ToSlash(relPath)
-		files = append(files, publishFile{
-			path:    relPath,
-			absPath: path,
-			size:    info.Size(),
-		})
-		return nil
-	})
+	rootDir, files, err := collectPublishFiles(skillDir, os.Stderr)
 	if err != nil {
-		return fmt.Errorf("failed to collect files: %w", err)
+		return err
 	}
+	// Uploads read through this root; see transfer.ReadCollectedFile.
+	skillRoot, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return fmt.Errorf("failed to open skill directory %s: %w", skillDir, err)
+	}
+	defer func() { _ = skillRoot.Close() }()
 
 	// Validate limits
 	if len(files) > 50 {
@@ -361,43 +338,36 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	// Upload files
 	for _, uploadInfo := range pubResp.UploadURLs {
 		// Find the matching local file
-		var localPath string
-		for _, f := range files {
-			if f.path == uploadInfo.Path {
-				localPath = f.absPath
+		var match *publishFile
+		for i := range files {
+			if files[i].path == uploadInfo.Path {
+				match = &files[i]
 				break
 			}
 		}
-		if localPath == "" {
+		if match == nil {
 			continue
 		}
 
-		file, err := os.Open(localPath)
+		// Read through os.Root (links that leave the skill directory are
+		// refused) and verified against the collected size and hash, so the
+		// uploaded bytes are the ones in the manifest. A mismatch fails
+		// before any byte of the file is sent.
+		data, err := transfer.ReadCollectedFile(skillRoot, match.collected())
 		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", localPath, err)
+			return err
 		}
-		err = skillSvc.UploadFile(ctx, uploadInfo.URL, uploadInfo.Method, uploadInfo.Headers, file)
-		_ = file.Close()
+		err = skillSvc.UploadFile(ctx, uploadInfo.URL, uploadInfo.Method, uploadInfo.Headers, bytes.NewReader(data))
 		if err != nil {
 			return fmt.Errorf("failed to upload %s: %w", uploadInfo.Path, err)
 		}
 		fmt.Printf("  Uploaded %s\n", uploadInfo.Path)
 	}
 
-	// Build manifest with file hashes
-	manifest := &hubclient.SkillManifest{
-		Files: make([]hubclient.TemplateFile, len(files)),
-	}
-	for i, f := range files {
-		hash, err := hashFile(f.absPath)
-		if err != nil {
-			return fmt.Errorf("failed to hash %s: %w", f.path, err)
-		}
-		manifest.Files[i] = hubclient.TemplateFile{
-			Path: f.path,
-			Size: f.size,
-			Hash: hash,
-		}
+	// Build manifest with the hashes recorded at collection
+	manifest, err := buildSkillManifest(files)
+	if err != nil {
+		return err
 	}
 
 	// Finalize
@@ -418,9 +388,108 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 }
 
 type publishFile struct {
-	path    string
-	absPath string
-	size    int64
+	path string
+	size int64
+	// hash is the sha256 content hash recorded at collection ("sha256:<hex>").
+	hash string
+	// mode is the normalised mode recorded in the manifest: "0755" for an
+	// executable file, otherwise "0644" (ptone/scion#5657).
+	mode string
+}
+
+// collected returns f as the transfer.FileInfo it was collected from, for
+// transfer.ReadCollectedFile.
+func (f publishFile) collected() transfer.FileInfo {
+	return transfer.FileInfo{Path: f.path, Size: f.size, Hash: f.hash}
+}
+
+// skillPublishExcludes are skipped in addition to
+// transfer.DefaultExcludePatterns.
+var skillPublishExcludes = []string{"__pycache__", ".gitignore"}
+
+// collectPublishFiles returns the files `scion skills publish` uploads from
+// skillDir. It applies the same rules as template and harness-config uploads
+// (transfer.ManifestBuilder): only regular files inside the skill directory
+// are published, and VCS and editor clutter is excluded. Other entries, such
+// as symlinks, are skipped with a warning written to warn (if non-nil).
+//
+// SKILL.md must be a regular file. The skillDir argument itself may be a
+// symlink to a directory; it is resolved once before walking, and the
+// resolved directory is returned with the files.
+func collectPublishFiles(skillDir string, warn io.Writer) (string, []publishFile, error) {
+	root, err := filepath.EvalSymlinks(skillDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
+		}
+		return "", nil, fmt.Errorf("failed to resolve skill directory %s: %w", skillDir, err)
+	}
+
+	info, err := os.Lstat(filepath.Join(root, "SKILL.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("SKILL.md not found in %s", skillDir)
+		}
+		return "", nil, fmt.Errorf("failed to read SKILL.md in %s: %w", skillDir, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("SKILL.md in %s must be a regular file", skillDir)
+	}
+
+	builder := transfer.NewManifestBuilder(root).WithExcludePatterns(skillPublishExcludes)
+	builder.OnSkip = func(relPath string) {
+		if warn != nil {
+			_, _ = fmt.Fprintf(warn, "Warning: skipped non-regular file %q\n", relPath)
+		}
+	}
+	collected, err := builder.CollectFiles()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to collect files: %w", err)
+	}
+
+	files := make([]publishFile, len(collected))
+	for i, f := range collected {
+		files[i] = publishFile{
+			path: f.Path,
+			size: f.Size,
+			hash: f.Hash,
+			mode: publishFileMode(transfer.NormalizeMode(f.Mode)),
+		}
+	}
+	return root, files, nil
+}
+
+// publishFileMode is the manifest mode for a local file with mode m. Only
+// the executable bit is carried. On Windows, whose file modes carry no
+// executable bit, every file is "0644".
+func publishFileMode(m os.FileMode) string {
+	if !localModesCarryExecBit() {
+		return transfer.FormatMode(transfer.ModeRegular)
+	}
+	return transfer.NormalizedModeString(transfer.FormatMode(m))
+}
+
+// buildSkillManifest returns the finalize manifest for files: each file's
+// path, size, sha256 hash (as recorded at collection, which is also what
+// the upload verifies) and mode. The Hub serves the mode back with the
+// download URLs, so the broker installs an executable skill script
+// executable (ptone/scion#5657).
+func buildSkillManifest(files []publishFile) (*hubclient.SkillManifest, error) {
+	manifest := &hubclient.SkillManifest{
+		Files: make([]hubclient.TemplateFile, len(files)),
+	}
+	for i, f := range files {
+		if f.hash == "" {
+			return nil, fmt.Errorf("no content hash recorded for %s", f.path)
+		}
+		manifest.Files[i] = hubclient.TemplateFile{
+			Path: f.path,
+			Size: f.size,
+			Hash: f.hash,
+			Mode: f.mode,
+		}
+	}
+	return manifest, nil
 }
 
 func skillDisplayName(slug string) string {
@@ -431,19 +500,6 @@ func skillDisplayName(slug string) string {
 		}
 	}
 	return strings.Join(words, " ")
-}
-
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 var skillsDeleteCmd = &cobra.Command{

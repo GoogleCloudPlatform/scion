@@ -163,6 +163,14 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteSecret":               "delete-resource",
 	"DeleteSecretsByScope":       "delete-resource",
 	"GetSecretValue":             "read-secret",
+	// Secret encryption (ptone/scion#1530 §6): the privileged payload
+	// scan, ciphertext-only replacement, policy transitions and
+	// migration records.
+	"ScanSecretPayloads":        "read-secret",
+	"ReplaceSecretCiphertext":   "update-resource",
+	"UpdateEncryptionPolicy":    "update-resource",
+	"CreateEncryptionMigration": "create-resource",
+	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
 	"CreateBrokerSecret":     "create-resource",
@@ -410,15 +418,13 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/access_constraint_governance*.go — transactional governance
 	// PR #1445 moved store mutations from handlers to the governance layer.
-	// Audited creates run in the dedicated transactional helper; updates,
-	// deletes, compensations, and role-binding changes remain in the core file.
+	// Audited creates and updates run in the dedicated transactional helpers
+	// with their history row; deletes and role-binding changes remain in the
+	// core file.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/access_constraint_governance_auditevent.go", Function: "createAccessConstraintWithAudit", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
+	{File: "pkg/hub/access_constraint_governance_auditevent.go", Function: "updateAccessConstraintWithAudit", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "CreateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "DeleteAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
 
@@ -426,7 +432,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/access_constraint_recovery.go — constraint recovery operations
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/access_constraint_recovery.go", Function: "RecoverAll", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Constraint recovery: re-enables constraints disabled by audit failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
-	{File: "pkg/hub/access_constraint_recovery.go", Function: "rollbackDisable", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Constraint recovery rollback: restores constraint on disable failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_groups.go — group CRUD and membership
@@ -778,8 +783,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/entadapter/agent_deletion_finalize.go", Function: "finalizeAgentDeletionOnce", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: finalize-hard removes the agent's group memberships before tx.Agent.Delete(), in the same transaction; the caller (FinalizeAgentDeletion via the delete engine) authorizes (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject implementation", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject re-enters itself on the transactional store so the cascade and the row deletes commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to CreateSecret", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to UpdateSecret", Scope: "pkg/store/entadapter"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/store/storetest/ — store interface conformance test fixtures
@@ -812,6 +815,16 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "BrokerSecretDomain", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: broker secret domain update", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_project_broker.go", Function: "ProjectDomain", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: project domain teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encCreate", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpdate", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpsert", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encValueIfVersion", Symbol: "UpdateSecretValueIfVersion", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encDelete", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encScan", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encReplace", Symbol: "ReplaceSecretCiphertext", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encSetPolicy", Symbol: "UpdateEncryptionPolicy", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encCreateMigration", Symbol: "CreateEncryptionMigration", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_secret_encryption.go", Function: "encUpdateMigration", Symbol: "UpdateEncryptionMigration", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret encryption conformance wrapper (one call site per symbol)", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},

@@ -130,7 +130,7 @@ func TestGitHubSkillResolver_HappyPath(t *testing.T) {
 		t.Errorf("expected URL %s, got %s", expectedURL, skill.Files[0].URL)
 	}
 
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{
 		{Path: "SKILL.md", Hash: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(skillContent)))},
 		{Path: "README.md", Hash: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(readmeContent)))},
 	})

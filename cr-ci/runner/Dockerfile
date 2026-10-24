@@ -5,6 +5,9 @@
 # Tool versions and their sha256 checksums are pinned ONLY in the ARG block
 # below. Override them with --build-arg, always a version together with its
 # checksum. Every download is sha256-verified; the build fails on a mismatch.
+# golangci-lint is the exception: it is built from source by
+# golangci-lint/build.sh, the single copy of the patched build that CI also uses
+# (dominikh/go-tools#1839), with its pins in golangci-lint/VERSIONS.
 #
 # No Docker daemon: Cloud Run runs in gVisor, so DinD and `services:` do not
 # work (design section 1.4). No secret enters any layer: the JIT config is
@@ -19,20 +22,40 @@ ARG ACTIONS_RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25
 # https://go.dev/dl/ (linux-amd64 archive).
 ARG GO_VERSION=1.26.1
 ARG GO_SHA256=031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a
-# https://github.com/golangci/golangci-lint/releases (golangci-lint-<v>-checksums.txt); keep
-# in step with the version .github/workflows/ci.yml installs.
-ARG GOLANGCI_LINT_VERSION=2.15.0
-ARG GOLANGCI_LINT_SHA256=9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea
 # -------------------------------------------------------------------------------
 
+# --- Go toolchain (used by the golangci-lint build and copied into the image) ---
+FROM ${UBUNTU_IMAGE} AS go
+ARG GO_VERSION
+ARG GO_SHA256
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL -o /tmp/go.tgz "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
+ && echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c - \
+ && tar -C /usr/local -xzf /tmp/go.tgz \
+ && rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:${PATH}
+
+# --- golangci-lint, patched for dominikh/go-tools#1839 -------------------------
+# The same build.sh, VERSIONS and patch as .github/workflows/ci.yml's lint job, so
+# the image ships the binary CI runs (it reports 2.15.0-scion-gotools1839). The
+# modules come from the Go module proxy as checksum-pinned source; see
+# golangci-lint/README.md, which also says when to drop this stage.
+FROM go AS golangci-lint
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+COPY golangci-lint/ /src/golangci-lint/
+RUN GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache bash /src/golangci-lint/build.sh /out/golangci-lint \
+ && rm -rf /tmp/gocache /tmp/gomodcache
+
+# --- The runner image ------------------------------------------------------------
 FROM ${UBUNTU_IMAGE}
 
 ARG ACTIONS_RUNNER_VERSION
 ARG ACTIONS_RUNNER_SHA256
-ARG GO_VERSION
-ARG GO_SHA256
-ARG GOLANGCI_LINT_VERSION
-ARG GOLANGCI_LINT_SHA256
 
 # RUNNER_MANUALLY_TRAP_SIG=1 makes run.sh trap TERM/INT and forward SIGINT to the
 # runner's process group: a graceful job cancel when entrypoint.sh (PID 1) forwards
@@ -60,20 +83,10 @@ RUN apt-get update \
 # derives it from /etc/passwd, but the image config is what Cloud Run is sure to pass on.
 RUN useradd --create-home --home-dir /home/runner --uid 1001 --shell /bin/bash runner
 
-# Go toolchain.
-RUN curl -fsSL -o /tmp/go.tgz "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
- && echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c - \
- && tar -C /usr/local -xzf /tmp/go.tgz \
- && rm /tmp/go.tgz
+# Go toolchain (verified in the go stage) and the patched golangci-lint.
+COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:${PATH}
-
-# golangci-lint.
-RUN curl -fsSL -o /tmp/golangci-lint.tgz \
-      "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" \
- && echo "${GOLANGCI_LINT_SHA256}  /tmp/golangci-lint.tgz" | sha256sum -c - \
- && tar -C /tmp -xzf /tmp/golangci-lint.tgz \
- && install -m 0755 "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint" /usr/local/bin/golangci-lint \
- && rm -rf /tmp/golangci-lint.tgz "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64"
+COPY --from=golangci-lint --chmod=0755 /out/golangci-lint /usr/local/bin/golangci-lint
 
 # GitHub Actions runner. installdependencies.sh ships in the verified tarball
 # and installs the .NET runtime libraries (libicu, libssl, ...) via apt.

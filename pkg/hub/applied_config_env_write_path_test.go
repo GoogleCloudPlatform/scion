@@ -215,10 +215,10 @@ func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 // pins the invariant directly rather than relying on that side effect.
 //
 // This exercises several injection sites at once (hub name, hub-default TZ,
-// project-scoped storage env var, an environment-type resolved secret, and
-// the dev auth token) so a future call site that adds a new ResolvedEnv
-// write without a matching classifyEnv call is caught here, not just by
-// coincidence in some unrelated test.
+// project-scoped storage env var and an environment-type resolved secret) so
+// a future call site that adds a new ResolvedEnv write without a matching
+// classifyEnv call is caught here, not just by coincidence in some unrelated
+// test.
 func TestBuildCreateRequestClassifiesEveryResolvedEnvKey(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -249,7 +249,6 @@ func TestBuildCreateRequestClassifiesEveryResolvedEnvKey(t *testing.T) {
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetHubName("test-hub")
-	dispatcher.SetDevAuthToken("dev-token-value")
 	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
 		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
 	})
