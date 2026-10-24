@@ -212,13 +212,17 @@ printing the JSON result.
 
 When the template, Hub and broker do not supply a variable the agent needs, the Hub asks the CLI
 for it, and the CLI looks for it in its local environment. In an interactive terminal, `scion start`
-lists the keys it found and asks `Send N environment variable(s) to use in provisioning this agent?`
+lists the keys it found and asks `Send N environment value(s) to use in provisioning this agent?`
 before sending them. On an interactive terminal, `--yes` is an explicit answer: it confirms the
 send without showing the prompt, and `--send-env` is not needed. When no prompt can be shown (stdin
 is not a terminal, `--non-interactive`, `cli.interactive_disabled`, or agent mode), the CLI sends local
 environment values only with `--send-env`. Without it, the command fails without sending anything,
-names the keys (never their values) and the flag, and removes the agent the Hub provisioned. To avoid
-sending local values at all, store them on the Hub with `scion hub secret set` or `scion hub env set`.
+names the keys (never their values) and the flag, and removes the agent the Hub provisioned. Whenever
+the keys are sent without the text-mode prompt and its list (with `--yes`, with `--format json`, or
+with `--send-env` when no prompt can be shown), the CLI names them, never their values, in one line
+on stderr: `Sending N environment value(s) to the Hub: KEY_A, KEY_B`. With `--format json`, stdout
+carries only the JSON result. To avoid sending local values at all, store them on the Hub with
+`scion hub secret set` or `scion hub env set`.
 
 #### Long tasks and task files
 
@@ -680,7 +684,7 @@ per agent) is still printed on stdout, and no separate error message is added.
     - `--stopped`: Delete all agents with stopped containers.
     - `--cleanup-only`: Remove only the agent's local files: its worktree, its agent directory and, unless `--preserve-branch` is given, its git branch. Use it when a delete went through on the Hub but the local cleanup failed. It refuses while the Hub still has the agent (run `scion delete <agent-name>` instead); an agent the Hub no longer has, or has only soft-deleted, is cleaned up. When the Hub cannot be checked (unreachable, or no Hub in use) it refuses unless `--force` is given, which removes the local files without checking. Cannot be combined with `--stopped`. When a Hub delete succeeds but its local cleanup fails, `scion delete` prints the `--cleanup-only` command to retry.
     - `--self`: Allow deleting the current agent. Inside an agent container, if one of the named agents is the agent the CLI runs in, `scion delete` refuses, deletes none of the named agents, and exits 1 with a message that `--self` is required. That agent is matched by name, slug or agent ID within its own project. Deleting the current agent removes its files and branch and ends its session. With `--self` the delete goes ahead as usual; to use it after a refusal, re-run the same command with `--self` added. Other agents are deleted as usual. Outside an agent container `--self` has no effect. Also applies with `--cleanup-only`.
-    - `-f, --force`: Remove the agent from the Hub even when its Runtime Broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the Runtime Broker (containers, worktrees) may need separate cleanup on that Runtime Broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). `--force` does not override a Runtime Broker that holds a different run of the agent than the Hub recorded: the Hub refuses that delete with `409 conflict` and keeps the agent (see [`DELETE /agents/:id`](/scion/reference/api/)).
+    - `-f, --force`: Remove the agent from the Hub even when its Runtime Broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the Runtime Broker (containers, worktrees) may need separate cleanup on that Runtime Broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). When the Runtime Broker holds a different run of the agent than the Hub recorded, `--force` deletes the run it holds and then removes the agent; if the reported run is not a valid run ID, or that delete fails for any reason, including yet another run holding the agent by then (`409 conflict`), the Hub keeps the agent (see [`DELETE /agents/:id`](/scion/reference/api/)).
 
 The Hub may answer `202` when teardown is still running (see [`DELETE /agents/:id`](/scion/reference/api/)). The CLI then polls the agent every 2 seconds for up to 180 seconds. It removes the local worktree only after the Hub confirms the delete:
 - **Delete failed:** the worktree is kept and the command exits non-zero.
@@ -1157,6 +1161,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 Hub-only commands (require an enabled Hub):
 
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
+    - The template may also be a directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name` or `../name`). That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
 - `status`: Show the sync status of templates relative to the Hub.
 

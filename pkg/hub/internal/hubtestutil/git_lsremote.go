@@ -37,15 +37,17 @@ var errGitLsRemoteDisabled = errors.New("pkg/hub tests: real git ls-remote is di
 // with no deadline, ptone/scion#3670). Called from TestMain; returns a restore
 // func.
 func InstallHermeticGitLsRemote() (restore func()) {
-	return config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	return config.SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errGitLsRemoteDisabled
 	})
 }
 
-// GitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
+// GitLsRemoteStub records the repo URLs and tokens passed to a stubbed
+// ls-remote runner.
 type GitLsRemoteStub struct {
-	mu   sync.Mutex
-	urls []string
+	mu     sync.Mutex
+	urls   []string
+	tokens []string
 }
 
 // URLs returns a copy of the repo URLs the stub was called with.
@@ -53,6 +55,13 @@ func (s *GitLsRemoteStub) URLs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.urls...)
+}
+
+// Tokens returns a copy of the tokens the stub was called with, in call order.
+func (s *GitLsRemoteStub) Tokens() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.tokens...)
 }
 
 // StubGitLsRemote makes pkg/config's git ls-remote runner return the canned
@@ -65,9 +74,10 @@ func (s *GitLsRemoteStub) URLs() []string {
 func StubGitLsRemote(t *testing.T, output string) *GitLsRemoteStub {
 	t.Helper()
 	stub := &GitLsRemoteStub{}
-	restore := config.SetGitLsRemoteForTest(func(_ context.Context, repoURL string) ([]byte, error) {
+	restore := config.SetGitLsRemoteForTest(func(_ context.Context, repoURL, token string) ([]byte, error) {
 		stub.mu.Lock()
 		stub.urls = append(stub.urls, repoURL)
+		stub.tokens = append(stub.tokens, token)
 		stub.mu.Unlock()
 		return []byte(output), nil
 	})
