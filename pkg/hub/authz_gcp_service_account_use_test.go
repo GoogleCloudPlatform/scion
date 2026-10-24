@@ -25,10 +25,11 @@
 // Step 10 for gcp_service_account.use is the account's parent ceiling
 // (applyResourceParentCeiling): the source recorded on the agent's
 // assignment must currently hold gcp_service_account.assign on the exact
-// account. Allow cases below therefore seed that state (via
-// seedUseParentProof): post-backfill, a stored assign-mode agent, the
-// account row, and an assignment recorded from a project member. The
-// handler-level composition and the parent ceiling's deny cases are in
+// account, and the agent's chain must pass the chain check of recorded
+// state (parentCeilingChainDeny). Allow cases below therefore seed that
+// state (via seedUseParentProofWithEdge): post-backfill, a stored
+// assign-mode agent with a recorded delegation edge, the account row, and
+// an assignment recorded from a project member. The handler-level composition and the parent ceiling's deny cases are in
 // handlers_gcp_identity_mint_authority_test.go and sa_parent_ceiling_test.go.
 // Deny cases here are decided before step 10 and hold in either state.
 package hub
@@ -44,17 +45,43 @@ import (
 )
 
 // seedUseParentProof makes the parent ceiling of gcp_service_account.use
-// hold for agentID on saID: it marks the delegation-edge backfill complete
-// (production state), stores the project and a verified project-scoped
-// account row with that ID when missing (created by a stranger, so no owner
-// shortcut decides), stores the agent in assign mode for the account (or
-// points an existing agent at it), and records the agent's assignment from
-// an active project member, who holds gcp_service_account.assign. No role
-// gains gcp_service_account.use.
+// hold for agentID on saID, in production state: it marks the
+// delegation-edge backfill complete and then seeds seedUseParentProofState.
+// It writes no delegation edge, so after the backfill the chain check of
+// recorded state denies until the caller records the agent's chain (see
+// seedUseParentProofWithEdge).
 func seedUseParentProof(t *testing.T, s store.Store, agentID, projectID, saID string) {
 	t.Helper()
-	ctx := context.Background()
 	setBackfillCompleted(t, s)
+	seedUseParentProofState(t, s, agentID, projectID, saID)
+}
+
+// seedUseParentProofWithEdge is seedUseParentProof plus the agent's own
+// delegation edge, recorded from the assigner (useAssignerID) as an
+// interactive create records it.
+func seedUseParentProofWithEdge(t *testing.T, s store.Store, agentID, projectID, saID string) {
+	t.Helper()
+	seedUseParentProof(t, s, agentID, projectID, saID)
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, useAssignerID(agentID), store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+}
+
+// useAssignerID is the project member seedUseParentProofState records as
+// the source of agentID's assignment.
+func useAssignerID(agentID string) string {
+	return tid("use-assigner-" + agentID)
+}
+
+// seedUseParentProofState stores the project and a verified project-scoped
+// account row with saID when missing (created by a stranger, so no owner
+// shortcut decides), stores the agent in assign mode for the account (or
+// points an existing agent at it), and records the agent's assignment from
+// an active project member (useAssignerID), who holds
+// gcp_service_account.assign. No role gains gcp_service_account.use. It
+// leaves the delegation-edge backfill marker as it is and writes no edge.
+func seedUseParentProofState(t *testing.T, s store.Store, agentID, projectID, saID string) {
+	t.Helper()
+	ctx := context.Background()
 	if _, err := s.GetProject(ctx, projectID); err != nil {
 		if err := s.CreateProject(ctx, &store.Project{
 			ID: projectID, Name: projectID, Slug: "slug-" + projectID, Created: time.Now(), Updated: time.Now(),
@@ -72,7 +99,7 @@ func seedUseParentProof(t *testing.T, s store.Store, agentID, projectID, saID st
 			t.Fatalf("CreateGCPServiceAccount: %v", err)
 		}
 	}
-	assigner := tid("use-assigner-" + agentID)
+	assigner := useAssignerID(agentID)
 	createDCUser(t, s, assigner, assigner+"@test.com", projectID, store.ProjectRoleMember)
 	identity := &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: saID}
 	agent, err := s.GetAgent(ctx, agentID)
@@ -104,7 +131,7 @@ func TestGCPServiceAccountUse_MatchingScopeAdmits(t *testing.T) {
 	saX := tid("sa-x")
 	agentID, projectID := tid("agent-match"), tid("project-match")
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
-	seedUseParentProof(t, s, agentID, projectID, saX)
+	seedUseParentProofWithEdge(t, s, agentID, projectID, saX)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
@@ -263,10 +290,10 @@ func TestGCPServiceAccountUse_ScopeAndParentKindUnrelated(t *testing.T) {
 	saID := tid("sa-any-scope")
 	agentID, projectID := tid("agent-anyscope"), tid("project-anyscope")
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saID)})
-	seedUseParentProof(t, s, agentID, projectID, saID)
+	seedUseParentProofWithEdge(t, s, agentID, projectID, saID)
 
 	// Step 10 (the parent ceiling) loads the stored account by ID, which
-	// seedUseParentProof stored project-scoped in the agent's own project,
+	// seedUseParentProofWithEdge stored project-scoped in the agent's own project,
 	// so it admits all three shapes alike; the shapes vary only what steps
 	// 1-9 see. The project-scoped shape uses the agent's own project so the
 	// request is not cross-project -- a fact about project admission, not
@@ -297,7 +324,7 @@ func TestGCPServiceAccountUse_ExplainNamesPermission(t *testing.T) {
 	saX := tid("sa-explain")
 	agentID, projectID := tid("agent-explain"), tid("project-explain")
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
-	seedUseParentProof(t, s, agentID, projectID, saX)
+	seedUseParentProofWithEdge(t, s, agentID, projectID, saX)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
@@ -371,7 +398,7 @@ func TestGCPServiceAccountUse_IndependentGrantStillRestricted(t *testing.T) {
 
 	// The agent's JWT names SA X, not SA Y.
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
-	seedUseParentProof(t, s, agentID, projectID, saX)
+	seedUseParentProofWithEdge(t, s, agentID, projectID, saX)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),

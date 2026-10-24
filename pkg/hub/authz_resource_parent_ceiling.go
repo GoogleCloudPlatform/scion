@@ -406,7 +406,7 @@ func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m Resourc
 		return parentCeilingDenyDecision(decision, DenyCauseCeilingError,
 			"parent ceiling: the principal is not an agent identity", ParentProof{Permission: m.ParentPermission})
 	}
-	if cause, reason, adoptable := a.parentCeilingChainDeny(ctx, agent, m.DecisionPermission); cause != "" {
+	if deny, cause, reason, adoptable := a.parentCeilingChainDeny(ctx, agent, m.DecisionPermission); deny {
 		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Permission: m.ParentPermission})
 		decision.adoptionRemediable = cause == DenyCauseCeilingUnrecorded && adoptable
 		return decision
@@ -433,50 +433,65 @@ func parentCeilingDenyDecision(decision Decision, cause DenyCause, reason string
 	return decision
 }
 
-// parentCeilingChainDeny keeps, under a resource parent ceiling, the one
-// chain property every permission in recordedProvenanceRequired has: an
-// unrecorded hop never allows it. The parent ceiling reads the agent's
-// recorded assignment, not its delegation chain, so without this check a
-// legacy agent whose own edge was never recorded would be admitted once its
-// assignment was re-recorded by a live assigner.
+// parentCeilingChainDeny keeps, under a resource parent ceiling, the chain
+// states the delegation chain check (walkDelegationChainHops) denies from
+// what the chain recorded, so that the parent ceiling never admits a chain
+// the chain check refuses for its recorded state. In particular an
+// unrecorded hop never allows a permission in recordedProvenanceRequired.
+// The parent ceiling reads the agent's recorded assignment, not its
+// delegation chain, so without this check a legacy agent whose own edge was
+// never recorded would be admitted once its assignment was re-recorded by a
+// live assigner.
 //
 // It walks the agent's active delegation edges in its own project, from the
 // agent up to the first user delegator, and reads only what each hop
 // recorded. It never asks whether a delegator holds the permission: the
-// parent ceiling replaces that question. It returns a non-empty cause to
-// deny, and adoptable for a ceiling_unrecorded deny that delegation
+// parent ceiling replaces that question. It returns deny with a cause and a
+// reason, and adoptable for a ceiling_unrecorded deny that delegation
 // adoption can address (see unrecordedHopNote). In order, per hop:
 //   - an edge lookup error, a cycle, a chain deeper than
 //     maxDelegationDepth, an agent with no project, a ceiling kind or
 //     delegator type this binary does not know: ceiling_error;
-//   - no active edge: no deny. There is no recorded hop to read; the parent
-//     ceiling's recorded assignment is the proof. The chain check also
-//     admits a hub-attested agent with no edge before the edge backfill;
+//   - no active edge: the chain check's no-edge rule, exactly. A
+//     permission in legacyChainExcludedPermissions denies with
+//     ceiling_unrecorded. Otherwise the missing edge is admitted only for
+//     the agent's own edge (depth 0), only for a hub-attested identity, and
+//     only while the delegation edge backfill has not completed; the
+//     recorded assignment is then the proof. After the backfill, at
+//     depth > 0 (an agent delegator with no active edge, for example a
+//     soft-deleted parent), or for an identity that is not hub-attested, it
+//     denies with the chain check's reason and its cause, which is empty
+//     (no dedicated classification). The chain check's post-backfill
+//     allowance for registered non-sensitive reads does not apply: no
+//     permission with a parent ceiling is a read (ResourceParentCeilingFor);
 //   - more than one active edge: ceiling_provenance_ambiguous;
 //   - a migration-sentinel edge: ceiling_orphaned, the cause the chain check
 //     gives it for a permission that is not a registered read;
+//   - an edge with local development provenance, when dev authority is not
+//     enabled on this server or the delegator is not user:DevUserID:
+//     ceiling_source_not_allowed, as hopEffectCeilingDenyFor gives it;
 //   - an unrecorded edge (unrecorded kind, or a provenance version this
 //     binary does not understand): ceiling_unrecorded, with the chain
 //     check's reason.
-func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentIdentity, permissionID string) (DenyCause, string, bool) {
+func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentIdentity, permissionID string) (deny bool, cause DenyCause, reason string, adoptable bool) {
 	scopeID := agent.ProjectID()
 	if scopeID == "" {
-		return DenyCauseCeilingError, "delegation ceiling: the agent has no project scope", false
+		return true, DenyCauseCeilingError, "delegation ceiling: the agent has no project scope", false
 	}
 	visited := make(map[string]bool, maxDelegationDepth+1)
 	delegateID := agent.ID()
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
-			return DenyCauseCeilingError, "delegation chain exceeded maximum depth", false
+			return true, DenyCauseCeilingError, "delegation chain exceeded maximum depth", false
 		}
 		if visited[delegateID] {
-			return DenyCauseCeilingError, "delegation chain contains a cycle", false
+			return true, DenyCauseCeilingError, "delegation chain contains a cycle", false
 		}
 		visited[delegateID] = true
 
 		edges, err := a.getCachedDelegationEdges(ctx, store.DelegationPrincipalAgent, delegateID)
 		if err != nil {
-			return DenyCauseCeilingError, "delegation ceiling check failed (fail-closed): delegation edge lookup failed", false
+			return true, DenyCauseCeilingError, "delegation ceiling check failed (fail-closed): delegation edge lookup failed", false
 		}
 		var active []*store.DelegationEdge
 		for _, e := range filterEdgesByScope(edges, store.RoleScopeProject, scopeID) {
@@ -486,36 +501,59 @@ func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentId
 		}
 		switch len(active) {
 		case 0:
-			return "", "", false
+			return a.parentCeilingMissingEdge(ctx, agent, permissionID, delegateID, depth)
 		case 1:
 		default:
-			return DenyCauseCeilingProvenanceAmbiguous,
+			return true, DenyCauseCeilingProvenanceAmbiguous,
 				fmt.Sprintf("multiple active delegation edges for agent:%s (fail-closed on invariant violation)", delegateID), false
 		}
 		edge := active[0]
 		if isMigrationSentinel(edge) {
-			return DenyCauseCeilingOrphaned,
+			return true, DenyCauseCeilingOrphaned,
 				fmt.Sprintf("migration-provenance delegation permits registered non-sensitive reads only; %s denied", permissionID), false
+		}
+		if hasDevLocalProvenance(edge) {
+			if !a.devLocalAuthorityEnabled() {
+				return true, DenyCauseCeilingSourceNotAllowed, "delegation ceiling: " + reasonDevLocalDisabled, false
+			}
+			if edge.DelegatorType != store.DelegationPrincipalUser || edge.DelegatorID != DevUserID {
+				return true, DenyCauseCeilingSourceNotAllowed, "delegation ceiling: local development provenance with another delegator", false
+			}
 		}
 		if hopUnrecorded(edge) {
 			var note unrecordedHopNote
 			a.logUnrecordedHop(&note, DenyCauseCeilingUnrecorded, edge, permissionID)
-			return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), note.adoptable
+			return true, DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), note.adoptable
 		}
 		switch edge.Kind {
 		case store.EffectCeilingPrincipal, store.EffectCeilingBounded:
 		default:
-			return DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported ceiling kind", edge.ID), false
+			return true, DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported ceiling kind", edge.ID), false
 		}
 		switch edge.DelegatorType {
 		case store.DelegationPrincipalUser:
-			return "", "", false
+			return false, "", "", false
 		case store.DelegationPrincipalAgent:
 			delegateID = edge.DelegatorID
 		default:
-			return DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), false
+			return true, DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), false
 		}
 	}
+}
+
+// parentCeilingMissingEdge is parentCeilingChainDeny's rule for a delegate
+// with no active edge at depth. It is the no-edge branch of
+// walkDelegationChainHops, with the same causes and reasons, less the
+// registered-read allowance (see parentCeilingChainDeny).
+func (a *AuthzService) parentCeilingMissingEdge(ctx context.Context, agent AgentIdentity, permissionID, delegateID string, depth int) (bool, DenyCause, string, bool) {
+	if legacyChainExcludedPermissions[permissionID] {
+		return true, DenyCauseCeilingUnrecorded,
+			fmt.Sprintf("no delegation edge for agent:%s: %s requires a recorded delegation", delegateID, permissionID), false
+	}
+	if depth == 0 && AncestryIsHubAttested(agent) && !a.backfillCompleted(ctx) {
+		return false, "", "", false
+	}
+	return true, "", fmt.Sprintf("no delegation edge for agent:%s (no delegated authority)", delegateID), false
 }
 
 // decideStoredAgentServiceAccountUse decides gcp_service_account.use for a
@@ -527,9 +565,9 @@ func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentId
 // checks stand in for them: the agent's applied identity is in assign mode
 // for exactly this account, and the account passes the same admissibility
 // rule as the token mint (resolveCurrentSA). Step 10 is Decide's own
-// (applyResourceParentCeiling): the unrecorded-hop check, then the
-// account's parent ceiling. The decision is always audited, allow or deny,
-// as Decide audits a step-10 parent-ceiling decision.
+// (applyResourceParentCeiling): the chain check of recorded state, then
+// the account's parent ceiling. The decision is always audited, allow or
+// deny, as Decide audits a step-10 parent-ceiling decision.
 func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, agent *store.Agent, sa *store.GCPServiceAccount) Decision {
 	if a == nil || agent == nil || sa == nil {
 		return Decision{Allowed: false, Reason: "invalid stored-agent use request", DeniedBy: DeniedByDelegationCeiling, DenyCause: DenyCauseCeilingError}

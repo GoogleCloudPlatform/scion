@@ -1281,9 +1281,11 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// check: the recorded source must live-hold the parent permission on
 	// the exact resource, within the recorded effect ceiling. The chain
 	// check would ask whether each delegator holds the decision permission
-	// itself, which no delegator does by design. An unrecorded hop on the
-	// agent's own chain still denies such a permission first
-	// (parentCeilingChainDeny). The parent ceiling is the only proof for
+	// itself, which no delegator does by design. The chain states the chain
+	// check denies from what was recorded (an unrecorded or sentinel hop,
+	// local development provenance this server does not admit, a missing
+	// edge after the backfill or above the agent) still deny such a
+	// permission first (parentCeilingChainDeny). The parent ceiling is the only proof for
 	// such a permission, so an agent-kind principal whose identity is not
 	// an AgentIdentity denies here instead of passing unchecked.
 	if m, ok := ResourceParentCeilingFor(permissionID); ok && decision.Allowed && isAgentPrincipal(principal.Kind) {
