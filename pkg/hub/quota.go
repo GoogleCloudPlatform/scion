@@ -239,6 +239,14 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 // so when created is true; otherwise they would release a reservation an
 // earlier call made.
 func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) (created bool, err error) {
+	// A reservation needs a subject. A limit counted across subjects counts
+	// its whole scope whatever the subject, so a resource with no subject
+	// (an agent with no recorded creator) is recorded under the scope ID;
+	// no binding names a scope ID, so its cap is the default, as for an
+	// empty subject.
+	if subjectID == "" && countsAcrossSubjects(limitName) {
+		subjectID = scopeID
+	}
 	// 1. Look up LimitDefinition by name.
 	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
 	if err != nil {

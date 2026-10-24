@@ -56,7 +56,17 @@ func (s *Server) checkAndReserveProjectQuota(ctx context.Context, agent *store.A
 	if s.quotaService == nil || agent == nil || agent.ProjectID == "" {
 		return false, nil
 	}
-	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerProject, agent.CreatedBy, store.QuotaScopeProject, agent.ProjectID, agent.ID)
+	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerProject, projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
+}
+
+// projectQuotaSubject is the subject of agent's project reservation: its
+// creator, or for an agent with no recorded creator its project ID (a
+// reservation needs a subject; see QuotaService.Reserve).
+func projectQuotaSubject(agent *store.Agent) string {
+	if agent.CreatedBy != "" {
+		return agent.CreatedBy
+	}
+	return agent.ProjectID
 }
 
 // releaseProjectQuota releases agent's max_agents_per_project reservation,
@@ -245,7 +255,7 @@ func (s *Server) reassertProjectReservation(ctx context.Context, agent *store.Ag
 func (s *Server) recordProjectReservationUnchecked(ctx context.Context, limitDefID string, agent *store.Agent) (bool, error) {
 	_, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
 		LimitDefinitionID: limitDefID,
-		SubjectID:         agent.CreatedBy,
+		SubjectID:         projectQuotaSubject(agent),
 		ScopeType:         store.QuotaScopeProject,
 		ScopeID:           agent.ProjectID,
 		ResourceID:        agent.ID,
