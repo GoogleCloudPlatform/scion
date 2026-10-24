@@ -53,7 +53,7 @@ This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the
 2. **Database.** Otherwise a value an admin saved through the admin API or UI is used, even when `settings.yaml` also sets one. A stale bootstrap file therefore does not override a value managed in the UI. Rows the Hub seeds from bootstrap material at startup do not count as saved values, and a save that leaves the Public URL unchanged (or sends back the value shown) does not store it. A public URL stored by a save in an earlier release stays in effect until an admin clears it.
 3. **File.** Otherwise the `settings.yaml` value applies, then the existing fallbacks.
 
-The endpoint resolved this way is the Hub endpoint everywhere it is used: the URL dispatched agents receive (unless `server.hub.agent_endpoint` is set), invite links, chat-bridge settings, the `hub.endpoint` written into hub-managed project settings, the broker join response, the OIDC issuer default and the `cloudrun_invoker` transport audience default.
+The endpoint resolved this way is the Hub endpoint everywhere it is used: the URL dispatched agents receive (unless `server.hub.agent_endpoint` is set), invite links, chat-bridge settings, the `hub.endpoint` written into hub-managed project settings, the broker join response, the OIDC issuer default and the `cloudrun_invoker` transport audience default. The web server's base URL (OAuth redirect base, session cookie `Secure` flag, and browser config) is resolved separately at startup from operator inputs only and never reads the settings database; see [Web Base URL](/scion/reference/server-config/#web-base-url).
 
 - **Restart required.** A save is stored at once and listed in the save report's `pending_restart`. The Hub picks it up at the next restart.
 - **Validation.** A value saved in the database must be an absolute URL of the form `scheme://host[:port]`: `https`, or `http` only for `localhost` or a loopback address; a host; no user credentials, query, fragment or path. A trailing `/` is removed. The admin API rejects anything else with `422 validation_error` naming `server.hub.public_url`. At startup an invalid database value is logged as an error and not used; the operator-configured endpoint applies instead. Values from the environment, flags and `settings.yaml` keep their existing handling.
@@ -65,7 +65,7 @@ The environment variable for this key is `SCION_SERVER_HUB_ENDPOINT`, and its se
 
 ### Hot reload vs restart
 
-- **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
+- **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. Live applies are ordered by a store-wide revision so an older snapshot never overwrites a newer one. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
 - **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 
 Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled` and `telemetry.enabled`. Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
@@ -100,7 +100,7 @@ A database-backed save (`PUT /api/v1/admin/server-config`) returns a `reload` ob
 | `file_applied` | Workstation Hubs: the `settings.yaml` changes applied live (also listed in `applied`). |
 | `requires_restart` | Workstation Hubs: the `settings.yaml` changes that need a restart. |
 
-A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. When the running Hub cannot use a saved change, the key is listed in `skipped` instead of `applied_keys`: `server.notification_channels` when a notification channel fails validation (the reason gives the channel's position; the channels that pass validation are in use), and the changed `server.federation.*` keys when the federation configuration is not installed: it fails validation, its authenticator cannot be built, or the test admin tier is on. A reason never repeats a configured value. The Server Config page lists these keys under **Saved but not applied**.
+A key is listed in `applied_keys` or `pending_restart` only when its value changed. An echoed `server.hub.hub_name` equal to the hub name in effect (the bootstrap value when no `endpoints` row is stored yet) is not a change and is not listed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. When the running Hub cannot use a saved change, the key is listed in `skipped` instead of `applied_keys`: `server.notification_channels` when a notification channel fails validation (the reason gives the channel's position; the channels that pass validation are in use), and the changed `server.federation.*` keys when the federation configuration is not installed: it fails validation, its authenticator cannot be built, or the test admin tier is on. A reason never repeats a configured value. The Server Config page lists these keys under **Saved but not applied**.
 
 A `409 revision_conflict` response covers the sections written before the conflict:
 
@@ -110,6 +110,8 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `unchanged_revisions` | Current revisions of sections the request sent unchanged; they were not written. |
 | `conflicted` | The section that conflicted, with its expected and current revision. |
 | `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
+
+When a save hits `409 revision_conflict` after earlier sections were written, the Server Config conflict banner also lists the keys saved before the conflict: `applied_keys` under **Applied now**, `pending_restart` under **Saved; applies after restart**, and `skipped` under **Saved but not applied**.
 
 ### Layer-0 edits by deployment mode
 
@@ -347,7 +349,7 @@ The admin UI provides structured feedback on save:
 |----------|-------------|
 | **200** | Success; shows ignored-keys notice if applicable |
 | **400** `validation_failed` | Inline per-section validation errors |
-| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
+| **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button, listing any keys saved before the conflict (`applied_keys`, `pending_restart`, and `skipped`) |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
 | **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |

@@ -38,15 +38,17 @@ import (
 // (?cursor, or ?pageToken where the endpoint uses that name) to every hub
 // list endpoint whose cursor reaches an entadapter cursor decoder
 // (decodeListCursor, decodeCursor, decodeConstraintCursor, or a UUID ID
-// cursor) and asserts 400, never 500 (ptone/scion#1957). Some endpoints
+// cursor) and asserts 400, never 500 (ptone/scion#1957), with the one
+// invalid_cursor answer every list gives (ptone/scion#3062). Some endpoints
 // validate or unseal the cursor before the store sees it; others (runtime
 // brokers, skills, messages, schedules, admin invites, access constraints)
 // hand it straight to the store, which is where the decoders'
-// store.ErrInvalidInput wrapping matters. Not listed: endpoints backed by
+// store.ErrInvalidCursor wrapping matters. Not listed: endpoints backed by
 // ListUsers (users, admin allow-list), whose numeric offset cursor ignores
 // unparseable input by design, and the access-constraint principals and
-// audit-history pageTokens, which the hub decodes itself and already rejects
-// with 400.
+// audit-history pageTokens, which the hub decodes itself
+// (TestConstraintAuditHistory_InvalidTokensFailBeforeHistoryQuery covers
+// the audit one).
 func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -137,6 +139,7 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 				}
 				assert.Equal(t, http.StatusBadRequest, rec.Code,
 					"malformed cursor must be a 400, not a %d; body: %s", rec.Code, rec.Body.String())
+				assertInvalidCursorBody(t, rec)
 			})
 		}
 	}
@@ -151,4 +154,5 @@ func TestAdminInvitesList_UnknownCursorReturns400(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/invites?"+url.Values{"cursor": {uuid.NewString()}}.Encode(), nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assertInvalidCursorBody(t, rec)
 }

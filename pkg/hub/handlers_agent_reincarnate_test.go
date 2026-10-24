@@ -1182,8 +1182,9 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
 		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
 	})
+	prevOverlay := config.GetGlobalSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prevOverlay) })
 
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -5355,7 +5356,8 @@ func TestReincarnateAgent_AC2b_HubDefaultHarnessConfigStillApplies(t *testing.T)
 // caller computes.
 func TestReincarnateAgent_AC2b_CreateInputsHarnessConfigEmptyWhenNotExplicit(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	srv, s, project, _ := setupReincarnateTestServer(t, disp)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	giveProviderCheckout(t, s, project.ID, broker.ID)
 
 	project.Annotations = map[string]string{"scion.io/default-harness-config": "project-default-hc"}
 	require.NoError(t, s.UpdateProject(context.Background(), project))
@@ -5538,7 +5540,8 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			disp := newReincarnateTestDispatcher()
-			srv, s, project, _ := setupReincarnateTestServer(t, disp)
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			giveProviderCheckout(t, s, project.ID, broker.ID)
 
 			if len(tc.projectAnnotations) > 0 {
 				project.Annotations = tc.projectAnnotations

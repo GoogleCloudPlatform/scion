@@ -60,6 +60,8 @@ var migrationEntities = []string{
 	"GCPServiceAccount",
 	"GithubInstallation",
 	"HarnessConfig",
+	"HubEncryptionMigration",
+	"HubEncryptionPolicy",
 	"InviteCode",
 	"MaintenanceOperation",
 	"MaintenanceOperationRun",

@@ -280,9 +280,20 @@ func (d *attachmentDelivery) Plan(ctx context.Context, recipient *store.Agent, d
 			e.State = messages.AttachmentDeliverable
 			e.InboxPath = attachmentInboxPath(del.MessageID, name)
 		}
+		applyProjection(&e)
 		plan = append(plan, e)
 	}
 	return plan
+}
+
+// applyProjection copies the delivery's scratchpad projection
+// (ptone/scion#5830) onto plan entry e, which the envelope lists after the
+// inbox path; a withheld recipient is told nothing about the attachment.
+func applyProjection(e *messages.AttachmentPlanEntry) {
+	if e.State == messages.AttachmentWithheld {
+		return
+	}
+	e.ProjectedPath, e.ProjectedMount = e.Delivery.ProjectedPath, e.Delivery.ProjectedMount
 }
 
 // Issue returns the wire attachments of plan for one dispatch attempt to

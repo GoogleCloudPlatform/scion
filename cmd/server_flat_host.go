@@ -309,7 +309,6 @@ type flatHostParams struct {
 	instances      []config.V1RuntimeBrokerInstanceConfig
 	hubEndpoint    string
 	hubEndpointSrc hubEndpointSource
-	devAuthToken   string
 	settings       *config.Settings
 	globalDir      string
 	autoProvide    bool
@@ -398,7 +397,6 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		cfg:                     cfg,
 		mode:                    mode,
 		hubEndpoint:             hubEndpointForRH,
-		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
@@ -582,6 +580,16 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	if _, err := records.ReconcileAbsent(objects, absent, slog.Warn); err != nil {
 		return fmt.Errorf("ownership records cannot be reconciled with the execution scope: %w", err)
 	}
+	// Records of creates that failed before their agent existed, older
+	// builds' included, are retired when their files are proven absent
+	// (ptone/scion#5768).
+	targetType := ""
+	if c.Instance.RuntimeTarget != nil {
+		targetType = c.Instance.RuntimeTarget.Type
+	}
+	if _, err := records.RetireAbandonedRecords(runtimebroker.OwnershipFilesProof(targetType), slog.Warn); err != nil {
+		return fmt.Errorf("ownership records of failed creates cannot be retired: %w", err)
+	}
 	problems, err := records.RepairSlugIndex()
 	if err != nil {
 		return fmt.Errorf("ownership records cannot be read: %w", err)
@@ -620,7 +628,6 @@ type flatServerShared struct {
 	cfg                     *config.GlobalConfig
 	mode                    brokerhost.Mode
 	hubEndpoint             string
-	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	// workspaceLocks is the one process-wide workspace lock service every
@@ -672,7 +679,6 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubOn,
-		HubToken:             sh.devAuthToken,
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 

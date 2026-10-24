@@ -97,14 +97,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    8, // R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    8, // R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -147,21 +147,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    10, // R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    11, // R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    8, // R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    6, // R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 		{
@@ -364,6 +364,8 @@ func projectOwnerPermissionIDs() []string {
 		// project.register are hub-level operations (enforced against hub
 		// scope, not the bound project) and are excluded from project-scoped
 		// roles.
+		// project.chat_post: post into the project's chat threads.
+		"project.chat_post",
 		"project.delete",
 		"project.list",
 		"project.manage",
@@ -453,6 +455,7 @@ func projectAdminPermissionIDs() []string {
 		"harness_config.read",
 		"harness_config.update",
 		// Project management (no delete, no hub-level create/clone/register)
+		"project.chat_post",
 		"project.list",
 		"project.manage",
 		"project.manage_visitors",
@@ -514,7 +517,10 @@ func projectMemberCuratedPermissionIDs() []string {
 		"harness_config.create",
 		"harness_config.list",
 		"harness_config.read",
-		// Project (read, list — no project.create, which is hub-level)
+		// Project (read, list and chat posting — no project.create, which
+		// is hub-level). project.chat_post lets a member post into the
+		// project's chat threads; a role with project.read alone reads them.
+		"project.chat_post",
 		"project.list",
 		"project.read",
 		// Scheduled events (create, read, list)
@@ -928,9 +934,10 @@ func hubAdminPermissionIDs() []string {
 		"role_binding.create": true,
 		"role_binding.delete": true,
 		// Project oversight
-		"project.read":   true,
-		"project.list":   true,
-		"project.update": true,
+		"project.read":      true,
+		"project.list":      true,
+		"project.update":    true,
+		"project.chat_post": true,
 		// Project visitor grants (ptone/scion#4603). Granting and changing
 		// a grant's window also need every permission of the
 		// project-visitor role on the project (non-amplification).

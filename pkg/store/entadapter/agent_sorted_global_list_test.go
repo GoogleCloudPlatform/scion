@@ -276,12 +276,14 @@ func TestListAgents_SortedRejectsLegacyCursor(t *testing.T) {
 		Cursor: legacy.NextCursor, CursorBinding: "b",
 	})
 	require.ErrorIs(t, err, store.ErrInvalidInput, "legacy cursor alone in sorted mode")
+	require.ErrorIs(t, err, store.ErrInvalidCursor, "legacy cursor alone in sorted mode")
 
 	_, err = s.ListAgents(ctx, filter, store.ListOptions{
 		Limit: 1, SortBy: agentsort.Created, SortDir: agentsort.Desc,
 		Cursor: legacy.NextCursor, SortCursor: &sortCur, CursorBinding: "b",
 	})
 	require.ErrorIs(t, err, store.ErrInvalidInput, "legacy cursor together with SortCursor")
+	require.ErrorIs(t, err, store.ErrInvalidCursor, "legacy cursor together with SortCursor")
 }
 
 // TestCountAgentsByPhaseIDs_MatchesFilterAndPhases pins CountAgentsByPhaseIDs'
