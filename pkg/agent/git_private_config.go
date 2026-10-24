@@ -32,6 +32,11 @@ import (
 // defining a security boundary.
 const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 
+// tmpConfigClose closes the written temp config before the rename. It is a
+// package var only so a test can inject a close error and confirm the write path
+// fails closed; it is otherwise exactly (*os.File).Close.
+var tmpConfigClose = func(f *os.File) error { return f.Close() }
+
 // seedPrivateGitConfig writes a per-agent private copy of the repository's
 // .git/config into the agent's (broker-owned, agent-scoped) state dir and
 // returns its path, for the runtime to bind read-only as a single file over the
@@ -47,11 +52,6 @@ const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 // The returned path is always a fresh, broker-written regular file: any stale
 // file (including one an earlier agent run left, or a symlink) is replaced by the
 // rename.
-// tmpConfigClose closes the written temp config before the rename. It is a
-// package var only so a test can inject a close error and confirm the write path
-// fails closed; it is otherwise exactly (*os.File).Close.
-var tmpConfigClose = func(f *os.File) error { return f.Close() }
-
 func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, error) {
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
@@ -120,8 +120,8 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 		_ = tmp.Close() // write already failed; the close is best-effort and the temp is removed by the deferred cleanup
 		return "", fmt.Errorf("seed private git config: write: %w", err)
 	}
-	// Explicit, checked close before the rename: a close error here means the
-	// written bytes may not be flushed, so fail closed (no rename; the deferred
+	// Explicit, checked close before the rename: a close error here can mean the
+	// written bytes did not reach the file, so fail closed (no rename; the deferred
 	// cleanup removes the temp). tmpConfigClose is a test seam.
 	if err := tmpConfigClose(tmp); err != nil {
 		return "", fmt.Errorf("seed private git config: close: %w", err)
