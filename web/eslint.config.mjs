@@ -261,16 +261,16 @@ export default defineConfig([
     },
   },
 
-  // Client requests go through apiFetch() in src/client/api.ts
-  // (ptone/scion#353): credentials, the hub clock sample and the global
-  // 401/403 handling (or `authErrors: 'caller'` to opt out) live in one
-  // place. A direct fetch() needs an explicit, commented exception
-  // (eslint-disable-next-line ... -- reason). Tests and fixtures stub
-  // fetch and are exempt. src/components and src/utils are not covered
-  // yet (follow-up of ptone/scion#5613).
+  // Requests go through apiFetch() in src/client/api.ts (ptone/scion#353):
+  // credentials, the hub clock sample and the global 401/403 handling (or
+  // `authErrors: 'caller'` to opt out) live in one place. A direct fetch()
+  // needs an explicit, commented exception (eslint-disable-next-line ...
+  // -- reason). Covers all of src: client, components, utils, lib and
+  // shared (ptone/scion#5641). Tests and fixtures stub fetch and are
+  // exempt.
   {
-    files: ['src/client/**/*.ts'],
-    ignores: ['src/client/**/*.test.ts', 'src/client/__fixtures__/**'],
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/**/__fixtures__/**'],
     rules: {
       'no-restricted-globals': [
         'error',
