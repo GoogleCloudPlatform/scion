@@ -24,9 +24,9 @@ import (
 )
 
 // collectedFullPathField is the transfer.FileInfo field that holds a
-// collected file's absolute path. Hub code reads collected files through an
-// os.Root opened at the collected directory (transfer.ReadCollectedFile /
-// OpenCollectedFile, as uploadDirBlobs and uploadResourceFiles do), never
+// collected file's absolute path. The resource uploaders (uploadDirBlobs and
+// uploadResourceFiles) read collected files through an os.Root opened at the
+// collected directory (transfer.ReadCollectedFile / OpenCollectedFile), not
 // by that path.
 const collectedFullPathField = "FullPath"
 
@@ -55,11 +55,13 @@ func checkCollectedFullPathSource(fset *token.FileSet, path string, src any) ([]
 	return problems, nil
 }
 
-// TestCollectedFilesReadThroughRoot is a source guard: no non-test file in
-// pkg/hub (or an area moved out of it) reads a collected entry's FullPath,
-// so every hub reader of collected files goes through an os.Root and the
-// transfer helpers, which check the entry is still a regular file of the
-// collected size and hash.
+// TestCollectedFilesReadThroughRoot is a source guard for one property: no
+// non-test file in pkg/hub (or an area moved out of it) reads a collected
+// entry's FullPath. Code that reads a collected entry by that path is
+// reported, so new uploaders read through an os.Root and the transfer helpers
+// instead. The guard does not cover code that joins a directory with an
+// entry's relative Path; templateBlobResolver.fromDir, dirFileReader and
+// readHarnessConfigYAMLFromDir read that way and are outside this guard.
 func TestCollectedFilesReadThroughRoot(t *testing.T) {
 	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.

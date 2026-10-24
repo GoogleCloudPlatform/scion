@@ -25,11 +25,11 @@ import (
 	"testing"
 )
 
-// TestCollectedReadSites_SymlinkSwapRefused replaces a collected file, or
-// its parent directory, with a symbolic link after collection. The link
-// target has the collected content, so only the regular-file and in-root
-// checks can refuse it.
-func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
+// TestCollectedReadSites_ReplacedByLinkAfterCollectFails replaces a
+// collected file, or its parent directory, with a symbolic link after
+// collection. The link target has the collected content, so only the
+// regular-file and in-root checks can refuse it.
+func TestCollectedReadSites_ReplacedByLinkAfterCollectFails(t *testing.T) {
 	const content = "export A=1\n"
 	for _, site := range collectedReadSites {
 		t.Run(site.name+"/entry", func(t *testing.T) {
@@ -48,7 +48,7 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 			stor := newCollectedReadStorage(t)
 			err := site.upload(context.Background(), stor, root, files)
 			if err == nil {
-				t.Fatalf("%s: upload through a link swapped in after collection succeeded", site.name)
+				t.Fatalf("%s: upload of an entry replaced by a link after collection succeeded", site.name)
 			}
 			if !strings.Contains(err.Error(), "no longer a regular file") {
 				t.Errorf("%s: error %q does not say the entry is no longer a regular file", site.name, err)
@@ -74,7 +74,7 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 			stor := newCollectedReadStorage(t)
 			err := site.upload(context.Background(), stor, root, files)
 			if err == nil {
-				t.Fatalf("%s: upload through an in-root link swapped in after collection succeeded", site.name)
+				t.Fatalf("%s: upload of an entry replaced by an in-root link after collection succeeded", site.name)
 			}
 			if !strings.Contains(err.Error(), "no longer a regular file") {
 				t.Errorf("%s: error %q does not say the entry is no longer a regular file", site.name, err)
@@ -103,11 +103,14 @@ func TestCollectedReadSites_SymlinkSwapRefused(t *testing.T) {
 	}
 
 	// uploadDirBlobs writes one blob per content hash and reads one file
-	// per hash. When the swapped entry shares its hash with another
+	// per hash. When the replaced entry shares its hash with another
 	// collected file, the entry is never opened: the upload succeeds and
 	// stores exactly the collected bytes. The link target here has other
-	// content, so opening it would fail the hash check.
-	t.Run("uploadDirBlobs/swapped entry sharing a collected hash is not opened", func(t *testing.T) {
+	// content, so opening it would fail the hash check. The case depends on
+	// the order of the collected entries: transfer.CollectFiles returns them
+	// sorted by Path, so "copy" comes before "home/.bashrc" and is the file
+	// uploadDirBlobs reads for the shared hash.
+	t.Run("uploadDirBlobs/replaced entry sharing a collected hash is not opened", func(t *testing.T) {
 		site := collectedReadSites[0]
 		if site.name != "uploadDirBlobs" {
 			t.Fatalf("collectedReadSites[0] is %s, want uploadDirBlobs", site.name)

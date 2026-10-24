@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -131,10 +132,12 @@ func TestCollectedReadSites_UploadUnchanged(t *testing.T) {
 				if err != nil {
 					t.Fatalf("download %s: %v", fi.Path, err)
 				}
-				got := make([]byte, fi.Size+1)
-				n, _ := rc.Read(got)
+				got, err := io.ReadAll(rc)
 				_ = rc.Close()
-				if transfer.HashBytes(got[:n]) != fi.Hash {
+				if err != nil {
+					t.Fatalf("read %s: %v", fi.Path, err)
+				}
+				if transfer.HashBytes(got) != fi.Hash {
 					t.Errorf("%s: stored content of %s differs from the collected entry", site.name, fi.Path)
 				}
 			}
