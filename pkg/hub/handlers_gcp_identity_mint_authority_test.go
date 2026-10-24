@@ -14,14 +14,18 @@
 
 //go:build !no_sqlite
 
-// Package hub — ptone/scion#2129 F.2h (first half): the authorization event
-// at every GCP token mint (authorizeAgentGCPMint). Both mint endpoints decide
-// gcp_service_account.use, whose step 10 is the account's parent ceiling (the
+// Package hub — ptone/scion#2129: the authorization event at every GCP
+// token mint (authorizeAgentGCPMint). Both mint endpoints decide
+// gcp_service_account.use. Its step 10 denies an unrecorded hop on the
+// agent's own chain and is otherwise the account's parent ceiling (the
 // recorded assignment source must currently hold gcp_service_account.assign
-// on the exact account, within the recorded effect ceiling), and in enforce
-// mode run actAs for that recorded source. Every test asserts both endpoints
-// and, on a refusal, that the two answers are byte-identical and come from
-// this layer (msgGCPMintNotAuthorized), not from an earlier record check.
+// on the exact account, within the recorded effect ceiling); in enforce mode
+// actAs then runs for that recorded source. Every test asserts both
+// endpoints and, on a refusal, that the two answers are byte-identical and
+// come from this layer (msgGCPMintNotAuthorized), not from an earlier record
+// check. A refusal by the use decision also pins its step-10 cause
+// (assertMintRefusedWithCause), so a deny from another step cannot pass for
+// the one the test names.
 package hub
 
 import (
@@ -33,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +104,38 @@ func requireMintRefusedByAuthority(t *testing.T, srv *Server, token string) {
 	require.Equal(t, access, identity, "both endpoints give the same answer")
 }
 
+// mintUseDecision runs the use decision the mint endpoints make
+// (authorizeAgentGCPMint) for agentID and sa, through srv's AuthzService,
+// with an agent identity whose token names exactly sa.
+func mintUseDecision(t *testing.T, srv *Server, agentID, projectID string, sa *store.GCPServiceAccount) Decision {
+	t.Helper()
+	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(sa.ID)})
+	return srv.authzService.Decide(context.Background(), AuthzRequest{
+		Principal:  principalContextForIdentity(agent),
+		Credential: credentialContextForIdentity(agent),
+		Resource:   gcpServiceAccountResource(sa),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+}
+
+// requireUseDeniedWithCause asserts that d is a step-10 deny with cause.
+func requireUseDeniedWithCause(t *testing.T, d Decision, cause DenyCause) {
+	t.Helper()
+	require.False(t, d.Allowed, "the use decision allows: reason %q", d.Reason)
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "cause=%q reason=%q", d.DenyCause, d.Reason)
+	require.Equal(t, cause, d.DenyCause, "reason %q", d.Reason)
+}
+
+// assertMintRefusedWithCause is assertMintRefusedByAuthority plus the use
+// decision for the fixture agent and account, which must deny at step 10
+// with cause.
+func assertMintRefusedWithCause(t *testing.T, f *gcpMintFixture, cause DenyCause) {
+	t.Helper()
+	assertMintRefusedByAuthority(t, f)
+	requireUseDeniedWithCause(t, mintUseDecision(t, f.Server, f.AgentID, f.ProjectID, f.SA), cause)
+}
+
 func requireMintAllowedOn(t *testing.T, srv *Server, token string) {
 	t.Helper()
 	access, identity := mintProbes(t, srv, token)
@@ -133,7 +170,7 @@ func TestAgentGCPToken_TokenCreatedAgentBoundedByIssuingCeiling(t *testing.T) {
 	}
 
 	f.recordAssignment(t, assigner, uat("agent.create", "agent.read"))
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingEffectExceeded)
 
 	f.recordAssignment(t, assigner, uat("agent.create", "gcp_service_account.assign"))
 	assertMintAllowed(t, f)
@@ -141,14 +178,14 @@ func TestAgentGCPToken_TokenCreatedAgentBoundedByIssuingCeiling(t *testing.T) {
 
 // ---- parent ceiling: refused above the ceiling -----------------------------
 
-// TestAgentGCPToken_CreatorWithoutAssignAuthorityDenied (T-R8-4): the
-// recorded source is an active project principal without assign.
+// TestAgentGCPToken_CreatorWithoutAssignAuthorityDenied: the recorded
+// source is an active project principal without assign.
 func TestAgentGCPToken_CreatorWithoutAssignAuthorityDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "no-assign")
 	noAssign := tid("no-assign-source")
 	scaCreateDelegatorWithoutAssign(t, f.Store, noAssign, "no-assign-source@test.com", f.ProjectID)
 	f.recordAssignment(t, noAssign, nil)
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingDelegatorLacksPermission)
 }
 
 // TestAgentGCPToken_SourceLosesAssignAfterCreationDenied: a mint after the
@@ -162,13 +199,14 @@ func TestAgentGCPToken_SourceLosesAssignAfterCreationDenied(t *testing.T) {
 
 	_, err := f.Store.DeleteRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, assigner)
 	require.NoError(t, err)
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingDelegatorLacksPermission)
 }
 
-// TestAgentGCPToken_DefaultChangeGrantsNoAssignAuthority (T-R8-6): an
-// assignment that came from a configured default records the requester as
-// its source; the default itself grants nothing, so a source without assign
-// is refused whatever the origin says.
+// TestAgentGCPToken_DefaultChangeGrantsNoAssignAuthority: an assignment that
+// came from a configured default records the requester as its source; the
+// default itself grants nothing. For each default origin, a source that
+// holds assign is admitted (so the origin alone never refuses), and a
+// source without assign is refused whatever the origin says.
 func TestAgentGCPToken_DefaultChangeGrantsNoAssignAuthority(t *testing.T) {
 	for _, origin := range []store.SAAssignmentOrigin{
 		store.SAAssignmentOriginCreateProjectDefault,
@@ -178,10 +216,16 @@ func TestAgentGCPToken_DefaultChangeGrantsNoAssignAuthority(t *testing.T) {
 		t.Run(string(origin), func(t *testing.T) {
 			name := strings.ReplaceAll(string(origin), "_", "-")
 			f := newGCPMintFixture(t, "default-"+name)
+			withOrigin := func(a *store.AgentServiceAccountAssignment) { a.Origin = origin }
+
+			assigner := f.addAssigner(t, "default-"+name)
+			f.recordAssignment(t, assigner, withOrigin)
+			assertMintAllowed(t, f)
+
 			noAssign := tid("default-no-assign-" + name)
 			scaCreateDelegatorWithoutAssign(t, f.Store, noAssign, noAssign+"@test.com", f.ProjectID)
-			f.recordAssignment(t, noAssign, func(a *store.AgentServiceAccountAssignment) { a.Origin = origin })
-			assertMintRefusedByAuthority(t, f)
+			f.recordAssignment(t, noAssign, withOrigin)
+			assertMintRefusedWithCause(t, f, DenyCauseCeilingDelegatorLacksPermission)
 		})
 	}
 }
@@ -197,12 +241,12 @@ func TestAgentGCPToken_SourceNotLiveDenied(t *testing.T) {
 		require.NoError(t, err)
 		u.Status = "suspended"
 		require.NoError(t, f.Store.UpdateUser(context.Background(), u))
-		assertMintRefusedByAuthority(t, f)
+		assertMintRefusedWithCause(t, f, DenyCauseCeilingOrphaned)
 	})
 	t.Run("missing", func(t *testing.T) {
 		f := newGCPMintFixture(t, "source-missing")
 		f.recordAssignment(t, tid("source-missing-user"), nil)
-		assertMintRefusedByAuthority(t, f)
+		assertMintRefusedWithCause(t, f, DenyCauseCeilingOrphaned)
 	})
 }
 
@@ -215,25 +259,37 @@ func TestAgentGCPToken_RevokedDelegationDenied(t *testing.T) {
 	_, err := f.Store.DeactivateAgentServiceAccountAssignments(context.Background(), f.AgentID,
 		store.Deactivation{Cause: store.EdgeDeactivationSACleared, OpID: "op-clear"})
 	require.NoError(t, err)
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingProvenanceMissing)
 }
 
 // TestAgentGCPToken_MissingProvenanceDenied: an assignment whose provenance
 // is not recorded, or whose source is not an accepted credential, is
 // refused. No legacy "no row" allowance applies at the mint.
 func TestAgentGCPToken_MissingProvenanceDenied(t *testing.T) {
-	cases := map[string]func(*store.AgentServiceAccountAssignment){
-		"provenance version 0": func(a *store.AgentServiceAccountAssignment) { a.ProvenanceVersion = 0 },
-		"unrecorded ceiling":   func(a *store.AgentServiceAccountAssignment) { a.EffectCeiling = store.EffectCeiling{} },
-		"migration source": func(a *store.AgentServiceAccountAssignment) {
-			a.SourceCredentialKind = store.SourceCredentialSystemMigration
+	cases := map[string]struct {
+		mutate func(*store.AgentServiceAccountAssignment)
+		cause  DenyCause
+	}{
+		"provenance version 0": {
+			func(a *store.AgentServiceAccountAssignment) { a.ProvenanceVersion = 0 },
+			DenyCauseCeilingProvenanceMissing,
+		},
+		"unrecorded ceiling": {
+			func(a *store.AgentServiceAccountAssignment) { a.EffectCeiling = store.EffectCeiling{} },
+			DenyCauseCeilingProvenanceMissing,
+		},
+		"migration source": {
+			func(a *store.AgentServiceAccountAssignment) {
+				a.SourceCredentialKind = store.SourceCredentialSystemMigration
+			},
+			DenyCauseCeilingSourceNotAllowed,
 		},
 	}
-	for name, mutate := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newGCPMintFixture(t, "prov-"+strings.ReplaceAll(name, " ", "-"))
-			f.recordAssignment(t, f.UserID, mutate)
-			assertMintRefusedByAuthority(t, f)
+			f.recordAssignment(t, f.UserID, tc.mutate)
+			assertMintRefusedWithCause(t, f, tc.cause)
 		})
 	}
 }
@@ -244,7 +300,39 @@ func TestAgentGCPToken_AssignmentForAnotherAccountDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "assignment-other-sa")
 	other := wiringSA(t, f.Store, store.ScopeProject, f.ProjectID, "assignment-other@my-gcp-project.iam.gserviceaccount.com")
 	f.recordAssignment(t, f.UserID, func(a *store.AgentServiceAccountAssignment) { a.ServiceAccountID = other.ID })
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingProvenanceStale)
+}
+
+// TestAgentGCPToken_UnrecordedEdgeDeniedDespiteRecordedAssignment: an agent
+// whose own delegation edge was never recorded is refused with the
+// unrecorded cause, even though its assignment was recorded again by a live
+// assigner that holds assign. An unrecorded hop never allows
+// gcp_service_account.use. The same setup with a recorded edge is admitted,
+// so only the edge differs.
+func TestAgentGCPToken_UnrecordedEdgeDeniedDespiteRecordedAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		edge     func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)
+		admitted bool
+	}{
+		{"unrecorded edge", createDCEdge, false},
+		{"recorded edge", seedRecordedDelegationEdge, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "edge-" + strings.ReplaceAll(tc.name, " ", "-")
+			f := newGCPMintFixture(t, name)
+			setBackfillCompleted(t, f.Store)
+			tc.edge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
+				store.RoleScopeProject, f.ProjectID, store.ProjectRoleOwner)
+			assigner := f.addAssigner(t, name)
+			f.recordAssignment(t, assigner, nil)
+			if tc.admitted {
+				assertMintAllowed(t, f)
+				return
+			}
+			assertMintRefusedWithCause(t, f, DenyCauseCeilingUnrecorded)
+		})
+	}
 }
 
 // ---- lookup errors ---------------------------------------------------------
@@ -272,21 +360,45 @@ func (s *mintAuthorityFaultStore) GetUser(ctx context.Context, id string) (*stor
 	return s.Store.GetUser(ctx, id)
 }
 
-// TestAgentGCPToken_AuthorityLookupErrorDenies (T-R8-5): a store fault in
-// the parent ceiling refuses, never 500 and never an allow.
+// TestAgentGCPToken_AuthorityLookupErrorDenies: a store fault in the parent
+// ceiling refuses with ceiling_error, never 500 and never an allow.
 func TestAgentGCPToken_AuthorityLookupErrorDenies(t *testing.T) {
 	t.Run("assignment lookup", func(t *testing.T) {
 		f := newGCPMintFixture(t, "authority-fault-assign")
 		f.Server.authzService.store = &mintAuthorityFaultStore{Store: f.Store, assignments: true}
-		assertMintRefusedByAuthority(t, f)
+		assertMintRefusedWithCause(t, f, DenyCauseCeilingError)
 	})
 	t.Run("source lookup", func(t *testing.T) {
 		f := newGCPMintFixture(t, "authority-fault-source")
 		assigner := f.addAssigner(t, "authority-fault-source")
 		f.recordAssignment(t, assigner, nil)
 		f.Server.authzService.store = &mintAuthorityFaultStore{Store: f.Store, userID: assigner}
-		assertMintRefusedByAuthority(t, f)
+		assertMintRefusedWithCause(t, f, DenyCauseCeilingError)
 	})
+}
+
+// TestAgentGCPToken_ActAsSourceLookupErrorDenies: in enforce mode, a store
+// fault while the Server resolves the recorded source into the actAs caller
+// (parentSourceActAsPrincipal) refuses. The use decision itself allows (the
+// fault is on the Server's store only, not the AuthzService's), so only the
+// actAs layer can refuse, and it does so without calling the checker.
+func TestAgentGCPToken_ActAsSourceLookupErrorDenies(t *testing.T) {
+	f := newGCPMintFixture(t, "actas-source-fault")
+	assigner := f.addAssigner(t, "actas-source-fault")
+	f.recordAssignment(t, assigner, nil)
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(f.SA.Email)
+	enforceSAAssign(f.Server, checker)
+	requireMintAllowedOn(t, f.Server, f.Token)
+	require.NotZero(t, checker.CallCount(), "control: the actAs check runs without the fault")
+	before := checker.CallCount()
+
+	installStoreFault(t, f.Server, func(inner store.Store, _ *storeFaultSwitch) *mintAuthorityFaultStore {
+		return &mintAuthorityFaultStore{Store: inner, userID: assigner}
+	})
+	d := mintUseDecision(t, f.Server, f.AgentID, f.ProjectID, f.SA)
+	require.True(t, d.Allowed, "the use decision does not see the fault: cause=%q reason=%q", d.DenyCause, d.Reason)
+	assertMintRefusedByAuthority(t, f)
+	assert.Equal(t, before, checker.CallCount(), "no actAs call for a source that could not be resolved")
 }
 
 // ---- actAs layer -----------------------------------------------------------
@@ -299,15 +411,18 @@ func TestAgentGCPToken_ActAsEnforceMode(t *testing.T) {
 		name    string
 		script  func(c *store.FakeCallerPermissionChecker, email string)
 		allowed bool
+		outcome store.ActAsOutcome // the outcome in the actAs audit record
 	}{
-		{"allowed", func(c *store.FakeCallerPermissionChecker, email string) { c.AllowTarget(email) }, true},
-		{"denied", func(c *store.FakeCallerPermissionChecker, email string) { c.DenyTarget(email, "no actAs grant") }, false},
+		{"allowed", func(c *store.FakeCallerPermissionChecker, email string) { c.AllowTarget(email) }, true, store.ActAsAllowed},
+		{"denied", func(c *store.FakeCallerPermissionChecker, email string) { c.DenyTarget(email, "no actAs grant") }, false, store.ActAsDenied},
 		{"indeterminate", func(c *store.FakeCallerPermissionChecker, email string) {
 			c.IndeterminateTarget(email, "troubleshooter returned UNKNOWN_INFO")
-		}, false},
+		}, false, store.ActAsIndeterminate},
+		// A checker error yields no verdict; EvaluateActAs forces
+		// Indeterminate, which the record shows and which denies.
 		{"check failed", func(c *store.FakeCallerPermissionChecker, email string) {
 			c.FailTarget(email, errors.New("iam api timeout"))
-		}, false},
+		}, false, store.ActAsIndeterminate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,6 +432,7 @@ func TestAgentGCPToken_ActAsEnforceMode(t *testing.T) {
 			checker := store.NewFakeCallerPermissionChecker()
 			tc.script(checker, f.SA.Email)
 			enforceSAAssign(f.Server, checker)
+			rec := installActAsAuditRecorder(f.Server)
 
 			if tc.allowed {
 				requireMintAllowedOn(t, f.Server, f.Token)
@@ -330,8 +446,47 @@ func TestAgentGCPToken_ActAsEnforceMode(t *testing.T) {
 				assert.Equal(t, assigner, c.Caller.ID)
 				assert.Equal(t, f.SA.ID, c.TargetSAID)
 			}
+			events := rec.actAsEvents()
+			require.Len(t, events, 2, "one actAs record per endpoint call")
+			for _, e := range events {
+				assert.Equal(t, SurfaceAgentGCPTokenMint, e.Surface)
+				assert.Equal(t, assigner, e.Caller.ID)
+				require.NotNil(t, e.Decision)
+				assert.Equal(t, tc.outcome, *e.Decision)
+			}
 		})
 	}
+}
+
+// actAsAuditRecorder records the actAs decision records a Server writes. It
+// embeds a real LogAuditLogger for every other event type.
+type actAsAuditRecorder struct {
+	*LogAuditLogger
+	mu     sync.Mutex
+	events []*store.SAAssignmentEvent
+}
+
+func (r *actAsAuditRecorder) RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error {
+	r.mu.Lock()
+	if event.Type == store.SAAssignmentDecision {
+		r.events = append(r.events, event)
+	}
+	r.mu.Unlock()
+	return r.LogAuditLogger.RecordSAAssignment(ctx, event)
+}
+
+func (r *actAsAuditRecorder) actAsEvents() []*store.SAAssignmentEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*store.SAAssignmentEvent(nil), r.events...)
+}
+
+// installActAsAuditRecorder replaces srv's audit logger with an
+// actAsAuditRecorder and returns it.
+func installActAsAuditRecorder(srv *Server) *actAsAuditRecorder {
+	rec := &actAsAuditRecorder{LogAuditLogger: NewLogAuditLogger("[test]", false)}
+	srv.SetAuditLogger(rec)
+	return rec
 }
 
 // TestAgentGCPToken_ActAsCheckerUnwiredDenies: enforce mode with no checker
@@ -365,16 +520,16 @@ func TestAgentGCPToken_ActAsNotReachedWhenPolicyDenies(t *testing.T) {
 	f.recordAssignment(t, noAssign, nil)
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(f.SA.Email)
 	enforceSAAssign(f.Server, checker)
-	assertMintRefusedByAuthority(t, f)
+	assertMintRefusedWithCause(t, f, DenyCauseCeilingDelegatorLacksPermission)
 	assert.Zero(t, checker.CallCount())
 }
 
-// ---- passthrough translation (OQ-1) ----------------------------------------
+// ---- passthrough translation -----------------------------------------------
 
 // ptrMintAgent is a translated passthrough agent of the ptr fixture whose
-// root is the fixture owner and whose assignment source is sourceID, with an
-// agent token naming the translation record.
-func ptrMintAgent(t *testing.T, f *ptrFixture, slug, sourceID string) string {
+// root is the fixture owner and whose assignment source is sourceID. It
+// returns the agent's ID and an agent token naming the translation record.
+func ptrMintAgent(t *testing.T, f *ptrFixture, slug, sourceID string) (string, string) {
 	t.Helper()
 	a := f.translatedAgent(t, slug, f.owner.ID, true)
 	got := mustGetAgent(t, f.store, a.ID)
@@ -385,10 +540,10 @@ func ptrMintAgent(t *testing.T, f *ptrFixture, slug, sourceID string) string {
 	token, err := f.srv.agentTokenService.GenerateAgentToken(a.ID, f.project.ID,
 		[]AgentTokenScope{GCPTokenScopeForSA(f.record.ID)}, []string{f.owner.ID})
 	require.NoError(t, err)
-	return token
+	return a.ID, token
 }
 
-// TestAgentGCPToken_PassthroughTranslationFollowsRecordedSource (OQ-1): a
+// TestAgentGCPToken_PassthroughTranslationFollowsRecordedSource: a
 // Cloud Run sandbox host-account passthrough records the requesting
 // principal as the assignment source. A mint is admitted while that source
 // live-holds assign on the exact host account and may act as it, and is
@@ -396,13 +551,13 @@ func ptrMintAgent(t *testing.T, f *ptrFixture, slug, sourceID string) string {
 func TestAgentGCPToken_PassthroughTranslationFollowsRecordedSource(t *testing.T) {
 	t.Run("source holds assign", func(t *testing.T) {
 		f := setupPTR(t, "ptm-allow")
-		token := ptrMintAgent(t, f, "ptm-allow-agent", f.other.ID)
+		_, token := ptrMintAgent(t, f, "ptm-allow-agent", f.other.ID)
 		requireMintAllowedOn(t, f.srv, token)
 	})
 
 	t.Run("source loses assign after creation", func(t *testing.T) {
 		f := setupPTR(t, "ptm-lost")
-		token := ptrMintAgent(t, f, "ptm-lost-agent", f.other.ID)
+		agentID, token := ptrMintAgent(t, f, "ptm-lost-agent", f.other.ID)
 		requireMintAllowedOn(t, f.srv, token)
 
 		ctx := context.Background()
@@ -410,11 +565,12 @@ func TestAgentGCPToken_PassthroughTranslationFollowsRecordedSource(t *testing.T)
 		require.NoError(t, err)
 		require.NoError(t, f.store.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, f.other.ID))
 		requireMintRefusedByAuthority(t, f.srv, token)
+		requireUseDeniedWithCause(t, mintUseDecision(t, f.srv, agentID, f.project.ID, f.record), DenyCauseCeilingDelegatorLacksPermission)
 	})
 
 	t.Run("source may not act as the host account", func(t *testing.T) {
 		f := setupPTR(t, "ptm-actas")
-		token := ptrMintAgent(t, f, "ptm-actas-agent", f.other.ID)
+		_, token := ptrMintAgent(t, f, "ptm-actas-agent", f.other.ID)
 		enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().DenyTarget(ptrHostSA, "no actAs grant"))
 		requireMintRefusedByAuthority(t, f.srv, token)
 	})
@@ -426,8 +582,9 @@ func TestAgentGCPToken_PassthroughTranslationFollowsRecordedSource(t *testing.T)
 			Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 		}
 		require.NoError(t, f.store.CreateUser(context.Background(), outsider))
-		token := ptrMintAgent(t, f, "ptm-outsider-agent", outsider.ID)
+		agentID, token := ptrMintAgent(t, f, "ptm-outsider-agent", outsider.ID)
 		requireMintRefusedByAuthority(t, f.srv, token)
+		requireUseDeniedWithCause(t, mintUseDecision(t, f.srv, agentID, f.project.ID, f.record), DenyCauseCeilingDelegatorLacksPermission)
 	})
 }
 
@@ -489,6 +646,27 @@ func TestEvaluateResourceParentCeiling_UnmappedOrMismatchedDenies(t *testing.T) 
 	d = authz.evaluateResourceParentCeiling(context.Background(), unknown, tid("agent"), Resource{Type: "secret", ID: tid("x")})
 	assert.False(t, d.Allowed)
 	assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+}
+
+// TestApplyResourceParentCeiling_NonAgentIdentityDenies: an agent-kind
+// principal whose identity is not an AgentIdentity reaches step 10 with no
+// agent, which denies with ceiling_error instead of leaving the allow
+// unchecked; so does a typed nil agent.
+func TestApplyResourceParentCeiling_NonAgentIdentityDenies(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	m, ok := ResourceParentCeilingFor("gcp_service_account.use")
+	require.True(t, ok)
+	resource := Resource{Type: "gcp_service_account", ID: tid("non-agent-sa")}
+
+	var typedNil *agentIdentityWrapper
+	for name, agent := range map[string]AgentIdentity{"nil": nil, "typed nil": typedNil} {
+		t.Run(name, func(t *testing.T) {
+			d := authz.applyResourceParentCeiling(context.Background(), m, agent, resource, Decision{Allowed: true})
+			assert.False(t, d.Allowed)
+			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+			assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+		})
+	}
 }
 
 // TestParentSourceActAsPrincipal covers the actAs caller built from a
