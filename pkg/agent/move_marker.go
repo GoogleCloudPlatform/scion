@@ -130,13 +130,23 @@ func checkMoveMarker(dir, id string) error {
 // any present worktree or registration, or anything that cannot be
 // checked, is ErrMoveMarkerMismatch, and the delete must remove nothing. It
 // returns the paths it checked, and changes nothing.
-func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error) {
+//
+// sharerKey is the key the same delete is given (DeleteHubAgentFiles);
+// empty means agentName. The worktree and registration checks cover every
+// key the delete acts on (sharerKeys), so the check and the delete cannot
+// diverge.
+func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, sharerKey, moveID string) ([]string, error) {
 	if moveID == "" {
 		return nil, fmt.Errorf("%w: no move reincarnation ID", ErrMoveMarkerMismatch)
 	}
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMoveMarkerMismatch, err)
 	}
+	sharerKey, err := validateSharerKey(projectPath, agentName, sharerKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMoveMarkerMismatch, err)
+	}
+	keys := sharerKeys(sharerKey, agentName)
 	// dirs must each be absent or carry this move's marker; worktrees must
 	// each be absent (a recreate never creates a worktree, so one that
 	// exists predates the move).
@@ -160,15 +170,19 @@ func (m *AgentManager) CheckMoveMarkers(ctx context.Context, projectPath, projec
 	// the shared base, and a shared worktree the agent is registered
 	// on; a forced move creates neither.
 	if layout.sharedBaseIsRepo {
-		worktrees = append(worktrees, filepath.Join(layout.sharedBase, "worktrees", agentName))
+		for _, key := range keys {
+			worktrees = append(worktrees, filepath.Join(layout.sharedBase, "worktrees", key))
+		}
 	}
 	if layout.repoRoot != "" {
-		_, _, found, findErr := provision.FindBranchForAgent(layout.repoRoot, projectDir, agentName)
-		if findErr != nil {
-			return dirs, fmt.Errorf("%w: read the worktree sharer registry: %v", ErrMoveMarkerMismatch, findErr)
-		}
-		if found {
-			return dirs, fmt.Errorf("%w: the agent is registered on a shared worktree", ErrMoveMarkerMismatch)
+		for _, key := range keys {
+			_, _, found, findErr := provision.FindBranchForAgent(layout.repoRoot, projectDir, key)
+			if findErr != nil {
+				return dirs, fmt.Errorf("%w: read the worktree sharer registry: %v", ErrMoveMarkerMismatch, findErr)
+			}
+			if found {
+				return dirs, fmt.Errorf("%w: the agent is registered on a shared worktree", ErrMoveMarkerMismatch)
+			}
 		}
 	}
 	hostBase, rel, err := m.nfsExportWorkspace(projectPath, projectID, agentName)

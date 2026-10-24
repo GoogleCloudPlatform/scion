@@ -96,7 +96,7 @@ func TestCheckMoveMarkers_LocalDisk(t *testing.T) {
 		return fx, filepath.Join(fx.projectPath, "agents", "test-agent")
 	}
 	check := func(fx moveAbsentFixture) error {
-		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		return err
 	}
 	t.Run("absent directory", func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestCheckMoveMarkers_LocalDisk(t *testing.T) {
 	})
 	t.Run("no reincarnation ID", func(t *testing.T) {
 		fx, _ := setup(t)
-		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "")
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", "")
 		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 	})
 }
@@ -138,7 +138,7 @@ func TestCheckMoveMarkers_OtherMoveRefused(t *testing.T) {
 	dir := filepath.Join(fx.projectPath, "agents", "test-agent")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, writeMoveMarker(dir, "99999999-2222-4333-8444-555555555555"))
-	_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+	_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 	require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 }
 
@@ -157,13 +157,13 @@ func TestCheckMoveMarkers_KubernetesNFS(t *testing.T) {
 	t.Run("both marked", func(t *testing.T) {
 		fx, _, export := setup(t)
 		require.NoError(t, writeMoveMarker(export, testMoveID))
-		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		require.NoError(t, err)
 		assert.Contains(t, paths, export)
 	})
 	t.Run("export unmarked", func(t *testing.T) {
 		fx, _, _ := setup(t)
-		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 	})
 }
@@ -240,7 +240,7 @@ func TestCheckMoveMarkers_RefusesWorktreesTheMoveNeverCreates(t *testing.T) {
 		require.NoError(t, writeMoveMarker(export, testMoveID))
 		wt := filepath.Join(fx.mountRoot, "share-1", nfsWorktreeSubPath(filepath.Join("projects", testNFSWorkspaceProjectID, "workspace"), "test-agent"))
 		require.NoError(t, os.MkdirAll(wt, 0o755))
-		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 		assert.Contains(t, err.Error(), "a worktree exists")
 		assert.Contains(t, paths, wt)
@@ -255,7 +255,7 @@ func TestCheckMoveMarkers_RefusesWorktreesTheMoveNeverCreates(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(base, ".git"), 0o755))
 		wt := filepath.Join(base, "worktrees", "test-agent")
 		require.NoError(t, os.MkdirAll(wt, 0o755))
-		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 		assert.Contains(t, err.Error(), "a worktree exists")
 		assert.DirExists(t, wt)
@@ -273,7 +273,7 @@ func TestCheckMoveMarkers_RefusesWorktreesTheMoveNeverCreates(t *testing.T) {
 		require.NoError(t, writeMoveMarker(local, testMoveID))
 		require.NoError(t, provision.RegisterSharer(proj, scion, "b1", "", "test-agent"))
 		mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
-		_, err := mgr.CheckMoveMarkers(context.Background(), scion, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+		_, err := mgr.CheckMoveMarkers(context.Background(), scion, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 		assert.Contains(t, err.Error(), "registered on a shared worktree")
 		assert.DirExists(t, local)
@@ -294,7 +294,7 @@ func TestProvision_MoveMarkerOnSplitStorageHomeParent(t *testing.T) {
 	assertMarker(t, filepath.Dir(agentHome), testMoveID)
 
 	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
-	paths, err := mgr.CheckMoveMarkers(context.Background(), scionDir, "", agentName, testMoveID)
+	paths, err := mgr.CheckMoveMarkers(context.Background(), scionDir, "", agentName, "", testMoveID)
 	require.NoError(t, err, "the move's own files pass the guarded delete's check")
 	assert.Contains(t, paths, filepath.Dir(agentHome))
 }
@@ -350,7 +350,7 @@ func TestCheckMoveMarkers_ProjectDirUnresolvedRefuses(t *testing.T) {
 	t.Cleanup(func() { moveMarkerProjectDir = prev })
 	moveMarkerProjectDir = func(string) (string, error) { return "", errors.New("injected resolver failure") }
 
-	_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", testMoveID)
+	_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", "", testMoveID)
 	require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch, got %v", err)
 	assert.Contains(t, err.Error(), "resolve the project directory")
 	assert.NotContains(t, err.Error(), fx.projectPath, "the refusal names no path")
@@ -389,5 +389,83 @@ func TestProvision_HomeClaimFailureRemovesClaimedHomeParent(t *testing.T) {
 		require.Error(t, err)
 		assert.FileExists(t, filepath.Join(parent, "keep.txt"), "a parent that existed before is untouched")
 		assert.NoFileExists(t, filepath.Join(parent, MoveMarkerFile), "a parent the move did not create is never marked")
+	})
+}
+
+// On a hub-managed broker the agent's worktree and sharer registry entry
+// are keyed by its hub agent ID, not its name (ptone/scion#5590). The
+// guarded delete's check takes the delete's sharer key and looks under
+// every key that delete acts on, so a worktree or registration under the
+// ID refuses it. Nothing is changed.
+func TestCheckMoveMarkers_SharerKey(t *testing.T) {
+	const hubID = "0b7e3c1a-hub-agent-id"
+	markedFixture := func(t *testing.T) (moveAbsentFixture, string) {
+		fx := newMoveAbsentFixture(t, "docker", false)
+		local := filepath.Join(fx.projectPath, "agents", "test-agent")
+		require.NoError(t, os.MkdirAll(local, 0o755))
+		require.NoError(t, writeMoveMarker(local, testMoveID))
+		return fx, local
+	}
+	t.Run("worktree under the shared base keyed by the hub agent ID", func(t *testing.T) {
+		fx, local := markedFixture(t)
+		base := filepath.Join(filepath.Dir(fx.projectPath), "workspace")
+		require.NoError(t, os.MkdirAll(filepath.Join(base, ".git"), 0o755))
+		wt := filepath.Join(base, "worktrees", hubID)
+		require.NoError(t, os.MkdirAll(wt, 0o755))
+		paths, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", hubID, testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch for the ID-keyed worktree, got %v", err)
+		assert.Contains(t, err.Error(), "a worktree exists")
+		assert.Contains(t, paths, wt)
+		assert.DirExists(t, wt)
+		assertMarker(t, local, testMoveID)
+	})
+	t.Run("sharer registration keyed by the hub agent ID", func(t *testing.T) {
+		root := t.TempDir()
+		t.Chdir(root)
+		t.Setenv("HOME", root)
+		proj := filepath.Join(root, "proj")
+		mustMkdir(t, proj)
+		setupGitRepo(t, proj)
+		scion := filepath.Join(proj, config.DotScion)
+		local := filepath.Join(scion, "agents", "test-agent")
+		mustMkdir(t, local)
+		require.NoError(t, writeMoveMarker(local, testMoveID))
+		require.NoError(t, provision.RegisterSharer(proj, scion, "b1", "", hubID))
+		mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }}).(*AgentManager)
+		_, err := mgr.CheckMoveMarkers(context.Background(), scion, testNFSWorkspaceProjectID, "test-agent", hubID, testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch for the ID-keyed registration, got %v", err)
+		assert.Contains(t, err.Error(), "registered on a shared worktree")
+		assert.DirExists(t, local)
+	})
+	t.Run("a worktree under the name is still refused with a hub agent ID", func(t *testing.T) {
+		fx, _ := markedFixture(t)
+		base := filepath.Join(filepath.Dir(fx.projectPath), "workspace")
+		require.NoError(t, os.MkdirAll(filepath.Join(base, ".git"), 0o755))
+		wt := filepath.Join(base, "worktrees", "test-agent")
+		require.NoError(t, os.MkdirAll(wt, 0o755))
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", hubID, testMoveID)
+		require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "want ErrMoveMarkerMismatch for the name-keyed worktree, got %v", err)
+		assert.DirExists(t, wt)
+	})
+	t.Run("the move's own marked directory with no worktree passes", func(t *testing.T) {
+		fx, _ := markedFixture(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(fx.projectPath), "workspace", ".git"), 0o755))
+		_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", hubID, testMoveID)
+		require.NoError(t, err)
+	})
+	t.Run("the name as the key is local mode", func(t *testing.T) {
+		fx, _ := markedFixture(t)
+		for _, key := range []string{"", "test-agent"} {
+			_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", key, testMoveID)
+			require.NoError(t, err, "key %q", key)
+		}
+	})
+	t.Run("a sharer key that is not a single path element is refused", func(t *testing.T) {
+		fx, local := markedFixture(t)
+		for _, key := range []string{"../escape", "a/b", ".."} {
+			_, err := fx.mgr.CheckMoveMarkers(context.Background(), fx.projectPath, testNFSWorkspaceProjectID, "test-agent", key, testMoveID)
+			require.True(t, errors.Is(err, ErrMoveMarkerMismatch), "key %q: want ErrMoveMarkerMismatch, got %v", key, err)
+		}
+		assertMarker(t, local, testMoveID)
 	})
 }
