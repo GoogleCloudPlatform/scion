@@ -52,6 +52,10 @@ func (c *Client) UploadFile(ctx context.Context, url UploadURLInfo, content io.R
 // UploadFileWithMethod uploads content to a signed URL with explicit method and headers.
 // Supports both file:// URLs (local filesystem) and HTTP(S) URLs (remote storage).
 func (c *Client) UploadFileWithMethod(ctx context.Context, signedURL, method string, headers map[string]string, content io.Reader) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Handle file:// URLs for local storage
 	if strings.HasPrefix(signedURL, "file://") {
 		return c.uploadToFile(signedURL, content)
@@ -126,6 +130,10 @@ func (c *Client) uploadToFile(fileURL string, content io.Reader) error {
 // DownloadFile downloads content from a signed URL.
 // Supports both file:// URLs (local filesystem) and HTTP(S) URLs (remote storage).
 func (c *Client) DownloadFile(ctx context.Context, signedURL string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Handle file:// URLs for local storage
 	if strings.HasPrefix(signedURL, "file://") {
 		path := strings.TrimPrefix(signedURL, "file://")
@@ -187,6 +195,9 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 		if !ok {
 			continue // Skip files without URLs (may be existing)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		f, err := os.Open(file.FullPath)
 		if err != nil {
@@ -222,6 +233,9 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 	}
 	if len(urls) == 0 {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
