@@ -3905,18 +3905,26 @@ var worktreeGitTimeout = 30 * time.Second
 func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false",
-		"-c", "core.excludesFile=" + os.DevNull,
-		"-C", wt.workTree,
-	}, args...)...)
+	// util.HostGitCommand adds no repository hooks, no file-system monitor
+	// and no repository-defined filter commands: the agent can write this
+	// worktree's git files.
+	cmd, err := util.HostGitCommand(ctx, wt.workTree, util.HostGitOptions{
+		Policy:              util.RepoPolicyLinked,
+		AllowedWorktreePath: wt.workTree,
+		Config: []string{
+			"core.untrackedCache=false",
+			"core.excludesFile=" + os.DevNull,
+		},
+		Env: append(worktreeGitEnv(),
+			"GIT_DIR="+wt.gitDir,
+			"GIT_COMMON_DIR="+wt.commonDir,
+			"GIT_WORK_TREE="+wt.workTree,
+		),
+	}, args...)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(worktreeGitEnv(),
-		"GIT_DIR="+wt.gitDir,
-		"GIT_COMMON_DIR="+wt.commonDir,
-		"GIT_WORK_TREE="+wt.workTree,
-	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
