@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"database/sql"
@@ -26,7 +26,7 @@ import (
 
 // conversationsTableDDL is the schema for the Ent-managed conversations table,
 // reproduced here for testing the dual-write paths that depend on it.
-const conversationsTableDDL = `
+const ConversationsTableDDL = `
 CREATE TABLE IF NOT EXISTS conversations (
     id              TEXT PRIMARY KEY,
     project_id      TEXT,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 `
 
 // getTopicConvID reads conversation_id directly from the webchat_topic table.
-func getTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
+func GetTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
 	t.Helper()
 	var convID string
 	err := db.QueryRow("SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ?", topicID).Scan(&convID)
@@ -53,20 +53,20 @@ func getTopicConvID(t *testing.T, db *sql.DB, topicID string) string {
 	return convID
 }
 
-func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
+func RawText(t *testing.T, db *sql.DB, query string, args ...any) string {
 	t.Helper()
 	var s string
 	require.NoError(t, db.QueryRow(query, args...).Scan(&s))
 	return s
 }
 
-func requireUTCInstant(t *testing.T, got, want time.Time) {
+func RequireUTCInstant(t *testing.T, got, want time.Time) {
 	t.Helper()
 	assert.True(t, got.Equal(want), "got %v, want %v", got, want)
 	assert.Equal(t, time.UTC, got.Location(), "got %v", got)
 }
 
-func requirePostgresDSN(t *testing.T) string {
+func RequirePostgresDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
 	if dsn == "" {
