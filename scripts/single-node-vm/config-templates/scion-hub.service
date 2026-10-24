@@ -9,7 +9,7 @@ User=scion
 Group=scion
 WorkingDirectory=/home/scion
 EnvironmentFile=/home/scion/.scion/hub.env
-ExecStart=/usr/local/bin/scion server start --foreground --hosted --enable-hub --enable-web --web-port 8080 --enable-runtime-broker
+ExecStart=/opt/scion/current/scion server start --foreground --hosted --enable-hub --enable-web --web-port 8080 --enable-runtime-broker
 Restart=always
 RestartSec=5
 

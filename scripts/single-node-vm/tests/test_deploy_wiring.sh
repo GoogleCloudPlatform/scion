@@ -1856,7 +1856,7 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the dev-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="localhost/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" render_settings_yaml_template "$template"; echo x)"
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
   assert_contains "$expected" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rendered template must reach the listen-port comment line"
   assert_eq "$expected" "$actual" \
@@ -1890,7 +1890,7 @@ test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the proxy-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="us-docker.pkg.dev/demo-project/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" \
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" \
     IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy" \
     render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
@@ -2190,6 +2190,7 @@ server.auth.mode
 server.hub.admin_emails[0]
 server.hub.hub_name
 server.maintenance.deployment_tier
+server.maintenance.install_root
 server.maintenance.release_channel
 server.maintenance.update_policy
 server.secrets.backend
@@ -2234,6 +2235,8 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: server.maintenance.release_channel"
     assert_eq "auto" "$(_json_get "$json" server.maintenance.update_policy)" \
       "tier-off ${mode}-mode write: server.maintenance.update_policy"
+    assert_eq "/opt/scion" "$(_json_get "$json" server.maintenance.install_root)" \
+      "tier-off ${mode}-mode write: server.maintenance.install_root"
     assert_eq "/home/scion/.scion/workspace-storage" "$(_json_get "$json" server.storage.local_path)" \
       "tier-off ${mode}-mode write: server.storage.local_path"
     assert_eq "local" "$(_json_get "$json" server.secrets.backend)" \

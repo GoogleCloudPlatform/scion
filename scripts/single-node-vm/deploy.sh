@@ -28,11 +28,35 @@
 #
 # Usage:
 #   ./deploy.sh [--version VERSION] [--config CONFIG_FILE] [--rebuild-images]
+#               [--update-policy POLICY]
+#   ./deploy.sh migrate-layout [--config CONFIG_FILE] [--update-policy POLICY]
 #   ./deploy.sh --delete
+#
+# Binary layout on the VM: each release is installed to
+# /opt/scion/releases/<tag>/scion (owned by the scion user), /opt/scion/current
+# is a symlink to the active release, /opt/scion/previous to the one before,
+# and /usr/local/bin/scion is a symlink to /opt/scion/current/scion. The
+# systemd unit runs /opt/scion/current/scion, so the hub can update itself
+# without sudo.
+#
+# Subcommands:
+#   migrate-layout      Convert an existing VM that still has a plain
+#                       /usr/local/bin/scion binary to the layout above,
+#                       keeping the installed version (nothing is
+#                       downloaded). It also re-renders the systemd unit,
+#                       sets server.maintenance.install_root, rewrites
+#                       update_policy "auto" to "notify" unless auto is
+#                       requested explicitly, and restarts the hub. Safe to
+#                       re-run: on a converted VM only the unit and settings
+#                       are re-applied. Uses hub_name/project_id/region from
+#                       --config, or prompts for them.
 #
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
 #                       If omitted, the latest release is fetched from GitHub.
+#   --update-policy POLICY
+#                       auto, notify, or disabled. Overrides update_policy in
+#                       the config file. The default is notify.
 #   --config FILE       Path to a JSON config file that pre-answers interactive
 #                       prompts. When provided with all required fields, the
 #                       script runs headlessly (no interactive input needed).
@@ -73,8 +97,8 @@
 #                                 accounts for agents. false skips the
 #                                 grant (and does not revoke an earlier
 #                                 one).
-#   update_policy                auto, notify, or disabled. Requires the
-#                                 binary auto-update feature.
+#   update_policy                auto, notify, or disabled. Defaults to
+#                                 notify. --update-policy overrides it.
 #   release_channel              stable, preview, or nightly. Defaults to
 #                                 nightly if not specified.
 #   gke_target.name              Name of an existing GKE cluster to attach
@@ -268,10 +292,16 @@ readonly NETWORK_CHECK_RETRY_SECS="${SCION_TEST_NETWORK_RETRY_SECS:-$NETWORK_CHE
 # ---------------------------------------------------------------------------
 VERSION=""
 DELETE_MODE=false
+MIGRATE_LAYOUT_MODE=false
 CONFIG_FILE=""
 CLI_REBUILD_IMAGES=false
+CLI_UPDATE_POLICY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    migrate-layout) MIGRATE_LAYOUT_MODE=true; shift ;;
+    --update-policy)
+      [[ $# -ge 2 ]] || { err "--update-policy requires a value (auto, notify, disabled)"; exit 1; }
+      CLI_UPDATE_POLICY="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     --delete) DELETE_MODE=true; shift ;;
@@ -283,6 +313,23 @@ while [[ $# -gt 0 ]]; do
     *) err "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+if [[ -n "$CLI_UPDATE_POLICY" ]]; then
+  case "$CLI_UPDATE_POLICY" in
+    auto|notify|disabled) ;;
+    *) err "Invalid --update-policy: '${CLI_UPDATE_POLICY}' (expected: auto, notify, disabled)"; exit 1 ;;
+  esac
+fi
+if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
+  if [[ "$DELETE_MODE" == "true" ]]; then
+    err "migrate-layout and --delete cannot be combined."
+    exit 1
+  fi
+  if [[ -n "$VERSION" || "$CLI_REBUILD_IMAGES" == "true" ]]; then
+    err "migrate-layout keeps the installed version; --version and --rebuild-images do not apply. Re-run deploy.sh without migrate-layout to change versions."
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Config file helper
@@ -340,6 +387,45 @@ config_prompt() {
     read -rp "$prompt" input
     printf -v "$varname" '%s' "${input:-$default}"
   fi
+}
+
+# SHA-256 of empty input. A SHA256SUMS entry with this hash describes an
+# empty upload, so the install commands refuse it even though the (empty)
+# download would "verify".
+# The versioned install root on the VM (design D1). Fixed: the systemd unit
+# template hard-codes ExecStart=/opt/scion/current/scion, and the hub reads
+# the same path from server.maintenance.install_root.
+readonly INSTALL_ROOT="/opt/scion"
+
+readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+# install_layout_command ARGS... -- prints remote shell text that writes
+# scion-layout.sh (this directory) to a temp file on the VM and runs it as
+# root with ARGS (install TAG BINARY | adopt | set-maintenance FILE POLICY).
+# The script travels inside the --command string as a quoted heredoc, so
+# nothing in it is expanded either locally or on the VM. ARGS must be
+# shell-safe words (deploy.sh only passes validated values).
+install_layout_command() {
+  printf '%s\n' \
+    "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
+    "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
+    "SCIONLAYOUTEOF" \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# read_update_policy_config -- prints the config file's update_policy
+# (empty when unset), or fails with an error for a value other than auto,
+# notify or disabled. Shared by the deploy and migrate-layout paths so both
+# read the key the same way.
+read_update_policy_config() {
+  local v
+  v="$(config_get 'update_policy' '')"
+  case "$v" in
+    ""|auto|notify|disabled) printf '%s' "$v" ;;
+    *) err "Invalid update_policy in config: '${v}' (expected: auto, notify, disabled)"; return 1 ;;
+  esac
 }
 
 # proxy_sa_name HUB_NAME — derives the Cloud Run proxy's service-account
@@ -974,6 +1060,98 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Layout migration (migrate-layout)
+# ---------------------------------------------------------------------------
+# Converts an existing VM to the versioned install root (design D9, steps
+# 1-6, ptone/scion#6009) using the binary that is already installed: no
+# version change and no download. On the VM, scion-layout.sh `adopt`
+# copies the binary /usr/local/bin/scion resolves to into
+# /opt/scion/releases/<its version>/, points /opt/scion/current at it and
+# replaces /usr/local/bin/scion with a symlink to /opt/scion/current/scion.
+# Then the unit is re-rendered (ExecStart=/opt/scion/current/scion),
+# settings.yaml gets server.maintenance.install_root and the D7
+# update_policy rule, and the hub restarts. Everything runs in one SSH
+# command under `set -e`, so if the adopt step fails the unit is never
+# pointed at a path that does not exist.
+#
+# Idempotent: on a converted VM `adopt` is a no-op, the settings edit only
+# changes what is out of date, and the unit is re-rendered.
+if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
+  section "Migrate layout: versioned install root (${INSTALL_ROOT})"
+
+  PROJECT_ID="$(config_get 'project_id' '')"
+  if [[ -z "$PROJECT_ID" ]]; then
+    info "Detecting GCP project..."
+    PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+  fi
+  if [[ -z "$PROJECT_ID" ]]; then
+    err "No GCP project configured. Set project_id in config or run: gcloud config set project PROJECT_ID"
+    exit 1
+  fi
+  echo "  Project: ${PROJECT_ID}"
+
+  HUB_NAME="$(config_get 'hub_name' '')"
+  if [[ -z "$HUB_NAME" ]]; then
+    config_prompt HUB_NAME "Hub name [my-hub]: " "my-hub"
+  fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    err "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
+  fi
+  INSTANCE_NAME="scion-hub-${HUB_NAME}"
+
+  ZONE="$(gcloud compute instances list \
+    --filter="name=${INSTANCE_NAME}" \
+    --format="value(zone)" \
+    --project="${PROJECT_ID}" 2>/dev/null | head -1)" || true
+  if [[ -z "$ZONE" ]]; then
+    err "VM ${INSTANCE_NAME} not found in project ${PROJECT_ID}; migrate-layout only converts an existing hub VM."
+    exit 1
+  fi
+  ZONE="${ZONE##*/}"
+  echo "  Instance: ${INSTANCE_NAME} (zone ${ZONE})"
+
+  # D7: an explicit auto (flag or config) is kept; otherwise "default" makes
+  # scion-layout.sh rewrite a rendered auto to notify and keep notify or
+  # disabled.
+  MIGRATE_CFG_UPDATE_POLICY="$(read_update_policy_config)" || exit 1
+  MIGRATE_UPDATE_POLICY="${CLI_UPDATE_POLICY:-${MIGRATE_CFG_UPDATE_POLICY:-default}}"
+  if [[ "$MIGRATE_UPDATE_POLICY" == "default" ]]; then
+    echo "  Update policy: auto -> notify unless already notify/disabled (pass --update-policy auto to keep auto)"
+  else
+    echo "  Update policy: ${MIGRATE_UPDATE_POLICY}"
+  fi
+
+  info "Converting ${INSTANCE_NAME} to the ${INSTALL_ROOT} layout (installed version kept)..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+    set -euo pipefail
+$(install_layout_command adopt)
+$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+    sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
+$(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
+SERVICEEOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable scion-hub.service
+    sudo systemctl restart scion-hub.service
+    echo 'scion-hub.service restarted from ${INSTALL_ROOT}/current/scion.'
+  "
+
+  info "Running post-migration health check..."
+  wait_for_hub_health "Post-migration health check" || exit 1
+
+  echo ""
+  echo -e "${BOLD}=== Layout migration complete ===${RESET}"
+  echo ""
+  echo "  Instance:     ${INSTANCE_NAME}"
+  echo "  Binary:       ${INSTALL_ROOT}/current/scion (/usr/local/bin/scion is a symlink to it)"
+  echo ""
+  echo "The hub can now update itself from the Maintenance page."
+  exit 0
+fi
+
 # ===================================================================
 # Phase 1: Prerequisites
 # ===================================================================
@@ -1207,24 +1385,28 @@ if [[ -z "$ADMIN_EMAIL" ]]; then
 fi
 
 # --- Update policy ---
-CFG_UPDATE_POLICY="$(config_get 'update_policy' '')"
-if [[ -n "$CFG_UPDATE_POLICY" ]]; then
-  case "$CFG_UPDATE_POLICY" in
-    auto|notify|disabled) UPDATE_POLICY="$CFG_UPDATE_POLICY" ;;
-    *) err "Invalid update_policy in config: '$CFG_UPDATE_POLICY' (expected: auto, notify, disabled)"; exit 1 ;;
-  esac
+# --update-policy wins over the config file's update_policy; with neither,
+# the interactive default (and the headless default) is notify, not auto
+# (design D7, ptone/scion#6009): once the hub can replace its own binary,
+# auto would start self-updating every hub that never chose it. An explicit
+# auto is still honoured.
+CFG_UPDATE_POLICY="$(read_update_policy_config)" || exit 1
+if [[ -n "$CLI_UPDATE_POLICY" ]]; then
+  UPDATE_POLICY="$CLI_UPDATE_POLICY"
+elif [[ -n "$CFG_UPDATE_POLICY" ]]; then
+  UPDATE_POLICY="$CFG_UPDATE_POLICY"
 else
   echo ""
   echo "Automatic update policy:"
-  echo "  1) Auto - automatically install new releases (recommended)"
-  echo "  2) Notify - check for updates, notify admin only"
+  echo "  1) Auto - automatically install new releases"
+  echo "  2) Notify - check for updates, notify admin only (recommended)"
   echo "  3) Disabled - no automatic update checking"
-  config_prompt UPDATE_CHOICE "Select [1]: " "1"
-  case "${UPDATE_CHOICE:-1}" in
+  config_prompt UPDATE_CHOICE "Select [2]: " "2"
+  case "${UPDATE_CHOICE:-2}" in
     1) UPDATE_POLICY="auto" ;;
     2) UPDATE_POLICY="notify" ;;
     3) UPDATE_POLICY="disabled" ;;
-    *) UPDATE_POLICY="auto" ;;
+    *) UPDATE_POLICY="notify" ;;
   esac
 fi
 
@@ -2381,6 +2563,17 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # the "[ *]" class accepts either sha256sum output mode: two spaces in text
 # mode (what build-release.yml's `sha256sum --` produces), or a space and an
 # asterisk in binary mode.
+#
+# Only the asset's own line is checked (never `sha256sum -c` over the whole
+# file, which would also act on unrelated or bogus entries such as one for
+# SHA256SUMS itself). An entry whose hash is the SHA-256 of empty input is
+# refused outright: it can only describe an empty or truncated upload, never
+# a real archive.
+#
+# The verified binary is then installed into the versioned layout by
+# scion-layout.sh (see install_layout_command below): releases/${VERSION}/scion,
+# with /opt/scion/current switched to it and /usr/local/bin/scion a symlink
+# to /opt/scion/current/scion.
 SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
 SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
 info "Installing scion binary (${VERSION})..."
@@ -2392,7 +2585,10 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
     echo 'Downloading release checksums...'
     if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-      if grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+      if grep -qE '^${EMPTY_SHA256} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+        echo 'ERROR: the SHA256SUMS entry for ${SCION_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
+        exit 1
+      elif grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
         echo 'Verifying checksum...'
         (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
       elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
@@ -2408,9 +2604,8 @@ gcloud compute ssh "${INSTANCE_NAME}" \
       exit 1
     fi
     tar -xzf /tmp/${SCION_ARCHIVE} -C /tmp
-    sudo mv /tmp/scion /usr/local/bin/scion
-    sudo chmod +x /usr/local/bin/scion
-    rm -f /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
+$(install_layout_command install "${VERSION}" /tmp/scion)
+    rm -f /tmp/scion /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
   "
 
@@ -2429,7 +2624,10 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
         curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
         if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-          if grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+          if grep -qE '^${EMPTY_SHA256} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+            echo 'ERROR: the SHA256SUMS entry for ${PLUGIN_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
+            exit 1
+          elif grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
             (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
           elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
             echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
@@ -2526,6 +2724,7 @@ ${ADMIN_EMAIL:+    admin_emails:
     deployment_tier: \"binary\"
     release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
+    install_root: \"${INSTALL_ROOT}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -3123,6 +3322,7 @@ ${ADMIN_EMAIL:+    admin_emails:
     deployment_tier: \"binary\"
     release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
+    install_root: \"${INSTALL_ROOT}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
