@@ -1031,7 +1031,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Config != nil && req.Config.SharedWorkspace {
 		// A marker naming an earlier ID of the same project (a re-link) is
 		// carried over to the current ID first (ptone/scion#4440).
-		if err := s.relinkSharedProjectIdentity(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name); err != nil {
+		lockErr, checkErr, err := s.relinkSharedProjectIdentityChecked(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name, req.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, r))
+		if lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			if err != nil {
+				s.agentLifecycleLog.Warn("project re-link: the re-link also failed; returning the workspace record conflict", "agent", req.Name, "relink_error", err.Error())
+			}
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+		if err != nil {
 			sce := projectRelinkStartContextError(err)
 			markAttemptFailed(sce.Status, "shared-workspace project re-link failed")
 			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
@@ -1467,6 +1482,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Attach:             req.Attach,
 		WorkspaceMode:      req.WorkspaceMode,
 		RunID:              req.RunID,
+		PreviousProjectIDs: req.PreviousProjectIDs,
 		HTTPRequest:        r,
 		Operation:          opCreate,
 		OwnedAbandon:       ownedAbandon,
@@ -3273,6 +3289,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Task               string                 `json:"task"`
 		ProjectPath        string                 `json:"projectPath"`
 		ProjectSlug        string                 `json:"projectSlug"`
+		PreviousProjectIDs []string               `json:"previousProjectIds,omitempty"`
 		HarnessConfig      string                 `json:"harnessConfig"`
 		HarnessConfigID    string                 `json:"harnessConfigId"`
 		HarnessConfigHash  string                 `json:"harnessConfigHash"`
@@ -3531,6 +3548,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectPathFromContainer: startProjectPathFromContainer,
 		ProjectSlug:              startReq.ProjectSlug,
 		HubGlobalProject:         startHubGlobalProject,
+		PreviousProjectIDs:       startReq.PreviousProjectIDs,
 		Config:                   cfg,
 		InlineConfig:             startReq.InlineConfig,
 		HubEndpoint:              startReq.HubEndpoint,
@@ -4616,6 +4634,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// as before.
 		ProjectPath          string              `json:"projectPath,omitempty"`
 		ProjectSlug          string              `json:"projectSlug,omitempty"`
+		PreviousProjectIDs   []string            `json:"previousProjectIds,omitempty"`
 		HarnessConfig        string              `json:"harnessConfig,omitempty"`
 		HarnessConfigID      string              `json:"harnessConfigId,omitempty"`
 		HarnessConfigHash    string              `json:"harnessConfigHash,omitempty"`
@@ -4766,6 +4785,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ProjectPathFromContainer: projectPathFromContainer,
 		ProjectSlug:              restartProjectSlug,
 		HubGlobalProject:         restartHubGlobalProject,
+		PreviousProjectIDs:       restartReq.PreviousProjectIDs,
 		Config:                   restartCfg,
 		SharedDirs:               restartReq.SharedDirs,
 		WorkspaceMode:            restartReq.WorkspaceMode,

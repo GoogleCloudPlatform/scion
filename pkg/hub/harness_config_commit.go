@@ -304,7 +304,7 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	}
 
 	// 3. Content hash. 4. Derived fields.
-	contentHash := computeContentHash(next)
+	contentHash := s.computeContentHash(next)
 	idx := deriveHarnessConfigIndex(configYAML, present, hc.Name)
 
 	// 5. One row write, in the blob layout.
