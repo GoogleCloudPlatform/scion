@@ -19,9 +19,10 @@
 # on the operator's machine. It contains no deploy.sh state, so the test
 # suite runs it directly against a temporary root.
 #
-# Staging: a release is copied into a root-owned temp dir next to <root>
-# (<root>/../.scion-stage.*), checked, then renamed into releases/. The
-# hub's own downloads use releases/<tag>.partial/ instead.
+# Privileges: run as root, it changes nothing inside <root> itself once the
+# owner holds it; staging a release and swapping current/previous run as
+# the owner (see "Privilege split" below). Defense in depth only: design
+# D1 already treats the owner as root-equivalent.
 #
 # Layout (design D1, ptone/scion#6009):
 #   <root>/                     owner 0755
@@ -83,25 +84,98 @@ own() {
   fi
 }
 
-# refuse_symlink PATH -- root never writes, chmods or chowns through a
-# symlink the owner could have planted inside its own tree.
+# refuse_symlink PATH -- refuse a PATH that is a symlink. A check, not a
+# guarantee (it can race); paths in the owner's tree are therefore only
+# changed by the owner (see "Privilege split" below).
 refuse_symlink() {
   if [[ -L "$1" ]]; then
-    die "$1 is a symlink; refusing to write through it"
+    die "$1 is a symlink; refusing to use it"
   fi
 }
 
-# ensure_root -- create <root>, releases/ and snapshots/ with the right
-# owner and mode. Safe to repeat.
+# owner_user -- the user that must own <root>: the user of
+# SCION_INSTALL_OWNER, or (tests, empty owner) the current user.
+owner_user() {
+  if [[ -n "$OWNER" ]]; then
+    printf '%s' "${OWNER%%:*}"
+  else
+    id -un
+  fi
+}
+
+# Privilege split. <root> and everything under it belong to the owner, who
+# can rename, replace or symlink any entry there at any time. So, as
+# defense in depth (design D1 already treats the owner as root-equivalent
+# through the docker group; this is not a security boundary), the root
+# side of this script never writes, chmods, chowns, renames or removes
+# anything inside <root> once the owner holds it:
+#   - root builds a fresh tree while <root> is still root-owned, then hands
+#     it over (ensure_root);
+#   - on an existing tree root only inspects, without following links
+#     (verify_owned_dir), and refuses on any mismatch instead of fixing it;
+#   - all changes inside <root> (staging a release, current/previous,
+#     missing subdirs) run as the owner (run_as_owner -> __as-owner);
+#   - root itself only writes <bin-link>, outside the tree.
+
+# verify_owned_dir PATH -- PATH must be a real directory (not a symlink),
+# owned by the owner, mode 0755. Inspected with stat, which does not follow
+# a final symlink. Refuses rather than repairs.
+verify_owned_dir() {
+  local info want
+  want="directory|$(owner_user)|755"
+  info="$(stat -c '%F|%U|%a' -- "$1")" || die "cannot inspect $1"
+  if [[ "$info" != "$want" ]]; then
+    die "$1 is not a directory owned by $(owner_user) with mode 0755 (found: ${info//|/, }); refusing to use it. Fix it by hand (it must not be a symlink) and re-run."
+  fi
+}
+
+# ensure_root -- make sure <root>, releases/ and snapshots/ exist, owned by
+# the owner, mode 0755.
+#   - Fresh host: <root> is created root-owned (its parent is root's), the
+#     subdirs are made and set up inside it while only root can write
+#     there, and ownership is handed over last, <root> itself at the end.
+#   - Existing tree: verify only (no chmod/chown through anything the
+#     owner could have swapped). A missing subdir is created later, as the
+#     owner, by __as-owner.
 ensure_root() {
   local d
-  for d in "$INSTALL_ROOT" "$INSTALL_ROOT/releases" "$INSTALL_ROOT/snapshots"; do
-    refuse_symlink "$d"
-    mkdir -p "$d"
-    chmod 0755 "$d"
-    own "$d"
+  if [[ ! -e "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]]; then
+    mkdir -p "$(dirname "$INSTALL_ROOT")"
+    mkdir -m 0755 "$INSTALL_ROOT"
+    chmod 0755 "$INSTALL_ROOT"
+    for d in releases snapshots; do
+      mkdir -m 0755 "$INSTALL_ROOT/$d"
+      chmod 0755 "$INSTALL_ROOT/$d"
+      own "$INSTALL_ROOT/$d"
+    done
+    own "$INSTALL_ROOT"
+    log "created $INSTALL_ROOT"
+    return 0
+  fi
+  verify_owned_dir "$INSTALL_ROOT"
+  for d in releases snapshots; do
+    if [[ -e "$INSTALL_ROOT/$d" || -L "$INSTALL_ROOT/$d" ]]; then
+      verify_owned_dir "$INSTALL_ROOT/$d"
+    fi
   done
 }
+
+# run_as_owner ARGS... -- run this script's internal __as-owner step with
+# ARGS as the owner. As root (with an owner configured) it re-runs the
+# script from stdin through runuser (the script's own temp file is not
+# readable by the owner); otherwise (tests) it runs in-process.
+run_as_owner() {
+  if [[ "$(id -u)" == "0" && -n "$OWNER" ]]; then
+    runuser -u "${OWNER%%:*}" -- env SCION_INSTALL_ROOT="$INSTALL_ROOT" SCION_INSTALL_OWNER="" \
+      bash -s -- __as-owner "$@" < "${BASH_SOURCE[0]}"
+  else
+    (cmd_as_owner "$@")
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Owner side (__as-owner): everything that changes <root>'s contents.
+# ---------------------------------------------------------------------------
 
 # swap_link NAME TARGET -- point <root>/NAME at TARGET (relative) with an
 # atomic rename, so a reader always sees either the old or the new link.
@@ -109,51 +183,36 @@ swap_link() {
   local name="$1" target="$2" tmp="$INSTALL_ROOT/$1.new"
   rm -f "$tmp"
   ln -s "$target" "$tmp"
-  own "$tmp"
   mv -T "$tmp" "$INSTALL_ROOT/$name"
 }
 
-# STAGE_DIRS -- root-owned temp dirs made by new_stage_dir, removed on exit.
-STAGE_DIRS=()
-cleanup_stage_dirs() {
-  if [[ ${#STAGE_DIRS[@]} -gt 0 ]]; then
-    rm -rf "${STAGE_DIRS[@]}"
-  fi
-}
-trap cleanup_stage_dirs EXIT
-
-# new_stage_dir -- a fresh root-owned (0700) directory next to <root>, so
-# it is on the same filesystem (rename works) but outside the tree the
-# owner can modify. Sets STAGE.
-new_stage_dir() {
-  STAGE="$(mktemp -d "$(dirname "$INSTALL_ROOT")/.scion-stage.XXXXXX")"
-  STAGE_DIRS+=("$STAGE")
-}
-
-# stage_release TAG BINARY -- install BINARY as releases/TAG/scion. The
-# copy is made and checked in a root-owned staging dir, then the finished
-# directory is renamed into releases/ in one step, so releases/TAG is
-# either absent, the old release, or the complete new one. An identical
-# existing release is kept as is; a differing one is replaced.
+# stage_release TAG BINARY -- install BINARY as releases/TAG/scion: copy
+# into releases/TAG.partial/, check the copy byte for byte, then rename
+# into place, so releases/TAG is absent, the old release, or the complete
+# new one. An identical existing release is kept; a differing one is
+# replaced.
 stage_release() {
   local tag="$1" bin="$2"
-  local dest="$INSTALL_ROOT/releases/$tag"
-  refuse_symlink "$dest"
-  if [[ -f "$dest/scion" ]] && cmp -s "$bin" "$dest/scion"; then
+  local dest="$INSTALL_ROOT/releases/$tag" partial="$INSTALL_ROOT/releases/$tag.partial"
+  if [[ -f "$dest/scion" && ! -L "$dest" ]] && cmp -s "$bin" "$dest/scion"; then
     log "releases/$tag already installed"
     return 0
   fi
-  new_stage_dir
-  local dir="$STAGE/release"
-  mkdir "$dir"
-  cp "$bin" "$dir/scion"
-  cmp -s "$bin" "$dir/scion" || die "copy of $bin to the staging dir is incomplete (disk full?); nothing was changed"
-  chmod 0755 "$dir" "$dir/scion"
-  own "$dir" "$dir/scion"
-  if [[ -e "$dest" ]]; then
-    mv -T "$dest" "$STAGE/old"
+  rm -rf "$partial"
+  mkdir -m 0755 "$partial"
+  if ! cp "$bin" "$partial/scion" || ! cmp -s "$bin" "$partial/scion"; then
+    rm -rf "$partial"
+    die "copy of $bin is incomplete (disk full?); nothing was changed"
   fi
-  mv -T "$dir" "$dest"
+  chmod 0755 "$partial" "$partial/scion"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    rm -rf "$INSTALL_ROOT/releases/$tag.old"
+    mv -T "$dest" "$INSTALL_ROOT/releases/$tag.old"
+    mv -T "$partial" "$dest"
+    rm -rf "$INSTALL_ROOT/releases/$tag.old"
+  else
+    mv -T "$partial" "$dest"
+  fi
   log "installed releases/$tag"
 }
 
@@ -177,8 +236,33 @@ activate() {
   log "current -> $target${old:+ (previous -> $old)}"
 }
 
+# cmd_as_owner TAG BINARY [TAG BINARY...] -- runs as the owner: create any
+# missing subdir, then stage and activate each TAG/BINARY pair in order
+# (an adopted old binary first, then the new release).
+cmd_as_owner() {
+  [[ $# -ge 2 && $(( $# % 2 )) -eq 0 ]] || die "usage: __as-owner TAG BINARY [TAG BINARY...]"
+  local d
+  for d in releases snapshots; do
+    if [[ ! -e "$INSTALL_ROOT/$d" && ! -L "$INSTALL_ROOT/$d" ]]; then
+      mkdir -m 0755 "$INSTALL_ROOT/$d"
+      chmod 0755 "$INSTALL_ROOT/$d"
+    fi
+  done
+  while [[ $# -gt 0 ]]; do
+    valid_tag "$1" || die "invalid release tag: '$1'"
+    stage_release "$1" "$2"
+    activate "$1"
+    shift 2
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Root side.
+# ---------------------------------------------------------------------------
+
 # link_bin -- make <bin-link> a symlink to <root>/current/scion (atomic
-# rename over whatever was there). Created by root, so root-owned.
+# rename over whatever was there). <bin-link>'s directory is root's, so
+# this is the one write root makes; the link is root-owned.
 link_bin() {
   local want="$INSTALL_ROOT/current/scion"
   if [[ -L "$BIN_LINK" && "$(readlink "$BIN_LINK")" == "$want" ]]; then
@@ -233,38 +317,30 @@ adopt_source() {
   printf '%s' "$src"
 }
 
-# adopt_as SRC TAG -- move SRC into the layout as releases/TAG and make it
-# current. Always called as a plain statement (never on the left of || or
-# in an if condition), so set -e stays in force for every step: a failed
-# copy stops the script before current or <bin-link> change.
-adopt_as() {
-  local src="$1" tag="$2"
-  log "adopting $src as releases/$tag"
-  ensure_root
-  stage_release "$tag" "$src"
-  activate "$tag"
-  link_bin
-}
-
+# Every step below is a plain statement (never on the left of || or in an
+# if condition), so set -e stays in force: a failed step stops the script
+# before <bin-link> changes.
 cmd_install() {
   [[ $# -eq 2 ]] || die "usage: install TAG BINARY"
   local tag="$1" bin="$2" src old_tag
+  local pairs=()
   valid_tag "$tag" || die "invalid release tag: '$tag'"
   [[ -f "$bin" ]] || die "binary not found: $bin"
   ensure_root
-  if ! is_converted && [[ -e "$BIN_LINK" ]] && [[ ! -e "$INSTALL_ROOT/current" ]]; then
+  if ! is_converted && [[ -e "$BIN_LINK" ]] && [[ ! -e "$INSTALL_ROOT/current" && ! -L "$INSTALL_ROOT/current" ]]; then
     # Old layout: keep the binary being replaced as a release, so previous
     # points at it. Best effort -- an unreadable version only loses that.
     src="$(adopt_source)"
     old_tag="$(binary_tag "$src")"
     if [[ -n "$old_tag" ]]; then
-      adopt_as "$src" "$old_tag"
+      log "adopting $src as releases/$old_tag"
+      pairs+=("$old_tag" "$src")
     else
       echo "scion-layout: WARNING: could not read the version of $src; not keeping it as a release" >&2
     fi
   fi
-  stage_release "$tag" "$bin"
-  activate "$tag"
+  pairs+=("$tag" "$bin")
+  run_as_owner "${pairs[@]}"
   link_bin
 }
 
@@ -282,7 +358,10 @@ cmd_adopt() {
   if [[ -z "$tag" ]]; then
     die "could not read a release version or commit from $src (scion version --format json); run a full deploy.sh with --version instead"
   fi
-  adopt_as "$src" "$tag"
+  log "adopting $src as releases/$tag"
+  ensure_root
+  run_as_owner "$tag" "$src"
+  link_bin
 }
 
 # YAML_TO_JSON_PY -- the default settings parser for verify_settings_edit:
@@ -499,6 +578,7 @@ main() {
   [[ $# -gt 0 ]] && shift
   case "$cmd" in
     install) cmd_install "$@" ;;
+    __as-owner) cmd_as_owner "$@" ;;
     adopt) cmd_adopt "$@" ;;
     set-maintenance) cmd_set_maintenance "$@" ;;
     *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY}" ;;

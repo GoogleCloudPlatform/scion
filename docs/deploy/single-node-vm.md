@@ -260,6 +260,13 @@ If something goes wrong, the command stops at that step:
   is converted. For an unreadable version, run a full
   `deploy.sh --version <tag>` instead. For a failed copy, free disk space
   and re-run.
+- **`/opt/scion`, `/opt/scion/releases` or `/opt/scion/snapshots` is not a
+  directory owned by `scion` with mode 0755** (for example, it was changed
+  by hand or is a symlink). The script refuses rather than repairing it,
+  and nothing changes. Fix the ownership or mode by hand
+  (`sudo chown scion:scion …`, `sudo chmod 0755 …`; replace a symlink with
+  a real directory) and re-run. `deploy.sh --version` refuses in the same
+  way.
 - **The settings edit is refused.** This happens if the file has a shape the
   script cannot edit safely (for example a flow-style `maintenance: {...}`),
   or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this

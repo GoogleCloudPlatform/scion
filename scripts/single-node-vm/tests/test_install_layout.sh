@@ -1044,26 +1044,167 @@ test_layout_install_leaves_no_staging_dir() {
 }
 
 test_layout_refuses_symlinked_dirs() {
-  local victim
-  _layout_new_host
-  victim="${LH_DIR}/victim"
-  mkdir -p "$victim" "$LH_ROOT"
-  ln -s "$victim" "$LH_ROOT/releases"
-  _fake_scion "${LH_DIR}/new" "nightly-20261023"
-  _layout install nightly-20261023 "${LH_DIR}/new"
-  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked releases/ must be refused"
-  assert_contains "$LAYOUT_OUT" "is a symlink" "the refusal must say why"
-  assert_eq "" "$(ls -A "$victim")" "nothing may be written through the symlink"
-  rm -rf "$LH_DIR"
+  local victim sub
+  for sub in releases snapshots; do
+    _layout_new_host
+    victim="${LH_DIR}/victim"
+    mkdir -p "$victim" "$LH_ROOT"
+    chmod 0700 "$victim"
+    [[ "$sub" == releases ]] && mkdir -m 0755 "$LH_ROOT/snapshots"
+    [[ "$sub" == snapshots ]] && mkdir -m 0755 "$LH_ROOT/releases"
+    ln -s "$victim" "$LH_ROOT/$sub"
+    _fake_scion "${LH_DIR}/new" "nightly-20261023"
+    _layout install nightly-20261023 "${LH_DIR}/new"
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked ${sub}/ must be refused"
+    assert_contains "$LAYOUT_OUT" "symbolic link" "the refusal for ${sub}/ must say what was found"
+    assert_eq "" "$(ls -A "$victim")" "nothing may be written through the ${sub} symlink"
+    assert_eq "700" "$(stat -c %a "$victim")" "the ${sub} symlink target must not be chmod-ed"
+    rm -rf "$LH_DIR"
+  done
 
+  # A planted releases/<tag> symlink is replaced by the owner-side rename
+  # (the link itself is moved aside and removed), never written through.
   _layout_new_host
   victim="${LH_DIR}/victim"
-  mkdir -p "$victim" "$LH_ROOT/releases"
+  mkdir -p "$victim"
+  mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases"
   ln -s "$victim" "$LH_ROOT/releases/nightly-20261023"
   _fake_scion "${LH_DIR}/new" "nightly-20261023"
   _layout install nightly-20261023 "${LH_DIR}/new"
-  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked release dir must be refused"
+  assert_eq "0" "$LAYOUT_RC" "a planted release symlink must be replaced (output: ${LAYOUT_OUT})"
   assert_eq "" "$(ls -A "$victim")" "nothing may be written through a planted release symlink"
+  assert_true "$([[ -d "$LH_ROOT/releases/nightly-20261023" && ! -L "$LH_ROOT/releases/nightly-20261023" ]] && echo true || echo false)" \
+    "releases/<tag> must now be a real directory"
+  rm -rf "$LH_DIR"
+}
+
+# =====================================================================
+# G1 (security audit): root never changes anything inside <root> after
+# its checks; an existing tree is verified and refused, never chmod-ed.
+# =====================================================================
+
+test_layout_existing_tree_wrong_mode_is_refused_not_fixed() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  chmod 0700 "$LH_ROOT/releases"
+  _fake_scion "${LH_DIR}/b" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/b"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a releases/ with the wrong mode must be refused"
+  assert_contains "$LAYOUT_OUT" "mode 0755" "the refusal must name the expected mode"
+  assert_eq "700" "$(stat -c %a "$LH_ROOT/releases")" "the mode must be left as found, not chmod-ed"
+  chmod 0755 "$LH_ROOT/releases"
+  assert_eq "releases/nightly-20261022" "$(readlink "$LH_ROOT/current")" "current must not have moved"
+  rm -rf "$LH_DIR"
+}
+
+# _layout_stat_stub DIR [WRONG_OWNER_PATH] [PLANT_PATH VICTIM] -- a PATH
+# dir with a `stat` that reports like the real one, except:
+#   - for WRONG_OWNER_PATH it reports the owner as "mallory";
+#   - right after reporting on PLANT_PATH (the check passing), it swaps
+#     PLANT_PATH for a symlink to VICTIM, simulating the owner winning the
+#     race between root's check and any later use.
+_layout_stat_stub() {
+  mkdir -p "$1"
+  cat > "$1/stat" <<EOF
+#!/usr/bin/env bash
+out="\$(/usr/bin/stat "\$@")" || exit \$?
+path="\${!#}"
+if [[ -n "${2:-}" && "\$path" == "${2:-}" ]]; then out="\${out/|\$(id -un)|/|mallory|}"; fi
+printf '%s\n' "\$out"
+if [[ -n "${3:-}" && "\$path" == "${3:-}" && ! -L "${3:-}" ]]; then
+  mv "${3:-}" "${3:-}.moved" && ln -s "${4:-}" "${3:-}"
+fi
+EOF
+  chmod 0755 "$1/stat"
+}
+
+test_layout_existing_tree_wrong_owner_is_refused() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  _layout_stat_stub "${LH_DIR}/stub" "$LH_ROOT/snapshots"
+  _fake_scion "${LH_DIR}/b" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${LH_DIR}/stub:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/b" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a subdir owned by someone else must be refused"
+  assert_contains "$LAYOUT_OUT" "mallory" "the refusal must say who owns it"
+  assert_eq "releases/nightly-20261022" "$(readlink "$LH_ROOT/current")" "current must not have moved"
+  rm -rf "$LH_DIR"
+}
+
+# The race: as root (stub id -u = 0, owner configured), the owner swaps
+# releases/ or snapshots/ for a symlink right after root's check. The
+# runuser stub records the owner step and does NOT run it, so anything
+# that reaches the victim was done by the root side. Nothing may: no
+# write, no chmod (victim stays 0700), no chown.
+test_layout_root_side_never_uses_tree_after_check() {
+  local sub victim stub log
+  for sub in releases snapshots; do
+    _layout_new_host
+    _fake_scion "${LH_DIR}/a" "nightly-20261022"
+    _layout install nightly-20261022 "${LH_DIR}/a"
+    victim="${LH_DIR}/victim"
+    mkdir -p "$victim"
+    chmod 0700 "$victim"
+    stub="${LH_DIR}/stub"
+    log="${LH_DIR}/calls.log"
+    _layout_stat_stub "$stub" "" "$LH_ROOT/$sub" "$victim"
+    cat > "${stub}/id" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && $# -eq 1 ]]; then echo 0; exit 0; fi
+exec /usr/bin/id "$@"
+STUB
+    cat > "${stub}/runuser" <<STUB
+#!/usr/bin/env bash
+echo "runuser \$*" >> "$log"
+exit 0
+STUB
+    cat > "${stub}/chown" <<STUB
+#!/usr/bin/env bash
+echo "chown \$*" >> "$log"
+exec /usr/bin/chown "\$@"
+STUB
+    chmod 0755 "${stub}/id" "${stub}/runuser" "${stub}/chown"
+    _fake_scion "${LH_DIR}/b" "nightly-20261023"
+    LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+      SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/b" 2>&1)"
+    LAYOUT_RC=$?
+    assert_eq "0" "$LAYOUT_RC" "the root side must complete (output: ${LAYOUT_OUT})"
+    assert_true "$([[ -L "$LH_ROOT/$sub" ]] && echo true || echo false)" "sanity: the ${sub} plant must have happened after the check"
+    assert_contains "$(cat "$log" 2>/dev/null)" "__as-owner nightly-20261023 ${LH_DIR}/b" \
+      "the release must be handed to the owner step"
+    assert_eq "" "$(ls -A "$victim")" "root must not write through ${sub} planted after its check"
+    assert_eq "700" "$(stat -c %a "$victim")" "root must not chmod through ${sub} planted after its check"
+    assert_not_contains "$(cat "$log" 2>/dev/null)" "chown" "root must not chown anything in an existing tree"
+    rm -rf "$LH_DIR"
+  done
+}
+
+# Fresh host: the tree is built while <root> is still root's and handed to
+# the owner last, <root> itself at the very end.
+test_layout_fresh_tree_handed_over_last() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log"
+  mkdir -p "$stub"
+  cat > "${stub}/chown" <<STUB
+#!/usr/bin/env bash
+echo "chown \$*" >> "$log"
+exec /usr/bin/chown "\$@"
+STUB
+  chmod 0755 "${stub}/chown"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+  LAYOUT_RC=$?
+  assert_eq "0" "$LAYOUT_RC" "a fresh install with an owner set must succeed (output: ${LAYOUT_OUT})"
+  local calls
+  calls="$(cat "$log" 2>/dev/null)"
+  assert_eq "3" "$(grep -c '^chown' <<< "$calls")" "exactly <root>, releases and snapshots are chowned"
+  assert_eq "chown -h $(id -un):$(id -gn) ${LH_ROOT}" "$(tail -1 <<< "$calls")" "<root> must be handed over last"
+  assert_eq "755" "$(stat -c %a "$LH_ROOT/releases")" "releases/ must be 0755"
+  assert_eq "755" "$(stat -c %a "$LH_ROOT/snapshots")" "snapshots/ must be 0755"
   rm -rf "$LH_DIR"
 }
 
@@ -1317,5 +1458,44 @@ test_layout_settings_keeps_trailing_comments_on_rewritten_lines() {
   _layout set-maintenance "${LH_DIR}/settings.yaml" disabled
   assert_contains "$(cat "${LH_DIR}/settings.yaml")" '    update_policy: "disabled"  # chosen by deploy.sh' \
     "an explicit policy rewrite must keep the trailing comment too"
+  rm -rf "$LH_DIR"
+}
+
+# As root with an owner configured, install and adopt hand the tree work to
+# the owner through runuser (stub: records, then runs the command as the
+# current user) and still produce the full layout -- the re-run of the
+# script from stdin carries its arguments and settings.
+test_layout_owner_step_runs_through_runuser() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log"
+  mkdir -p "$stub"
+  cat > "${stub}/id" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && $# -eq 1 && -z "${LAYOUT_STUB_DROPPED:-}" ]]; then echo 0; exit 0; fi
+exec /usr/bin/id "$@"
+STUB
+  cat > "${stub}/runuser" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == "-u" && "\$3" == "--" ]] || { echo "runuser stub: unexpected args: \$*" >&2; exit 2; }
+echo "runuser \$*" >> "$log"
+shift 3
+LAYOUT_STUB_DROPPED=1 exec "\$@"
+STUB
+  chmod 0755 "${stub}/id" "${stub}/runuser"
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
+  LAYOUT_RC=$?
+  assert_eq "0" "$LAYOUT_RC" "adopt as root must succeed through the owner step (output: ${LAYOUT_OUT})"
+  assert_contains "$(cat "$log")" "-- env SCION_INSTALL_ROOT=${LH_ROOT} SCION_INSTALL_OWNER= bash -s -- __as-owner nightly-20261001 " \
+    "the tree work must run as the owner via runuser"
+  assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/current")" "the owner step must have activated the release"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+  assert_eq "0" "$?" "install as root must succeed through the owner step (output: ${LAYOUT_OUT})"
+  assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "current must move to the new release"
+  assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/previous")" "previous must be set by the owner step"
+  assert_eq "$LH_ROOT/current/scion" "$(readlink "$LH_BIN")" "root must link the CLI path"
   rm -rf "$LH_DIR"
 }
