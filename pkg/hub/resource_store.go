@@ -122,19 +122,22 @@ type preUploadChecker interface {
 // compare-and-swap twice can no longer leave a row listing objects a
 // reconcile deleted. The store calls it in both the create and the
 // existing-row branches, before the persistence's Update commits the
-// manifest.
+// manifest. root is opened at the directory files were collected from, and
+// every file is read through it (transfer.ReadCollectedFile /
+// OpenCollectedFile).
 type resourceFileUploader interface {
-	UploadFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error)
+	UploadFiles(ctx context.Context, stor storage.Storage, root *os.Root, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error)
 }
 
 // uploadFiles uploads a collected resource directory: through the
 // persistence's UploadFiles when it has one, otherwise one object per file
-// under storagePath.
-func (rs *ResourceStore) uploadFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+// under storagePath. root must be opened at the directory files were
+// collected from; files are read only through it.
+func (rs *ResourceStore) uploadFiles(ctx context.Context, stor storage.Storage, root *os.Root, storagePath string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
 	if u, ok := rs.pers.(resourceFileUploader); ok {
-		return u.UploadFiles(ctx, stor, storagePath, files)
+		return u.UploadFiles(ctx, stor, root, storagePath, files)
 	}
-	return uploadResourceFiles(ctx, stor, storagePath, files, rs.pers.Label())
+	return uploadResourceFiles(ctx, stor, root, storagePath, files, rs.pers.Label())
 }
 
 // commitUploaded commits rec (its uploaded manifest) through the
@@ -185,9 +188,19 @@ func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 }
 
 // collectFiles collects the files of a resource directory, applying the
-// kind's exclude patterns on top of transfer.DefaultExcludePatterns.
-func (rs *ResourceStore) collectFiles(dir string) ([]transfer.FileInfo, error) {
-	return transfer.CollectFiles(dir, rs.excludePatterns)
+// kind's exclude patterns on top of transfer.DefaultExcludePatterns, and
+// opens an os.Root at dir through which the collected files are read. The
+// caller must close the root.
+func (rs *ResourceStore) collectFiles(dir string) ([]transfer.FileInfo, *os.Root, error) {
+	files, err := transfer.CollectFiles(dir, rs.excludePatterns)
+	if err != nil {
+		return nil, nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open collected dir: %w", err)
+	}
+	return files, root, nil
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
@@ -206,10 +219,11 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	if err := transfer.NormalizeDir(dir); err != nil {
 		return false, fmt.Errorf("normalize dir: %w", err)
 	}
-	files, err := rs.collectFiles(dir)
+	files, root, err := rs.collectFiles(dir)
 	if err != nil {
 		return false, err
 	}
+	defer func() { _ = root.Close() }()
 
 	// Pre-upload content check: a refusal writes nothing (no row, no
 	// storage change).
@@ -243,7 +257,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			return false, err
 		}
 
-		uploaded, _, err := rs.uploadFiles(ctx, stor, rec.StoragePath, files)
+		uploaded, _, err := rs.uploadFiles(ctx, stor, root, rec.StoragePath, files)
 		if err != nil {
 			return false, err
 		}
@@ -272,7 +286,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, root, storagePath, files)
 	if err != nil {
 		return false, err
 	}
@@ -461,12 +475,12 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 // unreferenced, so the garbage collector cannot remove it before the commit
 // (F5b). It never writes <StoragePath>/<path>, so a co-located broker's
 // direct read of a blob row keeps missing.
-func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Storage, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Storage, root *os.Root, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
 	t := p.model
 	if t == nil {
 		return nil, nil, fmt.Errorf("%s: no template loaded for upload", p.Label())
 	}
-	written, err := uploadDirBlobs(ctx, stor, templateBlobRow(t), p.s.templateContentBase(t), files, p.Label())
+	written, err := uploadDirBlobs(ctx, stor, root, templateBlobRow(t), p.s.templateContentBase(t), files, p.Label())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -482,8 +496,10 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 // unreferenced, so the garbage collector cannot remove it before the commit
 // (F5b). It never writes <StoragePath>/<path>, so a co-located broker's
 // direct read of a blob row keeps missing. Templates and harness-configs
-// share it.
-func uploadDirBlobs(ctx context.Context, stor storage.Storage, row *blobRow, base string, files []transfer.FileInfo, label string) (map[string]bool, error) {
+// share it. Each file is read through root (opened at the collected
+// directory) with transfer.ReadCollectedFile, so a file that is no longer a
+// regular file of the collected size and hash fails the upload.
+func uploadDirBlobs(ctx context.Context, stor storage.Storage, root *os.Root, row *blobRow, base string, files []transfer.FileInfo, label string) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	if row.isBlobs() {
 		for _, f := range row.Files {
@@ -532,12 +548,9 @@ func uploadDirBlobs(ctx context.Context, stor storage.Storage, row *blobRow, bas
 			if err := gctx.Err(); err != nil {
 				return err
 			}
-			data, err := os.ReadFile(j.fi.FullPath)
+			data, err := transfer.ReadCollectedFile(root, j.fi)
 			if err != nil {
-				return fmt.Errorf("%s: failed to open file %s: %w", label, j.fi.Path, err)
-			}
-			if transfer.HashBytes(data) != j.fi.Hash {
-				return fmt.Errorf("%s: file %s changed while it was uploaded", label, j.fi.Path)
+				return fmt.Errorf("%s: %w", label, err)
 			}
 			if err := uploadTemplateBlob(gctx, stor, j.blobPath, j.fi.Hash, data); err != nil {
 				return fmt.Errorf("%s: failed to upload file %s: %w", label, j.fi.Path, err)
@@ -807,12 +820,12 @@ func (p *harnessConfigPersistence) CheckDir(_ context.Context, dir string, _ []t
 // harness-config's content base (uploadDirBlobs). Together with the commit
 // this replaces the shared path upload and its prefix reconcile for
 // harness-configs (ptone/scion#4219, ptone/scion#3170).
-func (p *harnessConfigPersistence) UploadFiles(ctx context.Context, stor storage.Storage, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
+func (p *harnessConfigPersistence) UploadFiles(ctx context.Context, stor storage.Storage, root *os.Root, _ string, files []transfer.FileInfo) ([]store.TemplateFile, map[string]struct{}, error) {
 	hc := p.model
 	if hc == nil {
 		return nil, nil, fmt.Errorf("%s: no harness config loaded for upload", p.Label())
 	}
-	written, err := uploadDirBlobs(ctx, stor, harnessConfigBlobRow(hc), p.s.harnessConfigContentBase(hc), files, p.Label())
+	written, err := uploadDirBlobs(ctx, stor, root, harnessConfigBlobRow(hc), p.s.harnessConfigContentBase(hc), files, p.Label())
 	if err != nil {
 		return nil, nil, err
 	}

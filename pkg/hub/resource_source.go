@@ -273,11 +273,12 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
 	}
 
-	files, err := rs.collectFiles(dir)
+	files, root, err := rs.collectFiles(dir)
 	if err != nil {
 		result.Failed++
 		return result, err
 	}
+	defer func() { _ = root.Close() }()
 
 	// One pre-upload content check per resource; it covers the create, update
 	// and storage-repair branches below, so a refusal writes nothing.
@@ -287,9 +288,9 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 	}
 
 	if existing == nil {
-		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, files, &result)
+		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, root, files, &result)
 	}
-	return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, opts, &result)
+	return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, root, files, opts, &result)
 }
 
 // bootstrapSourceCreate handles the create path for a new resource.
@@ -297,6 +298,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 	ctx context.Context,
 	meta ResourceMetadata,
 	slug, dir string,
+	root *os.Root,
 	files []transfer.FileInfo,
 	result *BootstrapResult,
 ) (BootstrapResult, error) {
@@ -328,13 +330,13 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 				result.Failed++
 				return *result, fmt.Errorf("%s: create race recovery failed: %w", p.Label(), err)
 			}
-			return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, BootstrapOptions{Force: true}, result)
+			return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, root, files, BootstrapOptions{Force: true}, result)
 		}
 		result.Failed++
 		return *result, fmt.Errorf("%s: create failed: %w", p.Label(), err)
 	}
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, rec.StoragePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, root, rec.StoragePath, files)
 	if err != nil {
 		result.Failed++
 		return *result, err
@@ -360,6 +362,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	meta ResourceMetadata,
 	existing *ResourceRecord,
 	dir string,
+	root *os.Root,
 	files []transfer.FileInfo,
 	opts BootstrapOptions,
 	result *BootstrapResult,
@@ -373,7 +376,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		newHash := rs.srv.computeContentHash(toResourceFiles(files))
 		if newHash == existing.ContentHash {
 			if opts.RepairStorage && IsBuiltinManaged(existing.SourceURL) {
-				repaired, err := rs.repairStorageIfNeeded(ctx, existing, dir, files)
+				repaired, err := rs.repairStorageIfNeeded(ctx, existing, dir, root, files)
 				if err != nil {
 					result.Failed++
 					return *result, err
@@ -393,7 +396,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, root, storagePath, files)
 	if err != nil {
 		result.Failed++
 		return *result, err
@@ -421,6 +424,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	ctx context.Context,
 	rec *ResourceRecord,
 	dir string,
+	root *os.Root,
 	files []transfer.FileInfo,
 ) (bool, error) {
 	report, err := rs.ValidateStorage(ctx, rec)
@@ -444,7 +448,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	srv.resourceLog.Info(p.Label()+": repairing storage",
 		"name", rec.Name, "issues", len(report.Issues))
 
-	uploaded, _, err := rs.uploadFiles(ctx, stor, storagePath, files)
+	uploaded, _, err := rs.uploadFiles(ctx, stor, root, storagePath, files)
 	if err != nil {
 		return false, fmt.Errorf("repair upload: %w", err)
 	}
