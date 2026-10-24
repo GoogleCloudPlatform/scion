@@ -34,6 +34,12 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrInvalidCursor is returned for every pagination cursor a list call
+	// cannot use: malformed, bound to another list, or naming no row. It
+	// wraps ErrInvalidInput, so checks for that still match; the hub maps it
+	// to 400 invalid_cursor (ptone/scion#3062).
+	ErrInvalidCursor = fmt.Errorf("%w: invalid cursor", ErrInvalidInput)
+
 	// ErrActiveReservationExists is returned by CreateUsageReservation when
 	// the resource already holds an active (released_at IS NULL)
 	// reservation for the same limit definition: the unique active
@@ -577,6 +583,17 @@ type AgentStore interface {
 	// Returns ErrVersionConflict if the version doesn't match.
 	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
 	UpdateAgent(ctx context.Context, agent *Agent) error
+
+	// UpdateAgentConfig writes only the agent's applied config (and its
+	// harness_config shadow) and pending config, compare-and-set on
+	// expectedVersion, and bumps state_version. A nil pending clears the
+	// pending config. It leaves every status, phase and lifecycle column as
+	// it is, so a start path that has moved the row on (the starting phase,
+	// a start claim) can persist a config change from its own copy of the
+	// agent without writing that copy's stale status back. Returns the new
+	// state version; ErrNotFound if the agent doesn't exist or is
+	// soft-deleted; ErrVersionConflict if the version doesn't match.
+	UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *AgentAppliedConfig, pending *AgentPendingConfig) (int64, error)
 
 	// SetAgentSoftDeleteOpID sets the agent's soft_delete_op_id to opID, or
 	// clears it to NULL when opID is empty. It is the only writer of that
@@ -1867,6 +1884,12 @@ type BrokerDispatchStore interface {
 	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
 	// have not been dispatched within the expected window.
 	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
+
+	// ListStuckPendingMessageIDs returns the IDs of up to limit messages that
+	// CountStuckPendingMessages counts, oldest first, so the sweep can name
+	// them in its log line (ptone/scion#4827). A non-positive limit returns
+	// no IDs.
+	ListStuckPendingMessageIDs(ctx context.Context, before time.Time, limit int) ([]string, error)
 
 	// ExpireStuckPendingMessages transitions messages stuck in pending state
 	// past the given cutoff to failed, recording the reason. Returns the

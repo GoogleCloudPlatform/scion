@@ -187,7 +187,7 @@ export function shareSuggestion(page: Page, text: string): Locator {
   return page.locator(SELECTORS.shareSuggestion).filter({ hasText: text });
 }
 
-/** The home project grant row ("(home project)", no controls). */
+/** The home project grant row ("(home project)"; its permission select is read or write). */
 export function homeGrantRow(page: Page): Locator {
   return page.locator(SELECTORS.shareGrantRow).filter({ hasText: '(home project)' });
 }

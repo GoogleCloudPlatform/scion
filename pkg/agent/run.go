@@ -1695,6 +1695,22 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// Host networking and the GCP metadata mode: refuse assign, warn the
+	// user for block. Decided on the merged env, before any container work.
+	var relayedWarnings []string
+	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
+	if hostNetErr != nil {
+		slog.Warn("Start: refusing agent start: GCP metadata mode not supported under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode)
+		return nil, hostNetErr
+	}
+	if hostNetWarning != "" {
+		slog.Warn("Start: GCP metadata block mode is not enforced at the network level under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode)
+		warnings = append(warnings, hostNetWarning)
+		relayedWarnings = append(relayedWarnings, hostNetWarning)
+	}
+
 	// Check the OTLP TLS settings in the final env, after every merge. Only
 	// a warning: in the container sciontool logs a failed telemetry start
 	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
@@ -2631,7 +2647,7 @@ authDone:
 		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
-		MetadataInterception: hasMetadataInterception(agentEnv),
+		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {
@@ -2761,6 +2777,7 @@ authDone:
 				a.Detached = detached
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
+				a.RelayedWarnings = relayedWarnings
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -2783,6 +2800,7 @@ authDone:
 		Detached:              detached,
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
+		RelayedWarnings:       relayedWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,

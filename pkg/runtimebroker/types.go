@@ -749,8 +749,8 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Ready:                 phase == string(state.PhaseRunning),
 		WorkspacePlacement:    info.WorkspacePlacement,
 	}
-	if len(info.HubOnlyEnvWarnings) > 0 {
-		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
+	if len(info.HubOnlyEnvWarnings) > 0 || len(info.RelayedWarnings) > 0 {
+		resp.Warnings = append(append([]string(nil), info.HubOnlyEnvWarnings...), info.RelayedWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {
