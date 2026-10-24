@@ -15,8 +15,10 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -149,4 +151,12 @@ func TestCheckRegularTree(t *testing.T) {
 	err := checkRegularTree(dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "a/link")
+}
+
+// TestProductionGitSparseCheckoutForTest pins that the accessor returns the
+// production sparse-checkout runner, even while a stub is installed.
+func TestProductionGitSparseCheckoutForTest(t *testing.T) {
+	stub := GitSparseCheckoutFunc(func(context.Context, *GitHubURLParts, string, string) error { return nil })
+	t.Cleanup(SetGitSparseCheckoutForTest(stub))
+	assert.Equal(t, reflect.ValueOf(execSparseGitCheckout).Pointer(), reflect.ValueOf(ProductionGitSparseCheckoutForTest()).Pointer())
 }

@@ -610,6 +610,17 @@ func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
 	return func() { sparseGitCheckout = prev }
 }
 
+// ProductionGitSparseCheckoutForTest returns the production sparse-checkout
+// runner. Test binaries that install a hermetic runner for every test (pkg/hub
+// does, see SetGitSparseCheckoutForTest) use it to run the real checkout and
+// copy code in one test, with a fake git first on PATH so nothing reaches the
+// network.
+//
+// TEST-ONLY: never call this from production code.
+func ProductionGitSparseCheckoutForTest() GitSparseCheckoutFunc {
+	return execSparseGitCheckout
+}
+
 // execSparseGitCheckout is the production sparse-checkout runner: it performs
 // a sparse git checkout to get only the needed folder.
 // When token is non-empty, git authenticates through the credential helper

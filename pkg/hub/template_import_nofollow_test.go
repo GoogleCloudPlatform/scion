@@ -294,6 +294,9 @@ func TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets(t *testing.
 		t.Fatal(err)
 	}
 	installLinkingFakeGit(t, secretPath, outside)
+	// The pkg/hub TestMain disables the sparse checkout for every test; this
+	// test runs the production checkout and copy code against the fake git.
+	t.Cleanup(config.SetGitSparseCheckoutForTest(config.ProductionGitSparseCheckoutForTest()))
 
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
