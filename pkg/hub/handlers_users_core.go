@@ -741,7 +741,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Build actor audit metadata outside the transaction.
 	auditActor := s.buildAuditActorFromContext(ctx)
 
+	// suspended is set when the transaction changes the status to
+	// suspended.
+	suspended := false
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		suspended = false
 		// Re-read user inside the transaction for consistency.
 		txUser, err := tx.GetUser(ctx, id)
 		if err != nil {
@@ -842,6 +846,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 
 		if needsSuspend && beforeStatus != txUser.Status {
+			suspended = txUser.Status == store.UserStatusSuspended
 			mutationType := "user_suspend"
 			if txUser.Status == "active" {
 				mutationType = "user_reactivate"
@@ -882,6 +887,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	if needsPromote || needsSuspend {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
+	}
+	// A suspended issuer's agent delegation grants end, best effort:
+	// exchange and use already deny them (.design/agent-delegation.md
+	// §16.3).
+	if suspended {
+		s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: user.ID}, revokeReasonIssuerSuspended)
 	}
 
 	// This response applies the same per-viewer preferences visibility rule
@@ -1491,11 +1502,16 @@ func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 
 // afterUserDeleted runs once a user deletion has committed: it tells
 // conduit subscribers the user's authorization changed, then removes the
-// user's user-scope secrets and env vars as a best effort
-// (ptone/scion#2769). Failures are logged, not returned.
+// user's user-scope secrets and env vars and revokes the agent delegation
+// grants the user issued, as a best effort (ptone/scion#2769). Failures are
+// logged, not returned.
 func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
 	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: userID})
 	s.removeUserScopedData(ctx, userID)
+	// The deleted issuer's agent delegation grants end, best effort: a
+	// grant never blocks the delete, and exchange and use deny a missing
+	// issuer (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: userID}, revokeReasonIssuerDeleted)
 }
 
 // lastOwnerProjectRef identifies a project that deleting a user would leave

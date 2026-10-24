@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -2439,6 +2440,13 @@ type Server struct {
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
 
+	// cspReports is the browser policy report endpoint (csp_reports.go),
+	// and cspReportLimiter its rate limit, kept here so Start can run its
+	// cleanup goroutine. Both are set by New; nil on a Server built
+	// without it.
+	cspReports       *cspreport.Handler
+	cspReportLimiter *cspReportLimiter
+
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
@@ -3321,6 +3329,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A restored agent whose root user is no longer admitted to its project
 	// comes back held (ptone/scion#3433).
 	srv.registerMembershipRestoreHook()
+	// Agent delete, restore and the reincarnation claim revoke the agent's
+	// delegation grants in their own transaction
+	// (.design/agent-delegation.md §16.1).
+	srv.registerAgentDelegationLifecycleHooks()
 
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3440,6 +3452,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// one.
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
+
+	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
+	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter)
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions
@@ -5334,6 +5349,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6685,6 +6703,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.externalBearerRateLimiter != nil {
 		s.externalBearerRateLimiter.StartCleanup(ctx)
 	}
+	if s.cspReportLimiter != nil {
+		s.cspReportLimiter.StartCleanup(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {
@@ -6693,6 +6714,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
+
+	// Starred messages need a chat store with the star capability; report
+	// a misconfiguration at startup (requests answer 503 meanwhile).
+	s.validateMessageStarStore()
 
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
@@ -7375,6 +7400,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		// Starred messages (web.chat_starred_messages; 404 while off).
+		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
+		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
@@ -7398,6 +7426,9 @@ func (s *Server) registerRoutes() {
 	// Test-identity gate status for the web test-hub banner, readable
 	// without authentication (ptone/scion#4240).
 	s.mux.HandleFunc("GET /api/v1/test-infra/status", s.guarded("GET /api/v1/test-infra/status", s.handleTestInfraStatus))
+
+	// Policy reports from browsers showing the web pages; no sign-in (browsers send reports on their own).
+	s.mux.HandleFunc("POST /api/v1/csp-reports", s.guarded("POST /api/v1/csp-reports", s.handleCSPReport))
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))

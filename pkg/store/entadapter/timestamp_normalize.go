@@ -886,8 +886,20 @@ func existingSnapshot(file, label string) (string, error) {
 	return filepath.Join(dir, names[0]), nil
 }
 
+// webchatFixedWidthTimeColumns are webchat_* *_at columns that are not
+// RFC 3339 text in the webchat family's trimmed canonical form and must
+// never be rewritten to it. webchat_message_star.starred_at (owned by
+// pkg/hub/webchat_star_store.go) is a fixed-width TEXT keyset column:
+// nine fraction digits, always, so that a lexical comparison is
+// chronological and the star store's strict parser accepts it. Trimming it
+// would make every rewritten star unreadable and break the keyset order.
+var webchatFixedWidthTimeColumns = map[string]map[string]bool{
+	"webchat_message_star": {"starred_at": true},
+}
+
 // sqliteScalarTargets returns the ent time columns and the *_at columns of
-// every webchat_* table (discovered with PRAGMA table_info).
+// every webchat_* table (discovered with PRAGMA table_info), except the
+// fixed-width columns in webchatFixedWidthTimeColumns.
 func sqliteScalarTargets(ctx context.Context, db *sql.DB, tables map[string]bool) ([]scalarTarget, error) {
 	out, err := entTimeTargets(ctx, db, tables)
 	if err != nil {
@@ -907,7 +919,7 @@ func sqliteScalarTargets(ctx context.Context, db *sql.DB, tables map[string]bool
 		}
 		var at []string
 		for _, c := range cols {
-			if strings.HasSuffix(c, "_at") {
+			if strings.HasSuffix(c, "_at") && !webchatFixedWidthTimeColumns[name][c] {
 				at = append(at, c)
 			}
 		}

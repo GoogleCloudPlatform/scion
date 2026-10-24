@@ -761,6 +761,10 @@ func TestFetchGitHubTarball(t *testing.T) {
 // every subcommand except `fetch`, which fails with an auth-style error, so
 // execSparseGitCheckout runs end to end without touching the network
 // (ptone/scion#3750). It returns a func that reads the logged invocations.
+// When SCION_FAKE_GIT_ENV_LOG is set (see fakeGitConfigEnv), each invocation
+// also logs its GIT_CONFIG_* entries there, and a CRED= entry with the value
+// of the scoped credential helper's environment variable (scopedCredentialVar)
+// or "<unset>".
 func installFakeGit(t *testing.T) (calls, rawCalls func() []string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -778,6 +782,17 @@ func installFakeGit(t *testing.T) (calls, rawCalls func() []string) {
 printf '%s\n' "$*" >> "$SCION_FAKE_GIT_RAW"
 while [ "$1" = "-c" ]; do shift 2; done
 printf '%s\n' "$*" >> "$SCION_FAKE_GIT_LOG"
+if [ -n "$SCION_FAKE_GIT_ENV_LOG" ]; then
+  n=${GIT_CONFIG_COUNT:-0}
+  i=0
+  printf '%s\n' "$1" >> "$SCION_FAKE_GIT_ENV_LOG"
+  while [ "$i" -lt "$n" ]; do
+    eval "k=\${GIT_CONFIG_KEY_$i-}; v=\${GIT_CONFIG_VALUE_$i-}"
+    printf '%s %s=%s\n' "$1" "$k" "$v" >> "$SCION_FAKE_GIT_ENV_LOG"
+    i=$((i+1))
+  done
+  printf '%s CRED=%s\n' "$1" "${SCION_SCOPED_GIT_CREDENTIAL-<unset>}" >> "$SCION_FAKE_GIT_ENV_LOG"
+fi
 if [ "$1" = "fetch" ]; then
   echo "fatal: Authentication failed (fake git)" >&2
   exit 128
@@ -801,32 +816,83 @@ exit 0
 	return calls, rawCalls
 }
 
-func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
-	// execSparseGitCheckout embeds the token in the remote URL when provided.
-	// A fake git on PATH records the remote URL so this runs offline.
+// fakeGitConfigEnv makes the fake git from installFakeGit log the
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n entries of each invocation's
+// environment. It returns a func that reads them as subcommand ->
+// "key=value" entries, in order; every invocation has an entry, possibly
+// empty.
+func fakeGitConfigEnv(t *testing.T) func() map[string][]string {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "git-config-env.log")
+	t.Setenv("SCION_FAKE_GIT_ENV_LOG", logPath)
+	return func() map[string][]string {
+		data, err := os.ReadFile(logPath)
+		require.NoError(t, err)
+		out := map[string][]string{}
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			sub, entry, hasEntry := strings.Cut(line, " ")
+			if !hasEntry {
+				out[sub] = []string{}
+				continue
+			}
+			out[sub] = append(out[sub], entry)
+		}
+		return out
+	}
+}
+
+// scopedCredentialVar is the environment variable util.ScopedCredentialHelperEnv
+// sets for the git command and its constant helper reads at run time.
+const scopedCredentialVar = "SCION_SCOPED_GIT_CREDENTIAL"
+
+// credentialVarEntry returns the CRED= entry the fake git logged for a call.
+func credentialVarEntry(entries []string) string {
+	for _, e := range entries {
+		if strings.HasPrefix(e, "CRED=") {
+			return e
+		}
+	}
+	return ""
+}
+
+// credentialEntries returns the credential.* entries of a "key=value" list.
+func credentialEntries(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e, "credential.") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestSparseGitCheckout_TokenFromScopedCredentialHelper(t *testing.T) {
+	// execSparseGitCheckout uses the plain remote URL and authenticates
+	// through the credential helper scoped to https://github.com
+	// (util.ScopedCredentialHelperEnv). A fake git on PATH records argv,
+	// GIT_CONFIG_* entries and the helper's credential variable, so this runs
+	// offline.
 	parts := &GitHubURLParts{Owner: "test", Repo: "nonexistent-repo-12345", Branch: "main", Path: "templates"}
+	const anonRemote = "remote add origin https://github.com/test/nonexistent-repo-12345.git"
 
 	tests := []struct {
-		name       string
-		token      string
-		wantRemote string
+		name  string
+		token string
 	}{
-		{"without token uses anonymous URL", "", "remote add origin https://github.com/test/nonexistent-repo-12345.git"},
-		{"with token embeds it in the remote URL", "ghs_test_token", "remote add origin https://x-access-token:ghs_test_token@github.com/test/nonexistent-repo-12345.git"},
+		{"without token uses anonymous URL and no credential helper", ""},
+		{"with token uses anonymous URL and the scoped credential helper", "ghs_test_token"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls, rawCalls := installFakeGit(t)
+			configEnv := fakeGitConfigEnv(t)
 			err := execSparseGitCheckout(context.Background(), parts, t.TempDir(), tt.token)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "git fetch failed")
 			assert.Contains(t, err.Error(), "Authentication failed")
-			if tt.token != "" {
-				assert.NotContains(t, err.Error(), tt.token, "token must never appear in error text")
-			}
 			want := []string{
 				"init",
-				tt.wantRemote,
+				anonRemote,
 				"config core.sparseCheckout true",
 				"fetch --depth=1 origin main",
 			}
@@ -841,6 +907,35 @@ func TestSparseGitCheckout_AuthTokenInURL(t *testing.T) {
 			require.Len(t, raw, len(want))
 			for i := range want {
 				assert.Equal(t, pins+" "+want[i], raw[i], "call %d must carry exactly the host-side pins", i)
+			}
+
+			env := configEnv()
+			require.Len(t, env, len(want), "every git call must be logged")
+			for _, sub := range []string{"init", "remote", "config", "fetch"} {
+				creds := credentialEntries(env[sub])
+				if tt.token == "" {
+					assert.Empty(t, creds, "%s: no credential helper without a token", sub)
+					assert.Equal(t, "CRED=<unset>", credentialVarEntry(env[sub]), "%s: no credential variable without a token", sub)
+					continue
+				}
+				// The empty credential.helper reset (so no configured helper
+				// runs or stores the token), then the one helper scoped to
+				// the remote's host. The helper value is the constant that
+				// reads the credential variable at run time; the token is in
+				// the git command's environment only.
+				require.Len(t, creds, 2, "%s: %v", sub, creds)
+				assert.Equal(t, "credential.helper=", creds[0], sub)
+				assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), "%s: %s", sub, creds[1])
+				assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", sub)
+				assert.NotContains(t, creds[1], tt.token, "%s: git config values contain no secret values", sub)
+				assert.Equal(t, "CRED="+tt.token, credentialVarEntry(env[sub]), sub)
+			}
+
+			if tt.token != "" {
+				assert.NotContains(t, err.Error(), tt.token, "error text contains no secret values")
+				for _, r := range raw {
+					assert.NotContains(t, r, tt.token, "git arguments contain no secret values")
+				}
 			}
 		})
 	}
@@ -858,7 +953,7 @@ func (f remoteTemplatesRoundTripFunc) RoundTrip(r *http.Request) (*http.Response
 // and the auth token, and that its result is returned as-is.
 func TestFetchGitHubFolder_FallsBackToSparseCheckoutSeam(t *testing.T) {
 	calls, _ := installFakeGit(t) // any real git exec would be recorded here
-	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errors.New("ls-remote disabled in test")
 	}))
 
