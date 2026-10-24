@@ -259,9 +259,10 @@ The selection logic lives in
 4. Fails when the release branch head is not an ancestor of the chosen commit, i.e. the branch
    has commits that are not on `main`. It never force-pushes. This is the normal state during a
    freeze; use `bump-preview.sh` until the line is promoted.
-5. Computes the next tag from the highest `vX.Y.Z-preview.N` for the line, comparing `N`
-   numerically, or `vX.Y.0-preview.1` if there is none. It fails if that tag exists or if the line
-   has already been promoted to stable `vX.Y.Z`.
+5. Computes the next tag from the highest `vX.Y.Z-preview.N` for the line: the highest patch `Z`
+   first, then the highest `N` within it, both compared numerically, or `vX.Y.0-preview.1` if
+   there is none. It fails if that tag exists or if that `vX.Y.Z` has already been promoted to
+   stable.
 6. Pushes the fast-forward of `release/vX.Y` and the new tag in one atomic push (a plain push,
    which the remote rejects unless the branch update is a fast-forward).
 7. Calls `build-release.yml` with the tag, because tags pushed with `GITHUB_TOKEN` do not start

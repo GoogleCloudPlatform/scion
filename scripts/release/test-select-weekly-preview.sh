@@ -177,14 +177,32 @@ ci "$c4" success
 run
 want_status 1
 
-# --- Highest N wins across patch bases; non-matching tags ignored ---
+# --- Highest patch wins even with a lower N; non-matching tags ignored ---
 name=mixed-bases; new_repo "$name"
 ci "$c4" success
+g tag v0.3.0-preview.8 "$c1"
 g tag v0.3.1-preview.7 "$c1"
 g tag v0.3.0-preview.x "$c1"
 g tag v0.3.0-preview.8-rc "$c1"
 run
 want_status 0; want tag v0.3.1-preview.8
+
+# --- Patch compared numerically: v0.3.10 beats v0.3.9 ---
+name=patch-numeric; new_repo "$name"
+ci "$c4" success
+g tag v0.3.9-preview.20 "$c1"
+g tag v0.3.10-preview.3 "$c1"
+run
+want_status 0; want tag v0.3.10-preview.4
+
+# --- Highest patch already promoted to stable ---
+name=highest-patch-promoted; new_repo "$name"
+ci "$c4" success
+g tag v0.3.1-preview.7 "$c1"
+g tag v0.3.1 "$c1"
+run
+want_status 1; want selected false
+grep -q "v0.3.1 has already been promoted" "$tmp/stderr" || fail "$name: missing promoted message"
 
 # --- No release branch ---
 name=no-branch; new_repo "$name"

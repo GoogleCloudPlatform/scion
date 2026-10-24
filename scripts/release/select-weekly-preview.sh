@@ -210,20 +210,26 @@ fi
 
 # --- Next preview tag ------------------------------------------------------------
 
+# Highest patch Z first, then the highest N within that patch, both numeric:
+# with v0.3.0-preview.8 and v0.3.1-preview.7 the next tag is v0.3.1-preview.8.
+PATCH=-1
 HIGHEST=0
-BASE=""
 for t in $(git tag -l "v${LINE}.*-preview.*"); do
   [[ "$t" =~ ^v${LINE//./\\.}\.([0-9]+)-preview\.([0-9]+)$ ]] || continue
-  n="${BASH_REMATCH[2]}"
-  if [ "$((10#$n))" -gt "$HIGHEST" ]; then
-    HIGHEST="$((10#$n))"
-    BASE="v${LINE}.${BASH_REMATCH[1]}"
+  z="$((10#${BASH_REMATCH[1]}))"
+  n="$((10#${BASH_REMATCH[2]}))"
+  if [ "$z" -gt "$PATCH" ]; then
+    PATCH="$z"
+    HIGHEST="$n"
+  elif [ "$z" -eq "$PATCH" ] && [ "$n" -gt "$HIGHEST" ]; then
+    HIGHEST="$n"
   fi
 done
 
-if [ "$HIGHEST" -eq 0 ]; then
-  BASE="v${LINE}.0"
+if [ "$PATCH" -lt 0 ]; then
+  PATCH=0
 fi
+BASE="v${LINE}.${PATCH}"
 TAG="${BASE}-preview.$((HIGHEST + 1))"
 
 if git rev-parse -q --verify "refs/tags/${BASE}" >/dev/null; then
