@@ -46,7 +46,8 @@ type fakeGitHub struct {
 }
 
 // newFakeGitHub serves the commits and git trees endpoints for owner/repo,
-// returning commitSHA and a single-file listing under skillPath.
+// returning commitSHA and a single-file listing for any skill path at that
+// commit. skillPath names the skill the caller resolves; it is not checked.
 func newFakeGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *fakeGitHub {
 	t.Helper()
 
@@ -62,8 +63,10 @@ func newFakeGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *fake
 			// Accept: application/vnd.github.v3.sha — a bare SHA, not JSON.
 			_, _ = w.Write([]byte(commitSHA))
 		case strings.HasPrefix(r.URL.Path, treesPrefix):
-			assert.Equal(t, commitSHA+":"+skillPath, strings.TrimPrefix(r.URL.Path, treesPrefix),
-				"the tree must be listed at the resolved commit, not the symbolic ref")
+			// Callers may resolve several skill paths against one fake (some
+			// pass a placeholder skillPath), so only the commit is checked.
+			assert.True(t, strings.HasPrefix(strings.TrimPrefix(r.URL.Path, treesPrefix), commitSHA+":"),
+				"the tree must be listed at the resolved commit, not the symbolic ref: %s", r.URL.Path)
 			assert.Equal(t, "1", r.URL.Query().Get("recursive"))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"sha":"t","truncated":false,"tree":[{

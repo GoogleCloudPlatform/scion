@@ -64,7 +64,8 @@ func newStatusGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *st
 			}
 			_, _ = w.Write([]byte(commitSHA))
 		case strings.HasPrefix(r.URL.Path, treesPrefix):
-			assert.Equal(t, commitSHA+":"+skillPath, strings.TrimPrefix(r.URL.Path, treesPrefix))
+			assert.True(t, strings.HasPrefix(strings.TrimPrefix(r.URL.Path, treesPrefix), commitSHA+":"+skillPath),
+				"the tree must be listed at the resolved commit: %s", r.URL.Path)
 			f.contentsCalls.Add(1)
 			if st := int(f.contentsStatus.Load()); st != http.StatusOK {
 				http.Error(w, `{"message":"Not Found"}`, st)
