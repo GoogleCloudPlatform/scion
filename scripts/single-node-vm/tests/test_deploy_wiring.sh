@@ -2758,7 +2758,7 @@ BOOTSTRAP_IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/sc
 
 # _last_line_number PATTERN TEXT -- like line_number, but the last match.
 _last_line_number() {
-  echo "$2" | grep -n -F -- "$1" | tail -1 | cut -d: -f1
+  printf '%s\n' "$2" | grep -n -F -- "$1" | tail -1 | cut -d: -f1
 }
 
 # _lt A B -- "true" if A and B are both non-empty and A < B.
