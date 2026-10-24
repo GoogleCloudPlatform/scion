@@ -146,8 +146,13 @@ every runtime through it.
   - **#4141 (settings papercuts)** routes settings YAML decodes through a
     panic-safe wrapper with the same decode result, so the
     `project_storage` block parses unchanged. This change's own two
-    storage-key checks decode into `interface{}`, where yaml.v3 returns an
-    error instead of panicking on the same input (checked).
+    storage-key checks (`CheckStorageBlocksLoaded`,
+    `GlobalSettingsStorageKey`) decoded the global settings file with raw
+    yaml.v3, which panics even into `interface{}` on some malformed
+    merge-key shapes. That would crash the hub at startup or a broker on
+    agent Start. They now go through the same safe decoder, so such a file
+    is a parse error (the first refuses when the file mentions a storage
+    key; the second reports none). A test covers both.
   - **#4166** revokes delegation grants inside the project-delete
     transaction. That runs before the best-effort shared-dir cleanup, as
     before.
