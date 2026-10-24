@@ -33,11 +33,12 @@ export type BrokerVersionStatus = 'match' | 'mismatch' | 'unknown';
 export const HUB_VERSION_MIXED = 'mixed';
 
 /**
- * True when the hub version is no usable token: empty, or "unknown" (a hub
- * built without build information).
+ * True when the hub version is a usable token: not empty and not "unknown" (a
+ * hub built without build information reports "unknown"). A type guard, so
+ * callers that return early on false see a string afterwards.
  */
-function hubVersionUnknown(hubVersion: string | null | undefined): boolean {
-  return !hubVersion || hubVersion === 'unknown';
+function hubVersionKnown(hubVersion: string | null | undefined): hubVersion is string {
+  return !!hubVersion && hubVersion !== 'unknown';
 }
 
 /** A missing or unexpected status is unknown, never match. */
@@ -47,14 +48,14 @@ export function normalizeVersionStatus(status: string | null | undefined): Broke
 
 /** The hub version as shown after "Hub: ". */
 export function hubVersionText(hubVersion: string | null | undefined): string {
-  if (hubVersionUnknown(hubVersion)) return 'unknown';
+  if (!hubVersionKnown(hubVersion)) return 'unknown';
   if (hubVersion === HUB_VERSION_MIXED) return 'mixed versions (upgrade in progress)';
   return hubVersion;
 }
 
 /** The tooltip describing the hub version. */
 export function hubVersionTitle(hubVersion: string | null | undefined): string {
-  if (hubVersionUnknown(hubVersion)) return 'Hub version unknown';
+  if (!hubVersionKnown(hubVersion)) return 'Hub version unknown';
   if (hubVersion === HUB_VERSION_MIXED) return 'Hub instances run different versions';
   return `Hub runs ${hubVersion}`;
 }
@@ -70,7 +71,7 @@ export function brokerVersionTitle(
   if (s === 'mismatch') return `Differs from the hub. ${hubVersionTitle(hubVersion)}`;
   // Unknown although both sides report a version: the broker's token cannot
   // be compared (for example "unknown", a build without build information).
-  if (s === 'unknown' && !hubVersionUnknown(hubVersion) && hubVersion !== HUB_VERSION_MIXED) {
+  if (s === 'unknown' && hubVersionKnown(hubVersion) && hubVersion !== HUB_VERSION_MIXED) {
     return `Cannot be compared with the hub. ${hubVersionTitle(hubVersion)}`;
   }
   return hubVersionTitle(hubVersion);
