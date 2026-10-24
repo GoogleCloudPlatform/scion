@@ -2934,3 +2934,14 @@ DELETE FROM webchat_mention
 	n, _ := res.RowsAffected()
 	return int(n), nil
 }
+
+// AttachmentMeta holds metadata about a stored attachment.
+type AttachmentMeta struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"projectId"`
+	Filename   string    `json:"name"`
+	MimeType   string    `json:"mime"`
+	Size       int64     `json:"size"`
+	UploadedBy string    `json:"uploadedBy"`
+	CreatedAt  time.Time `json:"createdAt"`
+}

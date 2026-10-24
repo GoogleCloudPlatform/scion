@@ -5182,22 +5182,6 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-// isDMParticipant checks whether the given userID occupies a "user" slot in
-// a DM conversation key.  It matches only slots whose kind label is "user",
-// so an agent principal cannot inadvertently satisfy a user-slot check and
-// vice-versa.
-func isDMParticipant(key, userID string) bool {
-	// DM key formats:
-	//   dm:agent:<agentUUID>:user:<userUUID>
-	//   dm:user:<uuidA>:user:<uuidB>
-	parts := strings.Split(key, ":")
-	if len(parts) < 5 {
-		return false
-	}
-	return (parts[1] == "user" && parts[2] == userID) ||
-		(parts[3] == "user" && parts[4] == userID)
-}
-
 // dmUserParticipants returns the user IDs named in a DM key, skipping the agent
 // side of an agent DM. Keys have the form dm:<kind>:<id>:<kind>:<id>.
 func dmUserParticipants(key string) []string {
@@ -5378,56 +5362,6 @@ func (s *Server) ensureDMRegistered(ctx context.Context, key, callerID string) {
 	s.mu.RUnlock()
 
 	registerDMParticipants(ctx, wcs, key)
-}
-
-// registerDMParticipants upserts one webchat_dm row per participant of a DM
-// conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
-// store or a malformed key.
-//
-// Registration must happen before any TouchDMActivity call: TouchDMActivity is
-// a plain UPDATE and silently affects zero rows when the registry rows do not
-// exist yet — which is the case when an agent is the first to speak in a DM.
-func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
-	if wcs == nil {
-		return
-	}
-
-	parts := strings.Split(key, ":")
-	if len(parts) < 5 {
-		return
-	}
-
-	kind1, id1 := parts[1], parts[2]
-	kind2, id2 := parts[3], parts[4]
-
-	// Upsert two rows — one per participant.
-	now := time.Now().UTC()
-
-	// Participant 1 → Peer 2.
-	peerKind2 := kind2
-	if peerKind2 != "agent" {
-		peerKind2 = "user"
-	}
-	_ = wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: key,
-		ParticipantID:   id1,
-		PeerID:          id2,
-		PeerKind:        peerKind2,
-		LastActivityAt:  now,
-	})
-
-	// Participant 2 → Peer 1.
-	peerKind1 := kind1
-	if peerKind1 != "agent" {
-		peerKind1 = "user"
-	}
-	_ = wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: key,
-		ParticipantID:   id2,
-		PeerID:          id1,
-		PeerKind:        peerKind1,
-		LastActivityAt:  now,
-	})
 }
 
 // ---------------------------------------------------------------------------
