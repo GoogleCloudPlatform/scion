@@ -758,8 +758,17 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
-		(errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) ||
+		startRunNotBegunOutsideDelete(err) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
+}
+
+// startRunNotBegunOutsideDelete reports whether err is a start whose run
+// could not be begun before the request was sent (errStartRunNotBegun), for
+// a reason other than a delete holding the agent row
+// (store.ErrDeleteInProgress), which then owns the row. Both
+// startDidNotHappen and reincarnationStartLeftNoContainer use it.
+func startRunNotBegunOutsideDelete(err error) bool {
+	return errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)
 }
 
 // settleFailedProvisionedStart returns an agent whose start did not happen
