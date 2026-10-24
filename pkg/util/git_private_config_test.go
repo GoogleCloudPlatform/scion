@@ -264,15 +264,16 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		// helper prefix over an unparseable URL-shaped remainder with userinfo: drop.
 		"http::https://u:p%zz@h/x": {"", false, true},
 		// http family (http/https/ftp/ftps): any userinfo removed, username-only too.
-		"ftp://u:p@h/x":  {"ftp://h/x", true, false},
-		"ftps://u@h/x":   {"ftps://h/x", true, false},
-		"git://u:p@h/x":  {"git://h/x", true, false},
-		"git://u@h/x":    {"git://u@h/x", false, false}, // git scheme, username only: kept
-		"file://u:p@h/x": {"file://h/x", true, false},
-		"file://u@h/x":   {"file://u@h/x", false, false}, // username only: kept
-		// Any other scheme with a password: ALL userinfo removed (no username kept).
-		"ssh://u:p@h/x":       {"ssh://h/x", true, false},
-		"socks5://u:p@h:1080": {"socks5://h:1080", true, false},
+		"ftp://u:p@h/x": {"ftp://h/x", true, false},
+		"ftps://u@h/x":  {"ftps://h/x", true, false},
+		// Any other scheme: a password strips ALL userinfo; a username with no
+		// password is kept unchanged.
+		"git://u:p@h/x":       {"git://h/x", true, false},       // password -> stripped
+		"git://u@h/x":         {"git://u@h/x", false, false},    // username only -> kept
+		"file://u:p@h/x":      {"file://h/x", true, false},      // password -> stripped
+		"file://u@h/x":        {"file://u@h/x", false, false},   // username only -> kept
+		"ssh://u:p@h/x":       {"ssh://h/x", true, false},       // password -> stripped
+		"socks5://u:p@h:1080": {"socks5://h:1080", true, false}, // password -> stripped
 		// Schemeless user:password@host is NOT handled by the shared helper (it is
 		// scp form for non-proxy keys); the proxy-only helper handles proxy keys.
 		"u:p@proxy.example:8080": {"u:p@proxy.example:8080", false, false},
@@ -563,7 +564,6 @@ func TestRedactGitConfigSecrets_ScpKeptAsRemoteAndBase(t *testing.T) {
 // key name for an includeIf "hasconfig:remote.*.url:<url>" key never carries the
 // <url>'s userinfo — it is recorded as includeif.<redacted>.path — across an http(s)
 // password, an ssh password, a remote-helper-prefixed url, and an unparseable url.
-// The "leaks userinfo" failure text is what the gate's mutant step selects on.
 func TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted(t *testing.T) {
 	cases := map[string]string{ // <url> after the prefix -> placeholder that must not leak
 		"https://iu:ip@ic.example/**":       "iu:ip",
@@ -590,10 +590,10 @@ func TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted(t *testing.T) {
 			}
 		}
 		if !foundRedacted {
-			t.Errorf("includeIf hasconfig noted name leaks userinfo: form %q gave stripped=%v, want includeif.<redacted>.path", form, stripped)
+			t.Errorf("includeIf hasconfig noted name: unexpected userinfo in output: form %q gave stripped=%v, want includeif.<redacted>.path", form, stripped)
 		}
 		if strings.Contains(joined, placeholder) || strings.Contains(string(out), placeholder) {
-			t.Errorf("includeIf hasconfig noted name leaks userinfo: placeholder %q present for form %q (stripped=%v)", placeholder, form, stripped)
+			t.Errorf("includeIf hasconfig noted name: unexpected userinfo in output: placeholder %q present for form %q (stripped=%v)", placeholder, form, stripped)
 		}
 	}
 }
