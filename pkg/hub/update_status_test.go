@@ -278,14 +278,16 @@ func TestAbortRunningMaintenanceOps_SkipsRestartingWithPendingUpdate(t *testing.
 	}
 }
 
-// failingSettingStore fails UpsertHubSetting for one section.
+// failingSettingStore fails UpsertHubSetting for one section while its
+// fault switch is armed.
 type failingSettingStore struct {
 	store.Store
 	section string
+	fault   *storeFaultSwitch
 }
 
-func (f failingSettingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
-	if section == f.section {
+func (f *failingSettingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	if section == f.section && f.fault.Active() {
 		return nil, errors.New("disk full")
 	}
 	return f.Store.UpsertHubSetting(ctx, section, value, updatedBy, expectedRevision, origin)
@@ -314,7 +316,10 @@ func TestLaunchMaintenanceRun_WritesPendingUpdateBeforeRestart(t *testing.T) {
 
 func TestLaunchMaintenanceRun_PendingWriteFailureDoesNotRestart(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
-	srv.store = failingSettingStore{Store: s, section: HubSettingSectionPendingUpdate}
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *failingSettingStore {
+		return &failingSettingStore{Store: inner, section: HubSettingSectionPendingUpdate, fault: f}
+	})
+	fault.Arm()
 	run := newRun(t, s)
 	srv.launchMaintenanceRun(run, &restartingExecutor{}, map[string]string{})
 	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
@@ -815,10 +820,11 @@ func TestRunReleaseUpdateCheck(t *testing.T) {
 }
 
 // orderCheckingStore records, when a run is written as "restarting", whether
-// system.pending_update already existed, and can fail that write.
+// system.pending_update already existed, and fails that write while its
+// fault switch is armed.
 type orderCheckingStore struct {
 	store.Store
-	failRestarting bool
+	fault *storeFaultSwitch
 
 	mu             sync.Mutex
 	pendingAtWrite *bool
@@ -833,7 +839,7 @@ func (o *orderCheckingStore) UpdateMaintenanceRun(ctx context.Context, run *stor
 			o.pendingAtWrite = &present
 		}
 		o.mu.Unlock()
-		if o.failRestarting {
+		if o.fault.Active() {
 			return errors.New("database is locked")
 		}
 	}
@@ -842,8 +848,9 @@ func (o *orderCheckingStore) UpdateMaintenanceRun(ctx context.Context, run *stor
 
 func TestMarkRunRestarting_PendingUpdateWrittenFirst(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
-	o := &orderCheckingStore{Store: s}
-	srv.store = o
+	o, _ := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *orderCheckingStore {
+		return &orderCheckingStore{Store: inner, fault: f}
+	})
 	run := newRun(t, s)
 	srv.launchMaintenanceRun(run, &restartingExecutor{}, map[string]string{})
 	waitForRestartRecorded(t, s, run.ID)
@@ -856,7 +863,10 @@ func TestMarkRunRestarting_PendingUpdateWrittenFirst(t *testing.T) {
 
 func TestMarkRunRestarting_RunWriteFailureDoesNotRestart(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
-	srv.store = &orderCheckingStore{Store: s, failRestarting: true}
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *orderCheckingStore {
+		return &orderCheckingStore{Store: inner, fault: f}
+	})
+	fault.Arm()
 	run := newRun(t, s)
 	srv.launchMaintenanceRun(run, &restartingExecutor{}, map[string]string{})
 	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
