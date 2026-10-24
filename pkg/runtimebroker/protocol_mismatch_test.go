@@ -16,7 +16,6 @@ package runtimebroker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -109,18 +108,18 @@ func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOpt
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
-func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	return nil
 }
 
 func (m *protocolMockManager) StopTarget(ctx context.Context, ref scionrt.RunRef) error {
 	return nil
 }
-func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
-func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName string, ref scionrt.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref scionrt.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 func (m *protocolMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -139,59 +138,3 @@ func (m *protocolMockManager) Watch(ctx context.Context, agentID string) (<-chan
 	return nil, nil
 }
 func (m *protocolMockManager) Close() {}
-
-func TestProjectWorkspaceUploadRequest_JSON(t *testing.T) {
-	t.Run("canonical round-trip", func(t *testing.T) {
-		req := ProjectWorkspaceUploadRequest{
-			ProjectID:     "p1",
-			StoragePath:   "/s",
-			WorkspacePath: "/w",
-		}
-		data, err := json.Marshal(req)
-		if err != nil {
-			t.Fatalf("Marshal failed: %v", err)
-		}
-
-		var m map[string]interface{}
-		if err := json.Unmarshal(data, &m); err != nil {
-			t.Fatalf("Unmarshal back failed: %v", err)
-		}
-
-		if m["projectId"] != "p1" || m["storagePath"] != "/s" || m["workspacePath"] != "/w" {
-			t.Errorf("canonical fields mismatch: %v", m)
-		}
-		if _, ok := m["groveId"]; ok {
-			t.Errorf("legacy 'groveId' field present in marshal output")
-		}
-
-		var roundTripped ProjectWorkspaceUploadRequest
-		if err := json.Unmarshal(data, &roundTripped); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if roundTripped.ProjectID != req.ProjectID || roundTripped.StoragePath != req.StoragePath || roundTripped.WorkspacePath != req.WorkspacePath {
-			t.Errorf("round-trip = %+v, want %+v", roundTripped, req)
-		}
-	})
-
-	t.Run("unmarshal projectId", func(t *testing.T) {
-		jsonData := `{"projectId": "p1", "storagePath": "/s", "workspacePath": "/w"}`
-		var req ProjectWorkspaceUploadRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "p1" {
-			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "p1")
-		}
-	})
-
-	t.Run("legacy groveId field is not honoured", func(t *testing.T) {
-		jsonData := `{"groveId": "p1", "storagePath": "/s", "workspacePath": "/w"}`
-		var req ProjectWorkspaceUploadRequest
-		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
-			t.Fatalf("Unmarshal failed: %v", err)
-		}
-		if req.ProjectID != "" {
-			t.Errorf("legacy groveId field was honoured: ProjectID = %q", req.ProjectID)
-		}
-	})
-}

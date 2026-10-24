@@ -1426,6 +1426,38 @@ func TestIsProxyRoute(t *testing.T) {
 		{"/api/v1/agents/abc/ports/8080", false},
 		{"/api/v1/agents/abc/status", false},
 		{"/healthz", false},
+		// isProxyRoute also decides which credential-less requests get the
+		// port proxy's plain-text 401 (ptone/scion#5566), so the set it
+		// matches is pinned here.
+		// Other port routes of an agent.
+		{"/api/v1/agents/abc/ports", false},
+		{"/api/v1/agents/abc/ports/", false},
+		{"/api/v1/agents/abc/ports/tunnel", false},
+		{"/api/v1/agents/abc/ports/8080/", false},
+		{"/api/v1/agents/abc/ports/8080/proxyx", false},
+		{"/api/v1/agents/abc/ports/8080/xproxy", false},
+		{"/api/v1/agents/abc/ports/8080/Proxy", false},
+		{"/api/v1/agents/abc/ports/8080/proxy.html", false},
+		// The router sends this to the proxy route too, whose handler
+		// refuses the non-numeric port.
+		{"/api/v1/agents/abc/ports/tunnel/proxy", true},
+		// Agent routes that are not port routes.
+		{"/api/v1/agents/abc", false},
+		{"/api/v1/agents/abc/pty", false},
+		{"/api/v1/agents/abc/workspace/ports/8080/proxy", false},
+		{"/api/v1/agents/abc/proxy", false},
+		{"/api/v1/agents/abc/logs", false},
+		// Look-alike prefixes.
+		{"/api/v1/agentsx/abc/ports/8080/proxy", false},
+		{"/api/v1/agent/abc/ports/8080/proxy", false},
+		{"/api/v2/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/agents/abc/portsx/8080/proxy", false},
+		{"/api/v1/agents/abc/Ports/8080/proxy", false},
+		{"/x/api/v1/agents/abc/ports/8080/proxy", false},
+		{"api/v1/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/projects/p/agents/abc/ports/8080/proxy", false},
+		{"/api/v1/artifacts/view/abc/ports/8080/proxy", false},
+		{"", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -2917,7 +2949,10 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 }
 
 // The /agents and /projects list pages load their own lists, so their shells
-// carry no prefetched data and the hub API is not called while rendering them.
+// carry no prefetched data and the hub API is not called for page data while
+// rendering them. The signed-in shell's experiment map (GET
+// /api/v1/experiments, ptone/scion#2489) is the one call it does make; that
+// embed is covered by web_shell_experiments_test.go.
 func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
@@ -2927,7 +2962,9 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 
 	var hubCalls []string
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hubCalls = append(hubCalls, r.URL.Path)
+		if r.URL.Path != "/api/v1/experiments" {
+			hubCalls = append(hubCalls, r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []interface{}{}, "projects": []interface{}{}})
@@ -2959,7 +2996,7 @@ func TestSPAShellHandler_ListPagesHaveNoPrefetch(t *testing.T) {
 
 			assert.NotNil(t, pageData["user"], "user field should still be present")
 			assert.Nil(t, pageData["data"], "list page shell must carry no prefetched data")
-			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API")
+			assert.Empty(t, hubCalls, "rendering the shell must not call the hub API for page data")
 		})
 	}
 }

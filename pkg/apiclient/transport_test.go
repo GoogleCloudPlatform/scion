@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -451,6 +452,80 @@ func (rt *flakyBodyRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	}, nil
 }
 
+func TestDo_RetryLimits(t *testing.T) {
+	for _, limit := range []struct {
+		name        string
+		retries     int
+		failedCalls int
+	}{
+		{name: "min_int", retries: math.MinInt, failedCalls: 1},
+		{name: "negative_two", retries: -2, failedCalls: 1},
+		{name: "negative_one", retries: -1, failedCalls: 1},
+		{name: "zero", retries: 0, failedCalls: 1},
+		{name: "one", retries: 1, failedCalls: 2},
+		{name: "three", retries: 3, failedCalls: 3},
+		{name: "max_int", retries: math.MaxInt, failedCalls: 3},
+	} {
+		for _, outcome := range []struct {
+			name       string
+			failures   int
+			failStatus int
+		}{
+			{name: "success"},
+			{name: "network_error", failures: 2},
+			{name: "server_error", failures: 2, failStatus: http.StatusServiceUnavailable},
+		} {
+			t.Run(limit.name+"/"+outcome.name, func(t *testing.T) {
+				rt := &flakyBodyRoundTripper{failures: outcome.failures, failStatus: outcome.failStatus}
+				tr := NewTransport("http://hub.invalid",
+					WithHTTPClient(&http.Client{Transport: rt}),
+					WithRetry(limit.retries, 0))
+				const payload = `{"name":"test"}`
+				req, err := http.NewRequest(http.MethodPut, "http://hub.invalid/api/v1/resources/test", strings.NewReader(payload))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				resp, err := tr.Do(t.Context(), req)
+				if resp != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
+				wantCalls := 1
+				if outcome.failures > 0 {
+					wantCalls = limit.failedCalls
+				}
+				if rt.calls != wantCalls {
+					t.Errorf("RoundTrip calls = %d, want %d", rt.calls, wantCalls)
+				}
+				for i, body := range rt.bodies {
+					if body != payload {
+						t.Errorf("attempt %d carried body %q, want %q", i+1, body, payload)
+					}
+				}
+				if wantCalls <= outcome.failures && outcome.failStatus == 0 {
+					if err == nil || !strings.Contains(err.Error(), "simulated connection reset") {
+						t.Errorf("Do error = %v, want the transport error", err)
+					}
+					if resp != nil {
+						t.Errorf("Do response = %v, want nil on transport error", resp)
+					}
+					return
+				}
+				if err != nil || resp == nil {
+					t.Fatalf("Do = (%v, %v), want a response without an error", resp, err)
+				}
+				wantStatus := http.StatusOK
+				if wantCalls <= outcome.failures {
+					wantStatus = outcome.failStatus
+				}
+				if resp.StatusCode != wantStatus {
+					t.Errorf("status = %d, want %d", resp.StatusCode, wantStatus)
+				}
+			})
+		}
+	}
+}
+
 // TestDo_RetryResendsFullBodyOn5xx_RoundTripper is the RoundTripper-level
 // twin of TestDo_RetryResendsFullBodyOn5xx. Over a real socket, Go's
 // *http.Transport can itself recover a drained body via GetBody on some
@@ -675,5 +750,55 @@ func TestDoNoRetry_BodiedPOSTHitOnceOn503(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Errorf("expected exactly 1 server hit on the no-retry path, got %d", got)
+	}
+}
+
+// A request sent under WithRequestTimeout uses that client timeout instead
+// of the Transport's: a response slower than the usual timeout succeeds
+// with a longer one, through Do and DoNoRetry, while requests without it,
+// or with a non-positive one, keep the usual timeout, and the Transport's
+// own client is left unchanged.
+func TestWithRequestTimeout_OverridesClientTimeoutPerRequest(t *testing.T) {
+	const slow = 300 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(slow):
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	tr := NewTransport(server.URL, WithTimeout(50*time.Millisecond))
+
+	send := func(ctx context.Context, do func(context.Context, *http.Request) (*http.Response, error)) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/projects/p/agents", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return do(ctx, req)
+	}
+
+	if resp, err := send(context.Background(), tr.Do); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a response slower than the client timeout succeeded without an override")
+	}
+	if resp, err := send(WithRequestTimeout(context.Background(), 0), tr.Do); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("a zero override replaced the client timeout")
+	}
+	long := WithRequestTimeout(context.Background(), 10*time.Second)
+	for name, do := range map[string]func(context.Context, *http.Request) (*http.Response, error){"Do": tr.Do, "DoNoRetry": tr.DoNoRetry} {
+		resp, err := send(long, do)
+		if err != nil {
+			t.Fatalf("%s with a longer request timeout: %v", name, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s status = %d, want 201", name, resp.StatusCode)
+		}
+	}
+	if tr.HTTPClient.Timeout != 50*time.Millisecond {
+		t.Fatalf("Transport client timeout changed to %s", tr.HTTPClient.Timeout)
 	}
 }

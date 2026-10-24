@@ -73,6 +73,12 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "port_proxy"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "relay"},
+	// server.keyring_file is never API-writable: rejectGateProtectedSettingsKeys
+	// refuses it before this list is consulted, so it is never routed to
+	// settings.yaml. It is listed so the request census stays complete.
+	{"server", "keyring_file"},
+	// Likewise its operator-only world-readable override.
+	{"server", "keyring_file_allow_world_readable"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},

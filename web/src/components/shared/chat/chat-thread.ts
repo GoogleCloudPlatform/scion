@@ -55,6 +55,12 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import {
+  ChatStarsController,
+  conversationSupportsStars,
+  isStarrableMessageId,
+  starredMessagesEnabled,
+} from '../../../client/chat-stars.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
@@ -69,6 +75,7 @@ import {
   WAKE_OUTCOME_UNKNOWN_MESSAGE,
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
+  isChatPostDeniedBody,
   WakeOutcomeUnknownError,
   isAnswerAboutThisSend,
   isGatewayDrop,
@@ -148,6 +155,16 @@ const SCROLL_TOP_THRESHOLD = 100;
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
 
+/** How far, in pixels, `el` is scrolled up from its bottom. */
+function distanceFromBottom(el: HTMLElement): number {
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+/** Whether a view `distFromBottom` pixels up from the bottom counts as at the bottom. */
+function isNearBottom(distFromBottom: number): boolean {
+  return distFromBottom < SCROLL_BOTTOM_THRESHOLD;
+}
+
 /**
  * Whether the reader is pinned to the bottom after a scroll event. Near
  * the bottom always pins. Further up, the pin drops only when the reader
@@ -163,7 +180,7 @@ export function pinnedAfterScroll(
   movedUp: boolean,
   steered: boolean
 ): boolean {
-  if (distFromBottom < SCROLL_BOTTOM_THRESHOLD) return true;
+  if (isNearBottom(distFromBottom)) return true;
   return wasPinned && !movedUp && !steered;
 }
 
@@ -568,9 +585,18 @@ export class ScionChatThread extends LitElement {
   @property({ type: Array })
   agentMembers: ChatAgentMember[] = [];
 
-  /** Whether v2 mode is active. Derived from conversationKey presence. */
+  /**
+   * Whether v2 mode is active. Derived from conversationKey presence.
+   * Tolerates a null key (a binding can set one at runtime); it is read on
+   * disconnect, before willUpdate has coerced the key.
+   */
   private get isV2(): boolean {
-    return this.conversationKey.length > 0;
+    return (this.conversationKey?.length ?? 0) > 0;
+  }
+
+  /** Whether starred messages are offered in this conversation. */
+  private get starsActive(): boolean {
+    return this.isV2 && conversationSupportsStars(this.conversationKey) && starredMessagesEnabled();
   }
 
   /**
@@ -615,6 +641,13 @@ export class ScionChatThread extends LitElement {
   @state() private sending = false;
   @state() private sendError: string | null = null;
   /**
+   * Whether the caller may post in this thread: the history's `canPost`
+   * (project.chat_post on the thread's project), or false after a send
+   * refused with chat_post_denied. When false the composer gives way to a
+   * read-only notice. DMs never set it.
+   */
+  @state() private canPost = true;
+  /**
    * Conversation whose wake-and-send is in flight, or ''. Its composer is
    * blocked meanwhile (up to the hub's wake budget), so text typed during
    * the wait cannot be overwritten when a failed wake restores the draft.
@@ -638,6 +671,9 @@ export class ScionChatThread extends LitElement {
   private messageRowsVersion = 0;
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
+    // The key is typed as a string, but a binding or a removed attribute
+    // can set null at runtime: render and the readers below see ''.
+    if ((this.conversationKey as string | null | undefined) == null) this.conversationKey = '';
     // A new (or cleared) send error starts collapsed.
     if (changedProperties.has('sendError')) {
       this.sendErrorExpanded = false;
@@ -752,6 +788,26 @@ export class ScionChatThread extends LitElement {
   /** The open message menu is the mobile bottom sheet, not the popup. */
   @state() private contextMenuAsSheet = false;
 
+  // ---- Starred messages (web.chat_starred_messages) ----
+
+  /** Star state of this conversation's loaded messages (in memory only). */
+  private readonly stars = ((): ChatStarsController => {
+    const c = new ChatStarsController();
+    c.addEventListener('change', () => this.requestUpdate());
+    return c;
+  })();
+
+  /** Coalesces the star-state fetch of one loaded page. */
+  private _starLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Text of the polite live region announcing a star change. */
+  @state() private starAnnouncement = '';
+
+  /** An SSE star invalidation: refetch the state of loaded messages. */
+  private _starsUpdatedHandler = (): void => {
+    if (this.starsActive) void this.stars.invalidate();
+  };
+
   // ---- Path-link file preview state (#1148) ----
 
   /**
@@ -790,6 +846,12 @@ export class ScionChatThread extends LitElement {
 
   /** True while the open-time anchor to the unread divider is still in effect. */
   private _unreadAnchorActive = false;
+
+  /** True from `scrollToUnreadDivider` until its deferred first anchor write.
+   *  A 'scroll' event dispatched in that gap was queued by an earlier write
+   *  (the bottom pin while the history rendered), not by the user reacting to
+   *  the anchor, so it must not cancel the anchor before it is applied. */
+  private _unreadAnchorPending = false;
 
   /** Message count captured when the anchor was applied, to tell a late layout
    *  shift of existing content (re-apply) apart from a new message arriving
@@ -868,6 +930,8 @@ export class ScionChatThread extends LitElement {
       this._sawSseConnect = true;
       return;
     }
+    // Star invalidations sent while the stream was down were lost.
+    this._starsUpdatedHandler();
     if (!this.loaded || this.viewingAroundMessage) return;
     void this.fetchHistoryV2().catch((err) => {
       console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
@@ -1041,6 +1105,19 @@ export class ScionChatThread extends LitElement {
         flex-direction: column;
         height: 100%;
         min-height: 300px;
+      }
+
+      /* Visually hidden, announced: star changes (polite). */
+      .star-live-region {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
       }
 
       .thread-container {
@@ -1224,6 +1301,17 @@ export class ScionChatThread extends LitElement {
         font-size: var(--chat-fs-base);
         color: var(--scion-text-muted, #64748b);
         border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      /* In place of the composer in a thread the caller may read but not
+         post in. */
+      .read-only-notice {
+        flex-shrink: 0;
+        padding: 0.75rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        text-align: center;
       }
 
       .send-error {
@@ -1582,8 +1670,16 @@ export class ScionChatThread extends LitElement {
     this.cancelRestoreSettleWatch();
     this._scrollAnchor = null;
 
+    // Star state belongs to the conversation we just left.
+    this.stars.setConversation('');
+    if (this._starLoadTimer) {
+      clearTimeout(this._starLoadTimer);
+      this._starLoadTimer = null;
+    }
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
+    stateManager.removeEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -1617,6 +1713,7 @@ export class ScionChatThread extends LitElement {
     this.loaded = false;
     this.error = null;
     this.sendError = null;
+    this.canPost = true;
     // A send still in flight belongs to the conversation we just left; its
     // completion will not touch `sending` (fetchId guard), so release the
     // composer here.
@@ -1668,6 +1765,11 @@ export class ScionChatThread extends LitElement {
     this._eventBackfill.cancel();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
+    stateManager.removeEventListener('chat-stars-updated', this._starsUpdatedHandler);
+    if (this._starLoadTimer) {
+      clearTimeout(this._starLoadTimer);
+      this._starLoadTimer = null;
+    }
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -2190,11 +2292,13 @@ export class ScionChatThread extends LitElement {
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
         >;
         replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+        canPost?: boolean;
       };
 
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
       if (currentId !== this.fetchId) return false;
+      if (typeof data?.canPost === 'boolean') this.canPost = data.canPost;
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
@@ -2233,6 +2337,7 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
       return true;
     } catch (err) {
@@ -2245,6 +2350,7 @@ export class ScionChatThread extends LitElement {
   private startStreamV2(): void {
     this._sawSseConnect = stateManager.isConnected;
     stateManager.addEventListener('connected', this._sseReconnectHandler);
+    stateManager.addEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -2411,6 +2517,10 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages([msg]);
+      // A live message starts unstarred without a state request (one per
+      // arriving message per viewer otherwise); a star made elsewhere
+      // publishes an invalidation that corrects it.
+      if (this.starsActive) this.stars.markLive([msg.id]);
       // A payload with no real createdAt would otherwise record (or, worse,
       // "correct" a pending provisional record with) a fabricated
       // viewing-time timestamp — the recent-files record must use the
@@ -2685,6 +2795,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
+    this.scheduleStarLoad();
     this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
@@ -2727,7 +2838,7 @@ export class ScionChatThread extends LitElement {
 
   /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
   private get isAgentDM(): boolean {
-    return this.isDM && this.conversationKey.startsWith('dm:agent:');
+    return this.isDM && this.conversationKey?.startsWith('dm:agent:') === true;
   }
 
   /** Whether there are inter-agent markers to render in this conversation. */
@@ -2737,7 +2848,7 @@ export class ScionChatThread extends LitElement {
 
   /** Whether this is a human-to-human DM (the only place read receipts apply). */
   private get isHumanDM(): boolean {
-    return this.isDM && this.conversationKey.startsWith('dm:user:');
+    return this.isDM && this.conversationKey?.startsWith('dm:user:') === true;
   }
 
   // ---------------------------------------------------------------------------
@@ -3190,6 +3301,18 @@ export class ScionChatThread extends LitElement {
           if (!wakeOffer) {
             failSend(errorMessageFromBody(data, 'Failed to send message'));
           }
+        } else if (!wake && res.status === 403) {
+          // A caller that may read but not post: the composer gives way to
+          // the read-only notice (the draft is handed back first). The hub
+          // refuses such a caller on the first send, before any wake offer,
+          // so a refused wake retry keeps the generic error below.
+          const data: unknown = await res.json().catch(() => null);
+          failSend(errorMessageFromBody(data, 'Failed to send message'));
+          if (isChatPostDeniedBody(data) && !threadMovedOn()) {
+            // The notice says it; no separate send error.
+            this.canPost = false;
+            this.sendError = null;
+          }
         } else {
           failSend(
             await extractApiError(res, wake ? 'Failed to wake agent' : 'Failed to send message')
@@ -3303,6 +3426,8 @@ export class ScionChatThread extends LitElement {
         // non-provisional) correct it — even if the corrected time is
         // earlier.
         if (resData?.id) {
+          // The sent message's server ID: unstarred, without a request.
+          if (this.starsActive) this.stars.markLive([resData.id]);
           this.recordRecentFiles({ ...optimisticMsg, id: resData.id }, resData.attachments ?? [], {
             provisional: true,
             scopeGeneration: recentFilesGeneration,
@@ -3766,14 +3891,17 @@ export class ScionChatThread extends LitElement {
     // scroll landing in the very same frame as our write is still detected:
     // `_applyingUnreadAnchor` is true for that whole frame, but the resulting
     // scrollTop then disagrees with the value we just wrote.
+    // Before the first anchor write there is nothing to take over from: a
+    // scroll event then is the one the history render's bottom pin queued.
     if (
       this._unreadAnchorActive &&
+      !this._unreadAnchorPending &&
       (!this._applyingUnreadAnchor || el.scrollTop !== this._unreadAnchorWrittenScrollTop)
     ) {
       this.deactivateUnreadAnchor();
     }
 
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const distFromBottom = distanceFromBottom(el);
     // With no earlier position to compare against, any distance counts as
     // the reader having moved away, as before.
     const sameScroller = this._lastScrollEl === el;
@@ -4113,6 +4241,15 @@ export class ScionChatThread extends LitElement {
     const hash = window.location.hash;
     const match = hash.match(/^#msg-(.+)$/);
     return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  /**
+   * Bumped by every jump to a message (search, reply, deep link, a star):
+   * a caller that resolves a target first can tell whether a newer jump
+   * happened meanwhile.
+   */
+  get jumpSequence(): number {
+    return this._jumpSeq;
   }
 
   /**
@@ -4478,6 +4615,7 @@ export class ScionChatThread extends LitElement {
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
     } catch (err) {
       console.error('Failed to fetch around message:', err);
@@ -4496,6 +4634,7 @@ export class ScionChatThread extends LitElement {
    */
   private scrollToUnreadDivider(): void {
     this._unreadAnchorActive = true;
+    this._unreadAnchorPending = true;
     this._unreadAnchorMessageCount = this.messages.length;
     // Captured as a local, not stored back onto `this`: `fetchId` only bumps
     // on a thread switch, so if this open is superseded before this deferred
@@ -4504,18 +4643,44 @@ export class ScionChatThread extends LitElement {
     // fires, making the two indistinguishable. A local closure variable
     // keeps each open's token fixed to the value it had when scheduled.
     const openToken = this.fetchId;
-    void this.updateComplete.then(() => {
-      // One more frame past updateComplete: images, attachments and markdown
-      // inside already-rendered rows can still change height after Lit has
-      // committed the DOM, and reading geometry too early re-introduces the
-      // jump-to-bottom-then-up flash this anchor exists to avoid.
-      this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
-        this._unreadAnchorInitialRaf = null;
-        if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
-        this.applyUnreadAnchor();
-        this.observeUnreadAnchorLayout(openToken);
+    void this.updateComplete
+      .then(() => {
+        // One more frame past updateComplete: images, attachments and markdown
+        // inside already-rendered rows can still change height after Lit has
+        // committed the DOM, and reading geometry too early re-introduces the
+        // jump-to-bottom-then-up flash this anchor exists to avoid.
+        this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
+          this._unreadAnchorInitialRaf = null;
+          if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+          // This callback runs later, outside the promise chain, so the .catch
+          // below never sees its throws. Stand the anchor down here too, and
+          // set the bottom pin from where the view really is: applyUnreadAnchor
+          // sets the pin before its scrollTop write, off when the divider is
+          // above the tail, so a throw from that write could leave a view still
+          // at the bottom unpinned, while a throw after it (the guard frame
+          // request) leaves the view at the divider, which must stay unpinned.
+          // Rethrow so the error still reaches the console.
+          try {
+            this._unreadAnchorPending = false;
+            this.applyUnreadAnchor();
+            this.observeUnreadAnchorLayout(openToken);
+          } catch (err) {
+            if (this.fetchId === openToken) {
+              this.deactivateUnreadAnchor();
+              const scrollEl = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+              if (scrollEl) this.pinnedToBottom = isNearBottom(distanceFromBottom(scrollEl));
+            }
+            throw err;
+          }
+        });
+      })
+      .catch(() => {
+        // A render that throws rejects updateComplete, and a synchronous throw
+        // from requestAnimationFrame itself lands here too. Either way the
+        // first write never comes: stand the anchor down rather than leave the
+        // bottom pins off.
+        if (this.fetchId === openToken) this.deactivateUnreadAnchor();
       });
-    });
   }
 
   /**
@@ -4609,6 +4774,7 @@ export class ScionChatThread extends LitElement {
   /** Stop correcting the unread-divider anchor and tear down its watchers. */
   private deactivateUnreadAnchor(): void {
     this._unreadAnchorActive = false;
+    this._unreadAnchorPending = false;
     this._applyingUnreadAnchor = false;
     if (this._unreadAnchorResizeObserver) {
       this._unreadAnchorResizeObserver.disconnect();
@@ -4690,6 +4856,8 @@ export class ScionChatThread extends LitElement {
         run: () => this.handleContextMenuCopyLink(),
       }
     );
+    // An unsent local row has no server ID yet, so it cannot be starred.
+    if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
     if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
       actions.push({
         id: 'set-default-agent',
@@ -4700,6 +4868,92 @@ export class ScionChatThread extends LitElement {
     }
     if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
     return actions;
+  }
+
+  /**
+   * The Star/Unstar toggle of a message menu. Until the message's state is
+   * known it is disabled with a loading label (never assumed unstarred);
+   * while a change is in flight it is disabled.
+   */
+  private starMenuAction(msg: Message): MenuAction {
+    const state = this.stars.state(msg.id);
+    if (state === 'unknown') {
+      return {
+        id: 'star',
+        label: 'Star message (loading)',
+        icon: 'star',
+        disabled: true,
+        checked: false,
+        run: (): void => {},
+      };
+    }
+    const starred = state === 'starred';
+    return {
+      id: 'star',
+      label: starred ? 'Unstar message' : 'Star message',
+      icon: starred ? 'star-fill' : 'star',
+      checked: starred,
+      disabled: this.stars.isPending(msg.id),
+      run: (): void => {
+        this.closeContextMenu();
+        void this.setMessageStarred(msg.id, !starred);
+      },
+    };
+  }
+
+  /**
+   * Send the desired star state of a message. Success is announced in the
+   * polite live region; a failure restores the prior state, reconciles
+   * from the hub, and offers a retry of the same desired state.
+   */
+  private async setMessageStarred(messageId: string, starred: boolean): Promise<void> {
+    const key = this.conversationKey;
+    if (!key || !this.starsActive) return;
+    try {
+      await this.stars.setStarred(messageId, key, starred);
+      if (key !== this.conversationKey) return;
+      await this.announceStar(starred ? 'Message starred' : 'Message unstarred');
+    } catch {
+      if (key !== this.conversationKey) return;
+      void this.stars.invalidate();
+      showToast(starred ? 'Could not star message' : 'Could not unstar message', 'danger', {
+        action: {
+          label: 'Retry',
+          // Only in the conversation the failure happened in.
+          run: (): void => {
+            if (key !== this.conversationKey) return;
+            void this.setMessageStarred(messageId, starred);
+          },
+        },
+      });
+    }
+  }
+
+  /**
+   * Announce a star change in the polite live region. The region is
+   * emptied first, so the same text (star one message, then another) is
+   * announced again rather than ignored as unchanged.
+   */
+  private async announceStar(text: string): Promise<void> {
+    this.starAnnouncement = '';
+    await this.updateComplete;
+    this.starAnnouncement = text;
+  }
+
+  /**
+   * Fetch the star state of the loaded messages not yet known, once per
+   * history load (the first page, an older page, an around jump, a
+   * catch-up backfill). Live appends are not fetched (markLive).
+   */
+  private scheduleStarLoad(): void {
+    if (!this.starsActive) return;
+    this.stars.setConversation(this.conversationKey);
+    if (this._starLoadTimer) return;
+    this._starLoadTimer = setTimeout(() => {
+      this._starLoadTimer = null;
+      if (!this.starsActive) return;
+      void this.stars.load(this.messages.map((m) => m.id));
+    }, 50);
   }
 
   /** Render the context menu when a message is right-clicked or tapped. */
@@ -4816,6 +5070,8 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
+    // Star states whose request failed are retried when a menu opens.
+    if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
     this.contextMenuAsSheet = shouldUseMenuSheet();
@@ -5704,31 +5960,52 @@ export class ScionChatThread extends LitElement {
           @chat-scheduled-restore=${this.handleScheduledRestore}
         ></scion-chat-scheduled-list>
         ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
-        <scion-chat-composer
-          .agents=${this.agents}
-          .members=${this.members}
-          .defaultAgent=${this.defaultAgent}
-          .conversationMode=${this.isDM ? 'dm' : 'thread'}
-          .peerName=${this.peerName}
-          .projectId=${this.projectId}
-          .currentUserId=${this.currentUserId}
-          .conversationKey=${this.conversationKey}
-          .replyTo=${this.composerReplyTo}
-          .editMessage=${this.composerEditMessage}
-          ?scheduleSendEnabled=${this.scheduleSendAvailable}
-          ?disabled=${this.wakingConversationKey !== '' &&
-          this.wakingConversationKey === this.conversationKey}
-          @chat-cancel-reply=${this.handleComposerCancelReply}
-          @chat-cancel-edit=${this.handleComposerCancelEdit}
-          @chat-send=${this.handleChatSendV2}
-          @chat-schedule=${this.handleChatScheduleV2}
-          @chat-edit=${this.handleChatEditV2}
-          @chat-typing=${() => this.sendTypingEvent()}
-          @default-agent-change=${this.handleDefaultAgentChange}
-          @chat-slash-command=${this.handleSlashCommand}
-        ></scion-chat-composer>
+        ${this.isDM || this.canPost ? this.renderComposerV2() : this.renderReadOnlyNotice()}
         ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
+        ${this.starsActive
+          ? html`<div class="star-live-region" role="status" aria-live="polite">
+              ${this.starAnnouncement}
+            </div>`
+          : nothing}
       </div>
+    `;
+  }
+
+  /**
+   * Shown in place of the composer in a thread the caller may read but not
+   * post in (no project.chat_post on its project).
+   */
+  private renderReadOnlyNotice() {
+    return html`<div class="read-only-notice" role="status">
+      You can read this thread, but you don't have permission to post in it.
+    </div>`;
+  }
+
+  private renderComposerV2() {
+    return html`
+      <scion-chat-composer
+        .agents=${this.agents}
+        .members=${this.members}
+        .defaultAgent=${this.defaultAgent}
+        .conversationMode=${this.isDM ? 'dm' : 'thread'}
+        .peerName=${this.peerName}
+        .projectId=${this.projectId}
+        .currentUserId=${this.currentUserId}
+        .conversationKey=${this.conversationKey}
+        .replyTo=${this.composerReplyTo}
+        .editMessage=${this.composerEditMessage}
+        ?scheduleSendEnabled=${this.scheduleSendAvailable}
+        ?disabled=${this.wakingConversationKey !== '' &&
+        this.wakingConversationKey === this.conversationKey}
+        @chat-cancel-reply=${this.handleComposerCancelReply}
+        @chat-cancel-edit=${this.handleComposerCancelEdit}
+        @chat-send=${this.handleChatSendV2}
+        @chat-schedule=${this.handleChatScheduleV2}
+        @chat-edit=${this.handleChatEditV2}
+        @chat-typing=${() => this.sendTypingEvent()}
+        @default-agent-change=${this.handleDefaultAgentChange}
+        @chat-slash-command=${this.handleSlashCommand}
+      ></scion-chat-composer>
     `;
   }
 
@@ -6082,6 +6359,7 @@ export class ScionChatThread extends LitElement {
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}
             deletedAt=${ext?.deletedAt || ''}
+            ?starred=${this.starsActive && this.stars.state(msg.id) === 'starred'}
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}

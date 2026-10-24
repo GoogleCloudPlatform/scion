@@ -15,9 +15,13 @@
 package runtime
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // sharedWorkspaceAgentsDir is the in-project agents root, relative to the
@@ -77,4 +81,130 @@ func sharedWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string, r
 func isDir(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+// workspaceProjectConfigDir is the project configuration directory,
+// relative to a workspace mounted at the container's workspace path.
+const workspaceProjectConfigDir = ".scion"
+
+// errProjectConfigSymlink is returned when a workspace's .scion is a
+// symbolic link: the link itself would stay writable in the container, so
+// the agent could point it elsewhere for later starts.
+var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic link; project configuration in a workspace that agents share must be a directory or a project marker file, so that it can be mounted read-only")
+
+// errProjectConfigMarkerNoBind is returned for a workspace whose .scion is
+// a project marker file on a runtime that cannot bind a single file: the
+// marker would stay writable, so the agent could replace it.
+var errProjectConfigMarkerNoBind = errors.New("the workspace's .scion is a project marker file, which this container runtime cannot mount read-only: on this runtime, commit a .scion/ directory to the repository, or use a non-shared workspace")
+
+// workspaceProjectConfigMount returns the broker-side .scion entry of a
+// workspace that is mounted into the container at containerWorkspace, and
+// the container path it is mounted read-only at. The broker reads project
+// settings, templates and harness-configs from a .scion directory when it
+// starts agents in the project, so an agent that shares the workspace gets
+// it read-only. Agent homes and agent state never live under it in this
+// layout (they are external, see the agents mask), so the agent's own
+// writable paths are unaffected.
+//
+// A .scion project marker file (a regular file naming the project's
+// external configuration directory) is mounted read-only too when
+// allowMarkerFile is set: the broker reads it to locate the project's
+// configuration, so the agent must not change it or replace it with a
+// directory (a mount point cannot be removed or renamed in the container).
+// Runtimes that cannot bind a single file pass false; a marker is then
+// refused with errProjectConfigMarkerNoBind.
+//
+// ok is false when there is no .scion at all: binding a missing path would
+// make the container runtime create it in the host checkout. A .scion that
+// is a symbolic link is refused with errProjectConfigSymlink, and a
+// workspace or .scion entry that cannot be checked is refused with an error.
+func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMarkerFile bool) (hostPath, target string, ok bool, err error) {
+	if workspace == "" || containerWorkspace == "" {
+		return "", "", false, nil
+	}
+	// Fail closed: a workspace or .scion entry that cannot be checked (other
+	// than not existing) is refused, never left without the read-only
+	// mount.
+	root, err := filepath.EvalSymlinks(workspace)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No workspace yet, so no .scion in it to protect.
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("cannot check the workspace for project configuration to mount read-only: %w", err)
+	}
+	candidate := filepath.Join(root, workspaceProjectConfigDir)
+	info, err := os.Lstat(candidate)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("cannot check the workspace's .scion to mount it read-only: %w", err)
+	}
+	target = path.Join(containerWorkspace, workspaceProjectConfigDir)
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", "", false, errProjectConfigSymlink
+	case info.IsDir():
+		return candidate, target, true, nil
+	case info.Mode().IsRegular():
+		if !allowMarkerFile {
+			return "", "", false, errProjectConfigMarkerNoBind
+		}
+		return candidate, target, true, nil
+	default:
+		return "", "", false, nil
+	}
+}
+
+// nestedProjectConfigRel returns the path of the project's .scion entry
+// (projectConfigPath, or <projectConfigPath>/.scion when that is a project
+// root) relative to repoRoot, when it lies below repoRoot somewhere other
+// than <repoRoot>/.scion. repoRoot must already be resolved (symlink-free),
+// as buildCommonRunArgs resolves it; a caller passing an unresolved repo
+// root must resolve it first.
+func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
+	if repoRoot == "" || projectConfigPath == "" {
+		return "", false
+	}
+	p := filepath.Clean(projectConfigPath)
+	if filepath.Base(p) != workspaceProjectConfigDir {
+		p = filepath.Join(p, workspaceProjectConfigDir)
+	}
+	// Resolve the parent (not the entry itself, which may be a marker
+	// file or a link) the way repoRoot was resolved.
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		p = filepath.Join(parent, filepath.Base(p))
+	}
+	rel, err := filepath.Rel(repoRoot, p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == workspaceProjectConfigDir {
+		return "", false
+	}
+	return rel, true
+}
+
+// ensureAgentsMaskPoint creates <src>/agents, the mount point of the agents
+// mask under the read-only project configuration directory src, on the
+// runtimes that mask the agents directory whenever src is a directory
+// (Docker and Podman). The read-only mount leaves the container runtime no
+// way to create it, so a failure to create it, or an existing entry that is
+// not a real directory, refuses the start instead of running without the
+// mask. Apple masks only an existing agents directory and creates nothing;
+// a src that is not a directory (a marker file) has no agents directory.
+func ensureAgentsMaskPoint(config RunConfig, src string) error {
+	if config.RuntimeName == appleContainerRuntimeName || !isDir(src) {
+		return nil
+	}
+	agents := filepath.Join(src, "agents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		return fmt.Errorf("cannot create the project's agents directory to mask it: %w", err)
+	}
+	info, err := os.Lstat(agents)
+	if err != nil {
+		return fmt.Errorf("cannot check the project's agents directory to mask it: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the project's agents directory is not a directory (%s), so it cannot be masked", info.Mode().Type())
+	}
+	return nil
 }

@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -109,6 +111,12 @@ type Agent struct {
 
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
+
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
 
 	// Timestamps
 	Created           time.Time `json:"created"`
@@ -594,6 +602,11 @@ type AgentAppliedConfig struct {
 // caller's original agent object (which the persistence path may still
 // write from) must come out of this call unmodified.
 //
+// Each InlineConfig.MCPServers entry's env and headers maps and each
+// InlineConfig.Services entry's env map are cleared the same way (see
+// redactMCPServersForResponse and redactServicesForResponse), matching env:
+// the entries themselves stay in the response.
+//
 // CreateInputs.InlineConfig gets the same treatment as InlineConfig, through
 // a deep copy of CreateInputs (see redactCreateInputsForResponse).
 //
@@ -632,11 +645,14 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 }
 
 // redactInlineConfigForResponse returns a deep copy of cfg suitable for a
-// response body: Env and the Telemetry cloud-export header map are cleared
-// unless canAttach is true, and GITHUB_TOKEN is stripped from Env
+// response body: Env, the Telemetry cloud-export header map, every MCP
+// server's env and headers and every service's env are cleared unless
+// canAttach is true, and
+// GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). ClearedFields is dropped for every
-// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// ResponseView/MarshalJSON above). ClearedFields and ChangedFields are
+// dropped for every viewer: they are hub-internal bookkeeping
+// (ptone/scion#3906, ptone/scion#3982), ClearedFields' env.<KEY>
 // entries name env keys a viewer without attach access must not learn, and
 // leaving it out means a GET echoed back into a PATCH never carries it. The
 // input is never mutated.
@@ -659,6 +675,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	}
 	copied := *cfg
 	copied.ClearedFields = nil
+	copied.ChangedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -675,7 +692,63 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		copied.Env = env
 	}
 	copied.Telemetry = redactTelemetryForResponse(cfg.Telemetry, canAttach)
+	copied.MCPServers = redactMCPServersForResponse(cfg.MCPServers, canAttach)
+	copied.Services = redactServicesForResponse(cfg.Services, canAttach)
 	return &copied
+}
+
+// redactServicesForResponse returns a deep copy of services suitable for a
+// response body. Each service's env map gets the same default-closed
+// treatment as InlineConfig.Env: it is cleared unless canAttach is true.
+// Every other field of an entry (name, command, restart, ready_check) is
+// copied through, so the response still lists every service. canAttach is
+// ResponseView's own parameter, passed through unchanged by
+// redactInlineConfigForResponse. The input is never mutated.
+func redactServicesForResponse(services []api.ServiceSpec, canAttach bool) []api.ServiceSpec {
+	if services == nil {
+		return nil
+	}
+	copied := make([]api.ServiceSpec, len(services))
+	for i, svc := range services {
+		svc.Command = slices.Clone(svc.Command)
+		if svc.ReadyCheck != nil {
+			rc := *svc.ReadyCheck
+			svc.ReadyCheck = &rc
+		}
+		if canAttach {
+			svc.Env = maps.Clone(svc.Env)
+		} else {
+			svc.Env = nil
+		}
+		copied[i] = svc
+	}
+	return copied
+}
+
+// redactMCPServersForResponse returns a deep copy of servers suitable for a
+// response body. Each server's env and headers maps get the same
+// default-closed treatment as InlineConfig.Env: they are cleared unless
+// canAttach is true. Every other field of an entry (transport, command,
+// args, url, scope) is copied through, so the response still lists every
+// server. canAttach is ResponseView's own parameter, passed through
+// unchanged by redactInlineConfigForResponse. The input is never mutated.
+func redactMCPServersForResponse(servers map[string]api.MCPServerConfig, canAttach bool) map[string]api.MCPServerConfig {
+	if servers == nil {
+		return nil
+	}
+	copied := make(map[string]api.MCPServerConfig, len(servers))
+	for name, srv := range servers {
+		srv.Args = slices.Clone(srv.Args)
+		if canAttach {
+			srv.Env = maps.Clone(srv.Env)
+			srv.Headers = maps.Clone(srv.Headers)
+		} else {
+			srv.Env = nil
+			srv.Headers = nil
+		}
+		copied[name] = srv
+	}
+	return copied
 }
 
 // redactTelemetryForResponse returns a deep copy of cfg with the cloud-export
@@ -810,7 +883,24 @@ const (
 	// global project (value "true"), as the embedded registration creates it.
 	LabelSystemProject = "scion.io/system"
 	LabelGlobalProject = "scion.io/global"
+	// LabelProjectOrigin records how a project came to exist. It is
+	// server-owned: ProjectOriginLinked when the project is created by
+	// registration from an existing checkout (registerProject),
+	// ProjectOriginHub when it is created on the hub (create, clone).
+	// Projects created before the label existed have none. Clients cannot
+	// set, change or remove it. It distinguishes a linked project without a
+	// git remote from a hub-managed one, which provider records cannot when
+	// the only provider is a remote broker without a local path.
+	LabelProjectOrigin  = "scion.dev/project-origin"
+	ProjectOriginLinked = "linked"
+	ProjectOriginHub    = "hub"
 )
+
+// IsLinkedOrigin reports whether the project was created by registration
+// from an existing checkout (LabelProjectOrigin).
+func (p *Project) IsLinkedOrigin() bool {
+	return p != nil && p.Labels[LabelProjectOrigin] == ProjectOriginLinked
+}
 
 // Project members group marker annotations (ptone/scion#2556).
 const (
@@ -1322,6 +1412,12 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries: it redeems the capabilities of a message request's
+	// attachments field and writes the files into the agent's home before
+	// delivering the text (ptone/scion#4596). The hub issues capabilities
+	// only to brokers that report it.
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -1329,6 +1425,19 @@ type BrokerCapabilities struct {
 	// stopped. It says what the broker build can do; runtime suitability is
 	// a separate hub check.
 	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// ChangedFields indicates the broker re-renders, at start, the files
+	// provisioning wrote for the provision-rendered keys the hub lists in
+	// the inline config's changed_fields (ptone/scion#3982). Only for such
+	// a broker does the hub report an edit of those keys on a stopped,
+	// created or suspended agent as applied at the next start rather than
+	// held for a reincarnation.
+	ChangedFields bool `json:"changedFields,omitempty"`
+	// ClearedFields indicates the broker applies the inline config's
+	// cleared_fields at start (ptone/scion#3906, ptone/scion#4890). Only
+	// for such a broker does the hub report a clear of a key the broker
+	// applies (api.ClearableConfigPath, and env key removals) as applied
+	// at the next start rather than held for a reincarnation.
+	ClearedFields bool `json:"clearedFields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -2307,6 +2416,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -2416,6 +2538,13 @@ type Notification struct {
 	// stored before outcomes were recorded, whose Dispatched flag keeps its
 	// old meaning).
 	DispatchOutcome string `json:"dispatchOutcome"`
+	// DispatchReason says why a NotificationOutcomeFailed outcome was
+	// recorded (a NotificationReason* value). Empty for any other outcome
+	// and for rows stored before reasons were recorded.
+	DispatchReason string `json:"dispatchReason,omitempty"`
+	// NextAttemptAt is the earliest time the dispatch sweep may claim the
+	// notification again after a failed delivery; nil means at once.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.
@@ -2429,6 +2558,57 @@ const (
 	// stays dispatched so the sweep does not retry it.
 	NotificationOutcomeFailed = "failed"
 )
+
+// Notification.DispatchReason values, recorded with
+// NotificationOutcomeFailed.
+const (
+	// NotificationReasonExpired: the notification was still undelivered
+	// when it reached the maximum retry age, for example because its
+	// subscriber stayed suspended or had no runtime broker.
+	NotificationReasonExpired = "expired"
+	// NotificationReasonSubscriptionGone: the subscription was deleted.
+	NotificationReasonSubscriptionGone = "subscription_gone"
+	// NotificationReasonSubscriberGone: the subscriber agent was deleted.
+	NotificationReasonSubscriberGone = "subscriber_gone"
+	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
+	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+)
+
+// ValidNotificationReason reports whether reason is a known
+// NotificationReason* value.
+func ValidNotificationReason(reason string) bool {
+	switch reason {
+	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		return true
+	}
+	return false
+}
+
+// Notification retry backoff bounds. The base equals the dispatch sweep
+// cadence (a shorter delay would have no effect); the cap keeps a
+// subscriber that recovers on its own reachable within an hour.
+const (
+	NotificationRetryBackoffBase = 5 * time.Minute
+	NotificationRetryBackoffMax  = time.Hour
+)
+
+// NotificationRetryBackoff returns how long the dispatch sweep waits
+// before retrying a notification whose latest delivery attempt failed.
+// attempts is the number of delivery attempts made so far, including the
+// failed one. The delay starts at NotificationRetryBackoffBase for the
+// first attempt and doubles with each further attempt, up to
+// NotificationRetryBackoffMax.
+func NotificationRetryBackoff(attempts int) time.Duration {
+	d := NotificationRetryBackoffBase
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d >= NotificationRetryBackoffMax {
+			return NotificationRetryBackoffMax
+		}
+	}
+	return d
+}
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -3168,6 +3348,19 @@ type Message struct {
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// DeferredAttachments is never stored. For a deferred message, the
+	// conversation messages route lists its attachments stored as
+	// artifacts here, to a reader only, so catch-up can say they were not
+	// delivered (ptone/scion#4596).
+	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+}
+
+// DeferredAttachment names one attachment of a deferred message: its
+// reduced file name and size, and nothing else.
+type DeferredAttachment struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // MessageFilter defines query parameters for listing messages.
@@ -3389,6 +3582,12 @@ type ScheduledEventFilter struct {
 	EventType  string
 	Status     string
 	ScheduleID string // Filter events generated by a specific recurring schedule
+	// InitiatorAgentID, when set, keeps only rows whose current initiator
+	// principal is this agent with a recorded attribution (version 1 or
+	// later, credential kind neither empty nor legacy_unknown). It matches
+	// the hub's agent row decision, so an agent's list pages fill with the
+	// rows it holds.
+	InitiatorAgentID string
 }
 
 // =============================================================================
@@ -3473,6 +3672,12 @@ type ScheduleFilter struct {
 	// LastRunStatus, when set, keeps only schedules whose most recent run
 	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
 	LastRunStatus string
+	// InitiatorAgentID, when set, keeps only rows whose current initiator
+	// principal is this agent with a recorded attribution (version 1 or
+	// later, credential kind neither empty nor legacy_unknown). It matches
+	// the hub's agent row decision, so an agent's list pages fill with the
+	// rows it holds.
+	InitiatorAgentID string
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
@@ -3781,6 +3986,12 @@ type HubSetting struct {
 	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+
+	// SettingsRevision is the operational-settings revision (see
+	// HubSettingsRevisionSection) after the write that returned this row:
+	// set by UpsertHubSetting for an operational section on a store that
+	// keeps the revision, 0 otherwise.
+	SettingsRevision int64 `json:"-"`
 }
 
 // =============================================================================
@@ -4220,6 +4431,17 @@ const (
 	// EdgeDeactivationSACleared marks an assignment ended by a write that
 	// removed the agent's assign-mode GCP identity.
 	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+	// EdgeDeactivationReincarnateFailed marks the assignment a reincarnation
+	// claim recorded for a new account, ended when the reincarnation failed
+	// and the previous configuration was restored by the worker.
+	EdgeDeactivationReincarnateFailed EdgeDeactivationCause = "reincarnate_failed"
+	// EdgeDeactivationReincarnatePendingSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed because its worker never started.
+	EdgeDeactivationReincarnatePendingSwept EdgeDeactivationCause = "reincarnate_pending_swept"
+	// EdgeDeactivationReincarnateStaleSwept is EdgeDeactivationReincarnateFailed
+	// for a reincarnation the sweep failed after its worker stopped
+	// reporting progress.
+	EdgeDeactivationReincarnateStaleSwept EdgeDeactivationCause = "reincarnate_stale_swept"
 )
 
 // ValidAssignmentDeactivationCause reports whether c is a cause that may be
@@ -4230,7 +4452,14 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationCreateCompensation,
 		EdgeDeactivationSAReplaced,
-		EdgeDeactivationSACleared:
+		EdgeDeactivationSACleared,
+		// On an assignment, reincarnate_replaced marks the row a
+		// reincarnation claim replaced with one for another account; the
+		// claim's reincarnation ID is its operation ID.
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationReincarnateFailed,
+		EdgeDeactivationReincarnatePendingSwept,
+		EdgeDeactivationReincarnateStaleSwept:
 		return true
 	}
 	return false

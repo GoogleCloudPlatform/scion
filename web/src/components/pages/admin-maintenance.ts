@@ -1788,7 +1788,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     let interval = 1000;
     while (Date.now() < deadline) {
       try {
-        const res = await fetch('/healthz', { credentials: 'include' });
+        const res = await apiFetch('/healthz', { authErrors: 'caller' });
         if (res.ok) {
           const data = (await res.json()) as { uptime?: string };
           // The uptime field is a Go duration string like "3.12s" or "1m5s".

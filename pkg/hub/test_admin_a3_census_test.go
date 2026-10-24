@@ -136,6 +136,8 @@ func agentScopeSitesInFile(rel string, src []byte) ([]agentScopeSite, error) {
 // subpackages included, with its path relative to pkg/hub.
 func a3HubSources(t *testing.T, visit func(rel string, src []byte)) {
 	t.Helper()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (non-test files, no SkipDir): covers every directory below it.
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err

@@ -65,6 +65,13 @@ type RenderDeliveryInput struct {
 	// When non-empty, the envelope's "type" is "reply" and "reply_to"
 	// carries this value.
 	ReplyToID string
+
+	// Plan is this recipient's attachment plan (ptone/scion#4596): each
+	// deliverable entry's inbox path is listed in the envelope's
+	// attachments (or, for a plain message, as an "Attachment:" line), and
+	// each entry the recipient's runtime cannot receive gets a
+	// not-delivered line in the body. Withheld entries are not mentioned.
+	Plan []messages.AttachmentPlanEntry
 }
 
 // RenderDeliveryText is the single shared rendering entry point for all hub
@@ -87,7 +94,7 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 
 	// Transport flag: plain messages deliver body text only.
 	if in.Msg.Plain {
-		return AppendArtifactFetchHints(in.Msg.Msg, in.Msg.Metadata)
+		return appendPlanLines(AppendArtifactFetchHints(in.Msg.Msg, in.Msg.Metadata), in.Plan, true)
 	}
 
 	// Pass the real persisted identity into MapLegacyEnvelope so the
@@ -106,6 +113,24 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	// Artifact fetch hints (ptone/scion#3223) go in the delivered body only;
 	// in.Msg and the persisted row keep the body as sent.
 	msg.Body = AppendArtifactFetchHints(msg.Body, in.Msg.Metadata)
+	msg.Body = appendPlanLines(msg.Body, in.Plan, false)
+	for i := range msg.Attachments {
+		if mount := in.Msg.AttachmentMounts[msg.Attachments[i].Path]; mount != "" {
+			msg.Attachments[i].Mount = mount
+		}
+	}
+	for _, e := range in.Plan {
+		// The inbox path comes first: it is valid on every runtime. The
+		// projection follows, tagged with its shared dir, so a recipient
+		// whose runtime does not mount that dir is never left with only a
+		// dangling path.
+		if e.State == messages.AttachmentDeliverable {
+			msg.Attachments = append(msg.Attachments, AttachmentRef{Path: e.InboxPath, Name: e.Name})
+		}
+		if e.State != messages.AttachmentWithheld && e.ProjectedPath != "" {
+			msg.Attachments = append(msg.Attachments, AttachmentRef{Path: e.ProjectedPath, Name: e.Name, Mount: e.ProjectedMount})
+		}
+	}
 
 	// Override timestamp if we have a real one from the persisted row.
 	if !in.CreatedAt.IsZero() {
@@ -227,4 +252,88 @@ func RenderDeliveryTextWithLookup(
 		DisplayName:    conv.DisplayName,
 	}
 	return RenderDeliveryText(in)
+}
+
+// appendPlanLines appends to body, after a blank line, one line per
+// attachment of plan the recipient's runtime cannot receive and, with
+// paths, one "Attachment: <path>" line per deliverable attachment (the
+// plain form, which has no envelope to list them in), plus one line per
+// non-withheld attachment that is also projected into a shared dir
+// (AttachmentProjectedLine). Withheld entries are not mentioned. body is returned unchanged when there is nothing to add.
+func appendPlanLines(body string, plan []messages.AttachmentPlanEntry, paths bool) string {
+	var lines []string
+	for _, e := range plan {
+		switch e.State {
+		case messages.AttachmentDeliverable:
+			if paths {
+				lines = append(lines, "Attachment: "+e.InboxPath)
+			}
+		case messages.AttachmentUndeliverableRuntime:
+			lines = append(lines, AttachmentNotDeliveredLine(e.Name, e.Delivery.Size,
+				"the recipient's runtime cannot receive attachments"))
+		}
+		if e.State != messages.AttachmentWithheld && e.ProjectedPath != "" {
+			lines = append(lines, AttachmentProjectedLine(e.Name, e.ProjectedPath, e.ProjectedMount))
+		}
+	}
+	if len(lines) == 0 {
+		return body
+	}
+	return body + "\n\n" + strings.Join(lines, "\n")
+}
+
+// AttachmentProjectedLine is the line a recipient reads for an attachment
+// that is also projected into a shared dir (ptone/scion#5827): the
+// inbox path stays the one to use; the projection is where sibling agents
+// that mount the shared dir find the same file.
+func AttachmentProjectedLine(name, path, mount string) string {
+	return "Attachment " + name + " is also visible to sibling agents at " + path +
+		" (shared dir " + mount + ", only in containers that mount it)."
+}
+
+// Reasons a broker gives for an attachment that did not land in the
+// recipient's home (ptone/scion#4596): in the not-delivered line the agent
+// reads, and in the per-file outcomes the hub counts.
+const (
+	AttachmentReasonNotDownloaded = "could not be downloaded"
+	AttachmentReasonVerification  = "failed verification"
+	AttachmentReasonNotWritten    = "could not be written to your home"
+)
+
+// AttachmentNotDeliveredLine is the line a recipient reads for an
+// attachment that did not reach its home (ptone/scion#4596): what it is
+// (its name or inbox path, and size), why, and what to do. It names no
+// command and no id.
+func AttachmentNotDeliveredLine(what string, size int64, reason string) string {
+	return "Attachment not delivered: " + what + " (" + FormatAttachmentSize(size) + "): " + reason + ". Ask the sender to resend it."
+}
+
+// FormatAttachmentSize renders a file size for a delivery line.
+func FormatAttachmentSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
+	case n >= 1<<10:
+		return strconv.FormatFloat(float64(n)/(1<<10), 'f', 1, 64) + " KiB"
+	default:
+		return strconv.FormatInt(n, 10) + " bytes"
+	}
+}
+
+// ApplyAttachmentPlanLegacy applies plan to msg for the legacy envelope,
+// which the broker formats itself when the hub renders no delivery text:
+// deliverable inbox paths are appended to msg.Attachments, and not-delivered
+// and projection lines to msg.Msg (the legacy attachment list carries no
+// mount, so a projection is described in the body only). msg must be the
+// per-recipient message being dispatched.
+func ApplyAttachmentPlanLegacy(msg *messages.StructuredMessage, plan []messages.AttachmentPlanEntry) {
+	if msg == nil {
+		return
+	}
+	for _, e := range plan {
+		if e.State == messages.AttachmentDeliverable {
+			msg.Attachments = append(msg.Attachments, e.InboxPath)
+		}
+	}
+	msg.Msg = appendPlanLines(msg.Msg, plan, false)
 }

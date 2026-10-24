@@ -30,8 +30,13 @@ type StartDispatchArgs struct {
 	// Async asks the owner to send the start as an asynchronous launch
 	// (StartDispatchOptions.Async, ptone/scion#4669). An owner that does
 	// not know it runs the start synchronously, and the requester's wait
-	// then ends on the agent's phase as before. No requester sets it yet.
+	// then ends on the agent's phase as before.
 	Async bool `json:"async,omitempty"`
+	// Kind and PriorPhase are StartDispatchOptions.Kind and PriorPhase for
+	// an Async start: the requester wrote starting before deferring, so
+	// the owner cannot read the prior phase from the row.
+	Kind       string `json:"kind,omitempty"`
+	PriorPhase string `json:"priorPhase,omitempty"`
 }
 
 // RestartDispatchArgs is intentionally empty — the owner's

@@ -16,12 +16,18 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  addLeaveGuard,
   browserPath,
+  fullPageUrl,
+  loadPage,
+  mayLeave,
   navigateTo,
+  noteShownEntry,
   pushInPageFragment,
   pushUrl,
   replaceSearch,
   stripBasePath,
+  vetoPopState,
 } from './navigation.js';
 import { IN_PAGE_STATE_KEY, isInPagePop, type RouteShell } from './route-history.js';
 
@@ -39,6 +45,59 @@ describe('browserPath', () => {
   it('prefixes the base path, without doubling the slash', () => {
     vi.stubEnv('BASE_URL', '/scion/');
     expect(browserPath('/projects/p1')).toBe('/scion/projects/p1');
+  });
+});
+
+describe('fullPageUrl', () => {
+  it('returns app paths unchanged when served at the root', () => {
+    vi.stubEnv('BASE_URL', '/');
+    expect(fullPageUrl('/brokers')).toBe('/brokers');
+    expect(fullPageUrl('/login?error=session_expired')).toBe('/login?error=session_expired');
+  });
+
+  it('prefixes app paths, query included, under a non-root base path', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(fullPageUrl('/')).toBe('/scion/');
+    expect(fullPageUrl('/settings?tab=service-accounts')).toBe(
+      '/scion/settings?tab=service-accounts'
+    );
+    expect(fullPageUrl('/auth/login/github?returnTo=%2Fscion%2Finvite')).toBe(
+      '/scion/auth/login/github?returnTo=%2Fscion%2Finvite'
+    );
+  });
+
+  it('leaves absolute, protocol-relative and relative URLs alone', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(fullPageUrl('https://example.com/x')).toBe('https://example.com/x');
+    expect(fullPageUrl('//example.com/x')).toBe('//example.com/x');
+    expect(fullPageUrl('brokers')).toBe('brokers');
+  });
+});
+
+describe('loadPage', () => {
+  it('assigns the base-prefixed URL to window.location.href', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    const original = window.location;
+    let written = '';
+    Object.defineProperty(window, 'location', {
+      value: {
+        set href(v: string) {
+          written = v;
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      loadPage('/projects/new');
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: original,
+        configurable: true,
+        writable: true,
+      });
+    }
+    expect(written).toBe('/scion/projects/new');
   });
 });
 
@@ -162,5 +221,53 @@ describe('pushInPageFragment', () => {
     pushInPageFragment('#row-a', { row: 'a' }, { row: null });
     expect(replace).toHaveBeenCalledWith({ [IN_PAGE_STATE_KEY]: { row: null } }, '');
     replace.mockRestore();
+  });
+});
+
+describe('leave guards (ptone/scion#3460)', () => {
+  it('allows leaving with no guard, or when every guard allows it', () => {
+    expect(mayLeave()).toBe(true);
+    const remove = addLeaveGuard(() => true);
+    expect(mayLeave()).toBe(true);
+    expect(vetoPopState()).toBe(false);
+    remove();
+  });
+
+  it('vetoes leaving while a guard says stay, and not once it is removed', () => {
+    const guard = vi.fn(() => false);
+    const remove = addLeaveGuard(guard);
+    expect(mayLeave()).toBe(false);
+    expect(guard).toHaveBeenCalledTimes(1);
+    remove();
+    expect(mayLeave()).toBe(true);
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+
+  it('on a vetoed popstate, puts back the URL and state last noted as on screen', () => {
+    window.history.replaceState({ page: 'editor' }, '', '/admin/access-boundaries/new');
+    const remove = addLeaveGuard(() => false);
+    // The page changes its own query after the guard was added.
+    replaceSearch('step=2');
+    // Back has already moved the browser to the previous entry.
+    window.history.pushState({}, '', '/admin/access-boundaries');
+    const before = window.history.length;
+
+    expect(vetoPopState()).toBe(true);
+    expect(window.location.pathname).toBe('/admin/access-boundaries/new');
+    expect(window.location.search).toBe('?step=2');
+    expect(window.history.state).toEqual({ page: 'editor' });
+    expect(window.history.length).toBe(before + 1);
+    remove();
+  });
+
+  it('leaves the URL alone on a popstate every guard allows', () => {
+    window.history.replaceState({}, '', '/admin/access-boundaries/new');
+    noteShownEntry();
+    const remove = addLeaveGuard(() => true);
+    window.history.pushState({}, '', '/admin/access-boundaries');
+
+    expect(vetoPopState()).toBe(false);
+    expect(window.location.pathname).toBe('/admin/access-boundaries');
+    remove();
   });
 });

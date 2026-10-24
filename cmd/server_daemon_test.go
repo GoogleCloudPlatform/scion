@@ -134,6 +134,8 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	f.StringVar(&webSessionSecret, "session-secret", "", "")
 	f.StringVar(&webBaseURL, "base-url", "", "")
 	f.StringArrayVar(&adminEmails, "admin-emails", nil, "")
+	f.StringVar(&serverKeyringFile, "keyring-file", "", "")
+	f.BoolVar(&serverKeyringAllowWorldReadable, "keyring-file-allow-world-readable", false, "")
 
 	c.SetArgs([]string{
 		"--hosted=false",     // explicit mode disable must survive the re-exec
@@ -145,6 +147,8 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 		"--base-url=https://scion.example.com",
 		"--admin-emails=a@x.com,b@y.com",
 		"--template-cache-max=42",
+		"--keyring-file=/run/secrets/keyring.json", // a path: forwarded
+		"--keyring-file-allow-world-readable",      // a bool: forwarded
 	})
 	if err := c.Execute(); err != nil {
 		t.Fatalf("parse: %v", err)
@@ -162,6 +166,8 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 		"--base-url=https://scion.example.com",
 		"--admin-emails=a@x.com,b@y.com",
 		"--template-cache-max=42",
+		"--keyring-file=/run/secrets/keyring.json",
+		"--keyring-file-allow-world-readable=true",
 	} {
 		assert.Contains(t, got, want)
 	}

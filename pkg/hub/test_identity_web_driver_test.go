@@ -251,13 +251,16 @@ type tiCall struct {
 	pos token.Pos
 }
 
-// tiCensus parses every non-test .go file of the package and returns, per
+// tiCensus parses every non-test .go file of the package (and its
+// guardScanSubdirs subpackages) and returns, per
 // selector name, the call sites x.<name>(...) with the selector expression
 // x rendered as source-like text ("cfg.ProxyAuthenticator").
 func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub and its guardScanSubdirs entries; ../store is read alone).
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	out := map[string]map[string][]tiCall{}
 	for _, e := range entries {
@@ -436,7 +439,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	}
 	// Helpers whose callers carry the check, with every caller listed.
 	helperCallers := map[string][]string{
-		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser"},
+		"createPendingUserTx": {"handleAdminUserInvite", "handleProvisionUser", "inviteBatchUserStep"},
 		"provisionNewUser":    {"Resolve"},
 		"grantProjectVisitor": {"handleAddProjectVisitor"},
 	}
@@ -447,7 +450,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]bool{
-		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
+		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
 		"grantProjectVisitor": true, "linkPendingVisitor": true,
@@ -517,8 +520,15 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",
+		// The project storage layout authority (pkg/projectfs), not a
+		// user or transport resolver.
+		"projectRecordSharedDirPath localLayout",
+		// The workspace Mount through the same layout authority
+		// (projectfs.Layout.Resolve; workspace_layout.go), not a user or
+		// transport resolver.
+		"projectWorkspaceResolved layout",
 		"resolveAsNeededForKeys d.secretBackend",
-		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
+		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")
@@ -550,6 +560,7 @@ func tiFuncCalls(census map[string]map[string][]tiCall, fn string) []string {
 func tiStoreUserCreators(t *testing.T, re *regexp.Regexp) []string {
 	t.Helper()
 	dir := filepath.Join("..", "store")
+	// scan-coverage:exempt reads pkg/store only.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	fset := token.NewFileSet()

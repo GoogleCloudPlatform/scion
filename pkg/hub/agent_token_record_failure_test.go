@@ -105,6 +105,7 @@ func newRecordFailureFixture(t *testing.T, mode agentRunScopeMode) *recordFailur
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		LocalPath: fixtureProviderCheckout(t),
 	}))
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))

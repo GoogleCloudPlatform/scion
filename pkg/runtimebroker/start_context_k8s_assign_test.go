@@ -590,7 +590,7 @@ func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testi
 
 // TestBuildStartContext_KubernetesAssignSavedProfileFallback covers the
 // start/restart profile source: with no Config at all, the profile must come
-// from the agent's own saved profile (agent.GetSavedProfile), not silently
+// from the agent's provisioned profile (image provenance), not silently
 // fall back to the project's active profile. Uses
 // newTestServerForStartContextMultiProfile (not
 // newTestServerForStartContextRuntime): ForceRuntime short-circuits
@@ -615,9 +615,8 @@ runtimes:
             agent-worker@my-project.iam.gserviceaccount.com: runtime-entry-ksa
 `, otherProfile))
 
-	// Persist a saved profile for this agent, distinct from the broker's
-	// default, the same way agent.GetSavedProfile reads it (agent-info.json
-	// under the agent's home directory).
+	// Record a provisioned profile for this agent, distinct from the
+	// broker's default (writeSavedAgentProfile).
 	const agentName = "agent-k8s-assign-saved-profile"
 	writeSavedAgentProfile(t, dotScion, agentName, otherProfile)
 

@@ -119,7 +119,10 @@ type ServerConfig struct {
 	// HubEnabled indicates whether this Runtime Broker should connect to a Hub
 	// for template hydration and other centralized services.
 	HubEnabled bool
-	// HubToken is the authentication token for the Hub API.
+	// HubToken is an operator-configured bearer token for the Hub API. It is
+	// not the dev token: in dev-auth mode the broker authenticates with the
+	// dev token through DevAuthHubOptions, which sends it only to a loopback
+	// hub (a HubToken that is the dev token gets the same rule).
 	HubToken string
 	// HostCredentials makes a co-located broker eligible to give its agents
 	// the host's harness-declared credential files. The caller sets it only
@@ -301,10 +304,9 @@ type Server struct {
 	// each replaces its real implementation when set (see the setters in
 	// workspace_handlers.go), per Server, so tests can fake one without
 	// racing parallel tests. Guarded by mu.
-	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
-	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
-	projectWorkspaceStat func(path string) (os.FileInfo, error)
-	projectPathAbs       func(path string) (string, error)
+	workspaceUpload func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload  func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectPathAbs  func(path string) (string, error)
 	// projectConfigsRemove, when set (tests), replaces
 	// removeProjectConfigsSubtree for a project delete's project-configs
 	// entry (removeProjectConfigs).
@@ -404,12 +406,21 @@ type Server struct {
 
 	stateDir string
 
+	// inbox holds the attachment delivery state (ptone/scion#4596): the
+	// spool root downloads are verified in, and the last inbox prune per
+	// agent.
+	inbox inboxState
+
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// ownedHolds counts the in-flight holds on each owned run
+	// (holdOwnedRun), guarded by ownedHoldsMu.
+	ownedHoldsMu sync.Mutex
+	ownedHolds   map[ownedRunKey]int
 	// unmirroredUIDs holds the object UIDs from the journals of this
 	// instance's launches whose ownership recording failed; launch cleanup
 	// may delete them although the record may lack them (launchHandleOwned).
@@ -681,6 +692,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
 	}
+	// Remove attachment spools a crash left behind, before any message is
+	// accepted (ptone/scion#4596).
+	srv.initInboxSpool()
 
 	// A host-bind instance of a host with a single NFS mount owner uses
 	// that owner's reconciler (registered requirement, shared status, one
@@ -1033,7 +1047,7 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	}
 
 	// Build hub client options
-	opts := buildHubClientOpts(creds, secretKey)
+	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
 
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
@@ -1083,16 +1097,24 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 }
 
 // createHubConnectionFromConfig creates a HubConnection from server config
-// (bearer token or dev-auth), without file-based credentials.
+// (bearer token or dev-auth), without file-based credentials. HubToken is an
+// operator-configured bearer and is sent as configured. The server's dev
+// token reaches the hub only through DevAuthHubOptions (loopback hubs only);
+// a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 	var opts []hubclient.Option
 
-	if s.config.HubToken != "" {
+	switch {
+	case s.config.HubToken != "" && isDevAuthToken(s.config.HubToken):
+		if devTokenAllowedFor(s.config.HubEndpoint, "config") {
+			opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
+			slog.Info("Hub client using dev token authentication")
+		}
+	case s.config.HubToken != "":
 		opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
 		slog.Info("Hub client using bearer token authentication")
-	} else {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		slog.Info("Hub client using auto dev authentication")
+	default:
+		opts = append(opts, DevAuthHubOptions(s.config.HubEndpoint, "config")...)
 	}
 
 	// Resolve transport auth once from env and share between REST client and control channel
@@ -2095,8 +2117,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 //  1. a project-scoped search (scion.name plus the project label);
 //  2. only when projectID is set and stage 1 found nothing, a slug-only
-//     search that accepts just containers carrying no project label at all
-//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//     search that accepts just containers carrying no project identity
+//     whose recorded path identifies as projectID (pre-label containers —
+//     see legacyAgentsInProject; the same rule delete applies).
 //
 // Errors:
 //   - a default-runtime List failure, in either stage, wraps
@@ -2196,9 +2219,10 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
-	// project-scoped request, or same-slug agents across projects would collide.
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject). A container of a
+	// different project must not match a project-scoped request, or same-slug
+	// agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
@@ -2206,13 +2230,13 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
-			agents = agentsWithoutProjectLabel(agents)
+			agents = legacyAgentsInProject(agents, projectID)
 		}
 		matchManager = defMgr
 		matchRuntime = defRT
 		matchRecord = defRec
 		if len(agents) == 0 {
-			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, func(a []api.AgentInfo) []api.AgentInfo { return legacyAgentsInProject(a, projectID) })
 			if auxErr != nil {
 				return agentMatch{}, auxErr
 			}
@@ -2297,7 +2321,8 @@ func (e *otherRunsHoldNameError) Error() string {
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
 // project scoping lookupAgentMatch and LookupAgent use: entries labelled for
-// projectID, else (with a projectID) entries carrying no project label. A
+// projectID, else (with a projectID) entries carrying no project identity
+// whose recorded path identifies as projectID (legacyAgentsInProject). A
 // failed List wraps ErrAgentListUnavailable.
 func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
 	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
@@ -2310,7 +2335,7 @@ func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 	}
 	return agents, nil
 }
@@ -2479,8 +2504,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject), as lookupAgentMatch
+	// does. A container of a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
@@ -2488,7 +2514,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 		if len(agents) == 0 {
 			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -2496,7 +2522,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 					listUnavailable = true
 					continue
 				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				auxAgents = legacyAgentsInProject(auxAgents, projectID)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
 					// See the identity note above: use the runtime's own
@@ -2921,7 +2947,7 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 				continue
 			}
 
-			projectSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
+			projectSettings, err := config.LoadSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
 			if err != nil {
 				continue
 			}
@@ -3109,7 +3135,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.

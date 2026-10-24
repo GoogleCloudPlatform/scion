@@ -240,10 +240,14 @@ Stopping an agent deletes its Pod. What survives depends on the workspace volume
 
 | Agent workspace volume | After `scion stop` and a later start or restart |
 |---|---|
-| `emptyDir` (the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend) | The workspace is discarded with the Pod. **Changes that were not committed and pushed are lost.** For a git-backed workspace, the new Pod clones the repository again from the agent's git clone settings and branch. |
-| Persistent (`workspace_storage.backend: nfs`, or `gke-shared-volume` in shared-plain and worktree-per-agent modes) | The workspace is kept on the volume and mounted again as it was. It is not cloned again. |
+| `emptyDir` (the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend, and today also `gke-shared-volume`; see the note below) | The workspace is discarded with the Pod. **Changes that were not committed and pushed are lost.** For a git-backed workspace, the new Pod clones the repository again from the agent's git clone settings and branch. |
+| Persistent (`workspace_storage.backend: nfs`) | The workspace is kept on the volume and mounted again as it was. It is not cloned again. |
 
 With an `emptyDir` workspace, push work you want to keep before stopping or restarting the agent, or use a persistent backend. The same distinction decides the phase an agent gets when its Pod is preempted or evicted; see [Preempted and evicted status](#preempted-and-evicted-status).
+
+:::caution[`gke-shared-volume` is not mounted into agent pods]
+With `workspace_storage.backend: gke-shared-volume`, the Hub keeps project files on the shared volume, but the Kubernetes runtime does not mount that volume into agent pods yet. In every workspace mode the agent's workspace is an `emptyDir` and is lost when the Pod is deleted. The agent runtime logs a warning the first time an agent starts this way in each of its processes. Use `backend: nfs` for agent workspaces that persist. See [ptone/scion#1075](https://github.com/ptone/scion/issues/1075).
+:::
 
 A start or restart sends the agent's git clone settings, branch, workspace mode and template. If the broker no longer has the agent's own state (for example after the broker itself was replaced), it provisions the agent again; an agent created from a Hub template gets that template again rather than the default one.
 
@@ -860,7 +864,7 @@ With [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-
 - **Secrets**: staged secret and auth files stay in memory or read-only volumes under `/run/scion`. In the home they appear as symbolic links, so their content is never written to the export. A file, link or directory the user put at a link target that scion never linked, or a symbolic link in its parent path, is kept and the link is skipped with a warning. If `.scion` or `.scion/hooks` in the home is a symbolic link, the start fails rather than transferring through it. `SCION_SECRETS_FILE` points at the staged `secrets.json`. The harness's own staged secrets are copied into memory only (`SCION_HARNESS_SECRETS_DIR`), never into the home, and its generated outputs are written to memory too.
 - **Images**: the image's sciontool must support NFS homes (`sciontool version --features` lists `home-v1`); older images fail with a message saying so.
 - **One pod at a time**: pods with an NFS home are never force-deleted. Stop and delete use the pod's grace period (`stop_grace_seconds`, default 30) and return at once. A start waits for the previous pod to stop, for at most the grace period plus `termination_wait_seconds` (default 15). It is refused with the retryable `previous_pod_unconfirmed` when the previous pod cannot be read, its node is unreachable, or the bound runs out. The previous pod's secrets are removed only once it has stopped. The pod name is unique per agent and a start waits for the previous pod's confirmed termination, so two pods do not write to the same home; a per-agent advisory lock is also taken when the broker is given a store locker. Keep `stop_grace_seconds` plus `termination_wait_seconds` below the hub's 90 second start window; the server warns at startup when it is not.
-- **Sync**: `scion sync` copies the workspace only; the home stays on the export.
+- **Sync**: `scion sync to|from <agent>` copies the agent workspace only; the home stays on the export.
 - **Delete**: deleting an agent does not remove its home from the export in this version.
 - **Credentials at rest**: the agent's hub token and environment files (`.scion/scion-token`, `.scion/scion-env`), credentials that harness scripts copy into native home files (for example API-key auth files), and harness OAuth tokens are stored on the export while the home exists.
 
@@ -1034,7 +1038,7 @@ rules:
 2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`.
 3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors).
 4. **Attach**: `scion attach` connects to the tmux session inside the Pod via `pods/exec`.
-5. **Sync back**: `scion sync from <agent>` retrieves workspace changes via tar streaming.
+5. **Sync back**: the Kubernetes runtime copies files only to the Pod, never back from it. With the default (emptyDir) workspace, an agent's changes reach the host only when the agent commits and pushes them to the remote. The CLI's `scion sync from <agent>` does not read the Pod: it goes through the Hub, which returns the broker's copy of the workspace.
 6. **Delete**: `scion rm <agent>` deletes the Pod and associated Secrets/SecretProviderClasses. `scion stop` uses the same deletion path, so the per-agent Secret and, in GKE mode, the SecretProviderClass are deleted when the agent is stopped or deleted. If the Pod is removed outside scion, the objects are removed on the next stop/delete or start of that agent.
 7. **Incomplete start**: if a start ends before the Pod is running because it was cancelled (for example, the agent was deleted while its Pod was still `Pending`) or its request timed out, the runtime removes the Pod, the per-agent Secrets and, in GKE mode, the SecretProviderClass created by that start. This includes a Pod that the API server created as the start was cancelled. Each start labels its objects with `scion.start_id`, and cleanup only removes objects that carry that start's value. A newer agent created with the same name keeps its objects. If a start fails for another reason after its Pod exists, the Pod is kept so its status and logs can be inspected, and it is removed by the next stop or delete.
 
@@ -1086,7 +1090,7 @@ When an agent create fails on Kubernetes, the Runtime Broker's answer stays gene
 
 ## Limitations
 
-- Workspace sync uses tar snapshots (not live filesystem). Changes require explicit `scion sync`.
+- Workspace sync uses tar snapshots (not live filesystem). Changes require explicit `scion sync to|from <agent>`.
 - Local/bind-mount volumes are not supported on remote clusters.
 - Pod networking depends on cluster CNI configuration.
 - Authentication credentials must be propagated via Secrets or Workload Identity.

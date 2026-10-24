@@ -237,12 +237,19 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
+	// And the server keyring file path (ptone/scion#1530).
+	if resp.Server != nil {
+		resp.Server.KeyringFile = ""
+		resp.Server.KeyringFileAllowWorldReadable = false
+	}
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
-	overrides := ops.EnvOverriddenKeys()
+	// Never-API-writable keys are not listed: GET does not reveal which of
+	// them are set.
+	overrides := withoutNeverAPIWritableKeys(ops.EnvOverriddenKeys())
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
 	// How the hub endpoint was resolved at startup (ptone/scion#3905).
@@ -383,6 +390,12 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
 		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
 		resp.Federation = v1Server.Federation
+	}
+	// server.federation reports the same value, the one in effect, never
+	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
+	// the check keeps this line safe if that changes.
+	if resp.Server != nil {
+		resp.Server.Federation = resp.Federation
 	}
 
 	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
@@ -766,6 +779,57 @@ func effectiveHubName(ops *OperationalSettings) string {
 	return ops.Snapshot().HubName
 }
 
+// bootstrapHubName returns the bootstrap server.hub.hub_name, the value
+// Snapshot uses when the endpoints row leaves hub_name unset ("" when
+// there is none).
+func (o *OperationalSettings) bootstrapHubName() string {
+	if o == nil || o.bootstrapKoanf == nil {
+		return ""
+	}
+	return o.bootstrapKoanf.String("server.hub.hub_name")
+}
+
+// hubNameInEffectDoc returns the endpoints document doc with hub_name set
+// to the configured hub_name in effect: the document's own non-empty
+// hub_name, else bootstrap, the value Snapshot falls back to. hub_name is
+// removed when both are "". It is used only to compare the value in effect
+// before and after a save (ptone/scion#4699); nothing is written from it.
+// doc is returned as it is when it cannot be decoded.
+func hubNameInEffectDoc(doc json.RawMessage, bootstrap string) json.RawMessage {
+	m := map[string]json.RawMessage{}
+	if len(doc) > 0 {
+		if err := json.Unmarshal(doc, &m); err != nil {
+			return doc
+		}
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+	value := ""
+	if raw, ok := m["hub_name"]; ok {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return doc
+		}
+	}
+	if value == "" {
+		value = bootstrap
+	}
+	if value == "" {
+		delete(m, "hub_name")
+	} else {
+		v, err := json.Marshal(value)
+		if err != nil {
+			return doc
+		}
+		m["hub_name"] = v
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return doc
+	}
+	return out
+}
+
 // dropEchoedHubName removes server.hub.hub_name from keys when the request
 // sends the effective value back unchanged, and reports whether hub_name is
 // still a change to write. An echo is not written and not validated, so a
@@ -965,7 +1029,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// body that held nothing else is not an empty request: it still
 	// answers as an update that changes nothing.
 	sentBody := rawBody
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	// The read-only image_registry provenance of a GET body sent back is
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
@@ -1014,6 +1078,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
+	if rejectNullFederation(w, rawBody) {
 		return
 	}
 
@@ -1759,6 +1826,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		before := beforeDocs["endpoints"]
 		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
 		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
+		// hub_name keeps its bootstrap value when a document leaves it
+		// unset, so compare the hub_name in effect: an echoed hub_name that
+		// is not written, or a seeded row's bootstrap hub_name, is not a
+		// change (ptone/scion#4699).
+		bootstrapName := ops.bootstrapHubName()
+		beforeDocs["endpoints"] = hubNameInEffectDoc(beforeDocs["endpoints"], bootstrapName)
+		writtenDocs["endpoints"] = hubNameInEffectDoc(writtenDocs["endpoints"], bootstrapName)
 	}
 	// The keys the write's self-apply skipped are reported as skipped, not
 	// applied (ptone/scion#4466).
@@ -3088,6 +3162,8 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
+
+	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

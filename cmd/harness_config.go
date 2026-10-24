@@ -586,6 +586,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 	if len(files) == 0 {
 		return fmt.Errorf("no files to sync in %s (backup and temp files are excluded); a harness-config needs at least one file", localPath)
 	}
+	// Uploads read through this root; see transfer.ReadCollectedFile.
+	root, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open harness-config directory %s: %w", localPath, err)
+	}
+	defer func() { _ = root.Close() }()
 
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
 	for i, f := range files {
@@ -658,7 +664,10 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			// A new source URL still needs a finalize to record it, even
 			// when no file changed.
 			sourceChanged := sourceURL != "" && sourceURL != existing.SourceURL
-			if len(filesToUpload) == 0 && len(removed) == 0 && !sourceChanged {
+			// A changed executable bit alone needs a finalize too: the
+			// content hash does not cover modes (ptone/scion#5652).
+			modeChanged := modeOnlyChanges(files, downloadResp.Files)
+			if len(filesToUpload) == 0 && len(removed) == 0 && !sourceChanged && len(modeChanged) == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
@@ -674,6 +683,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 			if len(filesToUpload) > 0 {
 				fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			}
+			if len(modeChanged) > 0 {
+				fmt.Printf("Updating the executable bit of %d file(s):\n", len(modeChanged))
+				for _, p := range modeChanged {
+					fmt.Printf("  ~ %s\n", p)
+				}
 			}
 		}
 	} else {
@@ -710,7 +725,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		}
 
 		fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
+		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, root, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
 			return err
 		}
 		uploadID = uploadResp.UploadID
@@ -753,15 +768,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		if retryErr != nil {
 			return fmt.Errorf("failed to get upload URLs for retry: %w", retryErr)
 		}
-		for _, urlInfo := range retryResp.UploadURLs {
-			fileInfo := localFileMap[urlInfo.Path]
-			if fileInfo == nil {
-				continue
-			}
-			if err := uploadHarnessConfigFileBySignedURL(ctx, hubCtx.Client.HarnessConfigs(), fileInfo, urlInfo); err != nil {
-				return err
-			}
-			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
+		if err := uploadHarnessConfigFilesBySignedURL(ctx, hubCtx.Client.HarnessConfigs(), root, localFileMap, retryResp.UploadURLs, "Re-uploaded", false); err != nil {
+			return err
 		}
 		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL, retryResp.UploadID)
 		if err != nil {
@@ -867,6 +875,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	type pendingFile struct {
 		content []byte
 		relPath string
+		mode    string
 	}
 	// Every entry must be a canonical relative path before anything is fetched
 	// or written.
@@ -882,7 +891,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		if err := verifyHarnessConfigArtifactHash(fileInfo, content); err != nil {
 			return fmt.Errorf("harness-config %q: %w", name, err)
 		}
-		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path})
+		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path, mode: fileInfo.Mode})
 	}
 
 	// Files are written through an os.Root so they stay inside destPath.
@@ -892,7 +901,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 	defer func() { _ = root.Close() }()
 	for _, f := range pending {
-		if err := writeHarnessConfigFile(root, f.relPath, f.content); err != nil {
+		if err := writeHarnessConfigFile(root, f.relPath, f.content, f.mode); err != nil {
 			return err
 		}
 		fmt.Printf("  Downloaded: %s\n", f.relPath)

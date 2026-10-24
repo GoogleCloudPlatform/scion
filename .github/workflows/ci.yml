@@ -52,6 +52,7 @@ jobs:
       starter_hub: ${{ steps.diff.outputs.starter_hub }}
       web: ${{ steps.diff.outputs.web }}
       web_checks: ${{ steps.diff.outputs.web_checks }}
+      go: ${{ steps.diff.outputs.go }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -77,6 +78,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -89,6 +91,7 @@ jobs:
               echo "starter_hub=true"
               echo "web=true"
               echo "web_checks=true"
+              echo "go=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -130,6 +133,34 @@ jobs:
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
+          fi
+          # go gates the golangci-lint job (ptone/scion#4208): PRs that
+          # cannot change lint results skip it, which saves a runner for
+          # several minutes. (It was added when lint could exhaust the
+          # runner's memory; hack/golangci-lint-split.sh removed that, see the
+          # lint job.) Deliberately wide; it matches anything that
+          # can change what golangci-lint loads or reports:
+          #   - Go sources and modules (*.go, go.mod, go.sum, go.work, in any
+          #     directory, extras/ included) and cgo/assembly sources;
+          #   - golangci-lint config (.golangci*; none today, defaults apply);
+          #   - go:embed inputs of the root module: harnesses/ (all:*),
+          #     resources/, pkg/config/embeds/, pkg/config/schemas/ and
+          #     third_party/ (ateapi.proto). A removed embedded file fails
+          #     type-checking, which golangci-lint reports;
+          #   - web/dist/ (web/embed.go embeds all:dist/client; only its
+          #     .gitkeep is in git, the rest is a build output);
+          #   - this workflow and the Go cache actions the lint job uses;
+          #   - cr-ci/runner/golangci-lint/ build.sh, VERSIONS and *.patch
+          #     (the build script, pins and patch of the golangci-lint
+          #     binary the lint job runs; not its README.md);
+          #   - hack/golangci-lint-split.sh and its selftest (how the lint
+          #     job runs golangci-lint).
+          # Keep this regex in sync when a new go:embed reads files that do
+          # not match it.
+          if grep -qE '(\.(go|c|h|s|S|syso)$|(^|/)go\.(mod|sum|work)$|^\.golangci|^(harnesses|resources|third_party)/|^pkg/config/(embeds|schemas)/|^web/dist/|^\.github/actions/(setup|save)-go-cache/|^\.github/workflows/ci\.yml$|^cr-ci/runner/golangci-lint/(build\.sh|VERSIONS|[^/]*\.patch)$|^hack/(test-)?golangci-lint-split\.sh$)' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
   build-and-test:
@@ -404,6 +435,26 @@ jobs:
             echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
           elif [ "$rc" -ne 0 ]; then
             echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
+      - name: Check pkg/hub Scan Coverage
+        run: |
+          set +e
+          ./hack/check-scan-coverage.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-scan-coverage.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=pkg/hub scan coverage::A pkg/hub source-scanning test enumerates files without a scan-covers claim that holds for every pkg/hub area. Route the scan through globGuardScanDirs or readGuardScanDirs and add a guardScanSubdirs claim, add a pkg/hub/... claim to a recursive walk, or exempt a call that reads no pkg/hub sources (hack/check-scan-coverage.sh). Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=pkg/hub scan coverage NOT checked::check-scan-coverage could not run (exit $rc) — nothing was analysed."
           fi
           exit "$rc"
 
@@ -1340,12 +1391,18 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
-    # Bounds a hang only; the runner shutdowns in ptone/scion#4208 were not
-    # timeouts. Passing lint steps took up to ~22 min at the default
-    # concurrency (4); --concurrency=2 below can make that up to ~2x slower
-    # in the worst case, plus checkout and cache restore, so 60 leaves margin
-    # without falling back to the 360-minute default.
-    timeout-minutes: 60
+    # Bounds a hang only. With the patched golangci-lint and the two-pass
+    # split (hack/golangci-lint-split.sh) the whole job took 4m40s-4m53s on
+    # ubuntu-latest (lint step 166-177 s, plus a 46-58 s cold build of the
+    # binary on a cache miss); 20 is about 4x that, and leaves room for a PR
+    # that recompiles pkg/hub and its dependents.
+    timeout-minutes: 20
+    needs: changes
+    # Runs only when a PR changes Go-relevant files (changes.outputs.go, see
+    # the regex in the changes job), and always on push to main. Fails open:
+    # if the changes job did not succeed, lint runs anyway. A job skipped by
+    # its `if:` still reports the golangci-lint check, as success.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -1364,44 +1421,67 @@ jobs:
         with:
           workload: lint
 
-      # The action only restores its analysis cache and installs the binary
-      # here (its post step still saves the cache); lint runs in the next
-      # step so that a memory sampler can log alongside it. The version is
-      # pinned so that a new golangci-lint release cannot change memory use
-      # unnoticed; bump it deliberately.
-      - name: Install golangci-lint
+      # golangci-lint is built from source with a patched honnef.co/go/tools
+      # (dominikh/go-tools#1839: `unused` is quadratic in package size and
+      # took 330-400 s on pkg/hub's test variant alone; the patch brings
+      # that to ~6 s with identical findings). The pins, the patch and the
+      # removal plan are in cr-ci/runner/golangci-lint/ (README.md); the
+      # cr-ci runner image is to build from it too (cr-ci fixup PR 2).
+      # build.sh verifies the pinned module checksums and the patch sha256,
+      # and skips the build when the restored binary's stamp matches its
+      # inputs and the Go version.
+      # The binary is cached on its own key; like the Go caches, only pushes
+      # to main save it. The build uses its own GOCACHE/GOMODCACHE so that
+      # golangci-lint's dependencies stay out of the lint workload's cache.
+      - name: Restore patched golangci-lint
+        id: golangci-lint-bin
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint-patched
+          key: golangci-lint-patched-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**', '!cr-ci/runner/golangci-lint/README.md') }}
+
+      - name: Build patched golangci-lint
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/golangci-lint-build/gocache
+          GOMODCACHE: ${{ runner.temp }}/golangci-lint-build/gomodcache
+        run: |
+          bin="$RUNNER_TEMP/golangci-lint-patched"
+          cr-ci/runner/golangci-lint/build.sh "$bin/golangci-lint"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Save patched golangci-lint
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.golangci-lint-bin.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/golangci-lint-patched
+          key: ${{ steps.golangci-lint-bin.outputs.cache-primary-key }}
+
+      # The action only restores its analysis cache here (its post step
+      # still saves the cache); install-mode none makes it use the patched
+      # binary from PATH. Lint runs in a later step so that a memory
+      # sampler can log alongside it. The golangci-lint version is pinned
+      # in cr-ci/runner/golangci-lint/VERSIONS so that a new release cannot
+      # change memory use unnoticed; bump it deliberately.
+      - name: Restore golangci-lint analysis cache
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.15.0
+          install-mode: none
           install-only: true
 
-      # Bound memory in the lint step so it cannot exhaust the ~16 GB
-      # runner, which shows up as "The runner has received a shutdown
-      # signal" with no lint output (ptone/scion#4208). golangci-lint
-      # loads packages through go list -export, which compiles each
-      # package for its export data in a separate compile process. The
-      # memory sampler measured one compile process at ~15 GB, while
-      # golangci-lint itself peaked at 5.6-5.7 GB.
-      # - GOFLAGS -gcflags=<pkg/hub>=-c=1 runs the compiler backend for
-      #   pkg/hub on one worker instead of up to four. This may lower
-      #   that compile's peak by the backend state of up to three
-      #   functions compiled at once; most of its memory is retained IR
-      #   and generated code, which -c does not change, so the effect
-      #   is expected to be modest. The package pattern limits the flag
-      #   to pkg/hub; without one it would apply to every package
-      #   matched by ./..., which golangci-lint loads. golangci-lint
-      #   passes its environment through to go list and sets no
-      #   -gcflags of its own.
-      # - --concurrency=2 (default: CPU count, 4) halves the packages
-      #   golangci-lint analyses at once, lowering its own memory; it
-      #   does not bound the compile processes.
-      # - GOGC=25 sets the heap target to 1.25x the live heap (default
-      #   2x; previously 1.5x), trading GC CPU for a lower peak. The
-      #   compile processes inherit it.
-      # - GOMEMLIMIT=8GiB is a soft limit: the GC runs harder near that
-      #   size but does not cap the heap if the live set is larger.
-      #   Close to the limit it holds the heap there rather than at
-      #   1.25x the live heap.
+      # golangci-lint runs in two passes (hack/golangci-lint-split.sh): every
+      # package except ./pkg/hub with tests, then ./pkg/hub with
+      # --tests=false. With tests, golangci-lint's package loading
+      # (go list -export -test) compiles pkg/hub's test variant for export
+      # data nothing reads; that one compile reached ~14.5 GB RSS on this
+      # 16 GB runner, ran 12-16 min and caused the runner shutdowns in
+      # ptone/scion#4208. Split, the lint step took 166-177 s and peaked at
+      # 6.6-6.8 GB used, so it runs at Go's and golangci-lint's defaults (no
+      # -c=1, GOGC, GOMEMLIMIT or --concurrency throttles any more). Trade-off:
+      # pkg/hub's _test.go files are no longer linted by errcheck,
+      # staticcheck, unused or ineffassign (govet is still covered: go vet
+      # checks them in the hub shard jobs); see hack/LINT-CONVENTIONS.md.
+      # The script's own tests run first (bash only, about a second).
       # GOLANGCI_LINT_CACHE is exported because the action sets it only
       # in its own process; it must match the path the action restores
       # and saves.
@@ -1412,13 +1492,14 @@ jobs:
       # arguments are passed as @file) and the response file's line
       # count, which tells a package from its test variant. It prints a
       # peak summary at the end and does not affect the step's result;
-      # the step exits with golangci-lint's exit code.
+      # the step exits with the split script's exit code.
+      # Called directly, not through make: the cr-ci runner image has no
+      # make, and a direct call keeps the selftest's exit code.
+      - name: Test the golangci-lint split script
+        run: ./hack/test-golangci-lint-split.sh
+
       - name: golangci-lint
         shell: bash
-        env:
-          GOGC: '25'
-          GOMEMLIMIT: 8GiB
-          GOFLAGS: '-gcflags=github.com/GoogleCloudPlatform/scion/pkg/hub=-c=1'
         run: |
           export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
           samples="$RUNNER_TEMP/lint-mem.log"
@@ -1436,7 +1517,7 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           rc=0
-          golangci-lint run --new-from-merge-base=origin/main --concurrency=2 || rc=$?
+          hack/golangci-lint-split.sh --new-from-merge-base=origin/main || rc=$?
           kill "$sampler" 2>/dev/null || true
           wait "$sampler" 2>/dev/null || true
           awk '{split($2,u,"="); split($3,a,"="); if (u[2]>max) max=u[2]; if (min=="" || a[2]<min) min=a[2]; n++}

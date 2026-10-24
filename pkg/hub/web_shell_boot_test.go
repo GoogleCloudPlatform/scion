@@ -143,7 +143,8 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
-	assert.Equal(t, webContentSecurityPolicy, resp.Header.Get("Content-Security-Policy"))
+	policy := resp.Header.Get("Content-Security-Policy")
+	assert.Equal(t, webContentSecurityPolicy(policyNonce(t, policy)), policy)
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 

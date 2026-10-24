@@ -92,9 +92,9 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 	return uploadURLs, manifestURL, nil
 }
 
-// verifyAndFinalizeFiles verifies files exist in storage and computes content hash.
-// Returns the content hash string. Manifest paths are validated with
-// validateManifestFilePaths before any storage call.
+// verifyAndFinalizeFiles verifies a skill version's files exist in storage
+// and returns their content hash (computeSkillContentHash). Manifest paths
+// are validated with validateManifestFilePaths before any storage call.
 func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) (string, error) {
 	if err := validateManifestFilePaths(files); err != nil {
 		return "", err
@@ -106,7 +106,7 @@ func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath 
 			return "", &fileNotFoundError{path: file.Path}
 		}
 	}
-	return computeContentHash(files), nil
+	return computeSkillContentHash(files), nil
 }
 
 // isCanonicalResourceFilePath reports whether p is a relative,
@@ -363,6 +363,7 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 			URL:  signedURL.URL,
 			Size: file.Size,
 			Hash: file.Hash,
+			Mode: transfer.NormalizedModeString(file.Mode),
 		})
 	}
 

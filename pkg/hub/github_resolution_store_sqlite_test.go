@@ -29,17 +29,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // TestGitHubResolutionStore_GetPut tests basic cache operations.
 func TestGitHubResolutionStore_GetPut(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
@@ -56,7 +52,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	}
 
 	// Put entry
-	err = store.Put(ctx, cacheKey, entry)
+	err := store.Put(ctx, cacheKey, entry)
 	require.NoError(t, err)
 
 	// Get entry (should hit)
@@ -82,13 +78,8 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 // against SQLite — see TestGitHubResolutionStore_Put_ConflictTargetInSQL for
 // the generated-SQL assertion that would catch it on a dialect that doesn't).
 func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 	cacheKey := "upsert-key"
@@ -116,9 +107,9 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 
 	// Exactly one row for this cache_key: a conflict-target-less upsert that
 	// instead fell back to always inserting (the failure mode this guards
-	// against) would leave two. Filtered by cache_key, not a bare Count(),
-	// since this DSN (file:ent?mode=memory&cache=shared) is shared across the
-	// package's tests and could otherwise pick up rows left by another test.
+	// against) would leave two. The test has its own database, so a bare
+	// Count() would also work today; the cache_key filter keeps the assertion
+	// about this key alone if a stray row ever lands in the table.
 	count, err := client.GitHubResolutionCache.Query().
 		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
 		Count(ctx)
@@ -142,7 +133,11 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 // on every dialect, SQLite included.
 func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	var captured []string
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{},
+	// enttest.NewClient takes no ent options, and this test needs ent.Log and
+	// ent.Debug to capture the SQL, so it opens its own database: in-memory,
+	// named after the test, and pinned to one connection like enttest's.
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1},
 		ent.Log(func(args ...any) { captured = append(captured, fmt.Sprint(args...)) }),
 		ent.Debug())
 	require.NoError(t, err)
@@ -184,13 +179,8 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 
 // TestGitHubResolutionStore_Expiration tests TTL expiration.
 func TestGitHubResolutionStore_Expiration(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
@@ -205,7 +195,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 	}
 
 	// Put expired entry
-	err = store.Put(ctx, cacheKey, entry)
+	err := store.Put(ctx, cacheKey, entry)
 	require.NoError(t, err)
 
 	// Get should miss (expired)
@@ -216,13 +206,8 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 
 // TestGitHubResolutionStore_PurgeExpired tests TTL eviction.
 func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	err = entc.AutoMigrate(ctx, client)
-	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
 
@@ -237,7 +222,7 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
 		OriginalURI: "gh://expired/repo/skill",
 	}
-	err = store.Put(ctx, expiredKey, expiredEntry)
+	err := store.Put(ctx, expiredKey, expiredEntry)
 	require.NoError(t, err)
 
 	// Add valid entry
@@ -278,12 +263,8 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 // row past MaxResolutionStaleAge confirms PurgeExpired still deletes rows
 // that are genuinely beyond anyone's stale horizon.
 func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
-
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 
@@ -344,11 +325,8 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 // minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
 // one-minute margins below are sized to land on either side of.
 func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
-	client, err := entc.OpenSQLite("file:ent?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	defer client.Close() //nolint:errcheck
+	client := enttest.NewClient(t)
 	ctx := context.Background()
-	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 	cutoff := time.Now().Add(agent.MaxJitteredTTL(agent.DefaultResolutionCacheTTL) - agent.MaxResolutionStaleAge)

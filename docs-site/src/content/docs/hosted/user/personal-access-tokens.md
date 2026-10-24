@@ -39,6 +39,7 @@ permissions). Available scopes:
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
 | `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in a project's chat threads with `inbox:write`, and your own account must hold `project.chat_post` there |
 | `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
@@ -111,6 +112,8 @@ project is a hub-level resource; a project's own groups belong to that project.
 - A token is held to the group's own role hierarchy: only the group's owner, or an owner or admin
   member of the group, adds members, even when you are a super-admin.
 - The members of a project's agents group are the project's agents; no one adds members to it.
+- Removing a member from, or deleting, a group that is the subject of an access constraint is
+  session only: a token is refused with `403` and `details.reason` `GOV_PENDING`.
 
 ### Hub-boundary tokens for user administration
 

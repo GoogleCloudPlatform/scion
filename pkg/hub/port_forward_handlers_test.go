@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -327,6 +329,10 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Set-Cookie", "session=agent-set; Path=/")
 		w.Header().Set("Content-Security-Policy", "default-src *")
+		for name, v := range agentPageHeaders {
+			w.Header().Set(name, v)
+		}
+		w.Header().Set("X-Agent-Kept", "kept")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("<html>agent content</html>"))
@@ -365,8 +371,30 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	assert.Equal(t, "<html>agent content</html>", rec.Body.String())
 	assert.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"),
 		"the hub's sandbox CSP must be authoritative; the agent's own CSP must not pass through")
+	// Without the web frontend in front (this recorder is the hub alone),
+	// the response still refuses to be embedded.
+	assert.Equal(t, []string{"'none'"}, cspDirective(rec.Header().Get("Content-Security-Policy"), "frame-ancestors"), "hub-only frame-ancestors")
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	assert.Empty(t, rec.Header().Values("Set-Cookie"), "the agent must not be able to set cookies on the hub origin")
+
+	// Behind the web server's security headers, which set the web pages'
+	// policy first, the sandbox policy is still the only one.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/"+portText+"/proxy/", nil)
+	req.Header.Set("X-Scion-Agent-Token", token)
+	webRec := httptest.NewRecorder()
+	(&WebServer{}).securityHeadersMiddleware(srv.Handler()).ServeHTTP(webRec, req)
+	require.Equal(t, http.StatusOK, webRec.Code)
+	assert.Equal(t, []string{untrustedContentSandboxCSP}, webRec.Header().Values("Content-Security-Policy"), "tunnel response policies")
+	assert.Equal(t, []string{"nosniff"}, webRec.Header().Values("X-Content-Type-Options"), "tunnel response nosniff headers")
+
+	// The hub's own page headers are not combined with the app's: each
+	// has exactly the hub's single value. Positive control: a header the
+	// hub does not set still passes through from the app.
+	hub := hubPageHeaderValues(t)
+	for _, name := range hubPageHeaderNames {
+		assert.Equal(t, []string{hub[name]}, webRec.Header().Values(name), "tunnel page header "+name)
+	}
+	assert.Equal(t, "kept", webRec.Header().Get("X-Agent-Kept"))
 }
 
 // TestAgentPortProxyResponseDoesNotRelayHubOriginStateHeaders verifies the
@@ -618,4 +646,441 @@ func createPortForwardAgent(t *testing.T, srv *Server, s store.Store) (*store.Ag
 	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	require.NoError(t, err)
 	return agent, token
+}
+
+// TestAgentPortProxyBareURLRedirect (ptone/scion#5566): on the legacy
+// tunnel path, GET and HEAD of the bare .../proxy URL are redirected to
+// .../proxy/ with the raw query kept; other methods, callers without
+// access and ports that are not exposed get the same answer as before.
+func TestAgentPortProxyBareURLRedirect(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	base := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy"
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			rec := doAgentTokenRequest(t, srv, method, base+"?x=1&y=a%2Fb", nil, token)
+			require.Equal(t, http.StatusPermanentRedirect, rec.Code)
+			assert.Equal(t, "proxy/?x=1&y=a%2Fb", rec.Header().Get("Location"))
+			assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+
+			rec = doAgentTokenRequest(t, srv, method, base, nil, token)
+			require.Equal(t, http.StatusPermanentRedirect, rec.Code)
+			assert.Equal(t, "proxy/", rec.Header().Get("Location"))
+		})
+	}
+
+	t.Run("relative_location_resolves_to_the_trailing_slash_form", func(t *testing.T) {
+		rec := doAgentTokenRequest(t, srv, http.MethodGet, base+"?x=1", nil, token)
+		require.Equal(t, http.StatusPermanentRedirect, rec.Code)
+		from, err := url.Parse("https://hub.example" + base + "?x=1")
+		require.NoError(t, err)
+		to, err := url.Parse(rec.Header().Get("Location"))
+		require.NoError(t, err)
+		assert.Equal(t, "https://hub.example"+base+"/?x=1", from.ResolveReference(to).String())
+	})
+
+	// Other methods are proxied as before: with no tunnel, the same 503 as
+	// the trailing-slash form.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		t.Run(method+"_unchanged", func(t *testing.T) {
+			bare := doAgentTokenRequest(t, srv, method, base, nil, token)
+			slash := doAgentTokenRequest(t, srv, method, base+"/", nil, token)
+			assert.Equal(t, http.StatusServiceUnavailable, bare.Code)
+			assert.Equal(t, slash.Code, bare.Code)
+			assert.Empty(t, bare.Header().Get("Location"))
+		})
+	}
+
+	t.Run("port_not_exposed_unchanged", func(t *testing.T) {
+		bare := doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/9999/proxy", nil, token)
+		slash := doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/9999/proxy/", nil, token)
+		assert.Equal(t, http.StatusNotFound, bare.Code)
+		assert.Equal(t, slash.Code, bare.Code)
+		assert.Equal(t, slash.Body.String(), bare.Body.String())
+		assert.Empty(t, bare.Header().Get("Location"))
+	})
+
+	t.Run("caller_without_access_unchanged", func(t *testing.T) {
+		ctx := context.Background()
+		other := &store.Agent{
+			ID:        tid("pf-other-agent"),
+			Slug:      "pf-other-agent",
+			Name:      "PF Other Agent",
+			ProjectID: agent.ProjectID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, other))
+		otherToken, err := srv.GetAgentTokenService().GenerateAgentToken(other.ID, agent.ProjectID,
+			[]AgentTokenScope{ScopeAgentPortForward}, nil)
+		require.NoError(t, err)
+
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			bare := doAgentTokenRequest(t, srv, method, base+"?x=1", nil, otherToken)
+			slash := doAgentTokenRequest(t, srv, method, base+"/?x=1", nil, otherToken)
+			assert.NotEqual(t, http.StatusPermanentRedirect, bare.Code, method)
+			assert.Equal(t, slash.Code, bare.Code, method)
+			assert.Equal(t, slash.Body.String(), bare.Body.String(), method)
+			assert.Empty(t, bare.Header().Get("Location"), method)
+		}
+	})
+}
+
+// TestAgentPortProxyNoCredentialsPlainText (ptone/scion#5566): on the
+// legacy tunnel path, a page sub-request that reaches a proxy route with
+// no credential gets the plain-text 401 with the diagnostic headers and
+// is counted; a navigation keeps the hub's answer.
+func TestAgentPortProxyNoCredentialsPlainText(t *testing.T) {
+	srv, s := testServer(t)
+	count := portProxyCounterNamed(t, srv, "scion.hub.port_proxy.sandboxed_subresource_unauth")
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	base := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy"
+
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		header   map[string]string
+		wantHint bool
+	}{
+		{"module_script_origin_null", http.MethodGet, base + "/app.js",
+			map[string]string{"Origin": "null", "Accept": "*/*", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors"}, true},
+		{"stylesheet_cross_site", http.MethodGet, base + "/site.css",
+			map[string]string{"Accept": "text/css,*/*;q=0.1", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors"}, true},
+		{"fetch_post_origin_null", http.MethodPost, base + "/api/ping",
+			map[string]string{"Origin": "null"}, true},
+		{"image_same_origin", http.MethodGet, base + "/img/dot.png",
+			map[string]string{"Accept": "image/png,image/*", "Sec-Fetch-Site": "same-origin"}, false},
+		{"plain_client_no_headers", http.MethodGet, base + "/", nil, false},
+		{"bare_url_no_headers", http.MethodGet, base, nil, false},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			requirePortProxyNoCredentials(t, w.Code, w.Header(), w.Body.String(), tc.wantHint)
+			assert.Equal(t, int64(i+1), count())
+		})
+	}
+
+	t.Run("head_has_headers_without_body", func(t *testing.T) {
+		before := count()
+		hubHTTP := httptest.NewServer(srv.Handler())
+		t.Cleanup(hubHTTP.Close)
+		req, err := http.NewRequest(http.MethodHead, hubHTTP.URL+base+"/app.js", nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", "null")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Empty(t, body)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.Equal(t, "text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
+		assert.Equal(t, "no-credentials", resp.Header.Get("X-Scion-Proxy-Error"))
+		assert.Equal(t, "sandboxed-subresource", resp.Header.Get("X-Scion-Proxy-Hint"))
+		assert.Equal(t, before+1, count())
+	})
+
+	t.Run("navigation_keeps_the_hub_answer", func(t *testing.T) {
+		before := count()
+		req := httptest.NewRequest(http.MethodGet, base+"/", nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+		assert.Empty(t, w.Header().Get("X-Scion-Proxy-Error"))
+		assert.Equal(t, before, count())
+	})
+
+	t.Run("non_proxy_route_keeps_the_hub_answer", func(t *testing.T) {
+		before := count()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports", nil)
+		req.Header.Set("Origin", "null")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+		assert.Empty(t, w.Header().Get("X-Scion-Proxy-Error"))
+		assert.Equal(t, before, count())
+	})
+}
+
+// TestAgentPortProxyOtherCredentialsNotPlainText (ptone/scion#5566): a
+// proxy sub-request that carries a credential other than an
+// Authorization header is handled by that credential's own path; it
+// never gets the plain-text no-credentials 401.
+func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
+	srv, s := testServer(t)
+	count := portProxyCounterNamed(t, srv, "scion.hub.port_proxy.sandboxed_subresource_unauth")
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	path := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy/app.js"
+
+	serve := func(t *testing.T, header map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Origin", "null")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		for k, v := range header {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	// Each credential's own path decides the answer (served, refused or
+	// deferred); what is pinned here is that step 3g never answers.
+	notPlainText := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		assert.Empty(t, w.Header().Get("X-Scion-Proxy-Error"), "status %d body %s", w.Code, w.Body.String())
+		assert.NotEqual(t, portProxyNoCredentialsBody, w.Body.String())
+	}
+
+	t.Run("agent_token", func(t *testing.T) {
+		// Authenticated as the agent: proxied, and with no tunnel the 503.
+		w := serve(t, map[string]string{"X-Scion-Agent-Token": token})
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		notPlainText(t, w)
+	})
+	t.Run("invalid_agent_token", func(t *testing.T) {
+		w := serve(t, map[string]string{"X-Scion-Agent-Token": "not-a-token"})
+		notPlainText(t, w)
+	})
+	t.Run("broker_headers", func(t *testing.T) {
+		w := serve(t, map[string]string{"X-Scion-Broker-ID": "broker-1"})
+		notPlainText(t, w)
+	})
+	t.Run("federation_header", func(t *testing.T) {
+		w := serve(t, map[string]string{FederationTokenHeader: "x"})
+		notPlainText(t, w)
+	})
+	t.Run("trusted_proxy_user_headers", func(t *testing.T) {
+		prev := srv.authConfig.TrustedProxies
+		srv.authConfig.TrustedProxies = []string{"192.0.2.0/24"} // httptest.NewRequest's RemoteAddr
+		t.Cleanup(func() { srv.authConfig.TrustedProxies = prev })
+		w := serve(t, map[string]string{
+			"X-Forwarded-User-Id":    "proxy-user-1",
+			"X-Forwarded-User-Email": "proxy-user@example.com",
+		})
+		notPlainText(t, w)
+	})
+	t.Run("front_proxy_assertion_refused", func(t *testing.T) {
+		prev := srv.authConfig.ProxyAuthenticator
+		srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{err: errors.New("bad assertion")}
+		t.Cleanup(func() { srv.authConfig.ProxyAuthenticator = prev })
+		w := serve(t, nil)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+		assert.Contains(t, w.Body.String(), "invalid proxy assertion")
+		notPlainText(t, w)
+	})
+	t.Run("front_proxy_assertion_user", func(t *testing.T) {
+		prevAuth, prevProv := srv.authConfig.ProxyAuthenticator, srv.authConfig.ProxyUserProvisioner
+		srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{user: &ProxyUserInfo{
+			Subject: "front-proxy-user-1", Email: "front-proxy-user@example.com",
+		}}
+		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
+		t.Cleanup(func() {
+			srv.authConfig.ProxyAuthenticator, srv.authConfig.ProxyUserProvisioner = prevAuth, prevProv
+		})
+		w := serve(t, nil)
+		notPlainText(t, w)
+	})
+	assert.Zero(t, count())
+}
+
+// portProxyStubAuthenticator is a front-proxy authenticator that answers every
+// request with user, or with err when it is set.
+type portProxyStubAuthenticator struct {
+	user *ProxyUserInfo
+	err  error
+}
+
+func (a portProxyStubAuthenticator) Authenticate(*http.Request) (*ProxyUserInfo, error) {
+	return a.user, a.err
+}
+
+func (portProxyStubAuthenticator) Name() string { return "stub" }
+
+// TestRedirectToProxyRootLocationIsOneLine (ptone/scion#5566): whatever
+// bytes the raw query holds, the bare-URL redirect writes exactly one
+// Location header whose value is a single line of printable ASCII, and no
+// other header. Raw CR, LF and NUL never come from the HTTP parser; the
+// handler is checked with them directly.
+func TestRedirectToProxyRootLocationIsOneLine(t *testing.T) {
+	tests := []struct {
+		rawQuery string
+		want     string
+	}{
+		{"x=1", "proxy/?x=1"},
+		{"x=%0d%0aSet-Cookie:%20a=b", "proxy/?x=%0d%0aSet-Cookie:%20a=b"},
+		{"x=\r\nSet-Cookie: a=b", "proxy/?x=%0D%0ASet-Cookie:%20a=b"},
+		{"x=\nLocation: /evil", "proxy/?x=%0ALocation:%20/evil"},
+		{"a=\x00\x01\x1f\x7f&b=\xff\xc3\xa9", "proxy/?a=%00%01%1F%7F&b=%FF%C3%A9"},
+		{"t=\tq", "proxy/?t=%09q"},
+		{"", "proxy/"},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%q", tc.rawQuery), func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a/ports/3000/proxy", nil)
+			req.URL.RawQuery = tc.rawQuery
+			w := httptest.NewRecorder()
+			redirectToProxyRoot(w, req)
+			require.Equal(t, http.StatusPermanentRedirect, w.Code)
+			require.Equal(t, []string{tc.want}, w.Header().Values("Location"))
+			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+			assert.Len(t, w.Header(), 2, "only Location and Cache-Control are written: %v", w.Header())
+			for i := 0; i < len(tc.want); i++ {
+				c := tc.want[i]
+				assert.True(t, c > ' ' && c < 0x7f, "byte %#x at %d", c, i)
+			}
+		})
+	}
+}
+
+// TestAgentPortProxyBareURLRedirectWire (ptone/scion#5566): over a real
+// connection, bare-URL requests whose query holds encoded CR/LF and odd
+// bytes are either refused by the HTTP server or redirected with one
+// well-formed Location line; the response never carries an extra header
+// line.
+func TestAgentPortProxyBareURLRedirectWire(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	hubHTTP := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubHTTP.Close)
+	hubAddr := strings.TrimPrefix(hubHTTP.URL, "http://")
+	bare := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy"
+
+	tests := []struct {
+		query string
+		want  string // the Location when the server answers 308
+	}{
+		{"x=%0d%0aSet-Cookie:%20a=b", "proxy/?x=%0d%0aSet-Cookie:%20a=b"},
+		{"x=%0D%0ALocation:%20/evil&y=%00%ff%7f", "proxy/?x=%0D%0ALocation:%20/evil&y=%00%ff%7f"},
+		{"x=\xff\xfe", "proxy/?x=%FF%FE"},
+		{"x=\x01", ""},
+		{"x=\x7f", ""},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%q", tc.query), func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", hubAddr, 5*time.Second)
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(10*time.Second)))
+			_, err = io.WriteString(conn, "GET "+bare+"?"+tc.query+" HTTP/1.1\r\nHost: hub.test\r\n"+
+				"X-Scion-Agent-Token: "+token+"\r\nConnection: close\r\n\r\n")
+			require.NoError(t, err)
+			raw, err := io.ReadAll(conn)
+			require.NoError(t, err)
+
+			head, _, found := strings.Cut(string(raw), "\r\n\r\n")
+			require.True(t, found, "response %q", raw)
+			lines := strings.Split(head, "\r\n")
+			require.True(t, strings.HasPrefix(lines[0], "HTTP/1.1 "), "status line %q", lines[0])
+			var locations []string
+			for _, line := range lines[1:] {
+				name, value, ok := strings.Cut(line, ": ")
+				require.True(t, ok, "malformed header line %q", line)
+				assert.NotContains(t, line, "\n")
+				assert.NotContains(t, line, "\r")
+				switch http.CanonicalHeaderKey(name) {
+				case "Location":
+					locations = append(locations, value)
+				case "Set-Cookie":
+					t.Errorf("unexpected Set-Cookie line %q", line)
+				}
+			}
+
+			switch {
+			case strings.HasPrefix(lines[0], "HTTP/1.1 308 "):
+				require.Equal(t, []string{tc.want}, locations)
+			case strings.HasPrefix(lines[0], "HTTP/1.1 400 "):
+				assert.Empty(t, locations)
+			default:
+				t.Fatalf("status line %q: want 308 or 400", lines[0])
+			}
+		})
+	}
+}
+
+// TestAgentPortProxyBareURLWebSocketUnchanged (ptone/scion#5566): on the
+// legacy tunnel path, an admitted WebSocket upgrade to the bare .../proxy
+// URL is not redirected; it keeps the answer it had before, the same as
+// the trailing-slash form (WebSocket is not supported there).
+func TestAgentPortProxyBareURLWebSocketUnchanged(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	send := func(path, tok string, upgrade bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Scion-Agent-Token", tok)
+		if upgrade {
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		}
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	base := "/api/v1/agents/" + agent.ID + "/ports/3000/proxy"
+	bare, slash := send(base, token, true), send(base+"/", token, true)
+	assert.Equal(t, http.StatusNotImplemented, bare.Code, bare.Body.String())
+	assert.Equal(t, slash.Code, bare.Code)
+	assert.Equal(t, slash.Body.String(), bare.Body.String())
+	assert.Empty(t, bare.Header().Get("Location"))
+
+	// A caller without access is refused before the upgrade is looked at:
+	// the upgrade gets exactly the answer a plain request gets.
+	t.Run("caller_without_access", func(t *testing.T) {
+		ctx := context.Background()
+		other := &store.Agent{
+			ID:        tid("pf-ws-other-agent"),
+			Slug:      "pf-ws-other-agent",
+			Name:      "PF WS Other Agent",
+			ProjectID: agent.ProjectID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, other))
+		otherToken, err := srv.GetAgentTokenService().GenerateAgentToken(other.ID, agent.ProjectID,
+			[]AgentTokenScope{ScopeAgentPortForward}, nil)
+		require.NoError(t, err)
+
+		up, plain := send(base, otherToken, true), send(base, otherToken, false)
+		assert.Equal(t, http.StatusForbidden, up.Code, up.Body.String())
+		assert.Equal(t, plain.Code, up.Code)
+		assert.Equal(t, plain.Body.Bytes(), up.Body.Bytes())
+		// X-Request-ID is per request; every other header must match.
+		upHeader, plainHeader := up.Header().Clone(), plain.Header().Clone()
+		upHeader.Del("X-Request-ID")
+		plainHeader.Del("X-Request-ID")
+		assert.Equal(t, plainHeader, upHeader)
+		assert.Empty(t, up.Header().Get("Location"))
+	})
 }

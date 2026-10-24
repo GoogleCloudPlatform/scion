@@ -918,7 +918,7 @@ func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntr
 			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
 		} `yaml:"runtimes" json:"runtimes"`
 	}
-	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
 		return false
 	}
 	if profileName != "" {
@@ -1600,6 +1600,13 @@ type V1ServerConfig struct {
 	// LogFormat is accepted so existing settings files still load, but nothing
 	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
 	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// KeyringFile is the path of the server keyring file
+	// (server.keyring_file, KeyringFileKey). See GlobalConfig.KeyringFile.
+	KeyringFile string `json:"keyring_file,omitempty" yaml:"keyring_file,omitempty" koanf:"keyring_file"`
+	// KeyringFileAllowWorldReadable is the operator override that admits a
+	// world-readable keyring file (server.keyring_file_allow_world_readable).
+	// See GlobalConfig.KeyringFileAllowWorldReadable.
+	KeyringFileAllowWorldReadable bool `json:"keyring_file_allow_world_readable,omitempty" yaml:"keyring_file_allow_world_readable,omitempty" koanf:"keyring_file_allow_world_readable"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -2019,6 +2026,8 @@ type V1ServerRelayConfig struct {
 	// PublicURL is the relay's own public URL, recorded as its
 	// relay_instances.public_endpoint.
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// Singleton asserts a non-HA singleton relay (required on Cloud Run).
+	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -3020,6 +3029,16 @@ type V1RuntimeConfig struct {
 	// safe_to_evict wins over it, and a template's or agent's
 	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are Kubernetes-only
+	// placement defaults for agent pods started on the runtime this entry
+	// describes (matched by cluster identity and namespace, not by name).
+	// A profile on this entry adds to them: its selector keys win, its
+	// tolerations are combined with these, and its runtime class wins when
+	// set. Read from the global settings only. See resolvePlacement in
+	// pkg/runtimebroker and config.ApplyPlacement.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents whose profile uses this runtime entry.
 	// A profile's own value wins over it. The nfs details always come from
@@ -3582,6 +3601,14 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are Kubernetes-only
+	// placement defaults for agents whose runtime choice used this profile.
+	// They apply over the profile's runtime entry's values: selector keys
+	// win per key, tolerations are combined, and the runtime class wins
+	// when set. Read from the global settings only.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// CloneDepth is the git clone depth for agents using this profile:
 	// "full" or a positive integer. A template's or agent's clone_depth
 	// wins over it. Empty keeps the default shallow clone. See
@@ -3738,7 +3765,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		legacy.hubIDFromCamel = false
 		delete(res.sources, projectkeys.ConfigHubProjectIDKey)
 	}
-	if projectPath != "" && projectPath != globalDir {
+	// A hub-managed workspace root without a .scion entry has no project
+	// settings: its own settings file is workspace content.
+	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
+	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
@@ -3755,7 +3785,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// project is found via the current directory (resolveEffectiveProjectPath
 	// -> FindProjectRoot): step 3 above never runs in that case, so the
 	// precedence check must run here too, not only in step 3.
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath && !noProjectLayer {
 		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err
@@ -4297,6 +4327,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
+	if v1.KeyringFile != "" {
+		gc.KeyringFile = v1.KeyringFile
+	}
+	if v1.KeyringFileAllowWorldReadable {
+		gc.KeyringFileAllowWorldReadable = true
+	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -4455,7 +4491,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	}
 
 	if r := v1.Relay; r != nil {
-		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config
@@ -4754,8 +4790,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:     gc.Mode,
-		LogLevel: gc.LogLevel,
+		Mode:        gc.Mode,
+		LogLevel:    gc.LogLevel,
+		KeyringFile: gc.KeyringFile,
+
+		KeyringFileAllowWorldReadable: gc.KeyringFileAllowWorldReadable,
 	}
 
 	// Hub server config
@@ -4865,7 +4904,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	v1.Hub = v1Hub
 	if r := gc.Relay; !r.IsZero() {
-		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config
@@ -5332,7 +5371,7 @@ func detectDirSettingsFormat(dir string) (hasVersioned bool, missingSchemaVersio
 	}
 	var raw map[string]interface{}
 	hasExplicitVersion := false
-	if err := yamlv3.Unmarshal(data, &raw); err == nil && raw != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err == nil && raw != nil {
 		_, hasExplicitVersion = raw["schema_version"]
 	}
 	return true, !hasExplicitVersion
@@ -5439,7 +5478,7 @@ func unrecognizedSettingsFormatWarnings(projectPath string) []string {
 		}
 		// Parse to check for real keys.
 		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err != nil || len(raw) == 0 {
+		if err := unmarshalSettingsYAML(data, &raw); err != nil || len(raw) == 0 {
 			continue
 		}
 		warnings = append(warnings, fmt.Sprintf(
@@ -5696,7 +5735,7 @@ func loadSingleFileVersioned(held *SettingsLock, dir string) (*VersionedSettings
 			return nil, fmt.Errorf("failed to parse JSON settings at %s: %w", settingsPath, err)
 		}
 	} else {
-		if err := yamlv3.Unmarshal(data, &vs); err != nil {
+		if err := unmarshalSettingsYAML(data, &vs); err != nil {
 			return nil, fmt.Errorf("failed to parse YAML settings at %s: %w", settingsPath, err)
 		}
 	}
@@ -5877,7 +5916,7 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 	}
 	// Refuse to edit a file the struct loader would reject, as before.
 	var vs VersionedSettings
-	if err := doc.Decode(&vs); err != nil {
+	if err := decodeSettingsYAMLNode(doc, &vs); err != nil {
 		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
 	}
 	root := doc.Content[0]
@@ -5954,7 +5993,7 @@ func updateVersionedSettingYAML(lock *SettingsLock, dir, settingsPath string, ed
 // VersionedSettings, as LoadSingleFileVersioned decodes a YAML file.
 func decodeVersionedSettingsYAML(data []byte) error {
 	var vs VersionedSettings
-	return yamlv3.Unmarshal(data, &vs)
+	return unmarshalSettingsYAML(data, &vs)
 }
 
 // encodeSettingsYAML is encodeYAMLDocument. It is a variable so tests can
@@ -6745,7 +6784,7 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 			return nil, fmt.Errorf("failed to parse JSON settings: %w", err)
 		}
 	} else {
-		if err := yamlv3.Unmarshal(data, &legacy); err != nil {
+		if err := unmarshalSettingsYAML(data, &legacy); err != nil {
 			return nil, fmt.Errorf("failed to parse YAML settings: %w", err)
 		}
 	}

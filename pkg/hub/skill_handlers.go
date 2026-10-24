@@ -1148,7 +1148,9 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 
 	// b) Parse multipart form: 10 MB in memory, rest spills to disk.
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	cleanup, err := parseMultipartUpload(r, 10<<20)
+	defer cleanup()
+	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds 50MB limit", nil)
@@ -1157,7 +1159,6 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		BadRequest(w, "Failed to parse multipart form: "+err.Error())
 		return
 	}
-	defer func() { _ = r.MultipartForm.RemoveAll() }()
 
 	// c) Extract and validate version.
 	version := r.FormValue("version")
@@ -1316,8 +1317,8 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		manifest[i] = r.file
 	}
 
-	// i) Compute content hash.
-	contentHash := computeContentHash(manifest)
+	// i) Compute content hash (v1: skill versions are pinned by it).
+	contentHash := computeSkillContentHash(manifest)
 
 	// j) Update version to published.
 	sv.Status = store.SkillVersionStatusPublished
@@ -2555,7 +2556,8 @@ func safeShortSHA(sha string) string {
 	return sha[:12]
 }
 
-// computeBundleHash computes the content hash from file entries.
+// computeBundleHash computes the content hash from file entries. Like every
+// skill hash it is transfer.ComputeContentHashV1 (see computeSkillContentHash).
 func computeBundleHash(files []GitHubFileEntry) string {
 	// Convert to transfer.FileInfo for hash computation
 	fileInfos := make([]transfer.FileInfo, len(files))
@@ -2565,5 +2567,5 @@ func computeBundleHash(files []GitHubFileEntry) string {
 			Hash: f.Hash,
 		}
 	}
-	return transfer.ComputeContentHash(fileInfos)
+	return transfer.ComputeContentHashV1(fileInfos)
 }

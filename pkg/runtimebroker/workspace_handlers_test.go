@@ -57,7 +57,7 @@ func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*a
 	return nil, nil
 }
 
-func (m *mockAgentManager) Stop(ctx context.Context, name, projectPath, runID string) error {
+func (m *mockAgentManager) Stop(ctx context.Context, name, projectPath, projectID, runID string) error {
 	return nil
 }
 
@@ -65,11 +65,11 @@ func (m *mockAgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) e
 	return nil
 }
 
-func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
-func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -1226,226 +1226,26 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// Project Workspace Upload Handler Tests (Phase 3: Linked Project Relay)
-// ============================================================================
-
-func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
+// TestProjectWorkspaceUpload_RoutesRemoved verifies that the retired
+// project-level upload routes no longer resolve: /api/v1/workspace/grove-upload
+// and /api/v1/workspace/project-upload, which fed the hub's linked-project
+// workspace cache (removed, ptone/scion#5816).
+func TestProjectWorkspaceUpload_RoutesRemoved(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 
-	body := ProjectWorkspaceUploadRequest{
-		StoragePath:   "workspaces/test/project-workspace",
-		WorkspacePath: "/tmp/test",
+	for _, route := range []string{"/api/v1/workspace/grove-upload", "/api/v1/workspace/project-upload"} {
+		req := httptest.NewRequest(http.MethodPost, route, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: expected 404 for removed route, got %d: %s", route, rec.Code, rec.Body.String())
+		}
 	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "project-123",
-		WorkspacePath: "/tmp/test",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:   "project-123",
-		StoragePath: "workspaces/test/project-workspace",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "project-123",
-		StoragePath:   "workspaces/test/project-workspace",
-		WorkspacePath: "/tmp/test",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	cfg.StorageBucket = "test-bucket"
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "project-123",
-		StoragePath:   "workspaces/test/project-workspace",
-		WorkspacePath: "/nonexistent/path/12345",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestProjectWorkspaceUpload_RejectsUnsafeWorkspacePath is the fail-closed
-// regression test for req.WorkspacePath: unlike the agent-lookup-based
-// workspace handlers, this value comes straight from the request body, so
-// it needs the same validation with no help from an agent record. '/'
-// passes the existence check (it obviously exists), so this specifically
-// exercises the validator, not the earlier NotFound branch.
-func TestProjectWorkspaceUpload_RejectsUnsafeWorkspacePath(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	cfg.StorageBucket = "test-bucket"
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "project-123",
-		StoragePath:   "workspaces/test/project-workspace",
-		WorkspacePath: "/",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("failed to decode error response: %v", err)
-	}
-	if !strings.Contains(errResp.Error.Message, "is not an allowed workspace path") {
-		t.Errorf("expected the rejection to come from workspace source validation, got: %s", errResp.Error.Message)
-	}
-}
-
-// TestProjectWorkspaceUpload_RejectsUnsafeRelativeWorkspacePath confirms a
-// relative workspace path is refused by validation itself, never resolved
-// against the broker's own working directory by a stat call that runs
-// before validation does.
-func TestProjectWorkspaceUpload_RejectsUnsafeRelativeWorkspacePath(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	cfg.StorageBucket = "test-bucket"
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "project-123",
-		StoragePath:   "workspaces/test/project-workspace",
-		WorkspacePath: "relative/workspace/path",
-	}
-
-	rec := doProjectUploadRequest(t, srv, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-	var errResp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatalf("failed to decode error response: %v", err)
-	}
-	if !strings.Contains(errResp.Error.Message, "is not an allowed workspace path") {
-		t.Errorf("expected the rejection to come from workspace source validation, got: %s", errResp.Error.Message)
-	}
-}
-
-// The positive acceptance-set case for a legitimate ~/.scion workspace path
-// is not exercised through the full HTTP handler here: once validation
-// passes, handleProjectWorkspaceUpload proceeds to a real gcp.SyncToGCS
-// network call, and there is no mockable seam for it at this handler's
-// level (unlike getAgentWorkspacePath, which is a plain function this test
-// file calls directly elsewhere). Making that call would violate the
-// no-live-infra testing constraint. The acceptance-set proof for this call
-// site is TestValidateWorkspaceSource_RootlessAcceptsScionProjectsSubtree
-// (pkg/runtime/workspace_source_guard_test.go), which directly covers the
-// same ~/.scion/projects/<slug>/... shape this handler passes to the
-// validator with no root.
-
-func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/project-upload", nil)
-	rec := httptest.NewRecorder()
-	srv.handleProjectWorkspaceUpload(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", rec.Code)
-	}
-}
-
-// TestProjectWorkspaceUpload_LegacyRouteRemoved verifies that the retired
-// /api/v1/workspace/grove-upload route no longer resolves. Callers must use
-// /api/v1/workspace/project-upload instead.
-func TestProjectWorkspaceUpload_LegacyRouteRemoved(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	mgr := &mockAgentManager{}
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for removed route, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUploadRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("failed to marshal body: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/project-upload", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.handleProjectWorkspaceUpload(rec, req)
-	return rec
 }
 
 // TestBuildWorkspaceManifestExcludesIdentityEntry checks that the root .scion

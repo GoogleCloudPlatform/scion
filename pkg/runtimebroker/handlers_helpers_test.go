@@ -68,6 +68,7 @@ type mockManager struct {
 	lastDeleteRunID        string
 	lastDeleteFiles        bool
 	lastDeleteRemoveBranch bool
+	lastDeleteSharerKey    string
 	lastStopAgentID        string
 	lastStopRunID          string
 	// lastStartCtx captures the context passed to Start, so tests can assert
@@ -81,6 +82,12 @@ type mockManager struct {
 	// control its return value (including the three agentkeys sentinels)
 	// and capture its arguments, without needing a real AgentManager/tmux.
 	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
+
+	// beforeProvision, when set, runs at the start of Provision (for
+	// example to leave agent files behind before provisionErr).
+	beforeProvision func(opts api.StartOptions)
+	// beforeStart, when set, runs at the start of Start.
+	beforeStart func(opts api.StartOptions)
 
 	// preflightErr, when set, is returned by Preflight (e.g.
 	// config.ErrTemplateNotFound, for the async-create admission 404 case).
@@ -96,6 +103,9 @@ type mockManager struct {
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if m.beforeProvision != nil {
+		m.beforeProvision(opts)
+	}
 	if m.provisionErr != nil {
 		return nil, m.provisionErr
 	}
@@ -122,6 +132,9 @@ func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*
 }
 
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if m.beforeStart != nil {
+		m.beforeStart(opts)
+	}
 	m.mu.Lock()
 	m.startCalls++
 	m.lastStartOpts = opts
@@ -171,7 +184,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
@@ -191,7 +204,7 @@ func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error 
 	return m.stopErr
 }
 
-func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
@@ -200,7 +213,7 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 	return true, nil
 }
 
-func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
@@ -209,6 +222,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref ru
 	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
 	m.lastDeleteRemoveBranch = removeBranch
+	m.lastDeleteSharerKey = sharerKey
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
 		return false, m.deleteTargetErr
@@ -318,6 +332,13 @@ func (m *mockManager) LastDeleteFiles() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastDeleteFiles
+}
+
+// LastDeleteSharerKey returns the sharer key of the last DeleteTarget call.
+func (m *mockManager) LastDeleteSharerKey() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteSharerKey
 }
 
 func (m *mockManager) LastListFilter() map[string]string {

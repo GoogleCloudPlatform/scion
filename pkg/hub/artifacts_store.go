@@ -126,15 +126,6 @@ func (s *Server) attachmentService() *artifacts.Service {
 	return svc
 }
 
-// attachmentCallerIsSession reports whether the request's caller is one the
-// artifact service lets read attachments (artifactHost.PermitsMessageRead:
-// a session of a user or the dev user). The attachment upload, send,
-// history and event paths use it to keep every other credential on the
-// AttachmentStore path (user access tokens: ptone/scion#4596).
-func (s *Server) attachmentCallerIsSession(ctx context.Context) bool {
-	return newArtifactHost(s).PermitsMessageRead(ctx)
-}
-
 // artifactBackend reports the server's current artifact store, resource
 // storage and hub id.
 func (s *Server) artifactBackend() artifacts.Backend {
@@ -178,6 +169,9 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 // attachments of messages that are gone are retired; a failure in either is
 // logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
+	// Attachment retention (scratchpad projections, legacy blobs) does not
+	// depend on the artifact store; it paces itself to once an hour.
+	s.sweepAttachmentRetention(ctx, time.Now())
 	st := s.ArtifactStore()
 	if st == nil {
 		return
@@ -193,6 +187,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	}
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)
+	s.sweepDeliveryRedemptions(ctx)
 	n, err = artifacts.SweepExpired(ctx, st, now, artifactReapBatch, s.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)

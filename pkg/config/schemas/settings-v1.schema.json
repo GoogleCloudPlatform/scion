@@ -97,6 +97,19 @@
           "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
+        "keyring_file": {
+          "type": "string",
+          "description": "Experimental: path of the server keyring file, a version-1 JSON document holding versioned signing and encryption keys. Read once at startup by the hub/web server process (never by --role relay); a keyring file together with --session-secret, SCION_SERVER_SESSION_SECRET or SESSION_SECRET refuses startup. Requires the server.secret_rotation experiment. In this release only web session cookies use the keyring; every other purpose uses its \"legacy\" entry unchanged. Never returned or accepted by the server-config API. Restart to apply.",
+          "x-sensitive": true,
+          "x-env-var": "SCION_SERVER_KEYRING_FILE",
+          "x-since": "1"
+        },
+        "keyring_file_allow_world_readable": {
+          "type": "boolean",
+          "description": "Experimental: operator override that admits a server keyring file whose world-read permission bit is set, with a warning. Default false: a world-readable keyring file refuses startup. World write or execute is always refused, and a group-readable file loads with a warning. Prefer mounting the file with mode 0400 (0440 when a group must read it). Never returned or accepted by the server-config API. Restart to apply.",
+          "x-env-var": "SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE",
+          "x-since": "1"
+        },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
         "mode": {
           "type": "string",
@@ -596,6 +609,29 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
+        },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods started on the runtime this entry describes; a profile on this entry adds its own values over these. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods started on the runtime this entry describes, for example a sandbox class such as gvisor. A profile on this entry that sets one wins."
         },
         "shared_dir_storage_backend": {
           "type": "string",
@@ -1168,6 +1204,29 @@
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
         },
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Kubernetes only. Node selector labels (label key to value) added to agent pods whose runtime choice used this profile, over the runtime entry's values. Keys may contain dots and slashes. Validated like the Kubernetes API server (qualified-name keys, label values)."
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+              "value": { "type": "string" },
+              "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Kubernetes only. Tolerations added to agent pods whose runtime choice used this profile, over the runtime entry's values. An empty key requires operator Exists; Exists requires an empty value."
+        },
+        "runtime_class_name": {
+          "type": "string",
+          "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for agent pods whose runtime choice used this profile, for example a sandbox class such as gvisor. Wins over the runtime entry's value."
+        },
         "shared_dir_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -1292,6 +1351,12 @@
           "description": "The relay's own public URL, recorded as its relay_instances.public_endpoint.",
           "x-env-var": "SCION_SERVER_RELAY_PUBLICURL",
           "x-since": "1"
+        },
+        "singleton": {
+          "type": "boolean",
+          "description": "Asserts a non-HA singleton relay: required on Cloud Run (K_SERVICE set), with max_instances=1, min_instances=1 and cpu_idle=false; allowed elsewhere, where it labels the relay non-HA. Read at startup.",
+          "x-env-var": "SCION_SERVER_RELAY_SINGLETON",
+          "x-since": "1"
         }
       }
     },
@@ -1309,7 +1374,7 @@
         "hub_name": {
           "type": "string",
           "pattern": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
-          "description": "Human-readable hub display name for HA deployments. All nodes in a cluster should share the same hub_name. Defaults to os.Hostname() if not set.",
+          "description": "Hub name for HA deployments: a lowercase DNS label (letters, digits and hyphens, at most 63 characters, starting with a letter and not ending with a hyphen), used in log labels, telemetry and secret labels. All nodes in a cluster should share the same hub_name. Defaults to the machine hostname if not set.",
           "x-env-var": "SCION_SERVER_HUB_HUBNAME",
           "x-scope": "global"
         },

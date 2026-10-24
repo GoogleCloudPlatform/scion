@@ -35,7 +35,7 @@ import (
 func newWebKeyTestClient(t *testing.T) *ent.Client {
 	t.Helper()
 	name := strings.ReplaceAll(t.Name(), "/", "_")
-	client, err := entc.OpenSQLite("file:"+name+"?mode=memory&cache=shared", entc.PoolConfig{})
+	client, err := entc.OpenSQLite("file:"+name+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	t.Cleanup(func() { _ = client.Close() })
@@ -100,7 +100,7 @@ func TestLoadTestIdentityWebSessionKey_FailsClosed(t *testing.T) {
 func newWebKeyTestClientNamed(t *testing.T, suffix string) *ent.Client {
 	t.Helper()
 	name := strings.ReplaceAll(t.Name(), "/", "_") + "_" + suffix
-	client, err := entc.OpenSQLite("file:"+name+"?mode=memory&cache=shared", entc.PoolConfig{})
+	client, err := entc.OpenSQLite("file:"+name+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	t.Cleanup(func() { _ = client.Close() })

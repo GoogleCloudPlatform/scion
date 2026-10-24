@@ -109,6 +109,14 @@ import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
+import '../shared/chat/chat-starred-list.js';
+import type { StarredMessageOpenDetail } from '../shared/chat/chat-starred-list.js';
+import {
+  conversationSupportsStars,
+  fetchStarDetail,
+  starredMessagesEnabled,
+} from '../../client/chat-stars.js';
+import { showToast } from '../../utils/toast.js';
 import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
@@ -1041,6 +1049,12 @@ export class ScionPageChat extends LitElement {
    * at connect, before this page writes to the entry.
    */
   private _restoredPanel: ChatPanel | null = null;
+  /**
+   * True until the conversation the URL names first opens, or the user moves
+   * to another panel or conversation. While it holds, a switch into the
+   * mobile layout hands the pending open the panel the entry records.
+   */
+  private _routeOpenPending = true;
   /** The space whose mobile rail view this page last opened from the URL. */
   private _spaceOpenedSlug: string | null = null;
   private _touchStartX = 0;
@@ -4436,7 +4450,12 @@ export class ScionPageChat extends LitElement {
     // panel it records, so it and the entries around it hold again.
     if (e.matches && this.ownsPanelHistory()) {
       const entry = this._panelHistory.current();
-      if (entry) this.mobilePanel = entry.panel;
+      if (entry) {
+        this.mobilePanel = entry.panel;
+        // A conversation the URL names may still be opening (a slug lookup in
+        // flight): it should land on this panel too, not on its fallback.
+        if (this._routeOpenPending) this._restoredPanel = entry.panel;
+      }
       this._panelHistory.observe();
     }
   }
@@ -4450,6 +4469,7 @@ export class ScionPageChat extends LitElement {
    */
   private goToPanel(target: ChatPanel): void {
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (target === this.mobilePanel) return;
     const move =
       this.isMobileViewport() && this.ownsPanelHistory()
@@ -4465,6 +4485,7 @@ export class ScionPageChat extends LitElement {
   private takeRouteOpenPanel(fallback: ChatPanel): ChatPanel {
     const panel = this._restoredPanel ?? fallback;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     return panel;
   }
 
@@ -4504,6 +4525,7 @@ export class ScionPageChat extends LitElement {
     const panel = this._panelHistory.popped(e.state, !this.isMobileLayout);
     if (!panel) return;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     if (panel === this.mobilePanel) return;
     if (this.mobilePanel === 'center') this.dismissKeyboard();
     this.mobilePanel = panel;
@@ -4572,6 +4594,7 @@ export class ScionPageChat extends LitElement {
   private pushChatPath(path: string): void {
     const seq = this._userNavSeq;
     this._restoredPanel = null;
+    this._routeOpenPending = false;
     // Reopening what the URL already names (the open thread picked again,
     // the open DM's peer clicked) adds no entry: Back would only land on the
     // same conversation. In the mobile layout the panel change it makes is
@@ -6598,6 +6621,12 @@ export class ScionPageChat extends LitElement {
               </sl-menu>
             </sl-dropdown>
           </span>
+          ${this.headerShowsStars(conv)
+            ? html`<scion-chat-starred-list
+                conversationKey=${conv.conversationKey}
+                @starred-message-open=${this.handleStarredMessageOpen}
+              ></scion-chat-starred-list>`
+            : nothing}
           <sl-tooltip content="Search messages">
             <sl-icon-button
               name="search"
@@ -6655,6 +6684,81 @@ export class ScionPageChat extends LitElement {
     `;
   }
 
+  /**
+   * Whether the header shows the starred-messages button: the experiment is
+   * on and the conversation supports stars (phase 1: project threads). It
+   * sits in the always-visible action area, not the secondary span.
+   */
+  private headerShowsStars(conv: V2ConversationState): boolean {
+    return starredMessagesEnabled() && conversationSupportsStars(conv.conversationKey);
+  }
+
+  /** Bumped by every header star jump; a newer jump supersedes older ones. */
+  private starJumpSeq = 0;
+
+  /**
+   * A header star entry was chosen: resolve the star's current target
+   * first, then jump with the existing around-message navigation. A star
+   * that is no longer available leaves the current conversation as it is.
+   */
+  private handleStarredMessageOpen = (e: CustomEvent<StarredMessageOpenDetail>): void => {
+    const messageId = e.detail?.messageId;
+    if (!messageId) return;
+    void this.openStarredMessage(messageId, this.v2Conversation?.conversationKey ?? '');
+  };
+
+  /**
+   * Open a starred message chosen while `originKey` was open. Newer
+   * navigation wins: if the user opened another conversation, or chose
+   * another entry, while the detail request ran, nothing happens. A Retry
+   * from the error toast keeps the original conversation, so it does
+   * nothing either once the user has moved on.
+   */
+  private async openStarredMessage(messageId: string, originKey: string): Promise<void> {
+    const seq = ++this.starJumpSeq;
+    // A jump inside the open thread (search, reply preview) made while the
+    // detail request runs is newer navigation too.
+    const threadJumps = (): number => this.threadElement()?.jumpSequence ?? 0;
+    const threadJump = threadJumps();
+    const superseded = (): boolean =>
+      seq !== this.starJumpSeq ||
+      (this.v2Conversation?.conversationKey ?? '') !== originKey ||
+      threadJumps() !== threadJump;
+    let item;
+    try {
+      item = await fetchStarDetail(messageId);
+    } catch {
+      if (superseded()) return;
+      showToast('Could not open the starred message', 'danger', {
+        action: {
+          label: 'Retry',
+          run: (): void => {
+            if ((this.v2Conversation?.conversationKey ?? '') !== originKey) return;
+            void this.openStarredMessage(messageId, originKey);
+          },
+        },
+      });
+      return;
+    }
+    if (superseded()) return;
+    if (!item) {
+      showToast('This starred message is no longer available', 'warning');
+      return;
+    }
+    this.v2SearchActive = false;
+    if (item.conversationKey === this.v2Conversation?.conversationKey) {
+      await this.updateComplete;
+      void this.threadElement()?.scrollToMessageById(item.messageId);
+      return;
+    }
+    navigateTo(item.permalink);
+  }
+
+  /** The open conversation's thread element, if rendered. */
+  private threadElement(): import('../shared/chat/chat-thread.js').ScionChatThread | null {
+    return this.shadowRoot?.querySelector('scion-chat-thread') ?? null;
+  }
+
   /** Whether the conversation header folds its secondary actions into the More menu. */
   private isHeaderCompact(conv: V2ConversationState): boolean {
     return isCompactHeaderWidth(
@@ -6676,6 +6780,7 @@ export class ScionPageChat extends LitElement {
           ? this.resolveDefaultAgentId(conv.defaultAgent)
           : '';
     let count = 3; // export, search, members
+    if (this.headerShowsStars(conv)) count += 1; // starred messages
     if (agentId) count += this.getAgentProjectId(agentId) ? 2 : 1; // terminal, graph
     if (!this.isMobileLayout) count += 1; // density
     if (conv.isDM && conv.peerKind === 'agent') count += 1; // promote

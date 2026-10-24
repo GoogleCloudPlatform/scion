@@ -68,7 +68,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 
 	// Parse into a generic map to inspect top-level keys.
 	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		// Unparseable data is treated as neither versioned nor legacy.
 		return "", false
 	}
@@ -148,7 +148,9 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 // For schema version "1" it also checks value formats the schema cannot
 // express, such as shared_dir_size being a Kubernetes quantity, and that a
 // shared_dir_storage_backend of "nfs" has a complete
-// server.shared_dir_storage.nfs block.
+// server.shared_dir_storage.nfs block. It also validates the Kubernetes
+// placement fields and requires runtime entries with literally the same
+// context and namespace to agree on placement (ValidatePlacement).
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
 	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
 	if err != nil || schemaVersion != "1" {
@@ -167,10 +169,11 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 	}
 	// A decode failure here (e.g. a wrongly typed field) is already
 	// reported by the schema pass above.
-	if yaml.Unmarshal(data, &vs) == nil {
+	if unmarshalSettingsYAML(data, &vs) == nil {
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
 		errs = append(errs, ValidateHomeStorageOverrides(vs.Runtimes, vs.Profiles)...)
+		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		if err := vs.Server.HomeStorage.Validate(); err != nil {
 			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
 		}
@@ -196,11 +199,13 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
-	if yaml.Unmarshal(data, &vs) != nil {
+	if unmarshalSettingsYAML(data, &vs) != nil {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
 	warnings = append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
 }
 
@@ -264,7 +269,7 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 
 	// Parse the input data from YAML to a generic structure.
 	var doc interface{}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
 	}
 

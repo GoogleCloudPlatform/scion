@@ -6,6 +6,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	scionlog "github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -24,6 +26,7 @@ import (
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -43,6 +46,13 @@ type GCPExporter struct {
 	onAsyncLogError func(error)
 	logSlotOnce     sync.Once
 	logSlot         chan struct{} // one Logger/Client Flush outcome per pipeline batch
+
+	// analytics writes agent.usage events to the dedicated scion-analytics
+	// log (see analytics_drainer.go). analyticsSink, when set, captures the
+	// entries instead (tests).
+	analyticsOnce   sync.Once
+	analyticsLogger *logging.Logger
+	analyticsSink   func(logging.Entry) error
 }
 
 // NewGCPExporter creates a new GCP-native exporter for traces, metrics, and logs.
@@ -341,4 +351,62 @@ func isGCPMetricAggregationSupported(agg metricdata.Aggregation) bool {
 	default:
 		return false
 	}
+}
+
+// SendAnalytics writes one final analytics event line synchronously to the
+// dedicated Cloud Logging log telemetrycontract.AnalyticsLogID as structured
+// jsonPayload, with the entry timestamp set to the event's event_ts. It
+// never goes through the agent log (scionlog.AgentLogID) or its converter.
+func (e *GCPExporter) SendAnalytics(ctx context.Context, line []byte) error {
+	if e == nil {
+		return errors.New("GCP analytics exporter unavailable")
+	}
+	entry, err := analyticsEntry(line)
+	if err != nil {
+		// The same bytes will never parse: dead-letter, do not retry.
+		return PermanentSendError(err)
+	}
+	if e.analyticsSink != nil {
+		return classifyAnalyticsSendError(e.analyticsSink(entry))
+	}
+	if e.logClient == nil {
+		return errors.New("GCP analytics exporter unavailable")
+	}
+	e.analyticsOnce.Do(func() {
+		e.analyticsLogger = e.logClient.Logger(telemetrycontract.AnalyticsLogID)
+	})
+	return classifyAnalyticsSendError(e.analyticsLogger.LogSync(ctx, entry))
+}
+
+// classifyAnalyticsSendError marks errors Cloud Logging will repeat for the
+// same entry (InvalidArgument, e.g. a malformed or oversized entry) as
+// permanent; everything else (unavailable, deadline, permission, quota) is
+// retried.
+func classifyAnalyticsSendError(err error) error {
+	if err == nil || IsPermanentSendError(err) {
+		return err
+	}
+	if status.Code(err) == codes.InvalidArgument {
+		return PermanentSendError(err)
+	}
+	return err
+}
+
+// analyticsEntry builds the Cloud Logging entry for one analytics line.
+func analyticsEntry(line []byte) (logging.Entry, error) {
+	var head struct {
+		EventTS string `json:"event_ts"`
+	}
+	if err := json.Unmarshal(line, &head); err != nil {
+		return logging.Entry{}, fmt.Errorf("analytics line is not JSON: %w", err)
+	}
+	ts, err := telemetrycontract.ParseTS(head.EventTS)
+	if err != nil {
+		return logging.Entry{}, err
+	}
+	return logging.Entry{
+		Timestamp: ts,
+		Severity:  logging.Info,
+		Payload:   json.RawMessage(append([]byte(nil), line...)),
+	}, nil
 }

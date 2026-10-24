@@ -575,7 +575,11 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
 - **Narrowing setting.** An optional operational settings section `agent_delegation_policy`
   (`pkg/config/opsettings/registry.go`, database-only like `artifacts`) can remove permissions from
   the policy per boundary kind. It can never add any. Changes apply at the next exchange and on
-  every use.
+  every use. Its shape is `{"remove": {"project": [<permission ID>...], "hub": [...]}}`; a write
+  that does not match it is refused, and a stored document the hub cannot read (unreadable JSON,
+  an unknown field or boundary kind) refuses issuance and exchange with 500 and denies every use
+  with `lookup_error`. The section is refused for user access token writes, like the other
+  sections that confer authority.
 - Names: G's strings must not collide with existing uses of `agent_delegation`, which is already
   the agent-create mutation audit type (`agent_create_tx.go:36`) and a `CanDelegate` grant type
   (`authz_candelegate.go:44`). G's audit types use the `agent_delegation_grant_*` and
@@ -618,9 +622,18 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
   - `/events`, `/auth/*` and `/healthz` are on the web mux, outside `routeGuard` (`web.go:993-1012`).
     `/events` builds its identity only from a web session (`authorizeSSESubjects`, `web.go:2021`),
     so a `scion_adt_` bearer never becomes an event-stream identity.
-  - On a match, `routeGuard` puts the table's operation in the request context. The middleware
-    never sets it. `decideAgentDelegation` denies when the operation is missing or unknown,
-    including on internal service paths that reach `Decide` outside an HTTP route.
+  - The project resource path has its own exact resolution, `projects.byId.resource`: exactly
+    `/api/v1/projects/{id}` (one segment, no sub-path, no trailing slash), with an operation only
+    for `GET` (`project.read`). It is resolved only on the `projects.byId` mux route.
+  - On a match, `routeGuard` puts the table's operation and the route's target (the agent or project
+    in the path) in the request context. The middleware never sets them. `decideAgentDelegation`
+    denies when the operation is missing or unknown, including on internal service paths that reach
+    `Decide` outside an HTTP route.
+  - **Handler branch.** Every handler that serves an admitted operation calls
+    `admitDelegatedHandler(w, r, <operation>, <resource>)` after it loads the target and before it
+    authorizes. For a delegated caller it answers 403 `credential_not_admitted` unless `routeGuard`
+    admitted exactly that operation for that target. A drift test requires the operations named in
+    these calls to equal the catalog operations that admit the delegated pair.
 - **Secondary checks.** A handler may call `Decide` again for another permission. For a delegated
   credential, that call is **evaluated** only if `(operation, permission)` is on the route's
   `Secondary` list, and the check still needs its own exact permission, ceiling and live issuer
@@ -847,7 +860,16 @@ each, with a test:
 - `catalogListReadBatch` (`authorized_list.go:127`): deny-all, ahead of the default arm.
 - `scopedCursorBinding` (`authorized_list.go:404`): a delegated arm (§11.8).
 - `authorizeAgentMessage` (`authorize_message.go:232`): a delegated arm that runs G's decision for
-  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes.
+  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes. The
+  actor agent's send is then evaluated exactly as the agent's own send would be (both message
+  modes, the same-project mode matrix or every cross-project gate, including the hub setting, the
+  sender's hub mode and the destination's inbound policy, and the agent's standing), and both must
+  allow; a refusal carries the agent send's denial code. Before anything is written, the send also
+  gets the agent send's delivery checks (dispatch availability, a held target, the target's phase)
+  and is charged to the agent's send budget. It allows only the agent the route admitted, so
+  mention, group and other fan-out targets are refused, and a delegated request may carry only a
+  direct text message (the project visitor allow-list: no thread, conversation, mention,
+  notification, interrupt or wake field).
 - `authorizeAgentTargetAction` (`authorize.go:429`): deny, because no lifecycle operation is
   delegable in v1.
 - The reincarnation self-exemption (`handlers_agent_reincarnate.go:188-201`) keys on an
@@ -868,6 +890,11 @@ each, with a test:
     create resource;
   - every key has at least one catalog operation that admits the delegated credential, and every
     such operation's permission is a key.
+  The effect guard covers every catalog operation, apart from the operations listed in
+  `permissions.AgentDelegationSharedKeyExemptions`: operations that share a delegable key but are never
+  admitted for the delegated credential (today `project.broadcast`, which shares `project.read`), as
+  with the `agent.attach` operations that are not admitted. A test fails if a listed operation is ever
+  admitted.
 - **v1 set (decided by ptone, 2026-09-30).** Exact reviewed permission IDs only, with no wildcard
   or read-family expansion:
 
@@ -875,7 +902,7 @@ each, with a test:
   | --- | --- | --- | --- |
   | `agent.read` | project, hub | `GET` agent (`agents.byId`, operation `agent.read`) | G.2-a |
   | `project.read` | project, hub | `GET` project (operation `project.read`) | G.3-a |
-  | `agent.message` | project, hub | the HTTP agent message route, once it is catalogued (today `agent.message.send` has only a broker-call entry point and the HTTP route is pending a catalog entry) | G.3-a |
+  | `agent.message` | project, hub | the HTTP agent message route, operation `agent.action.message`, by ID (`agents.action.message`) and in the project form (`projects.agents.action.message`). `agent.message.send` (broker call) is not admitted | G.3-a |
   | `agent.attach` | project, hub | the PTY WebSocket (`agents.pty`, operation `agent.attach`) only. `agent.lifecycle.exec`, `.env` and `.resetauth` share the permission but are **not** admitted | G.3-a |
   | `agent.list`; skill and template read and list | project, hub | per D.2's merged list operations (at `abc63c5`, skill and template listing is served by the `skill.read` and `template.read` operations) | G.3-L |
 
@@ -979,8 +1006,9 @@ does not change that schema.
 
 ### 14.5 Messages
 
-A message sent with a delegated credential is stored with `Sender = "agent:<A>"` and `SenderID = A`,
-plus two new nullable columns, `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
+`SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 
@@ -1078,7 +1106,10 @@ These cascades are best-effort, because use-time checks are authoritative:
 
 Revoking a grant or credential denies the next attach handshake or reconnect. An established
 session can outlive both the credential's expiry and revocation, so the 60-minute credential
-lifetime is not a maximum session duration. A future PTY ticket mint must deny for delegated
+lifetime is not a maximum session duration. In v1 a delegated attach takes only the runtime
+broker's terminal path: an attach that would take the agent's conduit path (for example, an agent
+on a managed runtime) is refused before the upgrade with 503 `runtime_attach_unsupported`, reason
+`delegated_credential_broker_path_only`. A future PTY ticket mint must deny for delegated
 credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 
 ## 17. Concrete flows
@@ -1103,8 +1134,10 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
    until it expires (at most 2 active). A third exchange supersedes the oldest. After a refresh of
    A's agent JWT, credentials exchanged with the old agent credential deny, and A re-exchanges.
 5. **Super-admin across projects.** Super-admin S issues a hub grant for `agent:read` and
-   `agent:message` to S's agent. It can read and message agents in any project while S remains
-   super-admin. Messages show "from agent, authorized by S".
+   `agent:message` to S's agent. It can read agents in any project while S remains super-admin,
+   and message them subject to the cross-project gates that apply to the agent's own send (the hub
+   setting, the agent's hub mode and the destination project's inbound policy). Messages show
+   "from agent, authorized by S".
 6. **Ordinary automation is unaffected.** With the experiment off or on, Alice's hub UAT works
    exactly as D specifies, and agent A keeps using its project JWT for its own scopes.
 

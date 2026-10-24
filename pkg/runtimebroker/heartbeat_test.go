@@ -189,7 +189,7 @@ func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
-func (m *heartbeatMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *heartbeatMockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	return nil
 }
 
@@ -197,11 +197,11 @@ func (m *heartbeatMockManager) StopTarget(ctx context.Context, ref runtime.RunRe
 	return nil
 }
 
-func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 
-func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 

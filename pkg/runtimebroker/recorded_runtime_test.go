@@ -69,9 +69,9 @@ type rrManager struct {
 
 func (m *rrManager) acted() int32 { return m.acts.Load() }
 
-func (m *rrManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *rrManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	m.acts.Add(1)
-	return m.listCountingManager.Stop(ctx, agentID, projectPath, runID)
+	return m.listCountingManager.Stop(ctx, agentID, projectPath, projectID, runID)
 }
 
 func (m *rrManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
@@ -79,14 +79,14 @@ func (m *rrManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return m.listCountingManager.StopTarget(ctx, ref)
 }
 
-func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	m.acts.Add(1)
-	return m.listCountingManager.Delete(ctx, agentID, deleteFiles, projectPath, removeBranch)
+	return m.listCountingManager.Delete(ctx, agentID, deleteFiles, projectPath, projectID, removeBranch)
 }
 
-func (m *rrManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *rrManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.acts.Add(1)
-	return m.listCountingManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	return m.listCountingManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 func (m *rrManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {

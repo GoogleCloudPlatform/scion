@@ -19,9 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -250,6 +253,7 @@ func TestRedactURLCredentials_PropertyNestedURL(t *testing.T) {
 		}
 		return b.String()
 	}
+	masked := 0
 	for i := 0; i < 5000; i++ {
 		// The outer path is delimiter-free too: a "?" and "=" in it would
 		// make next=... itself a nested value, and its query the second
@@ -259,9 +263,22 @@ func TestRedactURLCredentials_PropertyNestedURL(t *testing.T) {
 		if strings.Contains(got, "S3CRETVALUE") {
 			t.Fatalf("redactURLCredentials(%q) = %q, shows the token", in, got)
 		}
+		// A URL that does not parse and has an '@' (from the trailing
+		// junk) where the user info rule cannot find it shows only its
+		// scheme; every other input keeps its destination readable.
+		if _, err := url.Parse(in); err != nil && strings.Contains(in, "@") {
+			if got != "https://xxxxx" {
+				t.Fatalf("redactURLCredentials(%q) = %q, want only the scheme", in, got)
+			}
+			masked++
+			continue
+		}
 		if !strings.Contains(got, "next=https://app.example.com/") {
 			t.Fatalf("redactURLCredentials(%q) = %q, lost the nested destination", in, got)
 		}
+	}
+	if masked > 2500 {
+		t.Errorf("%d of 5000 inputs masked whole; the readable destination is barely checked", masked)
 	}
 }
 
@@ -284,4 +301,130 @@ func redactPropertySafeJunk(r *rand.Rand) string {
 		b.WriteString(redactPropertySafe[r.Intn(len(redactPropertySafe))])
 	}
 	return b.String()
+}
+
+// A URL that does not parse, whose user info the fallback rule cannot
+// delimit, shows only its scheme and a mask; URLs the rules already
+// handled, and ordinary URLs, keep their output. The table is pkg/config's
+// (testdata/url_redact_unparsed.tsv), which runs it on RedactURL.
+func TestRedactURLCredentials_Unparsed(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "config", "testdata", "url_redact_unparsed.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for i, line := range strings.Split(string(data), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 4 {
+			t.Fatalf("url_redact_unparsed.tsv:%d: %d fields, want 4", i+1, len(f))
+		}
+		n++
+		name, in, want, secret := f[0], f[1], f[2], f[3]
+		got := redactURLCredentials(in)
+		if got != want {
+			t.Errorf("%s: redactURLCredentials(%q) = %q, want %q", name, in, got, want)
+		}
+		if secret == "-" {
+			continue
+		}
+		for k := 0; k+4 <= len(secret); k++ {
+			if strings.Contains(got, secret[k:k+4]) {
+				t.Errorf("%s: redactURLCredentials(%q) = %q, shows %q", name, in, got, secret[k:k+4])
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("url_redact_unparsed.tsv: no cases")
+	}
+}
+
+// Through the transport, a base URL with a '/' in its password that
+// url.Parse rejects is not quoted in the error.
+func TestTransportErrors_UnparsedBaseURL(t *testing.T) {
+	const secret = "fake/Pw9q"
+	_, err := NewTransport("http://alice:"+secret+"@127.0.0.1:1").Get(context.Background(), "/healthz", nil)
+	if err == nil {
+		t.Fatal("no error")
+	}
+	for i := 0; i+4 <= len(secret); i++ {
+		if strings.Contains(err.Error(), secret[i:i+4]) {
+			t.Errorf("error %q shows %q", err.Error(), secret[i:i+4])
+		}
+	}
+}
+
+// fakeNetError is a timeout and temporary error whose message quotes a
+// made-up secret.
+type fakeNetError struct{}
+
+func (fakeNetError) Error() string   { return "dial tcp: lookup tok_fake/Pw9q: timeout" }
+func (fakeNetError) Timeout() bool   { return true }
+func (fakeNetError) Temporary() bool { return true }
+
+// A *url.Error whose URL is masked whole shows a fixed message instead of
+// its error, but errors.Is, Timeout and Temporary still see the original
+// error, also when the original wraps the error that answers them, and
+// errors.As still finds a net.Error (the *url.Error). Walking
+// errors.Unwrap to the bottom never reaches an error whose text shows the
+// URL (its user info or its host) or the original message.
+func TestRedactURLError_MaskedKeepsErrorChain(t *testing.T) {
+	const secret = "tok_fake/Pw9q"
+	const raw = "https://" + secret + "@hub.example.com/api"
+	for _, tc := range []struct {
+		name      string
+		inner     error
+		is        error
+		timeout   bool
+		temporary bool
+	}{
+		{"deadline", context.DeadlineExceeded, context.DeadlineExceeded, true, true},
+		{"canceled", context.Canceled, context.Canceled, false, false},
+		{"net timeout", fakeNetError{}, nil, true, true},
+		{"wrapped deadline", fmt.Errorf("read: %w", context.DeadlineExceeded), context.DeadlineExceeded, true, true},
+		{"wrapped net timeout", fmt.Errorf("dial: %w", fakeNetError{}), nil, true, true},
+	} {
+		err := redactURLError(&url.Error{Op: "Get", URL: raw, Err: tc.inner})
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatalf("%s: %v is not a *url.Error", tc.name, err)
+		}
+		if want := `Get "https://xxxxx": details not shown for a masked URL`; err.Error() != want {
+			t.Errorf("%s: error = %q, want %q", tc.name, err.Error(), want)
+		}
+		if tc.is != nil && !errors.Is(err, tc.is) {
+			t.Errorf("%s: errors.Is(err, %v) = false", tc.name, tc.is)
+		}
+		if ue.Timeout() != tc.timeout || ue.Temporary() != tc.temporary {
+			t.Errorf("%s: Timeout() = %v, Temporary() = %v, want %v, %v", tc.name, ue.Timeout(), ue.Temporary(), tc.timeout, tc.temporary)
+		}
+		var nerr net.Error
+		if !errors.As(err, &nerr) || nerr.Timeout() != tc.timeout {
+			t.Errorf("%s: errors.As(err, &net.Error) = %v (%T), want the *url.Error with Timeout() = %v", tc.name, nerr != nil, nerr, tc.timeout)
+		}
+		var ne fakeNetError
+		if errors.As(err, &ne) {
+			t.Errorf("%s: errors.As reaches the original error", tc.name)
+		}
+		depth := 0
+		for e := error(err); e != nil; e = errors.Unwrap(e) {
+			for i := 0; i+4 <= len(secret); i++ {
+				if strings.Contains(e.Error(), secret[i:i+4]) {
+					t.Errorf("%s: unwrapped error %d (%T) %q shows %q", tc.name, depth, e, e.Error(), secret[i:i+4])
+				}
+			}
+			if strings.Contains(e.Error(), "hub.example.com") {
+				t.Errorf("%s: unwrapped error %d (%T) %q shows the host of a URL masked whole", tc.name, depth, e, e.Error())
+			}
+			if strings.Contains(e.Error(), tc.inner.Error()) {
+				t.Errorf("%s: unwrapped error %d (%T) %q shows the original message", tc.name, depth, e, e.Error())
+			}
+			depth++
+		}
+		if depth != 2 {
+			t.Errorf("%s: unwrap chain has %d errors, want 2 (the url.Error and its fixed error)", tc.name, depth)
+		}
+	}
 }

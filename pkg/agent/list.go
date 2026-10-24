@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -109,9 +108,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			agentInfoJSON := filepath.Join(agentHome, "agent-info.json")
 			terminalPhase := terminalRuntimePhase(agents[i])
 
+			// Profile and harness config come from the broker-side agent
+			// dir (brokerRecordedSettings), never from agent-info.json in
+			// the agent home; the runtime comes from the runtime entry.
+			recordedProfile, recordedHarnessConfig := brokerRecordedSettings(agentDir)
+			agents[i].Profile = recordedProfile
+			if agents[i].HarnessConfig == "" {
+				agents[i].HarnessConfig = recordedHarnessConfig
+			}
+
 			// Try agent-info.json first for latest status from container
+			// (read confined to the agent home; a link there is refused).
 			var parsedInfo *api.AgentInfo
-			if data, err := os.ReadFile(agentInfoJSON); err == nil {
+			if data, err := readHomeAgentInfo(agentHome); err == nil {
 				var info api.AgentInfo
 				if err := json.Unmarshal(data, &info); err == nil {
 					parsedInfo = &info
@@ -119,15 +128,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						agents[i].Phase = info.Phase
 						agents[i].Activity = info.Activity
 					}
-					if agents[i].Runtime == "" {
-						agents[i].Runtime = info.Runtime
-					}
-					agents[i].Profile = info.Profile
 					if agents[i].Template == "" {
 						agents[i].Template = info.Template
-					}
-					if agents[i].HarnessConfig == "" {
-						agents[i].HarnessConfig = info.HarnessConfig
 					}
 					if info.Detail != nil {
 						agents[i].Detail = info.Detail
@@ -186,7 +188,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
-			if fi, err := os.Stat(agentInfoJSON); err == nil {
+			if fi, err := os.Lstat(agentInfoJSON); err == nil {
 				agents[i].LastSeen = fi.ModTime()
 			}
 
@@ -301,8 +303,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 
 				var info *api.AgentInfo
 
-				// Try agent-info.json first
-				if data, err := os.ReadFile(agentInfoJSON); err == nil {
+				// Try agent-info.json first (read confined to the agent home)
+				if data, err := readHomeAgentInfo(agentHome); err == nil {
 					var ai api.AgentInfo
 					if err := json.Unmarshal(data, &ai); err == nil {
 						info = &ai
@@ -334,6 +336,16 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						continue
 					}
 				}
+
+				// Profile and harness config come from the broker-side agent
+				// dir, never from agent-info.json in the agent home, which
+				// records no runtime either for an agent without a runtime
+				// entry (brokerRecordedSettings). info is a copy, so the
+				// file's values are not used below.
+				recorded := *info
+				recorded.Profile, recorded.HarnessConfig = brokerRecordedSettings(agentDir)
+				recorded.Runtime = ""
+				info = &recorded
 
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
 					continue
@@ -384,7 +396,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents
-				if fi, err := os.Stat(agentInfoJSON); err == nil {
+				if fi, err := os.Lstat(agentInfoJSON); err == nil {
 					agentEntry.LastSeen = fi.ModTime()
 				}
 
@@ -400,6 +412,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	return agents, nil
+}
+
+// brokerRecordedSettings returns the settings profile recorded in agentDir's
+// image provenance and the harness-config recorded in its scion-agent config
+// (harnessConfigInAgentDir), each "" when there is none or it cannot be read. Both files are in the
+// broker-side agent dir, outside every container mount, so List reports
+// them rather than the copies in agent-info.json in the agent home. An agent
+// provisioned before image provenance was recorded reports no profile.
+func brokerRecordedSettings(agentDir string) (profile, harnessConfig string) {
+	if p, err := readImageProvenance(agentDir); err == nil && p != nil {
+		profile = p.Profile
+	}
+	return profile, harnessConfigInAgentDir(agentDir)
 }
 
 // createdAgentLabels approximates the label set a created agent's
@@ -470,35 +495,26 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 	return string(state.PhaseStopped)
 }
 
+// persistAgentInfoState records phase and activity in the agent-info.json at
+// path (in the agent home, its directory). Locked read-modify-write (see
+// updateSavedAgentInfo, #4681), confined to the home (updateHomeAgentInfo).
 func persistAgentInfoState(path, phase, activity string) error {
-	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
-	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		fi, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-
+	if filepath.Base(path) != agentInfoFileName {
+		return fmt.Errorf("persistAgentInfoState: %s is not an %s", path, agentInfoFileName)
+	}
+	return updateHomeAgentInfo(filepath.Dir(path), false, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		if info.Phase == phase && info.Activity == activity {
-			return nil
+			return nil, nil
 		}
 
 		info.Phase = phase
 		info.Activity = activity
 
-		updated, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }
