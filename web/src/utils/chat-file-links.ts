@@ -958,14 +958,15 @@ export function parseGcsUri(uri: string): GcsUriParts | null {
  * Build the `<a class="entity-link gcs-link">` element for a matched gs://
  * URI. Names are literal, with no percent-decoding — what's in the message
  * is exactly what `data-gcs-uri` carries. Built through the DOM, so no
- * value is ever parsed as markup.
+ * value is ever parsed as markup. href is "#" and the click handler opens
+ * the preview, so the link runs no script of its own.
  */
 export function buildGcsLinkElement(bucket: string, object: string): HTMLAnchorElement {
   const uri = `gs://${bucket}/${object}`;
   const a = document.createElement('a');
   a.setAttribute('class', 'entity-link gcs-link');
   a.setAttribute('data-gcs-uri', uri);
-  a.setAttribute('href', 'javascript:void(0)');
+  a.setAttribute('href', '#');
   a.setAttribute('title', `Open ${uri}`);
   a.textContent = uri;
   return a;

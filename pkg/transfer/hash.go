@@ -97,9 +97,10 @@ func GitBlobHashFile(path string) (string, error) {
 }
 
 // HashFile computes the SHA-256 hash of a file.
-// Returns the hash in format "sha256:<hex>".
+// Returns the hash in format "sha256:<hex>". The file is opened
+// non-blocking on Unix, so a FIFO at path does not block the open.
 func HashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, readOnlyFlags, 0)
 	if err != nil {
 		return "", err
 	}

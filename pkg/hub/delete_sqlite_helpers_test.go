@@ -108,7 +108,10 @@ type runMismatchDeleteClient struct {
 	*mockRuntimeBrokerClient
 	mu     sync.Mutex
 	answer func(runID string) error
-	runs   []string
+	// answerCtx, when set, is used instead of answer and also gets the
+	// delete's context.
+	answerCtx func(ctx context.Context, runID string) error
+	runs      []string
 }
 
 type runMismatchFixture struct {
@@ -118,11 +121,14 @@ type runMismatchFixture struct {
 	agent  *store.Agent
 }
 
-func (c *runMismatchDeleteClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
+func (c *runMismatchDeleteClient) DeleteAgent(ctx context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
 	c.mu.Lock()
 	c.runs = append(c.runs, opts.RunID)
-	answer := c.answer
+	answer, answerCtx := c.answer, c.answerCtx
 	c.mu.Unlock()
+	if answerCtx != nil {
+		return deleteAgentError(answerCtx(ctx, opts.RunID), opts.RunID)
+	}
 	return deleteAgentError(answer(opts.RunID), opts.RunID)
 }
 

@@ -993,8 +993,7 @@ func (s *agentService) SendKeys(ctx context.Context, agentID string, keys string
 
 	// Contract §2.4: the ONLY success shape is HTTP 200 with
 	// Response.Status == agentkeys.StatusDispatched. Nothing else — a 204,
-	// a 2xx the server never defines, or a 3xx apiclient.DecodeResponse's
-	// own <400 check would otherwise treat as decodable — may be reported
+	// a 2xx the server never defines, or an unfollowed 3xx — may be reported
 	// as success: each is either a response this contract never promises
 	// (so treating it as success would be a guess, not a decision) or a
 	// response DoNoRetry's "do not follow the redirect" contract leaves

@@ -68,7 +68,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 
 	// Parse into a generic map to inspect top-level keys.
 	var raw map[string]interface{}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		// Unparseable data is treated as neither versioned nor legacy.
 		return "", false
 	}
@@ -169,7 +169,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 	}
 	// A decode failure here (e.g. a wrongly typed field) is already
 	// reported by the schema pass above.
-	if yaml.Unmarshal(data, &vs) == nil {
+	if unmarshalSettingsYAML(data, &vs) == nil {
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
 		errs = append(errs, ValidateHomeStorageOverrides(vs.Runtimes, vs.Profiles)...)
@@ -199,7 +199,7 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
-	if yaml.Unmarshal(data, &vs) != nil {
+	if unmarshalSettingsYAML(data, &vs) != nil {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
@@ -269,7 +269,7 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 
 	// Parse the input data from YAML to a generic structure.
 	var doc interface{}
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
 	}
 
