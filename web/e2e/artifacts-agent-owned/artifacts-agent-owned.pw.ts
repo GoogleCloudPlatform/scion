@@ -110,6 +110,8 @@ import {
   AO_SELECTORS as AO,
   deleteConfirmButton,
   headerControl,
+  openDialogSection,
+  openShareDialog,
   reviewAdd,
   reviewSuggestion,
   rowOwnerDeletedBadge,
@@ -1212,11 +1214,20 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       await snapshot('aowner', 'R1B-08a');
       await headerControl(page, 'Grant review access').click();
       await expect(page.locator(AO.reviewSection), 'Grant review access dialog').toBeVisible();
+      // Exactly one share dialog is open, and it is Grant review access; its sections are counted
+      // in it alone (a steward's page also holds the closed Retention dialog).
+      await expect(openShareDialog(page), 'one open share dialog').toHaveCount(1);
+      r.ui.dialogLabel = await openShareDialog(page)
+        .locator('sl-dialog[open]')
+        .getAttribute('label');
+      expect
+        .soft(r.ui.dialogLabel, 'the open dialog is Grant review access')
+        .toBe('Grant review access');
       r.ui.dialogSections = {
-        links: await page.locator(AO.linksSection).count(),
-        people: await page.locator(AO.peopleSection).count(),
-        retention: await page.locator(AO.retentionSection).count(),
-        review: await page.locator(AO.reviewSection).count(),
+        links: await openDialogSection(page, 'links-heading').count(),
+        people: await openDialogSection(page, 'people-heading').count(),
+        retention: await openDialogSection(page, 'retention-heading').count(),
+        review: await openDialogSection(page, 'review-heading').count(),
       };
       expect.soft(r.ui.dialogSections, 'only the review part').toEqual({
         links: 0,

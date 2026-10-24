@@ -58,10 +58,6 @@ export const AO_SELECTORS = {
     'scion-artifact-share-dialog section[aria-labelledby="review-heading"] .row sl-button',
   reviewGranted: 'scion-artifact-share-dialog sl-alert.granted',
   dialogError: 'scion-artifact-share-dialog sl-alert[variant="danger"]',
-  /** Share mode's sections, which review mode must not show. */
-  linksSection: 'scion-artifact-share-dialog section[aria-labelledby="links-heading"]',
-  peopleSection: 'scion-artifact-share-dialog section[aria-labelledby="people-heading"]',
-  retentionSection: 'scion-artifact-share-dialog section[aria-labelledby="retention-heading"]',
   /** Review editor (artifact-detail.ts renderReview). */
   reviewEditor: 'scion-page-artifact-detail scion-code-editor.review-editor .cm-content',
   reviewCounts: 'scion-page-artifact-detail .review-toolbar .counts',
@@ -85,6 +81,26 @@ export const AO_SELECTORS = {
   /** The test-hub banner (shared test-hub banner, see e2e/test-hub-banner). */
   testHubBanner: 'sl-alert.test-hub-banner',
 } as const;
+
+/**
+ * The share dialog element whose dialog is open. The artifact page can hold
+ * more than one share dialog element at once (a steward also gets the closed
+ * Retention dialog, whose body renders while closed), so section checks are
+ * scoped to the open one.
+ */
+export function openShareDialog(page: Page): Locator {
+  return page
+    .locator('scion-artifact-share-dialog')
+    .filter({ has: page.locator('sl-dialog[open]') });
+}
+
+/** A section of the open share dialog, by its heading id. */
+export function openDialogSection(
+  page: Page,
+  heading: 'links-heading' | 'people-heading' | 'retention-heading' | 'review-heading'
+): Locator {
+  return openShareDialog(page).locator(`section[aria-labelledby="${heading}"]`);
+}
 
 /** A header action button by its exact label. */
 export function headerControl(page: Page, label: AoHeaderControl): Locator {
