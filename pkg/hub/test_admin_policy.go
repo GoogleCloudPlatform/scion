@@ -562,10 +562,13 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
+	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.SecretRotation:               testAdminPolicyDeny,
+	experiments.ContentHashV2:                testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

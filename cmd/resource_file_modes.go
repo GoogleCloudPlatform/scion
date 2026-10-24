@@ -70,6 +70,50 @@ func modeOnlyChangesInManifest(local []hubclient.FileInfo, remote []hubclient.Te
 	return changed
 }
 
+// localMatchesHub reports whether local files are the files the Hub records
+// for a template: the same paths and per-file content hashes, and, where
+// this platform's file modes carry an executable bit, the same executable
+// bits (on Windows the Hub's bits are taken as they are; see
+// modeOnlyChangesInManifest).
+//
+// It compares manifests rather than content hashes, because the Hub's
+// ContentHash is ComputeContentHashV2 (paths and modes included) for a row
+// committed with the hub.content_hash_v2 experiment on, and the
+// ComputeContentHashV1 of a row committed while it was off or by an older
+// Hub, which does not see a rename (ptone/scion#5658). A Hub response
+// without a manifest falls back to comparing the content hash against both
+// versions. That fallback cannot take the Hub's executable bits on a
+// platform whose modes carry none (Windows), so there a template with an
+// executable file in a v2 row reports out of date; the Hub's Get and List
+// responses carry the manifest, so the fallback is for responses that omit
+// it.
+func localMatchesHub(local []hubclient.FileInfo, remote []hubclient.TemplateFile, hubContentHash string) bool {
+	if len(remote) == 0 {
+		if hubContentHash == "" {
+			return false
+		}
+		return hubContentHash == transfer.ComputeContentHashV2(local) ||
+			hubContentHash == transfer.ComputeContentHashV1(local)
+	}
+	if len(local) != len(remote) {
+		return false
+	}
+	remoteByPath := make(map[string]hubclient.TemplateFile, len(remote))
+	for _, f := range remote {
+		remoteByPath[f.Path] = f
+	}
+	if len(remoteByPath) != len(remote) {
+		return false
+	}
+	for _, f := range local {
+		r, ok := remoteByPath[f.Path]
+		if !ok || r.Hash != f.Hash {
+			return false
+		}
+	}
+	return len(modeOnlyChangesInManifest(local, remote)) == 0
+}
+
 // localModesCarryExecBit reports whether this platform's file modes record
 // an executable bit (false on Windows). A variable so tests can override it.
 var localModesCarryExecBit = func() bool { return runtime.GOOS != "windows" }

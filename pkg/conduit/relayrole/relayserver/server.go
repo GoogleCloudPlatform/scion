@@ -32,6 +32,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -111,6 +113,11 @@ type Config struct {
 	// RequireSelfCheck makes the relay probe its own internal endpoint at
 	// start (HA deployments).
 	RequireSelfCheck bool
+	// Singleton runs the relay as a non-HA singleton (relay.Config.Singleton).
+	Singleton bool
+	// MeterProvider, when set, exports the relay's metrics (metrics.go);
+	// nil: none.
+	MeterProvider metric.MeterProvider
 	// ExperimentPollPeriod is how often hub.conduit is re-read
 	// (DefaultExperimentPollPeriod).
 	ExperimentPollPeriod time.Duration
@@ -282,6 +289,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		InternalEndpoint: endpoint,
 		PublicEndpoint:   cfg.PublicURL,
 		RequireSelfCheck: cfg.RequireSelfCheck,
+		Singleton:        cfg.Singleton,
 		Registry:         registry.New(cfg.Registry, registry.Config{}),
 		Store:            cfg.Registry,
 		Session:          conduit.Config{Clock: clock.Real()},
@@ -309,6 +317,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	s.Relay = r
 	role.Bind(r)
+	logRegisterRelayMetrics(log, cfg.MeterProvider, r, role, cfg.Singleton)
 	// Ingress dials are served only once the role is bound to the relay.
 	currentRole.Store(role)
 	role.Start(ctx)

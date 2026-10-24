@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 349
+**Operations:** 350
 
 ## Table of Contents
 
@@ -18,6 +18,7 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
 - [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
@@ -810,6 +811,39 @@
 
 ---
 
+## agent.update.pendingconfig.delete
+
+**Domain:** agent
+
+**Description:** Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/agents/{id}/pending-config` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentPendingConfig_DiscardClearsAndAudits`
+
+---
+
 ## agent.status.update
 
 **Domain:** agent
@@ -1061,9 +1095,9 @@
 | http_route | POST | `/api/v1/agents/{id}/message` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1109,9 +1143,9 @@
 |------|--------|---------|
 | websocket | GET | `/api/v1/agents/{id}/pty` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 

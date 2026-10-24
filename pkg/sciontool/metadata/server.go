@@ -72,6 +72,12 @@ type Config struct {
 	// When "host", iptables interception is skipped to avoid leaking
 	// redirect rules into the host's network namespace.
 	NetworkMode string
+	// InterceptionRequired is set when the runtime granted the container the
+	// capability for the metadata interception (InterceptionEnvVar is
+	// InterceptionRequired). Start then fails when the interception, or in
+	// block mode the filter rule, cannot be installed, instead of continuing
+	// with only the GCE_METADATA_HOST variables.
+	InterceptionRequired bool
 
 	// FetchGCPToken, if set, is called to obtain a GCP access token from the
 	// Hub instead of making a direct HTTP call. This allows the metadata
@@ -83,6 +89,19 @@ type Config struct {
 	// token from the Hub. Same motivation as FetchGCPToken.
 	FetchGCPIdentityToken func(ctx context.Context, audience string) (string, error)
 }
+
+// InterceptionEnvVar and its required value mirror
+// runtime.MetadataInterceptionEnvVar and runtime.MetadataInterceptionRequired
+// (pkg/runtime/common.go), which the Docker/Podman runtime sets from the same
+// decision that grants NET_ADMIN.
+const (
+	InterceptionEnvVar   = "SCION_METADATA_INTERCEPTION"
+	InterceptionRequired = "required"
+)
+
+// ErrInterceptionUnavailable is returned by Start when InterceptionRequired is
+// set and the metadata interception could not be installed.
+var ErrInterceptionUnavailable = errors.New("metadata interception unavailable")
 
 const (
 	modeBlock       = "block"
@@ -166,7 +185,33 @@ func ConfigFromEnv() *Config {
 		HubURL:      hubURL,
 		AuthToken:   os.Getenv("SCION_AUTH_TOKEN"),
 		NetworkMode: os.Getenv("SCION_NETWORK_MODE"),
+
+		InterceptionRequired: os.Getenv(InterceptionEnvVar) == InterceptionRequired,
 	}
+}
+
+// StartFailureIsFatal reports whether a Start error must stop the agent
+// start (fail closed) rather than let the harness run without the emulator:
+//
+//   - an unavailable required interception always;
+//   - any failure in assign mode, in any network mode;
+//   - any failure in block mode outside host networking.
+//
+// Block mode under host networking is the exception: every agent on the host
+// shares one loopback, so only the first block-mode emulator can bind the
+// port, and the others fall through to an emulator that also denies identity
+// requests (assign is refused under host networking by the broker).
+func (c Config) StartFailureIsFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrInterceptionUnavailable) {
+		return true
+	}
+	if c.Mode == modeAssign {
+		return true
+	}
+	return c.NetworkMode != "host"
 }
 
 // Server is the metadata HTTP server.
@@ -416,6 +461,33 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = ln.Close()
 		return fmt.Errorf("metadata server shutdown token: %w", err)
 	}
+
+	// Set up network-level interception for the GCE metadata server IP.
+	//
+	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
+	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
+	// defense-in-depth.
+	//
+	// For assign mode: only the REDIRECT is needed.
+	//
+	// In non-root containers (notably hosted Kubernetes agents), iptables
+	// interception is not available. In that case the metadata env vars are the
+	// primary mechanism and we skip the interception setup entirely to avoid
+	// misleading warnings.
+	//
+	// This runs before the server starts serving, so a required interception
+	// that fails closes the listener here, synchronously, and Start leaves
+	// nothing bound behind it.
+	if err := s.configureMetadataInterception(os.Getuid()); err != nil {
+		s.cleanupInterception()
+		cancel()
+		_ = ln.Close()
+		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+		}
+		return err
+	}
+
 	s.srv = &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
@@ -433,20 +505,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Set up network-level interception for the GCE metadata server IP.
-	//
-	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
-	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
-	// defense-in-depth.
-	//
-	// For assign mode: only the REDIRECT is needed.
-	//
-	// In non-root containers (notably hosted Kubernetes agents), iptables
-	// interception is not available. In that case the metadata env vars are the
-	// primary mechanism and we skip the interception setup entirely to avoid
-	// misleading warnings.
-	s.configureMetadataInterception(os.Getuid())
-
 	// Start proactive refresh if in assign mode
 	if s.config.Mode == modeAssign {
 		go s.proactiveRefreshLoop(ctx)
@@ -456,12 +514,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		if s.metadataBlocked != blockNone {
-			cleanupMetadataBlock(s.metadataBlocked)
-		}
-		if s.iptablesConfigured {
-			cleanupIPTablesRedirect(s.config.Port)
-		}
+		s.cleanupInterception()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		_ = s.srv.Shutdown(shutdownCtx)
@@ -477,18 +530,48 @@ func shouldAttemptMetadataInterception(uid int, networkMode string) bool {
 	return uid == 0
 }
 
-func (s *Server) configureMetadataInterception(uid int) {
+// Seams for tests: the iptables helpers need root and NET_ADMIN.
+var (
+	runSetupIPTablesRedirect = setupIPTablesRedirect
+	runSetupMetadataBlock    = setupMetadataBlock
+)
+
+// cleanupInterception removes whatever configureMetadataInterception
+// installed.
+func (s *Server) cleanupInterception() {
+	if s.metadataBlocked != blockNone {
+		cleanupMetadataBlock(s.metadataBlocked)
+		s.metadataBlocked = blockNone
+	}
+	if s.iptablesConfigured {
+		cleanupIPTablesRedirect(s.config.Port)
+		s.iptablesConfigured = false
+	}
+}
+
+// configureMetadataInterception installs the metadata IP interception. With
+// InterceptionRequired it returns an ErrInterceptionUnavailable error when
+// the interception, or outside assign mode the filter rule, is not in place;
+// otherwise those failures are logged and the env vars remain the only
+// mechanism.
+func (s *Server) configureMetadataInterception(uid int) error {
 	if !shouldAttemptMetadataInterception(uid, s.config.NetworkMode) {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: process is not root or shares the host network namespace", ErrInterceptionUnavailable)
+		}
 		if s.config.NetworkMode == "host" {
-			log.Debug("Skipping metadata IP interception: host networking mode (iptables would leak to host namespace)")
+			log.Warn("Metadata IP interception is not installed under host networking; mode %q applies only to clients that use GCE_METADATA_HOST", s.config.Mode)
 		} else {
 			log.Debug("Skipping metadata IP interception: process is not running as root")
 		}
-		return
+		return nil
 	}
 
-	err := setupIPTablesRedirect(s.config.Port)
+	err := runSetupIPTablesRedirect(s.config.Port)
 	if err != nil {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
+		}
 		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
 		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
 		log.Debug("iptables redirect not available: %v", err)
@@ -504,19 +587,23 @@ func (s *Server) configureMetadataInterception(uid int) {
 	// the defence-in-depth block. Testing `!= modeBlock` instead meant an
 	// unrecognised mode skipped the hardening.
 	if s.config.Mode == modeAssign {
-		return
+		return nil
 	}
 
 	// Defense-in-depth: block traffic to the metadata IP at the filter level
 	// so that even if the nat REDIRECT fails or is bypassed, direct access to
 	// the real metadata server is denied.
-	method, err := setupMetadataBlock()
+	method, err := runSetupMetadataBlock()
 	if err != nil {
+		if s.config.InterceptionRequired {
+			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+		}
 		log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
-		return
+		return nil
 	}
 
 	s.metadataBlocked = method
+	return nil
 }
 
 // Stop gracefully shuts down the server. It closes the listener synchronously

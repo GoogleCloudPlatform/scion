@@ -26,6 +26,12 @@ const (
 	// canonical one and the underscored one; both bind to the setting).
 	peerSecretEnv            = "SCION_SERVER_HUB_CONDUIT_PEERSECRET"
 	underscoredPeerSecretEnv = "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"
+	// The env spellings of server.keyring_file (ptone/scion#1530): the
+	// canonical one and the GlobalConfig-path alias. The value is a path,
+	// but it names the keyring file, so it is scrubbed like a secret; the
+	// file itself is read by loadServerKeyring.
+	keyringFileEnv      = "SCION_SERVER_KEYRING_FILE"
+	keyringFileAliasEnv = "SCION_SERVER_KEYRINGFILE"
 )
 
 // serverSecretEnvNames are the server secret env names that
@@ -37,6 +43,8 @@ var serverSecretEnvNames = []string{
 	legacySessionSecretEnv,
 	peerSecretEnv,
 	underscoredPeerSecretEnv,
+	keyringFileEnv,
+	keyringFileAliasEnv,
 }
 
 // capturedSessionSecret holds the session secret read from the env by
