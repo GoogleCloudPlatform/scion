@@ -142,7 +142,7 @@ After a Hub upgrade, the **Brokers** page and the **Health** page show which Run
 - **Hub version**: the version every live Hub instance reports. While Hub instances run different versions (a rolling upgrade), there is no single Hub version, so every Runtime Broker is shown as unknown.
 - **Match rule**: the two versions must be identical. There is no normalisation, so `1.2.0` and `v1.2.0` differ.
 - **Needs attention**: an online Runtime Broker whose version differs adds a `broker_version_mismatch` warning to the Health page (it does not change the overall status) and counts for the **Needs attention** filter of the Brokers area. An offline Runtime Broker keeps only its offline item. A Runtime Broker whose version is unknown adds nothing.
-- The summary's runtime broker rows carry `version_status` (`match`, `mismatch` or `unknown`); `GET /api/v1/runtime-brokers` carries `versionStatus` on each broker and the compared `hubVersion`.
+- The summary's runtime broker rows carry `version_status` (`match`, `mismatch` or `unknown`); the Runtime Broker list (with or without `projectId`) and `GET /api/v1/runtime-brokers/:id` carry `versionStatus`, and both list responses carry the compared `hubVersion` (see the [API reference](/scion/reference/api/#runtime-brokers-apiv1brokers)).
 
 Known limitations:
 
