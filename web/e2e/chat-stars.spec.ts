@@ -312,8 +312,10 @@ test.describe('Starred messages (phase 1)', () => {
     await expect(page).toHaveURL(new RegExp(`/chat/(?!space/)[^/]+/${topicId}(?:[?#].*)?$`), {
       timeout: 20_000,
     });
-    // ratio 1: the target is one short line of text (TARGET_TEXT), far shorter than both viewports
-    // (desktop 1440x900, mobile 390x844), so it can always be wholly in view once the jump is done.
+    // ratio 1: the target message is one line of text (TARGET_TEXT) that may wrap to two at 390 px,
+    // plus its sender/time header, at most about 150 px tall. That is far shorter than the message
+    // list on either project (desktop 1440x900, mobile 390x844), so it can be wholly in view once
+    // the jump is done.
     await expect(msgLocator(page, targetId)).toBeInViewport({ ratio: 1, timeout: 20_000 });
     await threadScrollIdle(page);
     await openMenuItem(page, targetId, 'Star message', loadedAt);
