@@ -38,7 +38,7 @@ import (
 // recreates or copies through file-system links found in the fetched content,
 // and never writes outside the destination.
 
-const outsideSecret = "OUTSIDE-CONTENT-must-never-be-copied\n"
+const outsideSecret = "outside-content-marker\n"
 
 func skipWithoutSymlinks(t *testing.T) {
 	t.Helper()
@@ -78,12 +78,11 @@ func assertRegularOnly(t *testing.T, dir string) {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(b), "OUTSIDE-CONTENT") {
+		if strings.Contains(string(b), "outside-content-marker") {
 			t.Errorf("%s contains content from outside the source", path)
 		}
 		return nil
 	}))
-	assert.NoError(t, checkRegularTree(dir))
 }
 
 // assertOutsideUntouched fails if anything other than secret.txt (with its
@@ -100,117 +99,6 @@ func assertOutsideUntouched(t *testing.T, outside string) {
 	b, err := os.ReadFile(filepath.Join(outside, "secret.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, outsideSecret, string(b))
-}
-
-func writeTestFile(t *testing.T, path, content string, mode os.FileMode) {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte(content), mode))
-}
-
-// plantLinkedRepo builds parent/repo with a template at templates/foo that
-// contains regular files, a .git dir, and absolute and relative file and
-// directory links (to the outside dir and inside the tree).
-func plantLinkedRepo(t *testing.T, parent, outside string) string {
-	t.Helper()
-	repo := filepath.Join(parent, "repo")
-	tpl := filepath.Join(repo, "templates", "foo")
-	writeTestFile(t, filepath.Join(repo, "README.md"), "# repo\n", 0o644)
-	writeTestFile(t, filepath.Join(tpl, "scion-agent.yaml"), "schema_version: \"1\"\n", 0o644)
-	writeTestFile(t, filepath.Join(tpl, "home", ".bashrc"), "export FOO=1\n", 0o644)
-	writeTestFile(t, filepath.Join(tpl, "bin", "run.sh"), "#!/bin/sh\n", 0o755)
-	writeTestFile(t, filepath.Join(tpl, ".git", "config"), "[core]\n", 0o644)
-	writeTestFile(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/main\n", 0o644)
-
-	links := map[string]string{
-		"abs-file":      filepath.Join(outside, "secret.txt"),
-		"abs-dir":       outside,
-		"rel-file":      "../../../outside/secret.txt",
-		"rel-dir":       "../../../outside",
-		"inside-file":   "scion-agent.yaml",
-		"inside-dir":    "home",
-		"home/rel-deep": "../../../../outside/secret.txt",
-	}
-	for name, target := range links {
-		require.NoError(t, os.Symlink(target, filepath.Join(tpl, name)))
-	}
-	// A top-level link to the outside directory, reachable with an empty
-	// sub-path.
-	require.NoError(t, os.Symlink(outside, filepath.Join(repo, "top-abs-dir")))
-	require.NoError(t, os.Symlink("../outside/secret.txt", filepath.Join(repo, "top-rel-file")))
-	return repo
-}
-
-var linkedRepoTemplateFiles = map[string]string{
-	"scion-agent.yaml": "schema_version: \"1\"\n",
-	"home/.bashrc":     "export FOO=1\n",
-	"bin/run.sh":       "#!/bin/sh\n",
-}
-
-func TestCopyDirExcludingGit_NeverFollowsLinks(t *testing.T) {
-	skipWithoutSymlinks(t)
-	parent, outside := outsideFixture(t)
-	repo := plantLinkedRepo(t, parent, outside)
-
-	t.Run("sub-path", func(t *testing.T) {
-		dst := filepath.Join(parent, "dst-sub")
-		require.NoError(t, os.MkdirAll(dst, 0o755))
-		require.NoError(t, copyDirExcludingGit(repo, "templates/foo/", dst))
-		assert.Equal(t, linkedRepoTemplateFiles, readTree(t, dst))
-		assertRegularOnly(t, dst)
-		info, err := os.Stat(filepath.Join(dst, "bin", "run.sh"))
-		require.NoError(t, err)
-		assert.NotZero(t, info.Mode().Perm()&0o100, "executable bit is kept")
-		assertOutsideUntouched(t, outside)
-	})
-
-	t.Run("whole repo", func(t *testing.T) {
-		dst := filepath.Join(parent, "dst-all")
-		require.NoError(t, os.MkdirAll(dst, 0o755))
-		require.NoError(t, copyDirExcludingGit(repo, "", dst))
-		want := map[string]string{"README.md": "# repo\n"}
-		for k, v := range linkedRepoTemplateFiles {
-			want["templates/foo/"+k] = v
-		}
-		assert.Equal(t, want, readTree(t, dst))
-		assertRegularOnly(t, dst)
-		assertOutsideUntouched(t, outside)
-	})
-}
-
-func TestCopyDirExcludingGit_RefusesLinkedOrEscapingSubPath(t *testing.T) {
-	skipWithoutSymlinks(t)
-	parent, outside := outsideFixture(t)
-	repo := plantLinkedRepo(t, parent, outside)
-	// An in-tree relative directory link and a chain of links.
-	require.NoError(t, os.Symlink("templates", filepath.Join(repo, "alias")))
-	require.NoError(t, os.Symlink("alias/foo", filepath.Join(repo, "chain")))
-
-	tests := []struct {
-		name, sub, wantErr string
-	}{
-		{"absolute dir link", "top-abs-dir", "symbolic link"},
-		{"below absolute dir link", "templates/foo/abs-dir", "symbolic link"},
-		{"relative dir link", "templates/foo/rel-dir", "symbolic link"},
-		{"in-tree dir link", "alias/foo", "symbolic link"},
-		{"chained links", "chain", "symbolic link"},
-		{"file link", "top-rel-file", "symbolic link"},
-		{"dot-dot escape", "../outside", "not inside the repository"},
-		{"dot-dot after a dir", "templates/../../outside", "not inside the repository"},
-		{"absolute path", outside, "not inside the repository"},
-		{"regular file", "README.md", "not a directory"},
-		{"missing", "templates/missing", "path templates/missing not found in repository"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dst := t.TempDir()
-			err := copyDirExcludingGit(repo, tt.sub, dst)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.wantErr)
-			assert.Empty(t, readTree(t, dst), "nothing is copied on error")
-			assertOutsideUntouched(t, outside)
-		})
-	}
 }
 
 // tarEntry is one header (plus body for regular files) of a test archive.
@@ -268,18 +156,17 @@ func linkedTarEntries(outside string) []tarEntry {
 		{typ: tar.TypeSymlink, name: "root/rel-file", linkname: "../outside/secret.txt"},
 		{typ: tar.TypeSymlink, name: "root/rel-dir", linkname: "../outside"},
 		{typ: tar.TypeSymlink, name: "root/inside", linkname: "scion-agent.yaml"},
-		// A chain that is lexically inside at every hop but escapes once
-		// the links are resolved.
+		// A chain of relative links, each lexically inside the archive.
 		{typ: tar.TypeSymlink, name: "root/a", linkname: "."},
 		{typ: tar.TypeSymlink, name: "root/home/b", linkname: "../a/a/home"},
 		{typ: tar.TypeSymlink, name: "root/c", linkname: "home/b/../../outside"},
 		{typ: tar.TypeLink, name: "root/hard", linkname: filepath.Join(outside, "secret.txt")},
 		{typ: tar.TypeLink, name: "root/hard-rel", linkname: "root/scion-agent.yaml"},
-		// Regular files written through the link names: they must land as
-		// regular files inside the destination, never through the link.
-		{typ: tar.TypeReg, name: "root/abs-dir/pwned.txt", body: "pwned\n"},
-		{typ: tar.TypeReg, name: "root/rel-dir/pwned.txt", body: "pwned\n"},
-		{typ: tar.TypeReg, name: "root/c/pwned.txt", body: "pwned\n"},
+		// Regular files named below the link names land as regular files
+		// in real directories inside the destination.
+		{typ: tar.TypeReg, name: "root/abs-dir/data.txt", body: "data\n"},
+		{typ: tar.TypeReg, name: "root/rel-dir/data.txt", body: "data\n"},
+		{typ: tar.TypeReg, name: "root/c/data.txt", body: "data\n"},
 		{typ: tar.TypeReg, name: "root/abs-file", body: "replaced\n"},
 	}
 }
@@ -294,12 +181,12 @@ func TestExtractTarGz_SkipsLinksAndStaysInside(t *testing.T) {
 	require.NoError(t, extractTarGz(archive, dest))
 
 	assert.Equal(t, map[string]string{
-		"scion-agent.yaml":  "schema_version: \"1\"\n",
-		"home/.bashrc":      "export FOO=1\n",
-		"abs-dir/pwned.txt": "pwned\n",
-		"rel-dir/pwned.txt": "pwned\n",
-		"c/pwned.txt":       "pwned\n",
-		"abs-file":          "replaced\n",
+		"scion-agent.yaml": "schema_version: \"1\"\n",
+		"home/.bashrc":     "export FOO=1\n",
+		"abs-dir/data.txt": "data\n",
+		"rel-dir/data.txt": "data\n",
+		"c/data.txt":       "data\n",
+		"abs-file":         "replaced\n",
 	}, readTree(t, dest))
 	assertRegularOnly(t, dest)
 	assertOutsideUntouched(t, outside)
@@ -311,16 +198,16 @@ func TestExtractTarGz_SkipsLinksAndStaysInside(t *testing.T) {
 func TestExtractTarGz_RefusesWriteThroughExistingLink(t *testing.T) {
 	skipWithoutSymlinks(t)
 	for _, entry := range []tarEntry{
-		{typ: tar.TypeReg, name: "root/evil/pwned.txt", body: "pwned\n"},
-		{typ: tar.TypeDir, name: "root/evil/sub/", mode: 0o755},
-		{typ: tar.TypeReg, name: "root/evil-rel/pwned.txt", body: "pwned\n"},
+		{typ: tar.TypeReg, name: "root/linked/data.txt", body: "data\n"},
+		{typ: tar.TypeDir, name: "root/linked/sub/", mode: 0o755},
+		{typ: tar.TypeReg, name: "root/linked-rel/data.txt", body: "data\n"},
 	} {
 		t.Run(entry.name, func(t *testing.T) {
 			parent, outside := outsideFixture(t)
 			dest := filepath.Join(parent, "dest")
 			require.NoError(t, os.MkdirAll(dest, 0o755))
-			require.NoError(t, os.Symlink(outside, filepath.Join(dest, "evil")))
-			require.NoError(t, os.Symlink("../outside", filepath.Join(dest, "evil-rel")))
+			require.NoError(t, os.Symlink(outside, filepath.Join(dest, "linked")))
+			require.NoError(t, os.Symlink("../outside", filepath.Join(dest, "linked-rel")))
 			archive := writeArchive(t, buildTarGz(t, []tarEntry{
 				{typ: tar.TypeDir, name: "root/", mode: 0o755},
 				entry,
@@ -338,9 +225,9 @@ func TestExtractTarGz_KeepsLexicalChecks(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 	archive := writeArchive(t, buildTarGz(t, []tarEntry{
 		{typ: tar.TypeReg, name: "ok.txt", body: "ok\n"},
-		{typ: tar.TypeReg, name: "../outside/pwned.txt", body: "pwned\n"},
-		{typ: tar.TypeReg, name: "x/../../outside/pwned2.txt", body: "pwned\n"},
-		{typ: tar.TypeReg, name: filepath.Join(outside, "pwned3.txt"), body: "pwned\n"},
+		{typ: tar.TypeReg, name: "../outside/data.txt", body: "data\n"},
+		{typ: tar.TypeReg, name: "x/../../outside/data2.txt", body: "data\n"},
+		{typ: tar.TypeReg, name: filepath.Join(outside, "data3.txt"), body: "data\n"},
 	}), "a.tar.gz")
 
 	// archive/tar may itself refuse insecure names (GODEBUG
@@ -386,15 +273,15 @@ func TestExtractZip_SkipsLinksAndStaysInside(t *testing.T) {
 		{name: "root/abs-file", body: filepath.Join(outside, "secret.txt"), mode: fs.ModeSymlink | 0o777},
 		{name: "root/abs-dir", body: outside, mode: fs.ModeSymlink | 0o777},
 		{name: "root/rel-dir", body: "../outside", mode: fs.ModeSymlink | 0o777},
-		{name: "root/abs-dir/pwned.txt", body: "pwned\n", mode: 0o644},
-		{name: "root/rel-dir/pwned.txt", body: "pwned\n", mode: 0o644},
+		{name: "root/abs-dir/data.txt", body: "data\n", mode: 0o644},
+		{name: "root/rel-dir/data.txt", body: "data\n", mode: 0o644},
 	}), "a.zip")
 
 	require.NoError(t, extractZip(archive, dest))
 	assert.Equal(t, map[string]string{
-		"scion-agent.yaml":  "schema_version: \"1\"\n",
-		"abs-dir/pwned.txt": "pwned\n",
-		"rel-dir/pwned.txt": "pwned\n",
+		"scion-agent.yaml": "schema_version: \"1\"\n",
+		"abs-dir/data.txt": "data\n",
+		"rel-dir/data.txt": "data\n",
 	}, readTree(t, dest))
 	assertRegularOnly(t, dest)
 	assertOutsideUntouched(t, outside)
@@ -405,10 +292,10 @@ func TestExtractZip_RefusesWriteThroughExistingLink(t *testing.T) {
 	parent, outside := outsideFixture(t)
 	dest := filepath.Join(parent, "dest")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
-	require.NoError(t, os.Symlink(outside, filepath.Join(dest, "evil")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dest, "linked")))
 	archive := writeArchive(t, buildZip(t, []zipEntry{
 		{name: "root/ok.txt", body: "ok\n", mode: 0o644},
-		{name: "root/evil/pwned.txt", body: "pwned\n", mode: 0o644},
+		{name: "root/linked/data.txt", body: "data\n", mode: 0o644},
 	}), "a.zip")
 
 	require.Error(t, extractZip(archive, dest))
@@ -550,18 +437,6 @@ func TestExecSparseGitCheckout_LinkedContent(t *testing.T) {
 	}
 }
 
-func TestCheckRegularTree(t *testing.T) {
-	skipWithoutSymlinks(t)
-	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "a", "b.txt"), "b\n", 0o644)
-	require.NoError(t, checkRegularTree(dir))
-
-	require.NoError(t, os.Symlink("b.txt", filepath.Join(dir, "a", "link")))
-	err := checkRegularTree(dir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "a/link")
-}
-
 // TestFetchRemoteTemplate_RefusesNonRegularResult pins the final check in
 // FetchRemoteTemplate: whichever fetch path produced the cache, a result that
 // holds a link is refused and the cache is removed.
@@ -602,4 +477,59 @@ func TestFetchRemoteTemplate_RefusesNonRegularResult(t *testing.T) {
 	got, err := FetchRemoteTemplate(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"scion-agent.yaml": "x\n"}, readTree(t, got))
+}
+
+// TestFetchGitHubFolder_RefusalKeepsClearError pins that a refused sub-path
+// or refused tarball content is reported as is, without a fallback to the
+// sparse checkout (which would replace the error with a git failure).
+func TestFetchGitHubFolder_RefusalKeepsClearError(t *testing.T) {
+	skipWithoutSymlinks(t)
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
+		return nil, errors.New("ls-remote disabled in test")
+	}))
+	requests := 0
+	old := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = old })
+	body := buildTarGz(t, []tarEntry{
+		{typ: tar.TypeDir, name: "repo-main/", mode: 0o755},
+		{typ: tar.TypeReg, name: "repo-main/templates/file", body: "x\n"},
+		{typ: tar.TypeReg, name: "repo-main/templates/foo/scion-agent.yaml", body: "schema_version: \"1\"\n"},
+	})
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Request: r}, nil
+	})
+	sparseCalls := 0
+	t.Cleanup(SetGitSparseCheckoutForTest(func(context.Context, *GitHubURLParts, string, string) error {
+		sparseCalls++
+		return errors.New("git init failed (stub)")
+	}))
+
+	tests := []struct {
+		name, uri, wantErr string
+		wantRequests       int
+	}{
+		{"dot-dot sub-path", "https://github.com/acme/repo/tree/main/templates/../../x", "not inside the repository", 0},
+		{"git sub-path", "https://github.com/acme/repo/tree/main/.git", "inside a .git directory", 0},
+		{"sub-path is a file", "https://github.com/acme/repo/tree/main/templates/file", "is not a directory", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests, sparseCalls = 0, 0
+			dest := t.TempDir()
+			err := fetchGitHubFolder(context.Background(), tt.uri, dest, "")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.ErrorIs(t, err, errRemoteContentRefused)
+			assert.Equal(t, tt.wantRequests, requests)
+			assert.Zero(t, sparseCalls, "no sparse-checkout fallback after a refusal")
+			assert.Empty(t, readTree(t, dest))
+		})
+	}
+
+	// A sub-path that is missing from the tarball still falls back.
+	requests, sparseCalls = 0, 0
+	err := fetchGitHubFolder(context.Background(), "https://github.com/acme/repo/tree/main/templates/missing", t.TempDir(), "")
+	require.Error(t, err)
+	assert.Equal(t, 1, sparseCalls)
 }

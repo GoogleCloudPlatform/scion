@@ -22,6 +22,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -36,12 +37,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-const importOutsideSecret = "OUTSIDE-CONTENT-must-never-be-stored"
+const importOutsideSecret = "outside-content-marker"
 
 // TestImportTemplatesFromRemote_StoresNoLinkTargets imports a template whose
-// fetched content carries absolute and relative file and directory links to
-// a file outside the fetch, and asserts that the stored template holds only
-// its regular files and never the link target's content.
+// fetched content carries absolute, relative, in-tree and chained file and
+// directory links, some resolving outside the fetch, and asserts that the
+// stored template holds only its regular files, never a link target's
+// content, and that nothing is written outside the fetch.
 func TestImportTemplatesFromRemote_StoresNoLinkTargets(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink fixtures require a POSIX file system")
@@ -68,15 +70,41 @@ func TestImportTemplatesFromRemote_StoresNoLinkTargets(t *testing.T) {
 		name, linkname string
 		body           string
 	}
+	const tpl = "repo-main/templates/my-template/"
 	entries := []entry{
-		{typ: tar.TypeReg, name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\n"},
-		{typ: tar.TypeReg, name: "repo-main/templates/my-template/agents.md", body: "# Agents\n"},
-		{typ: tar.TypeSymlink, name: "repo-main/templates/my-template/abs-file", linkname: secretPath},
-		{typ: tar.TypeSymlink, name: "repo-main/templates/my-template/abs-dir", linkname: outside},
-		{typ: tar.TypeSymlink, name: "repo-main/templates/my-template/rel-file", linkname: strings.Repeat("../", 32) + strings.TrimPrefix(secretPath, "/")},
-		{typ: tar.TypeSymlink, name: "repo-main/templates/my-template/system-prompt.md", linkname: secretPath},
-		{typ: tar.TypeLink, name: "repo-main/templates/my-template/hard", linkname: secretPath},
+		{typ: tar.TypeReg, name: tpl + "scion-agent.yaml", body: "schema_version: \"1\"\n"},
+		{typ: tar.TypeReg, name: tpl + "agents.md", body: "# Agents\n"},
+		{typ: tar.TypeSymlink, name: tpl + "abs-file", linkname: secretPath},
+		{typ: tar.TypeSymlink, name: tpl + "abs-dir", linkname: outside},
+		{typ: tar.TypeSymlink, name: tpl + "rel-file", linkname: strings.Repeat("../", 32) + strings.TrimPrefix(secretPath, "/")},
+		{typ: tar.TypeSymlink, name: tpl + "system-prompt.md", linkname: secretPath},
+		{typ: tar.TypeLink, name: tpl + "hard", linkname: secretPath},
+		// An in-tree link.
+		{typ: tar.TypeSymlink, name: tpl + "inside", linkname: "agents.md"},
 	}
+	// A chain of relative links whose every target is lexically inside the
+	// extracted tree, kept outside the imported sub-path: "deep" is a real
+	// directory chain 30 levels down, and deep/.../b points back up to
+	// deep's parent. "chain-file" (in the template) and "chain-dir" (at the
+	// repository root) step through b, so their lexical targets stay inside
+	// the tree while the resolved targets are the outside file and
+	// directory. "chain-dir/extra.txt" is a regular entry below chain-dir.
+	deep := "deep/"
+	for i := range 30 {
+		deep += fmt.Sprintf("d%d/", i)
+		entries = append(entries, entry{typ: tar.TypeDir, name: "repo-main/" + deep})
+	}
+	up := strings.Repeat("../", 31)
+	entries = append(entries,
+		entry{typ: tar.TypeSymlink, name: "repo-main/" + deep + "b", linkname: strings.Repeat("../", 30)},
+		entry{typ: tar.TypeSymlink, name: tpl + "chain-file", linkname: "../../" + deep + "b/" + up + strings.TrimPrefix(secretPath, "/")},
+		entry{typ: tar.TypeSymlink, name: "repo-main/chain-dir", linkname: deep + "b/" + up + strings.TrimPrefix(outside, "/")},
+		entry{typ: tar.TypeReg, name: "repo-main/chain-dir/extra.txt", body: "extra\n"},
+	)
+	// No real git: a sparse-checkout fallback is a test failure.
+	t.Cleanup(config.SetGitSparseCheckoutForTest(func(context.Context, *config.GitHubURLParts, string, string) error {
+		return errors.New("unexpected sparse-checkout fallback")
+	}))
 	old := http.DefaultClient.Transport
 	t.Cleanup(func() { http.DefaultClient.Transport = old })
 	http.DefaultClient.Transport = &mockRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
@@ -84,7 +112,11 @@ func TestImportTemplatesFromRemote_StoresNoLinkTargets(t *testing.T) {
 		gzw := gzip.NewWriter(&buf)
 		tw := tar.NewWriter(gzw)
 		for _, e := range entries {
-			hdr := &tar.Header{Typeflag: e.typ, Name: e.name, Linkname: e.linkname, Mode: 0o644, Size: int64(len(e.body))}
+			mode := int64(0o644)
+			if e.typ == tar.TypeDir {
+				mode = 0o755
+			}
+			hdr := &tar.Header{Typeflag: e.typ, Name: e.name, Linkname: e.linkname, Mode: mode, Size: int64(len(e.body))}
 			if err := tw.WriteHeader(hdr); err != nil {
 				return nil, err
 			}
@@ -123,6 +155,14 @@ func TestImportTemplatesFromRemote_StoresNoLinkTargets(t *testing.T) {
 	sort.Strings(paths)
 	if want := []string{"agents.md", "scion-agent.yaml"}; !slices.Equal(paths, want) {
 		t.Errorf("stored template files = %v, want %v", paths, want)
+	}
+
+	outsideEntries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outsideEntries) != 1 || outsideEntries[0].Name() != "secret.txt" {
+		t.Errorf("the directory outside the fetch was written to: %v", outsideEntries)
 	}
 
 	stor.mu.Lock()

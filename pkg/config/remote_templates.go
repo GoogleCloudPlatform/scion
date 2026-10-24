@@ -260,13 +260,47 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 	// Resolve branch names that may contain slashes
 	resolveGitHubRef(ctx, parsed, token)
 
+	if _, err := cleanRemoteSubPath(parsed.Path); err != nil {
+		return err
+	}
+
 	// Try GitHub tarball download first (works without git installed)
-	if err := fetchGitHubTarball(ctx, parsed, destPath, token); err == nil {
+	err = fetchGitHubTarball(ctx, parsed, destPath, token)
+	if err == nil {
 		return nil
+	}
+	if errors.Is(err, errRemoteContentRefused) {
+		// The content was fetched but refused; a sparse checkout of the
+		// same content would be refused too, so keep the clear error.
+		return err
 	}
 
 	// Fall back to sparse git checkout
 	return sparseGitCheckout(ctx, parsed, destPath, token)
+}
+
+// errRemoteContentRefused marks errors where fetched template content (or the
+// requested sub-path) is refused, as opposed to a download or checkout
+// failure. fetchGitHubFolder does not fall back to a sparse checkout for it.
+var errRemoteContentRefused = errors.New("remote template content refused")
+
+// cleanRemoteSubPath returns subPath cleaned ("." for the repository root).
+// It refuses a sub-path that is not local to the repository (absolute, or
+// with ".." leaving it) or that has a .git component.
+func cleanRemoteSubPath(subPath string) (string, error) {
+	sub := filepath.Clean(subPath)
+	if subPath == "" {
+		sub = "."
+	}
+	if !filepath.IsLocal(sub) {
+		return "", fmt.Errorf("path %s is not inside the repository: %w", subPath, errRemoteContentRefused)
+	}
+	for _, part := range strings.Split(sub, string(filepath.Separator)) {
+		if part == ".git" {
+			return "", fmt.Errorf("path %s is inside a .git directory: %w", subPath, errRemoteContentRefused)
+		}
+	}
+	return sub, nil
 }
 
 // GitLsRemoteFunc runs `git ls-remote --heads <repoURL>` and returns its
@@ -671,7 +705,8 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 
 // copyDirExcludingGit copies the directory subPath of baseDir into dst,
 // excluding .git directories. subPath is relative to baseDir ("" or "." for
-// baseDir itself) and must stay inside it.
+// baseDir itself), must stay inside it, and must not name a .git directory
+// (cleanRemoteSubPath).
 //
 // Fetched content is untrusted, so the copy never follows symbolic links:
 //   - the source is read only through an os.Root opened at baseDir, so no
@@ -686,12 +721,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 // Writes go through an os.Root opened at dst. The result therefore contains
 // regular files and directories only.
 func copyDirExcludingGit(baseDir, subPath, dst string) error {
-	sub := filepath.Clean(subPath)
-	if subPath == "" {
-		sub = "."
-	}
-	if !filepath.IsLocal(sub) {
-		return fmt.Errorf("path %s is not inside the repository", subPath)
+	sub, err := cleanRemoteSubPath(subPath)
+	if err != nil {
+		return err
 	}
 
 	srcRoot, err := os.OpenRoot(baseDir)
@@ -762,10 +794,10 @@ func checkRealDirPath(root *os.Root, sub, display string) error {
 			return fmt.Errorf("failed to inspect path %s: %w", display, err)
 		}
 		if info.Mode()&iofs.ModeSymlink != 0 {
-			return fmt.Errorf("path %s in repository goes through a symbolic link", display)
+			return fmt.Errorf("path %s in repository goes through a symbolic link: %w", display, errRemoteContentRefused)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("path %s in repository is not a directory", display)
+			return fmt.Errorf("path %s in repository is not a directory: %w", display, errRemoteContentRefused)
 		}
 	}
 	return nil
@@ -794,7 +826,7 @@ func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root,
 		return err
 	}
 	if !oinfo.Mode().IsRegular() || !os.SameFile(linfo, oinfo) {
-		return fmt.Errorf("file %s changed while copying the remote template", filepath.ToSlash(dstName))
+		return fmt.Errorf("file %s changed while copying the remote template: %w", filepath.ToSlash(dstName), errRemoteContentRefused)
 	}
 
 	return writeFileInRoot(dstRoot, dstName, in, linfo.Mode())
@@ -872,12 +904,9 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 
 // extractZip extracts a zip archive to the destination path.
 //
-// Only directories and regular files are extracted; symbolic links and other
-// entry types are skipped (a template never needs them, and recreating a link
-// from untrusted content could point outside the template). Entry names keep
-// the lexical checks of sanitizePath, and every write goes through an os.Root
-// opened at destPath, so nothing can be written outside it, including through
-// a symlinked parent directory.
+// Only directories and regular files are extracted; other entry types are
+// skipped (logged). Entry names are checked by sanitizePath, and every write
+// goes through an os.Root opened at destPath, so all writes stay inside it.
 func extractZip(zipPath, destPath string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -945,13 +974,10 @@ func extractZip(zipPath, destPath string) error {
 
 // extractTarGz extracts a .tar.gz or .tgz archive to the destination path.
 //
-// Only directories and regular files are extracted. Symbolic-link and
-// hard-link entries are skipped: a template never needs them, and recreating
-// a link from untrusted content lets later entries or later copies reach
-// files outside the template. Entry names keep the lexical checks of
-// sanitizePath, and every write goes through an os.Root opened at destPath,
-// so nothing can be written outside it, including through a symlinked parent
-// directory.
+// Only directories and regular files are extracted; link, device and FIFO
+// entries are skipped (logged). Entry names are checked by sanitizePath, and
+// every write goes through an os.Root opened at destPath, so all writes stay
+// inside it.
 func extractTarGz(tarGzPath, destPath string) error {
 	f, err := os.Open(tarGzPath)
 	if err != nil {
@@ -1051,6 +1077,8 @@ func extractTarGz(tarGzPath, destPath string) error {
 			}
 		case tar.TypeSymlink, tar.TypeLink:
 			slog.Warn("Skipping link entry in archive", "name", header.Name)
+		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+			slog.Warn("Skipping device or FIFO entry in archive", "name", header.Name)
 		}
 	}
 
