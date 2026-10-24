@@ -303,6 +303,7 @@ const (
 	hdDelegatorLive        hdDelegatorLiveness = iota
 	hdDelegatorNotFound                        // no record
 	hdDelegatorDeleted                         // agent with DeletedAt set
+	hdDelegatorHeld                            // agent with an active hold (ptone/scion#3433)
 	hdDelegatorInactive                        // user whose status is not active
 	hdDelegatorUnsupported                     // delegator type is neither user nor agent
 )
@@ -311,8 +312,10 @@ const (
 // the hub_delivery admission walk. It never consults roles or super-admin
 // status (a suspended super-admin is inactive like any other user), and it
 // never reads or writes the request-scoped delegator-authority cache. A
-// stopped agent is live. The returned string is the user's status for
-// hdDelegatorInactive. Any lookup error other than not-found is returned.
+// stopped agent is live; a held agent is not (ptone/scion#3433), as in
+// checkAgentHoldsPermission and agentStanding. The returned string is the
+// user's status for hdDelegatorInactive. Any lookup error other than
+// not-found, including a hold lookup error, is returned.
 func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegatorType, delegatorID string) (hdDelegatorLiveness, string, error) {
 	switch delegatorType {
 	case store.DelegationPrincipalUser:
@@ -337,6 +340,13 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 		}
 		if !ag.DeletedAt.IsZero() {
 			return hdDelegatorDeleted, "", nil
+		}
+		held, err := a.store.HasActiveAgentHold(ctx, delegatorID)
+		if err != nil {
+			return hdDelegatorLive, "", fmt.Errorf("agent %s hold lookup: %w", delegatorID, err)
+		}
+		if held {
+			return hdDelegatorHeld, "", nil
 		}
 		return hdDelegatorLive, "", nil
 	default:
@@ -364,10 +374,19 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 //  5. effect ceiling: principal passes, bounded must allow permissionID
 //     with no self-operation exception (ceiling_effect_exceeded), any other
 //     kind denies (ceiling_unrecorded);
-//  6. live delegator (hubDeliveryDelegatorLiveness);
+//  6. live delegator (hubDeliveryDelegatorLiveness); a held agent
+//     delegator is not live;
 //  7. a user delegator ends the chain; an agent delegator is the next hop;
 //     the depth bound and a repeated agent deny with no cause, like the
 //     ordinary walk.
+//
+// Before step 1 of every hop, the hop's delegate agent must not be held
+// (ptone/scion#3433): at depth 0 that is the target agent itself, and at
+// every later depth it is the agent delegator of the hop below, so a held
+// agent anywhere on the chain denies, matching agentStanding. A held agent
+// denies with cause ceiling_orphaned, the cause the ordinary walk records
+// for a non-live agent link (checkAgentHoldsPermission); a hold lookup
+// error denies with cause ceiling_error.
 func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep) (bool, string, DenyCause) {
 	addStep := func(step, detail string) {
 		if explain != nil {
@@ -402,6 +421,14 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 			return deny("delegation chain cycle", "")
 		}
 		visited[delegateID] = true
+
+		held, err := a.store.HasActiveAgentHold(ctx, delegateID)
+		if err != nil {
+			return failClosed(fmt.Errorf("agent %s hold lookup: %w", delegateID, err))
+		}
+		if held {
+			return deny(fmt.Sprintf("agent %s is held", delegateID), DenyCauseCeilingOrphaned)
+		}
 
 		allEdges, err := a.getCachedDelegationEdges(ctx, store.DelegationPrincipalAgent, delegateID)
 		if err != nil {
@@ -461,6 +488,8 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				return deny(fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
 			}
 			return deny(fmt.Sprintf("delegator %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
+		case hdDelegatorHeld:
+			return deny(fmt.Sprintf("delegator agent %s is held", edge.DelegatorID), DenyCauseCeilingOrphaned)
 		case hdDelegatorInactive:
 			return deny(fmt.Sprintf("delegator %s is %s", edge.DelegatorID, status), DenyCauseCeilingDelegatorLacksPermission)
 		default:
