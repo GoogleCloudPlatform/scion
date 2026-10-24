@@ -237,7 +237,7 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 
 To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
 - **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
-- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds. **Update Binary**, **Rebuild Server** and **Restart Hub** form one group: none of them starts while another is in progress (Restart Hub only waits for a running update or rebuild), and the `409` error names the blocking operation and run.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds. **Update Binary**, **Rebuild Server** and **Restart Hub** form one group: none of them starts while another is in progress (Restart Hub only waits for a running update or rebuild), and the `409` error names the blocking operation (and its run, when the blocker is an update or rebuild run; a pending Hub restart has no run).
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
 
 ## Persistence
