@@ -44,7 +44,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -127,4 +129,288 @@ func deliveryAuthzRequest(h *hubDeliveryIdentity, kind MaterialKind, res Resourc
 		Action:     ActionDeliver,
 		Permission: deliverPermissionForKind(kind),
 	}
+}
+
+// envVarDeliveryKind is the material kind of a stored env var row: a legacy
+// row flagged secret is a secret, any other row a plain env var.
+func envVarDeliveryKind(v store.EnvVar) MaterialKind {
+	if v.Secret {
+		return MaterialKindSecret
+	}
+	return MaterialKindEnvVar
+}
+
+// selectDeliveryEnv is resolveEnvFromStorage for the start and restart
+// paths, with every project-, hub- and broker-scope row authorized under
+// the delivery credential before it is used. The scopes, their order, the
+// as_needed and reserved-target skips, the progeny pass and the error
+// contract are resolveEnvFromStorage's; TZ rows, which buildStartEnv
+// discards, are skipped. A credential that cannot be minted is an error,
+// like a store read error.
+func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
+	result := make(map[string]string)
+	plain := make(map[string]bool)
+	if agent == nil {
+		return result, plain, nil
+	}
+
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
+		}
+		for _, v := range vars {
+			if v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
+			// The agent TZ resolver owns TZ: buildStartEnv never takes it
+			// from stored env, so a TZ row is neither authorized nor
+			// returned.
+			if v.Key == agentTZEnvKey {
+				continue
+			}
+			if filter.Scope != store.ScopeUser {
+				allowed, err := sel.authorize(ctx, envVarDeliveryKind(v), materialRecordEnvVar, v.ID, v.Key, filter.Scope, filter.ScopeID)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !allowed {
+					continue
+				}
+			}
+			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
+		}
+	}
+
+	// Progeny env vars: unchanged from resolveEnvFromStorage.
+	if len(agent.Ancestry) > 1 {
+		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list progeny env vars: %w", err)
+		}
+		for _, v := range progenyVars {
+			if secret.IsReservedEnvTarget(v.Key) || v.Key == agentTZEnvKey {
+				continue
+			}
+			if _, exists := result[v.Key]; exists {
+				continue
+			}
+			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
+		}
+	}
+	return result, plain, nil
+}
+
+// secretDeliveryCandidate is one secret selected for fetch.
+type secretDeliveryCandidate struct {
+	meta    secret.SecretMeta // as listed; FetchValues matches on it
+	progeny bool
+}
+
+// selectDeliverySecrets is resolveSecrets for the start and restart paths.
+// It returns the same list resolveSecrets returned (as_needed environment
+// secrets and reserved targets dropped, test-admin scope restriction
+// applied), built as follows:
+//
+//   - broker, hub and project secrets are listed by metadata and each one
+//     is authorized under the delivery credential;
+//   - owner user-scope secrets are listed by metadata and kept, and progeny
+//     secrets keep the agent's own progeny decision, as resolveSecrets;
+//   - values are fetched only for the kept secrets, by recorded metadata,
+//     after every authorization; an item whose fetch fails is skipped, as
+//     Resolve skipped it;
+//   - precedence: a higher scope's secret replaces a lower scope's secret
+//     of the same name, a progeny secret fills only names no scope set,
+//     then the highest scope wins per type and target.
+//
+// A list error or a credential that cannot be minted is an error.
+func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, error) {
+	if d.secretBackend == nil || agent == nil {
+		return nil, nil
+	}
+
+	type scopeEntry struct{ scope, scopeID string }
+	scopes := make([]scopeEntry, 0, 4)
+	if agent.RuntimeBrokerID != "" {
+		scopes = append(scopes, scopeEntry{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
+	}
+	scopes = append(scopes, scopeEntry{store.ScopeHub, d.secretBackend.HubID()})
+	if agent.ProjectID != "" {
+		scopes = append(scopes, scopeEntry{store.ScopeProject, agent.ProjectID})
+	}
+	if agent.OwnerID != "" {
+		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
+	}
+
+	var kept []secretDeliveryCandidate
+	for _, sc := range scopes {
+		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range metas {
+			if m.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			if sc.scope != store.ScopeUser {
+				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
+				if err != nil {
+					return nil, err
+				}
+				if !allowed {
+					continue
+				}
+			}
+			kept = append(kept, secretDeliveryCandidate{meta: m})
+		}
+	}
+
+	// Progeny secrets: the agent's own progeny decision, as resolveSecrets.
+	if len(agent.Ancestry) > 1 && d.authzService != nil {
+		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
+		if err != nil {
+			return nil, err
+		}
+		check := d.progenySecretCheck(ctx, agent)
+		for i := range progeny {
+			m := *secretMetaFromStore(&progeny[i])
+			if m.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			if !check(m) {
+				continue
+			}
+			kept = append(kept, secretDeliveryCandidate{meta: m, progeny: true})
+		}
+	}
+
+	if d.debug && sel.denied > 0 {
+		d.log.Debug("material delivery: items not authorized", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
+	}
+	if len(kept) == 0 {
+		return nil, nil
+	}
+
+	metas := make([]secret.SecretMeta, len(kept))
+	for i, c := range kept {
+		metas[i] = c.meta
+	}
+	values, err := d.secretBackend.FetchValues(ctx, metas)
+	if err != nil {
+		return nil, err
+	}
+
+	merged := make(map[string]secret.SecretWithValue)
+	for _, c := range kept {
+		r, ok := values[c.meta.ID]
+		if !ok || r.Err != nil {
+			continue
+		}
+		if c.progeny {
+			if _, exists := merged[c.meta.Name]; exists {
+				continue
+			}
+		}
+		sv := secret.SecretWithValue{SecretMeta: c.meta, Value: r.Value}
+		if sv.SecretType == "" {
+			sv.SecretType = store.SecretTypeEnvironment
+		}
+		if sv.Target == "" {
+			sv.Target = sv.Name
+		}
+		merged[c.meta.Name] = sv
+	}
+	names := make([]string, 0, len(merged))
+	for n := range merged {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	resolved := make([]secret.SecretWithValue, 0, len(merged))
+	for _, n := range names {
+		resolved = append(resolved, merged[n])
+	}
+	resolved = secret.DeduplicateByTarget(resolved)
+	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+
+	result := make([]ResolvedSecret, 0, len(resolved))
+	for _, sv := range resolved {
+		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
+			continue
+		}
+		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
+			continue
+		}
+		result = append(result, ResolvedSecret{
+			Name:   sv.Name,
+			Type:   sv.SecretType,
+			Target: sv.Target,
+			Value:  sv.Value,
+			Source: sv.Scope,
+			Ref:    sv.SecretRef,
+		})
+	}
+	return result, nil
+}
+
+// secretMetaFromStore converts a stored secret row to backend metadata,
+// field for field as the local backend does.
+func secretMetaFromStore(s *store.Secret) *secret.SecretMeta {
+	return &secret.SecretMeta{
+		ID:            s.ID,
+		Name:          s.Key,
+		SecretType:    s.SecretType,
+		Target:        s.Target,
+		Scope:         s.Scope,
+		ScopeID:       s.ScopeID,
+		Description:   s.Description,
+		InjectionMode: s.InjectionMode,
+		SecretRef:     s.SecretRef,
+		AllowProgeny:  s.AllowProgeny,
+		Version:       s.Version,
+		Created:       s.Created,
+		Updated:       s.Updated,
+		CreatedBy:     s.CreatedBy,
+		UpdatedBy:     s.UpdatedBy,
+	}
+}
+
+// probe reports whether a project- or hub-scope record the auth credential
+// probe found would be delivered to the agent at start: Decide(*.deliver)
+// under the delivery credential, with no value read.
+//
+// A nil selector is the create-time probe, which runs before the agent row
+// and its delegation edge are written, so there is no target to authorize
+// against: the record counts by existence (true), and every item is still
+// authorized at start before any value is read. A credential that cannot
+// be minted for an existing agent is an error.
+func (s *deliverySelector) probe(ctx context.Context, kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
+	if s == nil {
+		return true, nil
+	}
+	return s.authorize(ctx, kind, record, id, key, scope, scopeID)
+}
+
+// newProbeDeliverySelector returns the selector the auth credential probe
+// uses for agent, or nil when the agent's record does not exist yet (the
+// create-time probe). A lookup error other than not-found is returned.
+func (s *Server) newProbeDeliverySelector(ctx context.Context, agent *store.Agent) (*deliverySelector, error) {
+	if agent == nil || agent.ID == "" || s.store == nil {
+		return nil, nil
+	}
+	stored, err := s.store.GetAgent(ctx, agent.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, nil
+	}
+	return newDeliverySelector(s.authzService, stored, PurposeAvailabilityProbe), nil
 }

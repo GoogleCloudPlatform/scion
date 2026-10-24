@@ -52,7 +52,7 @@ var agentScopeCensusExempt = map[string]string{
 	"conduit_relay_admit.go:writeRelayAdmission":       "relay admission claims of a USER principal: copies a scoped user credential's own scopes (only a user access token reaches relay admission: relayUserAuthTypes admits no workload delegation), never an agent token's (the agent branch copies only the credential ID); every later relay operation rebuilds the user and is decided with the test-admin policy applied to that user, so the agent clamp is not the control here (pinned by TestTestAdminA3_RelayUserIdentityIgnoresClaimScopes)",
 	"agent_scope_reissue.go:planAgentDelegatorReissue": "scopes from AuthorizeAgentToken (parentGrant)",
 	"httpdispatcher.go:resolveAsNeededForKeys":         "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z): dispatch-time project-scope injection stays under A2's membership rule (provenance-root membership, SystemAuthorityProof)",
-	"httpdispatcher.go:resolveSecrets":                 "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z), as resolveAsNeededForKeys",
+	"httpdispatcher.go:progenySecretCheck":             "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z), as resolveAsNeededForKeys",
 }
 
 // agentScopeSite is one function that decides an agent scope list.

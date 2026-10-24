@@ -73,6 +73,7 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_ResolvesEnvFromStorage(t *test
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	err := dispatcher.DispatchAgentRestart(ctx, agent)
 	if err != nil {
@@ -138,21 +139,20 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_ResolvesSecrets(t *testing.T) 
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetSecretBackend(&mockSecretBackend{
-		secrets: []secret.SecretWithValue{
-			{
-				SecretMeta: secret.SecretMeta{
-					Name:          "API_KEY_SECRET",
-					SecretType:    "environment",
-					Target:        "API_KEY",
-					Scope:         "project",
-					ScopeID:       agent.ProjectID,
-					InjectionMode: "always",
-				},
-				Value: "secret-api-key-value",
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{
+			SecretMeta: secret.SecretMeta{
+				Name:          "API_KEY_SECRET",
+				SecretType:    "environment",
+				Target:        "API_KEY",
+				Scope:         "project",
+				ScopeID:       agent.ProjectID,
+				InjectionMode: "always",
 			},
+			Value: "secret-api-key-value",
 		},
-	})
+	}))
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	err := dispatcher.DispatchAgentRestart(ctx, agent)
 	if err != nil {
@@ -216,6 +216,7 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_ConfigEnvTakesPrecedence(t *te
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	err := dispatcher.DispatchAgentRestart(ctx, agent)
 	if err != nil {

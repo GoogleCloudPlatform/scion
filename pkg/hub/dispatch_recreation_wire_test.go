@@ -203,6 +203,13 @@ func (b *failingResolveBackend) Resolve(context.Context, string, string, string,
 	return nil, errors.New(fakeResolveBackendError)
 }
 
+// List fails the same way: the start and restart paths enumerate secret
+// metadata with List (launch selection, material_delivery.go) instead of
+// calling Resolve, so a failing backend must fail there too.
+func (b *failingResolveBackend) List(context.Context, secret.Filter) ([]secret.SecretMeta, error) {
+	return nil, errors.New(fakeResolveBackendError)
+}
+
 // fakeFileSecret is a file-type secret with a fake value. File secrets do
 // not travel in resolvedEnv, so before ptone/scion#2157 a restart dropped
 // them.
@@ -211,12 +218,22 @@ var fakeFileSecret = secret.SecretWithValue{
 	Value:      "fake-secret-value",
 }
 
+// ownerFileSecret is fakeFileSecret stored in agent's owner scope, where
+// start and restart select it (launch selection lists each scope by its
+// scope ID).
+func ownerFileSecret(agent *store.Agent, value string) secret.SecretWithValue {
+	sv := fakeFileSecret
+	sv.ScopeID = agent.OwnerID
+	sv.Value = value
+	return sv
+}
+
 // TestDispatchAgentRestart_WireSendsResolvedSecretsLikeStart: a restart
 // sends the resolved secrets a start sends for the same agent, resolved by
 // the same buildStartEnv call at dispatch time.
 func TestDispatchAgentRestart_WireSendsResolvedSecretsLikeStart(t *testing.T) {
 	d, agent, rb := newWireRecreationDispatcher(t, "")
-	d.SetSecretBackend(&mockSecretBackend{secrets: []secret.SecretWithValue{fakeFileSecret}})
+	d.SetSecretBackend(launchSecretBackend(t, d.store, "test-hub", []secret.SecretWithValue{ownerFileSecret(agent, fakeFileSecret.Value)}))
 
 	require.NoError(t, d.DispatchAgentStart(context.Background(), agent, "", false))
 	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
@@ -303,6 +320,7 @@ func TestDispatchAgentStart_WireNoSecretsStillStarts(t *testing.T) {
 		t.Run(b.name, func(t *testing.T) {
 			d, agent, rb := newWireRecreationDispatcher(t, "")
 			b.set(d)
+			grantLaunchDelivery(t, d.store, d, agent)
 			require.NoError(t, d.store.CreateEnvVar(context.Background(), &store.EnvVar{
 				ID:            tid("envvar-passthrough"),
 				Key:           "FAKE_PASSTHROUGH",
@@ -333,7 +351,7 @@ func TestDispatchAgentStart_WireNoSecretsStillStarts(t *testing.T) {
 // the second restart with its new value (fake values only).
 func TestDispatchAgentRestart_WirePicksUpSecretChange(t *testing.T) {
 	d, agent, rb := newWireRecreationDispatcher(t, "")
-	backend := &mockSecretBackend{secrets: []secret.SecretWithValue{fakeFileSecret}}
+	backend := launchSecretBackend(t, d.store, "test-hub", []secret.SecretWithValue{ownerFileSecret(agent, fakeFileSecret.Value)})
 	d.SetSecretBackend(backend)
 
 	secretValue := func() string {
@@ -350,9 +368,12 @@ func TestDispatchAgentRestart_WirePicksUpSecretChange(t *testing.T) {
 	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
 	assert.Equal(t, "fake-secret-value", secretValue())
 
-	changed := fakeFileSecret
-	changed.Value = "fake-secret-value-rotated"
-	backend.secrets = []secret.SecretWithValue{changed}
+	changed := ownerFileSecret(agent, "fake-secret-value-rotated")
+	_, _, err := backend.Set(context.Background(), &secret.SetSecretInput{
+		Name: changed.Name, Value: changed.Value, SecretType: changed.SecretType, Target: changed.Target,
+		Scope: changed.Scope, ScopeID: changed.ScopeID, InjectionMode: store.InjectionModeAlways,
+	})
+	require.NoError(t, err)
 
 	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
 	assert.Equal(t, "fake-secret-value-rotated", secretValue(), "the second restart must carry the new value")
