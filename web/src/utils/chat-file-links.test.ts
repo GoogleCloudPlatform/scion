@@ -1759,7 +1759,7 @@ describe('buildGcsLinkElement', () => {
   it('builds an anchor with the expected class, data attribute and text', () => {
     const a = buildGcsLinkElement('bkt', 'dir/o.txt');
     expect(a.outerHTML).toBe(
-      '<a class="entity-link gcs-link" data-gcs-uri="gs://bkt/dir/o.txt" href="javascript:void(0)" title="Open gs://bkt/dir/o.txt">gs://bkt/dir/o.txt</a>'
+      '<a class="entity-link gcs-link" data-gcs-uri="gs://bkt/dir/o.txt" href="#" title="Open gs://bkt/dir/o.txt">gs://bkt/dir/o.txt</a>'
     );
   });
 

@@ -1384,13 +1384,17 @@ const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/
 	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
 
 // assertLsRemoteCalledWithToken checks that branch resolution went through the
-// stubbed ls-remote seam exactly once, authenticated with the project token.
-// If a regression bypassed the seam, real git would run and this fails.
+// stubbed ls-remote seam exactly once, for the anonymous repository URL, and
+// was given the project token separately. If a regression bypassed the seam,
+// real git would run and this fails.
 func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
 	t.Helper()
-	want := "https://x-access-token:my-secret-token-12345@github.com/chiefkarlin/scion-experiments.git"
-	if got := stub.URLs(); len(got) != 1 || got[0] != want {
-		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
+	wantURL := "https://github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != wantURL {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", wantURL, got)
+	}
+	if got := stub.Tokens(); len(got) != 1 || got[0] != "my-secret-token-12345" {
+		t.Errorf("expected the project token to be passed to ls-remote once, got %d token(s)", len(got))
 	}
 }
 

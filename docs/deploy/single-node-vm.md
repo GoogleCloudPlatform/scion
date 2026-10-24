@@ -321,20 +321,25 @@ strategy, with no change on the host.
 
 The Hub configuration file. The deploy script writes it in two stages:
 
-1. **During VM setup (Phase 3)** — a bootstrap file with `server.auth.mode: dev` and
-   no proxy settings, so the Hub can start before IAP exists. Phase 3 checks
-   only the unauthenticated `/healthz` endpoint over SSH.
+1. **During VM setup (Phase 3)** — a bootstrap file with `server.auth.mode: dev`,
+   no proxy settings and `server.hub.host: 127.0.0.1`, so the Hub can start
+   before IAP exists. The loopback bind is needed because the server refuses
+   to listen on a non-loopback address without an https base URL, and the
+   https URL is derived from the IAP audience that only Phase 5 writes.
+   Phase 3 checks only the unauthenticated `/healthz` endpoint over SSH.
 2. **After IAP is ready (Phase 5)** — `auth.mode: proxy` with the IAP audience
-   string, enabling IAP-based authentication.
+   string, enabling IAP-based authentication. This file has no
+   `server.hub.host`, so after the restart the Hub listens on `0.0.0.0`
+   where the IAP proxy can reach it.
 
 The Phase 3 file does **not** turn on dev auth. `server.auth.mode: dev` on its own
 does not enable it, so until Phase 5 the Hub answers `/healthz` normally and
 every authenticated API call with `401`. Dev auth is turned on only by the
 `--dev-auth` flag or `server.auth.dev_mode: true` (environment variable
 `SCION_SERVER_AUTH_DEVMODE=true`). The server refuses to start with dev auth
-when the web server binds a non-loopback address. The Hub unit binds
-`0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth on
-the VM. If you need authenticated access before Phase 5, configure OAuth
+when the web server binds a non-loopback address. From Phase 5 on, the Hub
+binds `0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth
+on the VM. If you need authenticated access before Phase 5, configure OAuth
 (see [Authentication](../../docs-site/src/content/docs/hosted/single-node/auth.md)).
 For a short-lived test only, you can bind the Hub to loopback
 (`--host 127.0.0.1`) with dev auth and reach it through an SSH tunnel
@@ -640,6 +645,12 @@ Common causes:
   longer.
 - **VPC connectivity** — the Cloud Run proxy must be on the same VPC as the VM.
   The script deploys with `--network=default --subnet=default --vpc-egress=all-traffic`.
+- **5xx, or agents cannot reach the Hub, after a deploy that did not reach
+  "Deployment Complete"** — the Hub is still on the Phase 3 bootstrap bind
+  (`server.hub.host: 127.0.0.1`; see [settings.yaml](#settingsyaml)), so
+  `/healthz` answers on the VM's localhost but nothing else can connect.
+  Only the Phase 5 `settings.yaml` rewrite and restart remove the bind.
+  Fix: re-run `deploy.sh` to completion.
 
 ### Cloud-init takes too long
 

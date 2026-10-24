@@ -228,7 +228,7 @@ func SanitizeFilename(name string) (string, error) {
 	// type; #1098 tracks re-admitting it safely.
 	switch ext := attachmentExt(name); {
 	case DangerousExtensions[ext]:
-		return "", fmt.Errorf("dangerous file extension: %s", ext)
+		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	case refusedMarkupExtensions[ext]:
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}

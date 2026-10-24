@@ -64,25 +64,32 @@ func downloadHarnessConfigContent(
 	return content, nil
 }
 
+// uploadHarnessConfigFiles uploads the collected harness-config files in
+// filesToUpload. root must be opened at the collected directory; every file
+// is read through it and verified against its collected size and hash with
+// transfer.ReadCollectedFile, so a file that changed after collection stops
+// the upload before any of its bytes are sent.
 func uploadHarnessConfigFiles(
 	ctx context.Context,
 	service hubclient.HarnessConfigService,
 	harnessConfigID string,
+	root *os.Root,
 	localFileMap map[string]*hubclient.FileInfo,
 	filesToUpload []hubclient.FileUploadRequest,
 	uploadURLs []hubclient.UploadURLInfo,
 ) error {
 	if hasLocalSignedURLs(uploadURLs) {
-		return uploadHarnessConfigFilesThroughHubAPI(ctx, service, harnessConfigID, localFileMap, filesToUpload)
+		return uploadHarnessConfigFilesThroughHubAPI(ctx, service, harnessConfigID, root, localFileMap, filesToUpload)
 	}
 
-	return uploadHarnessConfigFilesBySignedURL(ctx, service, localFileMap, uploadURLs)
+	return uploadHarnessConfigFilesBySignedURL(ctx, service, root, localFileMap, uploadURLs, "Uploaded", true)
 }
 
 func uploadHarnessConfigFilesThroughHubAPI(
 	ctx context.Context,
 	service hubclient.HarnessConfigService,
 	harnessConfigID string,
+	root *os.Root,
 	localFileMap map[string]*hubclient.FileInfo,
 	filesToUpload []hubclient.FileUploadRequest,
 ) error {
@@ -96,7 +103,7 @@ func uploadHarnessConfigFilesThroughHubAPI(
 		filesForFallback = append(filesForFallback, *fileInfo)
 	}
 
-	if err := service.UploadFilesMultipart(ctx, harnessConfigID, filesForFallback); err != nil {
+	if err := service.UploadFilesMultipart(ctx, harnessConfigID, root, filesForFallback); err != nil {
 		return fmt.Errorf("upload harness config files through Hub API: %w", err)
 	}
 
@@ -106,47 +113,31 @@ func uploadHarnessConfigFilesThroughHubAPI(
 	return nil
 }
 
+// uploadHarnessConfigFilesBySignedURL uploads the collected files that have
+// an upload URL, read through root, printing "  <verb>: <path>" for each.
+// With warnMissing it also prints a warning for a URL with no matching file.
 func uploadHarnessConfigFilesBySignedURL(
 	ctx context.Context,
 	service hubclient.HarnessConfigService,
+	root *os.Root,
 	localFileMap map[string]*hubclient.FileInfo,
 	uploadURLs []hubclient.UploadURLInfo,
+	verb string,
+	warnMissing bool,
 ) error {
-	for _, urlInfo := range uploadURLs {
-		fileInfo := localFileMap[urlInfo.Path]
-		if fileInfo == nil {
-			fmt.Printf("  Warning: no matching file for %s\n", urlInfo.Path)
-			continue
+	byPath := make(map[string]transfer.FileInfo, len(localFileMap))
+	for p, fi := range localFileMap {
+		if fi != nil {
+			byPath[p] = *fi
 		}
-
-		if err := uploadHarnessConfigFileBySignedURL(ctx, service, fileInfo, urlInfo); err != nil {
-			return err
-		}
-		fmt.Printf("  Uploaded: %s\n", fileInfo.Path)
 	}
-	return nil
-}
-
-func uploadHarnessConfigFileBySignedURL(
-	ctx context.Context,
-	service hubclient.HarnessConfigService,
-	fileInfo *hubclient.FileInfo,
-	urlInfo hubclient.UploadURLInfo,
-) (err error) {
-	f, err := os.Open(fileInfo.FullPath)
-	if err != nil {
-		return fmt.Errorf("open harness config file for upload: %w", err)
+	var missing func(string)
+	if warnMissing {
+		missing = func(path string) { fmt.Printf("  Warning: no matching file for %s\n", path) }
 	}
-	defer func() {
-		if closeErr := f.Close(); err == nil && closeErr != nil {
-			err = fmt.Errorf("close harness config file: %w", closeErr)
-		}
-	}()
-
-	if err := service.UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f); err != nil {
-		return fmt.Errorf("upload harness config file: %w", err)
-	}
-	return nil
+	return uploadCollectedFiles(ctx, service, root, byPath, uploadURLs, missing, func(path string) {
+		fmt.Printf("  %s: %s\n", verb, path)
+	})
 }
 
 // writeHarnessConfigFile writes a pulled harness-config file through

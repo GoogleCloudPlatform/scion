@@ -568,8 +568,9 @@ func TestParity_D2_UnresolvablePermission(t *testing.T) {
 }
 
 // TestParity_D3_DeliveryGateZeroLoads is row D3: a deliver request is
-// denied at step 0 before any input load, for every credential kind,
-// because deliveryCredentialKinds is currently empty.
+// denied at step 0 before any input load for a user principal: the only
+// kind in deliveryCredentialKinds is the internal hub_delivery credential,
+// which no user identity derives.
 func TestParity_D3_DeliveryGateZeroLoads(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "d3")

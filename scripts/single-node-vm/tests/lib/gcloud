@@ -1389,7 +1389,13 @@ STUBERR
         echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
         ;;
       *"test -f /home/scion/.scion/hub.env"*)
-        echo "no"
+        # GCLOUD_STUB_HUB_ENV_EXISTS=true simulates a re-run on a VM that
+        # already has hub.env (the default is a fresh VM).
+        if [[ "${GCLOUD_STUB_HUB_ENV_EXISTS:-false}" == "true" ]]; then
+          echo "yes"
+        else
+          echo "no"
+        fi
         ;;
       *"schema_version"*"mode: proxy"*)
         # The settings.yaml Phase-5 proxy-mode (re)write: a later, distinct

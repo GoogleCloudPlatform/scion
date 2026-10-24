@@ -1043,6 +1043,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
 		return true
+	case "/api/v1/csp-reports": // Browser policy reports for the web pages (no sign-in; browsers send reports on their own)
+		return true
 	}
 	return false
 }
