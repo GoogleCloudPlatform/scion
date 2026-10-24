@@ -240,8 +240,8 @@ command:
    `/opt/scion/current/scion`;
 5. edits `settings.yaml` in place, as the file's owner (`scion`): adds
    `server.maintenance.install_root: "/opt/scion"` and applies the update
-   policy rule below. Comments and all other keys are left as they are.
-   The edited file is parsed (with the VM's PyYAML) and compared with the
+   policy rule below. Comments (including a trailing comment on the two
+   edited lines) and all other keys are left as they are. The edited file is parsed (with the VM's PyYAML) and compared with the
    original before it replaces it;
 6. re-renders the systemd unit with
    `ExecStart=/opt/scion/current/scion ...`;

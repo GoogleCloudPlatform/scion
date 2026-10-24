@@ -407,6 +407,9 @@ cmd_set_maintenance() {
     # value_of(LINE, KEY) -- the scalar after "KEY:", without a trailing
     # comment or surrounding quotes. A line whose value already matches is
     # kept byte-for-byte, so a correct hand edit counts as up to date.
+    # comment_of(LINE) -- a trailing " # ..." comment, kept when the line
+    # is rewritten.
+    function comment_of(l) { return match(l, /[ \t]+#.*$/) ? substr(l, RSTART) : "" }
     function value_of(l, key,   v) {
       v = l; sub("^ *" key ":[ \t]*", "", v); sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v); gsub(/"|\047/, "", v)
       return v
@@ -450,17 +453,17 @@ cmd_set_maintenance() {
         if (ind == child_ind && line ~ /^ *install_root:/) {
           seen_root = 1
           if (value_of(line, "install_root") == root) { print; next }
-          print pad(ind) "install_root: \"" root "\""; next
+          print pad(ind) "install_root: \"" root "\"" comment_of(line); next
         }
         if (ind == child_ind && line ~ /^ *update_policy:/) {
           seen_policy = 1
           v = value_of(line, "update_policy")
           if (policy == "default") {
-            if (v == "auto") { print pad(ind) "update_policy: \"notify\""; next }
+            if (v == "auto") { print pad(ind) "update_policy: \"notify\"" comment_of(line); next }
             print; next
           }
           if (v == policy) { print; next }
-          print pad(ind) "update_policy: \"" policy "\""; next
+          print pad(ind) "update_policy: \"" policy "\"" comment_of(line); next
         }
       }
       print

@@ -1302,3 +1302,20 @@ test_layout_settings_hand_edit_is_up_to_date_without_parser() {
   assert_eq "0" "$?" "an explicit policy that already matches must also be up to date (output: ${LAYOUT_OUT})"
   rm -rf "$LH_DIR"
 }
+
+# Comments are kept, including a trailing comment on a line that is
+# rewritten.
+test_layout_settings_keeps_trailing_comments_on_rewritten_lines() {
+  _layout_new_host
+  printf 'server:\n  maintenance:\n    install_root: /old   # where releases live\n    update_policy: auto  # chosen by deploy.sh\n' \
+    > "${LH_DIR}/settings.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_eq "0" "$LAYOUT_RC" "the edit must succeed (output: ${LAYOUT_OUT})"
+  assert_eq "$(printf 'server:\n  maintenance:\n    install_root: "%s"   # where releases live\n    update_policy: "notify"  # chosen by deploy.sh' "$LH_ROOT")" \
+    "$(cat "${LH_DIR}/settings.yaml")" "rewritten lines must keep their trailing comments"
+
+  _layout set-maintenance "${LH_DIR}/settings.yaml" disabled
+  assert_contains "$(cat "${LH_DIR}/settings.yaml")" '    update_policy: "disabled"  # chosen by deploy.sh' \
+    "an explicit policy rewrite must keep the trailing comment too"
+  rm -rf "$LH_DIR"
+}
