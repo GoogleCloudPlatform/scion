@@ -174,6 +174,10 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 				if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
 					log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
 				}
+				// A panic in or after the before-restart hook may leave a
+				// pending update naming this failed run; nothing restarts,
+				// so remove it (a no-op when it names another run or none).
+				s.clearPendingUpdateFor(context.Background(), runID)
 			}
 		}()
 

@@ -918,8 +918,12 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	case maintenance.StrategySudoInstall:
 		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
-		// systemctl restart is queued by systemd (--no-block, or started
-		// without waiting), so the response is written before the stop.
+		// With the --no-block rule systemd only queues the restart. With
+		// the plain rule the installer watches the systemctl child briefly:
+		// a normal non-zero exit is a failure (500), while a child killed
+		// by the unit's stop, or still running, means the restart is under
+		// way. In both cases the response is written before the hub stops,
+		// or the graceful shutdown lets it finish.
 		if err := installer.Restart(r.Context()); err != nil {
 			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email(), "installer", installer.Name())
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

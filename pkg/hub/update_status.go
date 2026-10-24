@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
@@ -385,7 +387,7 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 			Source:     source,
 		},
 		Pin:          "latest",
-		Installer:    s.updateInstaller().Status(),
+		Installer:    redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath),
 		UpdatePolicy: mc.UpdatePolicy,
 	}
 
@@ -402,6 +404,29 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 		resp.LastUpdate = &last
 	}
 	return resp, nil
+}
+
+// repoPathPlaceholder replaces the maintenance repo path in text that
+// update-status returns.
+const repoPathPlaceholder = "<maintenance repo>"
+
+// redactInstallerStatus removes the maintenance repo path from the
+// installer's reason and hint: update-status reports only whether a repo is
+// configured, never its path (installer detection builds its reasons from
+// host paths and sudo argv, which include it).
+func redactInstallerStatus(st maintenance.InstallerStatus, repoPath string) maintenance.InstallerStatus {
+	if repoPath == "" {
+		return st
+	}
+	// The cleaned path also covers the configured spelling with a trailing
+	// slash, which only adds a separator after it.
+	p := filepath.Clean(repoPath)
+	if p == "/" || p == "." {
+		return st
+	}
+	st.Reason = strings.ReplaceAll(st.Reason, p, repoPathPlaceholder)
+	st.MigrateHint = strings.ReplaceAll(st.MigrateHint, p, repoPathPlaceholder)
+	return st
 }
 
 // handleUpdateStatus handles GET /api/v1/admin/maintenance/update-status.
