@@ -128,3 +128,28 @@ every runtime through it.
   the Cloud Run warning.
 - `cmd`: hub startup resolution, the broker Layout and descriptor.
 - `deploy`: the settings template check and the Helm render guards.
+
+## Upstream merges
+
+- **Upstream main e0f573bf (merge 0f9b081a, 2026-10-24).** The R274 check at
+  a958db73 failed: upstream touched 17 of this change's files, and the docs
+  security page conflicted. The merge resolves that one conflict by keeping
+  upstream's two new bullets (CSP `frame-ancestors 'none'`, web page
+  scripts) next to this change's NFS bullet. Every Go, config and schema
+  file merged without conflict. The diff against the new base is line for
+  line the same as the reviewed one.
+- **Semantics checked:**
+  - **#4020 (shared worktree teardown on hosted agent delete)** keys on the
+    worktree-per-agent shared base and the sharer registry. This change
+    doesn't move either, and the delete guard never reaches a project tree
+    placed by `server.project_storage`.
+  - **#4141 (settings papercuts)** routes settings YAML decodes through a
+    panic-safe wrapper with the same decode result, so the
+    `project_storage` block parses unchanged. This change's own two
+    storage-key checks decode into `interface{}`, where yaml.v3 returns an
+    error instead of panicking on the same input (checked).
+  - **#4166** revokes delegation grants inside the project-delete
+    transaction. That runs before the best-effort shared-dir cleanup, as
+    before.
+  - **#4156:** this change's file responses inherit the stricter sandbox
+    CSP.
