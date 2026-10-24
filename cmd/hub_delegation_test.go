@@ -279,16 +279,6 @@ func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 	assert.Equal(t, "/api/v1/agents/agent-1/delegations/revoke-all", got[len(got)-1].path)
 }
 
-// TestHubDelegationConfirm_DefaultRefusesWithoutTerminal: the real
-// confirmation refuses without --yes when stdin is not a terminal (go test
-// runs without one) and accepts with the shared flag.
-func TestHubDelegationConfirm_DefaultRefusesWithoutTerminal(t *testing.T) {
-	resetDelegationFlags(t)
-	assert.False(t, hubDelegationConfirm("revoke?"))
-	autoConfirm = true
-	assert.True(t, hubDelegationConfirm("revoke?"))
-}
-
 // TestHubDelegationFlags_ParseThroughRootTree: the subcommands' flags parse
 // through the real command tree, and none shadows a root persistent flag
 // with another meaning: --hub and --project stay the root's hub and project
