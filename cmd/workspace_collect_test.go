@@ -19,6 +19,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -243,12 +244,86 @@ func checkWorkspaceCollectSource(fset *token.FileSet, filename string, src any, 
 	}
 	for _, decl := range f.Decls {
 		if fd, ok := decl.(*ast.FuncDecl); ok {
-			check(fd.Name.Name, fd)
+			check(workspaceCollectFuncKey(fd), fd)
 		} else {
 			check("", decl)
 		}
 	}
 	return problems, nil
+}
+
+// workspaceCollectFuncKey names a function for the collect guard. A
+// top-level function is keyed by its name, which is what the helper name,
+// the allow-lists and the required sites refer to. A method is keyed as
+// "(<receiver type>).<name>", which none of them can match, so a method is
+// never treated as an allow-listed function, a required site or the helper.
+func workspaceCollectFuncKey(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
+	}
+	return "(" + types.ExprString(fd.Recv.List[0].Type) + ")." + fd.Name.Name
+}
+
+// workspaceCollectTopLevelFuncs returns the names of the top-level
+// functions (not methods) declared in the non-test Go files of package cmd.
+func workspaceCollectTopLevelFuncs(t *testing.T) map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	funcs := map[string]bool{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil {
+				funcs[fd.Name.Name] = true
+			}
+		}
+	}
+	return funcs
+}
+
+// TestWorkspaceCollectLists_Consistent checks the collect guard's lists
+// against package cmd: the helper, every required site and every
+// allow-listed name is a top-level function in a non-test file, no name is
+// in both allow-lists, and the helper is in neither allow-list.
+func TestWorkspaceCollectLists_Consistent(t *testing.T) {
+	const helper = "collectWorkspaceFiles"
+	funcs := workspaceCollectTopLevelFuncs(t)
+	if !funcs[helper] {
+		t.Errorf("helper %s is not a top-level function in package cmd", helper)
+	}
+	for _, name := range workspaceCollectRequiredSites {
+		if !funcs[name] {
+			t.Errorf("required site %s is not a top-level function in package cmd", name)
+		}
+	}
+	for list, names := range map[string]map[string]bool{
+		"workspaceCollectAllowedHubclient": workspaceCollectAllowedHubclient,
+		"workspaceCollectAllowedTransfer":  workspaceCollectAllowedTransfer,
+	} {
+		for name := range names {
+			if !funcs[name] {
+				t.Errorf("%s entry %s is not a top-level function in package cmd", list, name)
+			}
+		}
+		if names[helper] {
+			t.Errorf("%s lists the helper %s", list, helper)
+		}
+	}
+	for name := range workspaceCollectAllowedHubclient {
+		if workspaceCollectAllowedTransfer[name] {
+			t.Errorf("%s is in both workspaceCollectAllowedHubclient and workspaceCollectAllowedTransfer", name)
+		}
+	}
 }
 
 // TestWorkspaceCollectSitesUseHelper is a source guard: every workspace
@@ -332,6 +407,26 @@ func collectPublishFiles(p string) { var b *transfer.ManifestBuilder; _ = b }
 import "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 func collectPublishFiles(p string) { hubclient.NewManifestBuilder(p) }
 `,
+		"manifest builder in a method named like a transfer allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+type publisher struct{}
+func (publisher) collectPublishFiles(p string) { transfer.NewManifestBuilder(p) }
+`,
+		"manifest builder in a pointer method named like a transfer allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+type publisher struct{}
+func (*publisher) collectPublishFiles(p string) { transfer.NewManifestBuilder(p) }
+`,
+		"hubclient collect in a method named like a hubclient allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+type syncer struct{}
+func (syncer) syncTemplateToHub(p string) { hubclient.CollectFiles(p, nil) }
+`,
+		"transfer collect in a method named like the helper": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+type collector struct{}
+func (collector) collectWorkspaceFiles(p string) { transfer.CollectFiles(p, nil) }
+`,
 	}
 	for name, src := range bypass {
 		t.Run(name, func(t *testing.T) {
@@ -369,6 +464,27 @@ func other() { var transfer transferLike; transfer.CollectFiles() }
 		}
 		if !callsHelper["syncToViaHub"] {
 			t.Errorf("guard did not record syncToViaHub calling the helper: %v", callsHelper)
+		}
+	})
+
+	t.Run("a method calling the helper is not a required site", func(t *testing.T) {
+		src := `package cmd
+type agentStarter struct{}
+func (agentStarter) startAgentViaHub(p string) { collectWorkspaceFiles(p, nil) }
+`
+		callsHelper := map[string]bool{}
+		problems, err := checkWorkspaceCollectSource(token.NewFileSet(), "method.go", src, callsHelper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(problems) != 0 {
+			t.Errorf("guard reported: %v", problems)
+		}
+		if callsHelper["startAgentViaHub"] {
+			t.Errorf("a method was recorded as the top-level site startAgentViaHub: %v", callsHelper)
+		}
+		if !callsHelper["(agentStarter).startAgentViaHub"] {
+			t.Errorf("method key not recorded: %v", callsHelper)
 		}
 	})
 }
