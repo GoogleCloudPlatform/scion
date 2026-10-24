@@ -455,7 +455,10 @@ func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
 
 	// C descends from the owner of the golden opted-in secret, env var and
 	// skill injection, through a recorded principal edge from that active,
-	// project-admitted user.
+	// project-admitted user. The admitted targets are the secret and the
+	// env var only: no relationship rule grants skill_injection.deliver to
+	// an agent (permissions/relationship_policy.go), so the skill injection
+	// is a deny row below.
 	agentC := tid("dg-valid-delivery-agent")
 	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
 	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
@@ -486,6 +489,17 @@ func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
 			assert.True(t, d.Allowed, "identity-only principal: reason %q", d.Reason)
 		})
 	}
+
+	// The golden skill injection is opted in and owned by C's root user,
+	// but no relationship rule grants skill_injection.deliver to an agent,
+	// so nothing admits it and step 10 never runs.
+	t.Run("skill_injection.deliver_not_granted", func(t *testing.T) {
+		d := decidePerm(f.authz, h, Resource{Type: "skill_injection", ID: f.skillInjectionID}, ActionDeliver, "skill_injection.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		for _, step := range d.ExplainTrace {
+			assert.False(t, strings.HasPrefix(step.Step, "delegation_ceiling_delivery_"), "step 10 must not run: %+v", d.ExplainTrace)
+		}
+	})
 
 	// Without the item grant: an agent whose ancestry names a project
 	// member with no opted-in row is denied, with the same chain shape.
@@ -660,6 +674,12 @@ func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
 		setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusSuspended)
 		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		// Through Decide, stage 2b (execution project) denies first: the
+		// source user is the suspended delegator.
+		assert.Equal(t, "relationship grant restricted by "+RelationshipRejectExecutionProject, d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectExecutionProject, r.RejectedBy)
+		assert.Equal(t, "execution source user is not active", r.Detail)
 
 		// The step-10 arm denies the same fact on its own.
 		var cause DenyCause
@@ -669,7 +689,7 @@ func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
 		}, "secret.deliver", h.ID(), nil, &cause)
 		require.NoError(t, err)
 		assert.False(t, allowed)
-		assert.Contains(t, reason, "is suspended")
+		assert.Equal(t, "delegator "+f.projectOwnerID+" is suspended", reason)
 		assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, cause)
 	})
 }
