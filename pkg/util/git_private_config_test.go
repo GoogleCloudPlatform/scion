@@ -73,7 +73,7 @@ func TestRedactGitConfigSecrets(t *testing.T) {
 		t.Errorf("url.<base> subsection userinfo not scrubbed:\n%s", outStr)
 	}
 
-	// G3: noted key names are redacted — a credential.<url> subsection is always
+	// Noted key names are redacted — a credential.<url> subsection is always
 	// "<redacted>", and a url.<base> base with userinfo appears in its cleaned form.
 	wantStripped := []string{
 		"credential.helper",
@@ -88,7 +88,7 @@ func TestRedactGitConfigSecrets(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(wantStripped, "\n") {
 		t.Errorf("stripped keys = %v, want %v", got, wantStripped)
 	}
-	// G3: no userinfo placeholder may appear in the stripped names either.
+	// No userinfo placeholder may appear in the stripped names either.
 	for _, bad := range []string{"s3cret", "bob:pw", "alice"} {
 		if strings.Contains(strings.Join(stripped, "\n"), bad) {
 			t.Errorf("stripped names contain userinfo %q: %v", bad, stripped)
@@ -158,7 +158,7 @@ func TestRedactGitConfigSecrets_URLKeyCoverage(t *testing.T) {
 			t.Errorf("expected %q in stripped keys, got %v", want, stripped)
 		}
 	}
-	// G3: no userinfo placeholder may appear in the stripped names.
+	// No userinfo placeholder may appear in the stripped names.
 	for _, bad := range []string{"s3cret", "bob:pw", "carol:tok", "dave:pw"} {
 		if strings.Contains(strings.Join(stripped, "\n"), bad) {
 			t.Errorf("stripped names contain userinfo %q: %v", bad, stripped)
@@ -259,14 +259,14 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		"https://host/x%zz": {"https://host/x%zz", false, false},
 		// Unparseable scp-style base with userinfo but no "://": kept unchanged.
 		"git@github.com:o/r.git": {"git@github.com:o/r.git", false, false},
-		// [G1] remote-helper prefix: split, sanitize the remainder, re-prepend.
+		// remote-helper prefix: split, sanitize the remainder, re-prepend.
 		"http::https://u:p@h/x": {"http::https://h/x", true, false},
-		// [G1] helper prefix over an unparseable URL-shaped remainder with userinfo: drop.
+		// helper prefix over an unparseable URL-shaped remainder with userinfo: drop.
 		"http::https://u:p%zz@h/x": {"", false, true},
-		// [G2] ftp/ftps: userinfo removed entirely.
+		// ftp/ftps: userinfo removed entirely.
 		"ftp://u:p@h/x": {"ftp://h/x", true, false},
 		"ftps://u@h/x":  {"ftps://h/x", true, false},
-		// [G2] other schemes with a password: keep only the username.
+		// other schemes with a password: keep only the username.
 		"ssh://u:p@h/x":       {"ssh://u@h/x", true, false},
 		"socks5://u:p@h:1080": {"socks5://u@h:1080", true, false},
 		// Opaque schemeless proxy with userinfo: dropped.
@@ -338,13 +338,13 @@ func TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase(t *testing.T) {
 	outStr := string(out)
 
 	// The userinfo substring must not survive anywhere — the output OR the stripped
-	// key names (G3: noted key names are redacted too).
+	// key names (noted key names are redacted too).
 	if strings.Contains(outStr, "u:p%zz") || strings.Contains(strings.Join(stripped, "\n"), "u:p%zz") {
 		t.Errorf("redacted config/stripped still contains the userinfo substring:\n%s\nstripped=%v", outStr, stripped)
 	}
 
 	// Both dropped keys must be recorded in stripped with the subsection REDACTED
-	// (the Apple refusal keys on a non-empty stripped list; G3 keeps userinfo out of
+	// (the Apple refusal keys on a non-empty stripped list; userinfo is kept out of
 	// the names).
 	for _, want := range []string{
 		"url.<redacted>.insteadof",
@@ -373,10 +373,11 @@ func TestRedactGitConfigSecrets_SubsectionDropsOnUnparseableBase(t *testing.T) {
 	}
 }
 
-// TestRedactGitConfigSecrets_S2Coverage covers the S2 additions: proxy URL keys,
+// TestRedactGitConfigSecrets_ProxyHelperAndKeyNameForms covers proxy URL keys,
 // sendemail.smtppass, lfs.<base> subsections, a remote-helper insteadOf base, and an
-// includeIf hasconfig:remote.*.url subsection. Synthetic placeholder userinfo only.
-func TestRedactGitConfigSecrets_S2Coverage(t *testing.T) {
+// includeIf hasconfig:remote.*.url subsection, plus the redacted key names. Synthetic
+// placeholder userinfo only.
+func TestRedactGitConfigSecrets_ProxyHelperAndKeyNameForms(t *testing.T) {
 	in := strings.Join([]string{
 		"[http]",
 		"\tproxy = https://pxu:pxp@proxy.example/",
@@ -405,7 +406,7 @@ func TestRedactGitConfigSecrets_S2Coverage(t *testing.T) {
 	outStr := string(out)
 	joined := strings.Join(stripped, "\n")
 
-	// No placeholder userinfo may survive in the output OR in the stripped names (G3).
+	// No placeholder userinfo may survive in the output OR in the stripped names.
 	for _, bad := range []string{"pxu:pxp", "smtpAphrase", "smtpBphrase", "lfu:lfp", "iou:iop", "icu:icp"} {
 		if strings.Contains(outStr, bad) || strings.Contains(joined, bad) {
 			t.Errorf("placeholder %q survived:\noutput:\n%s\nstripped=%v", bad, outStr, stripped)

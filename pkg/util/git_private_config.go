@@ -194,9 +194,9 @@ var helperPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
 //   - Anything else (e.g. an scp-style git@host:path remote or url.<base> base with
 //     no "://") is kept unchanged.
 //
-// G5 (known limit, no action): a split-authority base whose authority holds a
-// non-numeric port and no "@" (for example [url "https://alice:tok"] used only as
-// an insteadOf alias) does not parse and is kept unchanged.
+// Known limit: a split-authority base whose authority holds a non-numeric port and
+// no "@" (for example [url "https://alice:tok"] used only as an insteadOf alias)
+// does not parse and is kept unchanged.
 func sanitizeURLUserinfo(s string) (clean string, changed, drop bool) {
 	t := strings.TrimSpace(s)
 	if m := helperPrefixRe.FindString(t); m != "" {
