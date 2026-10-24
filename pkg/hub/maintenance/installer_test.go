@@ -696,6 +696,12 @@ func TestSymlinkInstaller_LinkValidation(t *testing.T) {
 		{"previous dangling", func(t *testing.T, root string) {
 			replaceLink(t, root, prevLinkName, "releases/gone")
 		}, "does not resolve"},
+		{"previous points at a file directly under releases", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, releasesDirName, "stray"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			replaceLink(t, root, prevLinkName, "releases/stray")
+		}, "not a release directory"},
 		{"previous is a directory", func(t *testing.T, root string) {
 			if err := os.Mkdir(filepath.Join(root, prevLinkName), 0o755); err != nil {
 				t.Fatal(err)
@@ -739,6 +745,16 @@ func TestSymlinkInstaller_LinkValidation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("invalid previous error says how to fix it", func(t *testing.T) {
+		root := installLayout(t, "nightly-20261022")
+		replaceLink(t, root, prevLinkName, "releases/gone")
+		err := newSymlinkInstaller(symlinkOpts(root)).Preflight(ctx)
+		prev := filepath.Join(root, prevLinkName)
+		if err == nil || !strings.Contains(err.Error(), "repoint "+prev) || !strings.Contains(err.Error(), "or remove it") {
+			t.Fatalf("Preflight = %v, want an actionable fix for %s", err, prev)
+		}
+	})
 
 	t.Run("valid previous passes", func(t *testing.T) {
 		root := installLayout(t, "nightly-20261022", "nightly-20261021")
@@ -809,6 +825,40 @@ func TestSymlinkInstaller_DeactivateValidates(t *testing.T) {
 			t.Fatalf("current = %q", cur)
 		}
 	})
+
+	// The pre-activation previous target is re-checked before it is written
+	// back: if that release was replaced or removed meanwhile, previous is
+	// dropped instead of pointing at it.
+	for name, tamper := range map[string]func(t *testing.T, root string){
+		"old previous release replaced by an outside symlink": func(t *testing.T, root string) {
+			rel := filepath.Join(root, releasesDirName, "nightly-20261021")
+			if err := os.RemoveAll(rel); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), rel); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"old previous release removed": func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, releasesDirName, "nightly-20261021")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, inst := setup(t)
+			tamper(t, root)
+			if err := inst.Deactivate(ctx); err != nil {
+				t.Fatalf("Deactivate: %v", err)
+			}
+			if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261022" {
+				t.Fatalf("current = %q", cur)
+			}
+			if target, err := os.Readlink(filepath.Join(root, prevLinkName)); err == nil {
+				t.Fatalf("previous restored to the invalid target %q", target)
+			}
+		})
+	}
 
 	t.Run("valid links roll back", func(t *testing.T) {
 		root, inst := setup(t)

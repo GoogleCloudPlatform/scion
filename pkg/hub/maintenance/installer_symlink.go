@@ -115,7 +115,8 @@ func (s *symlinkInstaller) Preflight(context.Context) error {
 	// current: Activate records it and Deactivate restores it.
 	if s.linkExists(prevLinkName) {
 		if _, err := s.checkReleaseLink(prevLinkName); err != nil {
-			return err
+			return fmt.Errorf("%w; repoint %s at a release directory under %s (ln -sfn releases/<tag> %s) or remove it",
+				err, s.linkPath(prevLinkName), s.releasesDir(), s.linkPath(prevLinkName))
 		}
 	}
 
@@ -195,7 +196,7 @@ func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 	}
 
 	swappedPrevious := false
-	if oldCurrent != "" && filepath.Base(oldCurrent) != tag {
+	if filepath.Base(oldCurrent) != tag {
 		if err := s.swapLink(prevLinkName, oldCurrent); err != nil {
 			return fmt.Errorf("update %s: %w", prevLinkName, err)
 		}
