@@ -37,6 +37,12 @@ export interface WaitForHubRestartOptions {
   timeoutMs?: number;
   /** Stops the wait (for example when the page is left). */
   signal?: AbortSignal;
+  /**
+   * Called when the hub answers but does not yet count as restarted. When
+   * it resolves true the wait ends at once with ok=false and stopped=true
+   * (for example: the run being waited for has already failed).
+   */
+  stopWhen?: (observed: HubHealthObservation) => Promise<boolean>;
 }
 
 /** The last /healthz answer seen while waiting. */
@@ -54,6 +60,8 @@ export type HubRestartResult =
       observed: HubHealthObservation | null;
       /** Set when the wait was stopped through the signal, not timed out. */
       aborted?: true;
+      /** Set when stopWhen ended the wait. */
+      stopped?: true;
     };
 
 const INITIAL_DELAY_MS = 500;
@@ -124,7 +132,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function waitForHubRestart(
   options: WaitForHubRestartOptions = {}
 ): Promise<HubRestartResult> {
-  const { expectVersion, timeoutMs = DEFAULT_RESTART_TIMEOUT_MS, signal } = options;
+  const { expectVersion, timeoutMs = DEFAULT_RESTART_TIMEOUT_MS, signal, stopWhen } = options;
   const deadline = Date.now() + timeoutMs;
   let observed: HubHealthObservation | null = null;
 
@@ -152,6 +160,9 @@ export async function waitForHubRestart(
         const versionOk = !expectVersion || seen.version === expectVersion;
         if (fresh && versionOk) {
           return { ok: true, observed: seen };
+        }
+        if (stopWhen && (await stopWhen(seen).catch(() => false))) {
+          return signal?.aborted ? aborted() : { ok: false, observed: seen, stopped: true };
         }
       }
     } catch {

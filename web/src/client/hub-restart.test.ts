@@ -164,4 +164,27 @@ describe('waitForHubRestart', () => {
     const init = fetch.mock.calls[0][1] as RequestInit | undefined;
     expect(init?.signal).toBe(ctrl.signal);
   });
+
+  it('ends early when stopWhen says so, only for answers that do not count', async () => {
+    stubHealthz(['down', { uptime: '2h0m0s', scionVersion: 'v1' }]);
+    const stopWhen = vi.fn(() => Promise.resolve(true));
+    const result = await run({ expectVersion: 'v2', stopWhen }, 5_000);
+    expect(stopWhen).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      ok: false,
+      observed: { version: 'v1', uptime: '2h0m0s', uptimeSeconds: 7200 },
+      stopped: true,
+    });
+  });
+
+  it('keeps waiting while stopWhen says no, and never asks once restarted', async () => {
+    stubHealthz([
+      { uptime: '2h0m0s', scionVersion: 'v1' },
+      { uptime: '2s', scionVersion: 'v2' },
+    ]);
+    const stopWhen = vi.fn(() => Promise.resolve(false));
+    const result = await run({ expectVersion: 'v2', stopWhen }, 5_000);
+    expect(result?.ok).toBe(true);
+    expect(stopWhen).toHaveBeenCalledTimes(1);
+  });
 });

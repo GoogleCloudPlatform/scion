@@ -394,6 +394,9 @@ const RESTART_HUB_TIMEOUT_MS = 60_000;
  */
 const FAILED_POLLS_BEFORE_RECONNECT = 2;
 
+/** Minimum gap between run status checks during a restart wait. */
+const RUN_CHECK_INTERVAL_MS = 5_000;
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -1299,15 +1302,23 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.updateConfirmTarget = null;
       this.updateAvailable = null;
       this.updateReconnectError = null;
-      this.trackedUpdate = {
-        runId: started.runId ?? '',
-        target,
-        expectVersion: target.startsWith('latest:') ? null : target,
-        lastStatus: 'running',
-      };
+      if (started.runId) {
+        this.trackedUpdate = {
+          runId: started.runId,
+          target,
+          expectVersion: target.startsWith('latest:') ? null : target,
+          lastStatus: 'running',
+        };
+      } else {
+        // Without a run id no result can be tied to this update; the run
+        // is still followed if a poll sees it running (trackUpdateRun).
+        showToast('The hub did not return a run id; follow the update in Run History.', 'warning');
+      }
 
-      // Reload operations and poll the run (see trackUpdateRun).
-      await this.loadData();
+      // Reload operations and poll the run (see trackUpdateRun). A polling
+      // load: if the hub is already going down, the failure counts towards
+      // the restart wait instead of replacing the page with an error.
+      await this.loadData(true);
       this.startPolling();
     } catch (err) {
       // The dialog stays open so the user can read the error and cancel.
@@ -1327,6 +1338,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     if (this.peekedRestartingRunId === run.id) return;
     this.peekedRestartingRunId = run.id;
     const pending = await this.peekPendingUpdate();
+    if (!this.isConnected) return;
     if (this.trackedUpdate || !pending?.runId || pending.runId !== run.id) return;
     this.trackedUpdate = {
       runId: run.id,
@@ -1349,6 +1361,7 @@ export class ScionPageAdminMaintenance extends LitElement {
    * run failed before it) reports its result.
    */
   private trackUpdateRun(): void {
+    if (!this.isConnected) return;
     const run = this.updateBinaryRun();
     if (!this.trackedUpdate && run?.status === 'running') {
       this.trackedUpdate = {
@@ -1363,14 +1376,39 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (run?.status === 'restarting') void this.adoptRestartingRun(run);
       return;
     }
-    if (!run || (tracked.runId && run.id !== tracked.runId)) return;
-    if (!tracked.runId) tracked.runId = run.id;
+    if (!run || run.id !== tracked.runId) return;
     tracked.lastStatus = run.status;
     if (run.status === 'restarting') {
       void this.reconnectAfterUpdate();
     } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
       this.trackedUpdate = null;
       void this.fetchUpdateStatus().then(() => this.reportUpdateResult(tracked, run.status));
+    }
+  }
+
+  /** When the restart wait last checked the run status (epoch ms). */
+  private lastRunCheckAt = 0;
+
+  /**
+   * For the restart wait, while the hub answers but has not restarted:
+   * whether the run has already finished (for example Restart() failed
+   * and the run was marked failed), so the wait need not run out. Reads
+   * the list without touching page state, at most every few seconds.
+   */
+  private async trackedRunFinished(runId: string): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.lastRunCheckAt < RUN_CHECK_INTERVAL_MS) return false;
+    this.lastRunCheckAt = now;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/operations', {
+        authErrors: 'caller',
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as MaintenanceResponse;
+      const run = (data.operations ?? []).find((op) => op.key === 'update-binary')?.lastRun;
+      return !!run && run.id === runId && !isRunInProgress(run.status);
+    } catch {
+      return false;
     }
   }
 
@@ -1398,7 +1436,9 @@ export class ScionPageAdminMaintenance extends LitElement {
    */
   private async reconnectAfterUpdate(): Promise<void> {
     const tracked = this.trackedUpdate;
-    if (this.updateReconnecting || !tracked) return;
+    // A poll or peek that resolves after the page was left must not start
+    // a wait nothing would abort.
+    if (this.updateReconnecting || !tracked || !this.isConnected) return;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
@@ -1415,7 +1455,11 @@ export class ScionPageAdminMaintenance extends LitElement {
         }
       }
       const expectVersion = this.trackedUpdate?.expectVersion ?? undefined;
-      const result = await waitForHubRestart({ expectVersion, signal });
+      const result = await waitForHubRestart({
+        expectVersion,
+        signal,
+        stopWhen: () => this.trackedRunFinished(tracked.runId),
+      });
       if (!result.ok && result.aborted) return;
       this.trackedUpdate = null;
       if (!result.ok && !result.observed) {
@@ -1528,6 +1572,8 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
 
       this.failedPollsWhileUpdating = 0;
+      // A later successful load recovers a page left on the error view.
+      if (this.error) this.error = null;
       this.trackUpdateRun();
       if (this.updateReconnecting && this.trackedUpdate) return;
 
@@ -1565,7 +1611,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private startPolling(): void {
-    if (this.pollTimer) return;
+    if (this.pollTimer || !this.isConnected) return;
     this.pollTimer = setInterval(() => void this.loadData(true), 3000);
   }
 

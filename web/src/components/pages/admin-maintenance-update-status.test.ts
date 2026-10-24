@@ -75,7 +75,7 @@ interface Options {
   /** Response to POST update-binary/run. */
   run?: { status: number; body: Json };
   /** Operations list; may change between calls. 'down' rejects the fetch. */
-  operations?: () => Json[] | 'down';
+  operations?: () => Json[] | 'down' | Promise<Json[]>;
   /** Body of POST check-updates, or an HTTP status to fail with. */
   checkUpdates?: Json | number;
 }
@@ -126,6 +126,9 @@ function handler(opts: Options) {
     if (path === '/api/v1/admin/maintenance/operations') {
       const ops = opts.operations ? opts.operations() : OPS;
       if (ops === 'down') return Promise.reject(new TypeError('Failed to fetch'));
+      if (ops instanceof Promise) {
+        return ops.then((o) => json({ migrations: [], operations: o }));
+      }
       return json({ migrations: [], operations: ops });
     }
     if (path === '/api/v1/admin/maintenance') {
@@ -800,6 +803,131 @@ describe('Reconnect after an update restart', () => {
       'Hub updated to nightly-20261023 (verified).',
       'success'
     );
+  });
+
+  it('does not start a wait from a poll that resolves after the page was left', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    let release: ((o: Json[]) => void) | null = null;
+    let ops: Json[] | 'down' | Promise<Json[]> = withRun('running');
+    el = await mount({
+      operations: () => ops,
+      status: updateStatus({ pendingUpdate: PENDING }),
+    });
+    ops = new Promise<Json[]>((resolve) => (release = resolve));
+    const poll = el.loadData(true);
+    el.remove();
+    release!(withRun('restarting'));
+    await poll;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+    expect((el as unknown as { pollTimer: unknown }).pollTimer).toBeNull();
+  });
+
+  it('recovers the page when the list load right after the POST fails', async () => {
+    let ops: Json[] | 'down' = idle();
+    let status: Json | number = updateStatus();
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      ops = withRun('completed');
+      status = verified('run-1');
+      return Promise.resolve({
+        ok: true,
+        observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+      });
+    });
+    el = await mount({ operations: () => ops, status: () => status });
+    el.updateConfirmTarget = 'nightly-20261023';
+    await settle(el);
+    // The hub is already going down when the POST returns.
+    ops = 'down';
+    confirmUpdate(el);
+    await settle(el);
+    expect(root(el).querySelector('.error-state')).toBeNull();
+    expect(root(el).querySelector('.section.server-version')).not.toBeNull();
+
+    await el.loadData(true);
+    await settle(el);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(root(el).querySelector('.error-state')).toBeNull();
+    expect(versionSection(el).querySelector('.current-version')?.textContent).toBe(
+      'nightly-20261023'
+    );
+    expect(showToast).toHaveBeenCalledWith(
+      'Hub updated to nightly-20261023 (verified).',
+      'success'
+    );
+  });
+
+  it('clears the error view after a later successful load', async () => {
+    let ops: Json[] | 'down' = 'down';
+    el = await mount({ operations: () => ops });
+    expect(root(el).querySelector('.error-state')).not.toBeNull();
+    ops = idle();
+    await el.loadData(true);
+    await settle(el);
+    expect(root(el).querySelector('.error-state')).toBeNull();
+  });
+
+  it('ends the wait early when the run fails while the hub keeps answering', async () => {
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    let stopAnswer: boolean | undefined;
+    vi.mocked(waitForHubRestart).mockImplementation(async (opts) => {
+      const old = { version: 'nightly-20261022', uptime: '2h0m0s', uptimeSeconds: 7200 };
+      // Restart() failed: the run is marked failed, the old hub stays up.
+      hub!.setOps(withRun('failed'));
+      hub!.setStatus(failed('run-1'));
+      stopAnswer = await opts!.stopWhen!(old);
+      return { ok: false, observed: old, stopped: true };
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(stopAnswer).toBe(true);
+    expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
+    expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();
+  });
+
+  it('does not end the wait while the run is still restarting', async () => {
+    let stopAnswer: boolean | undefined;
+    vi.mocked(waitForHubRestart).mockImplementation(async (opts) => {
+      stopAnswer = await opts!.stopWhen!({
+        version: 'nightly-20261022',
+        uptime: '2h0m0s',
+        uptimeSeconds: 7200,
+      });
+      return new Promise(() => {});
+    });
+    const hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+    expect(stopAnswer).toBe(false);
+  });
+
+  it('does not tie a result to the update when the POST returns no run id', async () => {
+    let ops: Json[] = [
+      op('update-binary', 'Update Binary', { id: 'run-0', status: 'completed', startedAt: '' }),
+    ];
+    el = await mount({
+      operations: () => ops,
+      status: () => verified('run-0'),
+      run: { status: 200, body: { status: 'running' } },
+    });
+    el.updateConfirmTarget = 'nightly-20261023';
+    await settle(el);
+    confirmUpdate(el);
+    await settle(el);
+    ops = [...ops];
+    await el.loadData(true);
+    await settle(el);
+
+    const toasts = vi.mocked(showToast).mock.calls.map((c) => String(c[0]));
+    expect(toasts).toContain('The hub did not return a run id; follow the update in Run History.');
+    expect(toasts.some((t) => t.includes('(verified)'))).toBe(false);
+    expect((el as unknown as { trackedUpdate: unknown }).trackedUpdate).toBeNull();
   });
 
   it('aborts the wait when the page is left', async () => {
