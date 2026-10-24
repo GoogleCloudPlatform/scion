@@ -194,3 +194,88 @@ func TestSyncCreateFailure_StartFailureKeepsReservationWhileAgentBranchRemains(t
 		})
 	}
 }
+
+// linkedCheckoutStart makes the flat project root a git checkout (no
+// worktree-per-agent shared base) and leaves what a ProvisionAgent start
+// on a reused branch leaves there: a worktree on branch slug at
+// .scion/agents/<slug>/workspace, registered by name, with a commit of its
+// own on the branch. It returns the checkout and the branch tip.
+func linkedCheckoutStart(t *testing.T, root, slug string) (string, string) {
+	t.Helper()
+	startFailureGitOut(t, root, "init", "-q", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"), []byte("project\n"), 0o644))
+	startFailureGitOut(t, root, "add", "README.md")
+	startFailureGitOut(t, root, "commit", "-q", "-m", "initial")
+	scionDir := filepath.Join(root, config.DotScion)
+	wt := filepath.Join(scionDir, "agents", slug, "workspace")
+	startFailureGitOut(t, root, "worktree", "add", "-q", "-b", slug, wt)
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "work.txt"), []byte("work\n"), 0o644))
+	startFailureGitOut(t, wt, "add", "work.txt")
+	startFailureGitOut(t, wt, "commit", "-q", "-m", "work")
+	require.NoError(t, provision.RegisterSharer(root, scionDir, slug, wt, slug))
+	tip := startFailureBranchTip(t, root, slug)
+	require.NotEmpty(t, tip)
+	return wt, tip
+}
+
+// In a linked checkout (ProvisionAgent layout, registered by name), the
+// start-failure cleanup removes the agent's own worktree and keeps the
+// branch and its commit; the files proof then keeps the record and the
+// slug reserved until the agent's delete.
+func TestCleanupAbortedLaunch_StartFailureKeepsReservationLinkedCheckout(t *testing.T) {
+	requireWorktreeGit(t)
+	t.Setenv("SCION_HOST_UID", "")
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.srv.config.FlatInstance.Instance.RuntimeTarget = &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeDocker}
+	root := flatProjectRoot(t)
+	const agentID, slug, runID = "agent-id-lc", "lc-agent", "run-lc"
+	require.NoError(t, f.srv.ownership.BeginRun(flatTestProjectID, agentID, slug, runID))
+	wt, tip := linkedCheckoutStart(t, root, slug)
+	require.NoError(t, writeLaunchMarker(root, false, slug, "L1"))
+
+	key := ownedRunKey{projectID: flatTestProjectID, agentID: agentID, runID: runID}
+	rec := newLaunchRecord("L1", agentID, store.LaunchKindCreate, "", time.Now().Add(time.Minute), func() {})
+	rec.ownedRun = key
+	lc := launchCtx{
+		opts:  api.StartOptions{Name: slug, ProjectPath: root, HubProjectID: flatTestProjectID, RunID: runID},
+		mgr:   f.mgr,
+		key:   launchKey{ProjectID: flatTestProjectID, Slug: slug},
+		owned: &ownedStart{hold: f.srv.holdOwnedRun(key)},
+	}
+	_ = f.srv.cleanupAbortedLaunch(f.mgr, rec, lc)
+
+	_, err := os.Lstat(wt)
+	assert.True(t, os.IsNotExist(err), "the agent's own worktree is removed")
+	assert.Equal(t, tip, startFailureBranchTip(t, root, slug), "the branch and its commit are kept")
+	assert.False(t, rec.filesRemoved.Load(), "files not proven removed while the agent's branch remains")
+	got, ok, err := f.srv.ownership.Get(flatTestProjectID, agentID)
+	require.NoError(t, err)
+	require.True(t, ok, "the ownership record is kept")
+	assert.Equal(t, OwnershipStateActive, got.State)
+	assert.Equal(t, agentID, flatSlugHolder(t, f, slug), "the slug stays reserved")
+}
+
+// The same linked-checkout case through the synchronous create.
+func TestSyncCreateFailure_StartFailureKeepsReservationLinkedCheckout(t *testing.T) {
+	requireWorktreeGit(t)
+	t.Setenv("SCION_HOST_UID", "")
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.srv.config.FlatInstance.Instance.RuntimeTarget = &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeDocker}
+	root := flatProjectRoot(t)
+	const slug = "lc-sync"
+	agentID := "agent-id-" + slug
+	wt, tip := linkedCheckoutStart(t, root, slug)
+
+	f.mgr.startErr = errors.New("start failed")
+	w := flatCreateAccepted(f, slug)
+	require.GreaterOrEqual(t, w.Code, 400, w.Body.String())
+
+	_, err := os.Lstat(wt)
+	assert.True(t, os.IsNotExist(err), "the agent's own worktree is removed")
+	assert.Equal(t, tip, startFailureBranchTip(t, root, slug), "the branch and its commit are kept")
+	got, ok, err := f.srv.ownership.Get(flatTestProjectID, agentID)
+	require.NoError(t, err)
+	require.True(t, ok, "the ownership record is kept")
+	assert.Equal(t, OwnershipStateActive, got.State)
+	assert.Equal(t, agentID, flatSlugHolder(t, f, slug), "the slug stays reserved")
+}
