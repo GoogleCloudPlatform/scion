@@ -934,7 +934,7 @@ Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `sourc
 
 **How a release is installed.** At startup the Hub detects an installer strategy for its host, shown on the Maintenance page:
 
-- `symlink`: the running binary lives under `<install_root>/releases/` and `<install_root>/current` is a symlink owned by the Hub's user (the single-node VM layout). The Hub verifies the release, places it in `releases/<tag>/`, switches `current` atomically (the old release becomes `previous`), then exits so that systemd restarts it on the new binary. **Restart Hub** also restarts this way.
+- `symlink`: the running binary lives under `<install_root>/releases/` and `<install_root>/current` is a symlink owned by the Hub's user (the single-node VM layout). The Hub verifies the release, places it in `releases/<tag>/`, switches `current` atomically (the old release becomes `previous`), then exits so that systemd restarts it on the new binary. **Restart Hub** also restarts this way. Restart Hub is refused (`409`) while an update or rebuild is running, and holds back new ones until the Hub is back.
 - `sudo-install`: a repository path is configured and the Hub user has the starter hub's exact sudoers rules. The verified binary is staged at `<repo>/scion.rebuild` and installed with `sudo -n install`, then the service is restarted with `sudo -n systemctl restart`. No other sudo rights are used.
 - `unsupported`: anything else. The update and the automatic policy stop before anything is downloaded, and the Maintenance page shows the reason and how to fix it.
 

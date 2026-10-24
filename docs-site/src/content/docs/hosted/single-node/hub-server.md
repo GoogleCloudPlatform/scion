@@ -208,7 +208,7 @@ Administrators can trigger critical infrastructure operations directly from the 
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running. It replaces the binary only, never the systemd unit. On a starter hub it compares the installed unit with `scripts/starter-hub/scion-hub.service.tmpl` in the checked-out tree. If they differ, the run log and a banner on this page say "re-provision needed", with the steps: re-run `scripts/starter-hub/gce-start-hub.sh --full` from the provisioning workstation with the original flags. The banner clears after a rebuild reports a match.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
-- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
+- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts. It is refused with `409 Conflict` while an **Update Binary** or **Rebuild Server** run is running, and once accepted it holds back new update and rebuild runs (also `409 Conflict`) until the Hub is back, for at most 2 minutes. An update that is already waiting for its own restart does not block it.
 
 ### Migrations
 
@@ -237,7 +237,7 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 
 To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
 - **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
-- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds. **Update Binary**, **Rebuild Server** and **Restart Hub** form one group: none of them starts while another is in progress (Restart Hub only waits for a running update or rebuild), and the `409` error names the blocking operation and run.
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
 
 ## Persistence

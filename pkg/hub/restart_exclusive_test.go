@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,12 +57,11 @@ func decodeAPIError(t *testing.T, body []byte) apiErrorBody {
 	return e
 }
 
-// G5: Restart Hub is refused while an update or rebuild is in flight,
-// including an update that is restarting the hub itself.
+// G5: Restart Hub is refused while an update or rebuild is running (the
+// window between an update's Activate and its before-restart hook).
 func TestHandleAdminRestart_RefusedWhileHubBinaryRunInFlight(t *testing.T) {
 	for _, tt := range []struct{ key, status string }{
 		{"update-binary", store.MaintenanceStatusRunning},
-		{"update-binary", store.MaintenanceStatusRestarting},
 		{"rebuild-server", store.MaintenanceStatusRunning},
 	} {
 		t.Run(tt.key+"/"+tt.status, func(t *testing.T) {
@@ -75,8 +75,9 @@ func TestHandleAdminRestart_RefusedWhileHubBinaryRunInFlight(t *testing.T) {
 				t.Fatalf("response = %d %s, want 409", rr.Code, rr.Body.String())
 			}
 			e := decodeAPIError(t, rr.Body.Bytes())
-			if e.Error.Code != errCodeOperationInProgress || e.Error.Details["runId"] != blocking.ID ||
-				e.Error.Details["operationKey"] != tt.key || e.Error.Message == "" {
+			if e.Error.Code != ErrCodeConflict || e.Error.Details["runId"] != blocking.ID ||
+				e.Error.Details["operationKey"] != tt.key || e.Error.Details["status"] != tt.status ||
+				!strings.Contains(e.Error.Message, "Cannot restart the hub while "+tt.key) {
 				t.Fatalf("error = %+v", e.Error)
 			}
 			if inst.restartCount() != 0 {
@@ -86,6 +87,23 @@ func TestHandleAdminRestart_RefusedWhileHubBinaryRunInFlight(t *testing.T) {
 				t.Fatal("a refused restart must not reserve the group")
 			}
 		})
+	}
+}
+
+// A "restarting" update already wrote its pending update, so a restart is
+// safe; Restart Hub stays the in-UI way out when that update's own restart
+// never ends the process.
+func TestHandleAdminRestart_AllowedWhileUpdateRestarting(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	inst := newTestInstaller(maintenance.StrategySudoInstall)
+	srv.config.MaintenanceConfig.Installer = inst
+	createRunWithStatus(t, s, "update-binary", store.MaintenanceStatusRestarting)
+
+	if rr := postRestart(t, srv); rr.Code != http.StatusOK {
+		t.Fatalf("response = %d %s, want 200", rr.Code, rr.Body.String())
+	}
+	if inst.restartCount() != 1 || !srv.hubRestartPending() {
+		t.Fatalf("restarts = %d, reserved = %v", inst.restartCount(), srv.hubRestartPending())
 	}
 }
 
@@ -125,11 +143,17 @@ func TestHubRestartReservation_RefusesHubBinaryRuns(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("update during restart = %d %s, want 409", rr.Code, rr.Body.String())
 	}
-	if e := decodeAPIError(t, rr.Body.Bytes()); e.Error.Code != errCodeOperationInProgress {
+	if e := decodeAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
+		!strings.Contains(e.Error.Message, "hub restart is in progress") {
 		t.Fatalf("error = %+v", e.Error)
 	}
-	if rr := postOperationRun(t, srv, "rebuild-server", `{"params":{}}`); rr.Code != http.StatusConflict {
+	rr = postOperationRun(t, srv, "rebuild-server", `{"params":{}}`)
+	if rr.Code != http.StatusConflict {
 		t.Fatalf("rebuild during restart = %d %s, want 409", rr.Code, rr.Body.String())
+	}
+	if e := decodeAPIError(t, rr.Body.Bytes()); e.Error.Code != ErrCodeConflict ||
+		!strings.Contains(e.Error.Message, "hub restart is in progress") {
+		t.Fatalf("rebuild error = %+v", e.Error)
 	}
 
 	// The scheduled auto update is held back too.
@@ -181,8 +205,9 @@ func TestHubRestartReservation_ReleasedOnFailureAndExpires(t *testing.T) {
 
 	t.Run("an active reservation refuses with errHubRestartPending", func(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
-		if blocking, err := srv.reserveHubRestart(ctx); err != nil || blocking != nil {
-			t.Fatalf("reserve: blocking=%v err=%v", blocking, err)
+		blocking, stamp, err := srv.reserveHubRestart(ctx)
+		if err != nil || blocking != nil || stamp == 0 {
+			t.Fatalf("reserve: blocking=%v stamp=%d err=%v", blocking, stamp, err)
 		}
 		run := newUpdateRun()
 		if _, err := srv.createExclusiveMaintenanceRun(ctx, run); !errors.Is(err, errHubRestartPending) {
@@ -191,9 +216,33 @@ func TestHubRestartReservation_ReleasedOnFailureAndExpires(t *testing.T) {
 		if _, err := s.GetMaintenanceRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("run created during a restart: %v", err)
 		}
-		srv.releaseHubRestart()
+		srv.releaseHubRestart(stamp)
 		if blocking, err := srv.createExclusiveMaintenanceRun(ctx, newUpdateRun()); err != nil || blocking != nil {
 			t.Fatalf("after release: blocking=%v err=%v", blocking, err)
+		}
+	})
+
+	t.Run("a failed restart does not release a concurrent restart's reservation", func(t *testing.T) {
+		srv, _ := newTestServerWithStore(t)
+		_, first, err := srv.reserveHubRestart(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond) // distinct stamps
+		_, second, err := srv.reserveHubRestart(ctx)
+		if err != nil || second == first {
+			t.Fatalf("second reserve: stamp=%d (first %d) err=%v", second, first, err)
+		}
+		srv.releaseHubRestart(first) // the first restart failed
+		if !srv.hubRestartPending() {
+			t.Fatal("the first restart's failure released the second restart's reservation")
+		}
+		if _, err := srv.createExclusiveMaintenanceRun(ctx, newUpdateRun()); !errors.Is(err, errHubRestartPending) {
+			t.Fatalf("err = %v, want errHubRestartPending", err)
+		}
+		srv.releaseHubRestart(second)
+		if srv.hubRestartPending() {
+			t.Fatal("releasing the current stamp must clear the reservation")
 		}
 	})
 }
