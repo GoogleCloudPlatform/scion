@@ -227,6 +227,7 @@ func (c *Client) UploadFiles(ctx context.Context, root *os.Root, files []FileInf
 // Every entry path must be a canonical relative path (see ValidateRelPath), and
 // files are written through an os.Root opened on destDir, so downloaded files
 // are only ever written inside destDir.
+// A non-empty entry Hash is verified before writing the file.
 // If progress is not nil, it is called after each file is downloaded.
 func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, destDir string, progress ProgressCallback) error {
 	for i, url := range urls {
@@ -251,6 +252,11 @@ func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, dest
 		content, err := c.DownloadFile(ctx, url.URL)
 		if err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
+		}
+		if url.Hash != "" {
+			if actualHash := HashBytes(content); actualHash != url.Hash {
+				return fmt.Errorf("hash mismatch for file %s: expected %s, got %s", url.Path, url.Hash, actualHash)
+			}
 		}
 		if err := WriteFileInRoot(root, url.Path, content, 0644); err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
