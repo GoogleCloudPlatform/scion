@@ -12,6 +12,7 @@
   "include": [
     "./agent-store-count/*.ts",
     "./artifacts-access/*.ts",
+    "./artifacts-agent-owned/*.ts",
     "./chat/*.ts",
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",
