@@ -43,7 +43,12 @@ import {
   NON_DISCLOSURE_ERROR,
   noRuntimeReason,
 } from '../artifacts-agent-owned/rows.js';
-import { DEVIATION, refuseRemoteTarget } from '../artifacts-agent-owned/state.js';
+import { harnessCredentialEnvNames } from '../async-create/credential-guard.js';
+import {
+  DEVIATION,
+  SUITE_DEFAULT_HARNESS,
+  refuseRemoteTarget,
+} from '../artifacts-agent-owned/state.js';
 
 const ID = '5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d';
 
@@ -97,7 +102,7 @@ test('parsePublish reads the exit status and the reference, not the typed format
   expect(parsePublish(`${typed}\nR1B-PUBLISH-EXIT=1\nError: forbidden\n`).exit).toBe(1);
 });
 
-/** The spec's row list (R1B-journey-spec rev 3 sections 3 and 5), pinned as a literal: 27 ids. */
+/** The spec's row list (R1B-journey-spec rev 4 sections 3 and 5), pinned as a literal: 27 ids. */
 const SPEC_ROW_IDS = [
   'R1B-P1',
   'R1B-P2',
@@ -175,6 +180,19 @@ test('the shell prompt reader takes the last non-blank line', () => {
   expect(shellPromptShown('This agent started without credentials.\nscion@abc:~$ \n\n')).toBe(true);
   expect(shellPromptShown('root@abc:/# ')).toBe(true);
   expect(shellPromptShown('scion@abc:~$ printf x\nx\n')).toBe(false);
+});
+
+test('the credential guard covers the default harness gemini-cli', () => {
+  const names = harnessCredentialEnvNames();
+  for (const n of [
+    'GEMINI_API_KEY',
+    'GOOGLE_API_KEY',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_CLOUD_PROJECT',
+  ]) {
+    expect(names, `the guard names ${n}`).toContain(n);
+  }
+  expect(SUITE_DEFAULT_HARNESS).toBe('gemini-cli');
 });
 
 test('a remote target is refused', () => {

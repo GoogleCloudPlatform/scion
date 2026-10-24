@@ -80,6 +80,8 @@ export const AO_SELECTORS = {
   /** Signed-out pages (components/pages/login.ts scion-login-page, unauthorized.ts). */
   loginPage: 'scion-login-page',
   unauthorizedPage: 'scion-page-unauthorized',
+  /** A success toast (utils/toast.ts showToast: an sl-alert moved into the toast stack). */
+  successToast: 'sl-alert[variant="success"]',
   /** The test-hub banner (shared test-hub banner, see e2e/test-hub-banner). */
   testHubBanner: 'sl-alert.test-hub-banner',
 } as const;

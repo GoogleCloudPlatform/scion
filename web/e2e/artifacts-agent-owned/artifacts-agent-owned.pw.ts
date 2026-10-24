@@ -15,7 +15,7 @@
 /**
  * Access to an artifact OWNED BY AN AGENT, graded at the UI per role (R1-B),
  * end to end on a local throwaway hub restarted without development
- * sign-in (spec R1B-journey-spec rev 3).
+ * sign-in (spec R1B-journey-spec rev 4).
  *
  * Five member test identities, each in its own browser context: powner
  * (creates the home project: project owner), aowner (project member; creates
@@ -495,12 +495,11 @@ async function searchReviewPeople(
   query: string,
   userId: string
 ): Promise<{ status: number; inAnswer: boolean }> {
-  const answer = page.waitForResponse(
-    (res) =>
-      res.request().method() === 'GET' &&
-      new URL(res.url()).pathname === '/api/v1/users' &&
-      new URL(res.url()).searchParams.get('search') === query
-  );
+  const answer = page.waitForResponse((res) => {
+    if (res.request().method() !== 'GET') return false;
+    const u = new URL(res.url());
+    return u.pathname === '/api/v1/users' && u.searchParams.get('search') === query;
+  });
   await page.locator(AO.reviewUserInput).fill(query);
   const res = await answer;
   const body = (await res.json().catch(() => ({}))) as { users?: Array<{ id: string }> };
@@ -719,16 +718,14 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           ).toBeAttached();
           const landed = new URL(page.url()).pathname;
           r.ui.anonymousLanding = landed;
-          r.ui.anonymousLandingPage =
-            (await page.locator(AO.unauthorizedPage).count()) > 0
-              ? '401 page'
-              : (await page.locator(AO.loginPage).count()) > 0
-                ? 'login page'
-                : 'neither';
-          expect
-            .soft(r.ui.anonymousLandingPage, 'no session: / shows the login or the 401 page')
-            .not.toBe('neither');
-          expect.soft(await page.locator('scion-nav').count(), 'no signed-in navigation').toBe(0);
+          const landing =
+            (await page.locator(AO.unauthorizedPage).count()) > 0 ? '401 page' : 'login page';
+          r.ui.anonymousLandingPage = landing;
+          // The login page is a standalone route without navigation; a 401 page renders inside the app
+          // shell, which always has the navigation, so the check applies to the login landing only.
+          if (landing === 'login page') {
+            expect.soft(await page.locator('scion-nav').count(), 'no signed-in navigation').toBe(0);
+          }
           const after = await context.request.get('/auth/me', { maxRedirects: 0 });
           r.ui.anonymousAuthMeAfterLanding = after.status();
           expect.soft(after.status(), 'still not signed in after the landing').toBe(401);
@@ -1044,7 +1041,15 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         uploadVersion: false,
       });
       expect.soft(snap.historyEdit, 'History Edit hidden').toBe(false);
-      await expectOwnerLabel('aowner', await expectedOwnerLabel('aowner', r), r);
+      // The creator can read its agent, so the frozen label is the agent's name (spec R1B-02), never a short id.
+      const aownerLabel = await expectedOwnerLabel('aowner', r);
+      expect
+        .soft((r.ui.aownerAgentLookup as { status: number }).status, 'aowner can read its agent')
+        .toBe(200);
+      expect
+        .soft(aownerLabel, 'the owner label names the agent')
+        .toBe(`${suite.agent!.name} (agent)`);
+      await expectOwnerLabel('aowner', aownerLabel, r);
       const c = await caps('aowner', r);
       expect.soft(c.canPublish, 'canPublish').toBe(false);
       expect.soft(c.canReview, 'canReview').toBe(false);
@@ -1388,12 +1393,14 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
 
     await row('R1B-10', async (r) => {
       for (const key of ['aowner', 'powner'] as const) {
-        const snap = await snapshot(key, `R1B-10 (${key})`);
+        const snap = await snapshot(key, `R1B-10 (${key})`, { history: true });
         r.ui[`${key}Snapshot`] = snap;
         expectControls(snap, {
-          visible: ['Grant review access', 'Retention…', 'Delete…'],
+          visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
           hidden: ['Edit', 'Review', 'Share', 'Move…'],
+          uploadVersion: false,
         });
+        expect.soft(snap.historyEdit, `${key}: History Edit hidden`).toBe(false);
         expect.soft(snap.reviewPending, `${key}: Review pending`).toBe(true);
         await expectOwnerLabel(key, await expectedOwnerLabel(key, r), r);
         const c = await caps(key, r);
@@ -1539,23 +1546,27 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     await row(
       'R1B-16',
       async (r) => {
-        const powner = await snapshot('powner', 'R1B-16 (powner)');
+        const powner = await snapshot('powner', 'R1B-16 (powner)', { history: true });
         r.ui.powner = powner;
         expectControls(powner, {
-          visible: ['Grant review access', 'Retention…', 'Delete…'],
+          visible: ['Grant review access', 'Retention…', 'Delete…', 'Download'],
           hidden: ['Edit', 'Review', 'Share', 'Move…'],
+          uploadVersion: false,
         });
+        expect.soft(powner.historyEdit, 'powner: History Edit hidden').toBe(false);
         const pc = await caps('powner', r);
         expect.soft(pc.canShare, 'powner canShare').toBe(true);
         expect.soft(pc.shareAuthority, 'powner shareAuthority').toBe('project_owner');
         expect.soft(pc.canGrantReview, 'powner canGrantReview').toBe(true);
         expect.soft(pc.canRetire, 'powner canRetire').toBe(true);
-        const padmin = await snapshot('padmin', 'R1B-16 (padmin)');
+        const padmin = await snapshot('padmin', 'R1B-16 (padmin)', { history: true });
         r.ui.padmin = padmin;
         expectControls(padmin, {
-          visible: ['Grant review access', 'Delete…'],
+          visible: ['Grant review access', 'Delete…', 'Download'],
           hidden: ['Edit', 'Review', 'Share', 'Retention…', 'Move…'],
+          uploadVersion: false,
         });
+        expect.soft(padmin.historyEdit, 'padmin: History Edit hidden').toBe(false);
         const ac = await caps('padmin', r);
         expect.soft(ac.canGrantReview, 'padmin canGrantReview').toBe(true);
         expect.soft(ac.canRetire, 'padmin canRetire').toBe(true);
@@ -1613,9 +1624,20 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
             q.request().method() === 'DELETE' &&
             new URL(q.url()).pathname === `/api/v1/artifacts/${id}`
         );
+        // The page says it was deleted: the success toast (artifact-detail.ts onDeleted), watched from the click on.
+        const toast = page
+          .locator(AO.successToast)
+          .filter({ hasText: `Deleted “${ARTIFACT_TITLE}”.` })
+          .first()
+          .waitFor({ state: 'visible' })
+          .then(() => true)
+          .catch(() => false);
         await deleteConfirmButton(page).click();
         const a = await answer;
         ui.status = a.status();
+        ui.deletedToast = await toast;
+        if (!ui.deletedToast)
+          residue.push('artifact UI delete: the page did not say it was deleted');
         await expect(page).toHaveURL(new RegExp(`/projects/${escapeRegExp(projectId())}/?$`));
         ui.landed = redactPath(new URL(page.url()).pathname);
         if (a.status() !== 204) residue.push(`artifact UI delete answered ${a.status()}`);
@@ -1728,6 +1750,9 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     // hub's temp dir (database included) when E2E_KEEP_HUB_STATE=1.
     cleanup.keepHubState = keepHubState();
     cleanup.hubDiscardScheduled = !keepHubState();
+    // The key the frozen oracle and the spec name (local mode records hubDiscarded: true); it holds the
+    // same value as hubDiscardScheduled (the discard happens at global teardown, after this evidence).
+    cleanup.hubDiscarded = !keepHubState();
 
     for (const [what, s] of Object.entries(states)) {
       if (s !== 'absent' && !isGone(s as Parameters<typeof isGone>[0])) {
