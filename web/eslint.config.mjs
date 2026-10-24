@@ -148,6 +148,7 @@ export default defineConfig([
     [
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
+      'e2e/artifacts-agent-owned/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',
@@ -160,6 +161,7 @@ export default defineConfig([
       'e2e/test-hub-banner/*.ts',
       'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
+      'e2e/page-policy/*.ts',
       'e2e/iap-driver/*.ts',
       'e2e/iap-journey/*.ts',
       'e2e/harness-selftest/*.ts',
