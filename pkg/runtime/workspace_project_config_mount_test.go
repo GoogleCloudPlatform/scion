@@ -717,9 +717,16 @@ func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
 	}
 	subdir := func(t *testing.T, cfg RunConfig) RunConfig {
 		root := filepath.Join(t.TempDir(), "repo")
-		mkdirs(t, filepath.Join(root, ".git"))
-		withAgentsFile(filepath.Join(root, "sub", ".scion"))
-		cfg.RepoRoot, cfg.Workspace = root, filepath.Join(root, "sub")
+		mkdirs(t, filepath.Join(root, ".git", "hooks"), filepath.Join(root, ".git", "info"))
+		writeFile(t, filepath.Join(root, ".git", "config"), "[core]\n")
+		ws := filepath.Join(root, "sub")
+		withAgentsFile(filepath.Join(ws, ".scion"))
+		cfg.RepoRoot, cfg.Workspace = root, ws
+		// A repo-subdirectory workspace reaches the worktree layout, which refuses
+		// unless it is a broker-recorded worktree with a private git config; set
+		// those up so the start reaches the agents-mask fail-closed check.
+		setupWorktreeAdmin(t, root, "sub", ws)
+		cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
 		return cfg
 	}
 	plain := func(t *testing.T, cfg RunConfig) RunConfig {
@@ -763,6 +770,43 @@ func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestBuildCommonRunArgs_UnregisteredRepoSubdirectoryRefused pins the behaviour
+// that a project in a repository subdirectory that is NOT a registered worktree
+// is refused before the agents-mask check: the worktree layout mounts per-agent
+// git metadata and cannot resolve a broker-recorded worktree admin for a plain
+// subdirectory, so the start fails closed with nothing mounted. The
+// registered-worktree variant of the same layout is covered by
+// TestBuildCommonRunArgs_AgentsMaskPointFailsClosed's "project in a repo
+// subdirectory" row. This refusal is new relative to upstream.
+func TestBuildCommonRunArgs_UnregisteredRepoSubdirectoryRefused(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		t.Run(rt, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			root := filepath.Join(t.TempDir(), "repo")
+			ws := filepath.Join(root, "sub")
+			// A real agents/ dir, so a refusal here is the unregistered-worktree
+			// one, not the agents-mask one.
+			mkdirs(t, filepath.Join(root, ".git"), filepath.Join(ws, ".scion", "agents"))
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+			mkdirs(t, cfg.HomeDir)
+			cfg.RepoRoot, cfg.Workspace = root, ws
+			args, err := buildCommonRunArgs(cfg)
+			if !errors.Is(err, errWorktreeAdminUnresolved) {
+				t.Fatalf("error = %v, want errWorktreeAdminUnresolved", err)
+			}
+			if !strings.Contains(err.Error(), "cannot resolve the broker-recorded worktree admin directory") {
+				t.Errorf("error lacks the worktree-admin reason: %v", err)
+			}
+			if args != nil {
+				t.Errorf("fail-closed: expected nil args, got %q", args)
+			}
+		})
 	}
 }
 

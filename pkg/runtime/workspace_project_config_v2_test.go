@@ -16,9 +16,12 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -101,8 +104,9 @@ func TestBuildCommonRunArgs_RegisteredOutsideWorktreeProjectConfig(t *testing.T)
 			ws := filepath.Join(base, "outside-wt")
 			layoutGit(t, main, "worktree", "add", "-q", "-b", "dev", ws)
 			// The worktree holds this project's .scion (settings/templates), which
-			// the broker reads; it must be mounted read-only.
-			mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+			// the broker reads; it must be mounted read-only. Its agents/ must
+			// already exist so the read-only bind can be masked on Docker/Podman.
+			mkdirs(t, filepath.Join(ws, ".scion", "templates"), filepath.Join(ws, ".scion", "agents"))
 
 			cfg := minimalRunConfig()
 			cfg.BrokerMode = true
@@ -222,6 +226,22 @@ func assertNestedProjectConfig(t *testing.T, cfg RunConfig, withAgents bool) {
 // in-repo worktree branch).
 func assertNestedProjectConfigAt(t *testing.T, cfg RunConfig, containerWorkspace string, withAgents bool) {
 	t.Helper()
+	if cfg.RuntimeName != appleContainerRuntimeName && !withAgents {
+		// On Docker and Podman a nested .scion with no agents/ refuses the start
+		// fail-closed (requireExistingAgentsMask never creates the mask point
+		// under this read-only bind), and nothing is created on disk. Apple still
+		// starts without a mask (handled by the success path below).
+		before := fsSnapshot(t, cfg.Workspace)
+		args, err := buildCommonRunArgs(cfg)
+		if !errors.Is(err, errAgentsMaskPointMissing) {
+			t.Fatalf("nested no-agents start: error = %v, want errAgentsMaskPointMissing", err)
+		}
+		if args != nil {
+			t.Errorf("fail-closed: expected nil args, got %q", args)
+		}
+		assertNothingCreated(t, before, cfg.Workspace)
+		return
+	}
 	args, err := buildCommonRunArgs(cfg)
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs: %v", err)
@@ -283,7 +303,7 @@ func assertNestedProjectConfigAt(t *testing.T, cfg RunConfig, containerWorkspace
 	// emit paths are each covered by a caller that also calls assertMasksAfterBinds:
 	// WorktreeNotOwnNested (which creates <ws>/.scion/agents) exercises the
 	// sharedWorkspaceAgentsMask block; FallbackOwnScionAgentsMask exercises the
-	// nested/own no-create mask flush (maskAgentsIfPresent).
+	// nested/own no-create mask flush (requireExistingAgentsMask).
 	if withAgents {
 		assertMasksAfterBinds(t, args)
 	}
@@ -470,7 +490,11 @@ func TestBuildCommonRunArgs_FallbackNestedProjectConfigReadOnly(t *testing.T) {
 				cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
 				cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
 				assertNestedProjectConfig(t, cfg, withAgents)
-				assertNoRepoRootExposure(t, cfg, main)
+				if withAgents || rt == appleContainerRuntimeName {
+					// The no-repo-root-exposure check re-runs the build; skip it when
+					// the no-agents nested start is refused on Docker/Podman (no args).
+					assertNoRepoRootExposure(t, cfg, main)
+				}
 			})
 		}
 	}
@@ -500,6 +524,22 @@ func TestBuildCommonRunArgs_FallbackOwnScionAgentsMask(t *testing.T) {
 				mkdirs(t, cfg.HomeDir)
 				cfg.RepoRoot, cfg.Workspace = main, ws
 				cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
+
+				if rt != appleContainerRuntimeName && !withAgents {
+					// Docker/Podman: an own .scion with no agents/ refuses the start
+					// fail-closed, creating nothing (requireExistingAgentsMask never
+					// creates the mask point under the read-only bind).
+					before := fsSnapshot(t, ws)
+					args, err := buildCommonRunArgs(cfg)
+					if !errors.Is(err, errAgentsMaskPointMissing) {
+						t.Fatalf("own no-agents start: error = %v, want errAgentsMaskPointMissing", err)
+					}
+					if args != nil {
+						t.Errorf("fail-closed: expected nil args, got %q", args)
+					}
+					assertNothingCreated(t, before, ws)
+					return
+				}
 
 				args, err := buildCommonRunArgs(cfg)
 				if err != nil {
@@ -542,7 +582,7 @@ func TestBuildCommonRunArgs_FallbackOwnScionAgentsMask(t *testing.T) {
 					t.Errorf("agents mask = %v, want %v (withAgents=%v); masks: %q", hasMask, withAgents, withAgents, tmpfsTargets(args))
 				}
 				if withAgents {
-					// The fallback own-.scion mask (via maskAgentsIfPresent) is
+					// The fallback own-.scion mask (via requireExistingAgentsMask) is
 					// emitted after all binds.
 					assertMasksAfterBinds(t, args)
 				}
@@ -737,7 +777,8 @@ func TestBuildCommonRunArgs_NestedProjectConfigPathAsRoot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			ws := filepath.Join(t.TempDir(), "workspace")
-			mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+			// agents/ must already exist so the Docker read-only nested bind is masked.
+			mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"), filepath.Join(ws, "sub", ".scion", "agents"))
 			cfg := minimalRunConfig()
 			cfg.BrokerMode = true
 			cfg.RuntimeName = "docker"
@@ -857,4 +898,534 @@ func TestBuildCommonRunArgs_FallbackOwnScionMarkerAndSymlink(t *testing.T) {
 			assertNothingCreated(t, before, ws)
 		})
 	}
+	// Own .scion is a directory but its agents/ entry is not a directory (a
+	// symlink or a regular file): refused with errAgentsMaskNotDir on every
+	// runtime, creating nothing. The mask point under the read-only bind cannot
+	// be a link or a file.
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		for _, kind := range []string{"symlink", "file"} {
+			t.Run("agents-"+kind+"/"+rt, func(t *testing.T) {
+				main, ws := registeredOutsideWorktree(t)
+				mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+				agentsPath := filepath.Join(ws, ".scion", "agents")
+				if kind == "symlink" {
+					mkdirs(t, filepath.Join(ws, ".scion", "realagents"))
+					if err := os.Symlink("realagents", agentsPath); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					writeFile(t, agentsPath, "not a directory\n")
+				}
+				cfg := minimalRunConfig()
+				cfg.BrokerMode = true
+				cfg.RuntimeName = rt
+				cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+				mkdirs(t, cfg.HomeDir)
+				cfg.RepoRoot, cfg.Workspace = main, ws
+				cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
+				before := fsSnapshot(t, ws)
+				args, err := buildCommonRunArgs(cfg)
+				if !errors.Is(err, errAgentsMaskNotDir) {
+					t.Fatalf("agents-%s/%s: error = %v, want errAgentsMaskNotDir", kind, rt, err)
+				}
+				if args != nil {
+					t.Errorf("fail-closed: expected nil args, got %q", args)
+				}
+				assertNothingCreated(t, before, ws)
+			})
+		}
+	}
+}
+
+// --- agents-mask guarantee gates (a) and (b) ---
+//
+// These two gates pin the reconciled agents-mask behaviour across every call
+// site, runtime and agents/src state. S1-S3 run upstream's ensureAgentsMaskPoint
+// verbatim (no sentinel, no seam); S4, the nested cases (N) and an S3 agent's own
+// workspace reached through N use the no-create requireExistingAgentsMask helper.
+// No row calls t.Skip.
+
+// maskGateSite builds a run config that reaches one agents-mask call site, with
+// the project .scion created as a directory but no agents/ entry, and returns the
+// config and the broker-side .scion directory whose agents/ a row populates.
+//
+//	S1    in-repo non-own worktree, project .scion at <ws>/.scion
+//	S2    shared-plain (non-git, reached on every runtime), <ws>/.scion
+//	S3    config-only (RepoRoot ""), <ws>/.scion
+//	S4    outside-root registered worktree, not own, <ws>/.scion
+//	N     a nested .scion in a subdirectory of a config-only workspace
+//	S3own an S3 agent's OWN workspace with a nested .scion (reached via N)
+func maskGateSite(t *testing.T, site, rt string) (RunConfig, string) {
+	t.Helper()
+	cfg := minimalRunConfig()
+	cfg.BrokerMode = true
+	cfg.RuntimeName = rt
+	cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+	mkdirs(t, cfg.HomeDir)
+	cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
+	switch site {
+	case "S1":
+		repoRoot, ws := setupHubManagedBaseRepo(t, "me")
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = repoRoot, ws
+		cfg.AgentOwnWorkspace = false
+		return cfg, filepath.Join(ws, ".scion")
+	case "S2":
+		ws := filepath.Join(t.TempDir(), "workspace")
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = ws, ws
+		return cfg, filepath.Join(ws, ".scion")
+	case "S3":
+		ws := filepath.Join(t.TempDir(), "workspace")
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+		cfg.Workspace = ws
+		return cfg, filepath.Join(ws, ".scion")
+	case "S4":
+		main, ws := registeredOutsideWorktree(t)
+		mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+		cfg.RepoRoot, cfg.Workspace = main, ws
+		cfg.AgentOwnWorkspace = false
+		return cfg, filepath.Join(ws, ".scion")
+	case "N":
+		ws := filepath.Join(t.TempDir(), "workspace")
+		mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+		cfg.Workspace = ws
+		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+		return cfg, filepath.Join(ws, "sub", ".scion")
+	case "S3own":
+		ws := filepath.Join(t.TempDir(), "workspace")
+		mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+		cfg.Workspace = ws
+		cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+		cfg.AgentOwnWorkspace = true
+		return cfg, filepath.Join(ws, "sub", ".scion")
+	}
+	t.Fatalf("unknown mask gate site %q", site)
+	return cfg, ""
+}
+
+// maskGateResolvedSrc is the broker-side .scion path requireExistingAgentsMask
+// receives (workspaceProjectConfigMount resolves the parent with EvalSymlinks).
+func maskGateResolvedSrc(t *testing.T, scionSrc string) string {
+	t.Helper()
+	return filepath.Join(layoutRealPath(t, filepath.Dir(scionSrc)), filepath.Base(scionSrc))
+}
+
+// injectAgentsMaskLstat swaps the agentsMaskLstat seam so a lookup of target
+// returns injErr, and restores it with t.Cleanup. Tests that use it must not run
+// in parallel.
+func injectAgentsMaskLstat(t *testing.T, target string, injErr error) {
+	t.Helper()
+	real := agentsMaskLstat
+	agentsMaskLstat = func(p string) (os.FileInfo, error) {
+		if p == target {
+			return nil, injErr
+		}
+		return real(p)
+	}
+	t.Cleanup(func() { agentsMaskLstat = real })
+}
+
+// arrangeMaskState sets up the <src>/agents entry (or an injected Lstat fault) for
+// a gate row at a nocreate site. scionSrc is the on-disk .scion directory from
+// maskGateSite.
+func arrangeMaskState(t *testing.T, scionSrc, state string) {
+	t.Helper()
+	agentsPath := filepath.Join(scionSrc, "agents")
+	switch state {
+	case "present":
+		mkdirs(t, agentsPath)
+	case "absent":
+		// nothing
+	case "symlink-agents":
+		mkdirs(t, filepath.Join(scionSrc, "realagents"))
+		if err := os.Symlink("realagents", agentsPath); err != nil {
+			t.Fatal(err)
+		}
+	case "dangling-agents":
+		if err := os.Symlink("nonexistent-target", agentsPath); err != nil {
+			t.Fatal(err)
+		}
+	case "file-agents":
+		writeFile(t, agentsPath, "not a directory\n")
+	case "agents-lstat-error":
+		injectAgentsMaskLstat(t, filepath.Join(maskGateResolvedSrc(t, scionSrc), "agents"),
+			&fs.PathError{Op: "lstat", Path: agentsPath, Err: syscall.EIO})
+	case "src-symlink":
+		// Replace the .scion directory with a symlink; it is refused by
+		// workspaceProjectConfigMount before the helper runs.
+		if err := os.RemoveAll(scionSrc); err != nil {
+			t.Fatal(err)
+		}
+		mkdirs(t, filepath.Join(filepath.Dir(scionSrc), "realscion", "templates"))
+		if err := os.Symlink("realscion", scionSrc); err != nil {
+			t.Fatal(err)
+		}
+	case "src-lstat-error":
+		injectAgentsMaskLstat(t, maskGateResolvedSrc(t, scionSrc),
+			&fs.PathError{Op: "lstat", Path: scionSrc, Err: syscall.EIO})
+	case "src-not-exist":
+		injectAgentsMaskLstat(t, maskGateResolvedSrc(t, scionSrc),
+			&fs.PathError{Op: "lstat", Path: scionSrc, Err: fs.ErrNotExist})
+	default:
+		t.Fatalf("unknown mask state %q", state)
+	}
+}
+
+type maskExpect struct {
+	refuse   bool
+	wantMask bool   // when !refuse
+	is       error  // errors.Is target (when refuse)
+	contains string // substring of err.Error() (when refuse && is == nil)
+}
+
+// maskGateExpect is the pinned outcome for (siteClass, runtime, state).
+func maskGateExpect(nocreate bool, rt, state string) maskExpect {
+	apple := rt == appleContainerRuntimeName
+	if !nocreate { // S1-S3: upstream ensureAgentsMaskPoint, verbatim.
+		switch state {
+		case "present":
+			return maskExpect{wantMask: true}
+		case "absent":
+			if apple {
+				return maskExpect{}
+			}
+			return maskExpect{wantMask: true} // dir created on host, then masked
+		case "symlink-agents":
+			if apple {
+				return maskExpect{wantMask: true} // isDir follows the link
+			}
+			return maskExpect{refuse: true, contains: "the project's agents directory"}
+		case "dangling-agents", "file-agents":
+			if apple {
+				return maskExpect{}
+			}
+			return maskExpect{refuse: true, contains: "the project's agents directory"}
+		}
+	} else { // S4, N, S3own: no-create requireExistingAgentsMask.
+		switch state {
+		case "present":
+			return maskExpect{wantMask: true}
+		case "absent":
+			if apple {
+				return maskExpect{}
+			}
+			return maskExpect{refuse: true, is: errAgentsMaskPointMissing}
+		case "symlink-agents", "dangling-agents", "file-agents":
+			return maskExpect{refuse: true, is: errAgentsMaskNotDir}
+		case "agents-lstat-error", "src-lstat-error":
+			return maskExpect{refuse: true, is: syscall.EIO}
+		case "src-not-exist":
+			return maskExpect{refuse: true, is: fs.ErrNotExist}
+		case "src-symlink":
+			return maskExpect{refuse: true, is: errProjectConfigSymlink}
+		}
+	}
+	panic("unreachable mask expect")
+}
+
+// hasScionAgentsMask reports whether any tmpfs mask target is a project
+// .scion/agents path.
+func hasScionAgentsMask(args []string) bool {
+	for _, m := range tmpfsTargets(args) {
+		if strings.HasSuffix(m, "/.scion/agents") {
+			return true
+		}
+	}
+	return false
+}
+
+// assertEveryROScionDirIsMasked is the (a) universal rule: on a successful
+// Docker/Podman start, each read-only bind whose source is a real .scion
+// directory has a later tmpfs at <target>/agents.
+func assertEveryROScionDirIsMasked(t *testing.T, args []string) {
+	t.Helper()
+	masks := map[string]bool{}
+	for _, m := range tmpfsTargets(args) {
+		masks[m] = true
+	}
+	for _, b := range layoutBinds(t, args) {
+		if !b.readOnly || !strings.HasSuffix(b.target, "/.scion") {
+			continue
+		}
+		src := b.source
+		if r, err := filepath.EvalSymlinks(src); err == nil {
+			src = r
+		}
+		if fi, err := os.Stat(src); err != nil || !fi.IsDir() {
+			continue
+		}
+		if !masks[b.target+"/agents"] {
+			t.Errorf("read-only .scion dir bind %s has no tmpfs mask at %s/agents; masks: %q", b.target, b.target, tmpfsTargets(args))
+		}
+	}
+}
+
+// TestBuildCommonRunArgs_EveryReadOnlyScionDirBindIsMasked is guarantee (a): no
+// Docker/Podman start succeeds with an unmasked read-only .scion directory bind,
+// so an agents dir created after the start is always under a tmpfs; fail-closed
+// states are refused with the pinned error. (The injected-Lstat rows have no skip
+// path and apply at the no-create sites.)
+func TestBuildCommonRunArgs_EveryReadOnlyScionDirBindIsMasked(t *testing.T) {
+	upstreamStates := []string{"present", "absent", "symlink-agents", "dangling-agents", "file-agents"}
+	nocreateStates := []string{"present", "absent", "symlink-agents", "dangling-agents", "file-agents", "agents-lstat-error", "src-symlink", "src-lstat-error", "src-not-exist"}
+	runtimes := []string{"docker", "podman", appleContainerRuntimeName}
+	sites := []struct {
+		name     string
+		nocreate bool
+	}{
+		{"S1", false}, {"S2", false}, {"S3", false},
+		{"S4", true}, {"N", true}, {"S3own", true},
+	}
+	for _, site := range sites {
+		states := upstreamStates
+		if site.nocreate {
+			states = nocreateStates
+		}
+		for _, rt := range runtimes {
+			for _, state := range states {
+				t.Run(site.name+"/"+rt+"/"+state, func(t *testing.T) {
+					cfg, scionSrc := maskGateSite(t, site.name, rt)
+					arrangeMaskState(t, scionSrc, state)
+					want := maskGateExpect(site.nocreate, rt, state)
+					args, err := buildCommonRunArgs(cfg)
+					if want.refuse {
+						if err == nil {
+							t.Fatalf("expected a refusal, got args %q", args)
+						}
+						if args != nil {
+							t.Errorf("fail-closed: expected nil args, got %q", args)
+						}
+						switch {
+						case want.is != nil:
+							if !errors.Is(err, want.is) {
+								t.Fatalf("error = %v, want errors.Is %v", err, want.is)
+							}
+						case want.contains != "":
+							if !strings.Contains(err.Error(), want.contains) {
+								t.Fatalf("error = %q, want it to contain %q", err.Error(), want.contains)
+							}
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("buildCommonRunArgs: %v", err)
+					}
+					if rt == appleContainerRuntimeName {
+						args = stripUnsupportedAppleFlags(args)
+					}
+					if got := hasScionAgentsMask(args); got != want.wantMask {
+						t.Errorf("agents mask present = %v, want %v; masks: %q", got, want.wantMask, tmpfsTargets(args))
+					}
+					if rt != appleContainerRuntimeName {
+						assertEveryROScionDirIsMasked(t, args)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestBuildCommonRunArgs_NestedAndFallbackNeverCreateUnderScion is guarantee (b):
+// at the no-create sites (S4, N, S3own), the runtime creates nothing under the
+// read-only .scion bind source, whether the start succeeds or is refused, and
+// every emitted mask follows its bind. The snapshot is a full equality of entry
+// type, inode, size and symlink target under the workspace (G5).
+func TestBuildCommonRunArgs_NestedAndFallbackNeverCreateUnderScion(t *testing.T) {
+	nocreateStates := []string{"present", "absent", "symlink-agents", "dangling-agents", "file-agents", "agents-lstat-error", "src-symlink", "src-lstat-error", "src-not-exist"}
+	runtimes := []string{"docker", "podman", appleContainerRuntimeName}
+	for _, site := range []string{"S4", "N", "S3own"} {
+		for _, rt := range runtimes {
+			for _, state := range nocreateStates {
+				t.Run(site+"/"+rt+"/"+state, func(t *testing.T) {
+					cfg, scionSrc := maskGateSite(t, site, rt)
+					arrangeMaskState(t, scionSrc, state)
+					before := strongSnapshot(t, cfg.Workspace)
+					args, err := buildCommonRunArgs(cfg)
+					assertStrongUnchanged(t, before, cfg.Workspace)
+					if err == nil && args != nil {
+						if rt == appleContainerRuntimeName {
+							args = stripUnsupportedAppleFlags(args)
+						}
+						if hasScionAgentsMask(args) {
+							assertMasksAfterBinds(t, args)
+						}
+					}
+				})
+			}
+		}
+	}
+	// Combined row: an S4 own .scion without agents/ AND a nested N, both without
+	// agents/. The snapshot covers both bind sources, so a reintroduced emit-block
+	// MkdirAll (or any line keyed on config.Workspace) is caught at the no-create
+	// sites. On Docker/Podman the start is refused; nothing is created either way.
+	for _, rt := range runtimes {
+		t.Run("combined-S4-and-N/"+rt, func(t *testing.T) {
+			main, ws := registeredOutsideWorktree(t)
+			mkdirs(t, filepath.Join(ws, ".scion", "templates"))
+			mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+			mkdirs(t, cfg.HomeDir)
+			cfg.RepoRoot, cfg.Workspace = main, ws
+			cfg.AgentOwnWorkspace = false
+			cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+			cfg.PrivateGitConfigSource = seedTestPrivateGitConfig(t)
+			before := strongSnapshot(t, ws)
+			args, err := buildCommonRunArgs(cfg)
+			assertStrongUnchanged(t, before, ws)
+			if rt != appleContainerRuntimeName {
+				if !errors.Is(err, errAgentsMaskPointMissing) {
+					t.Fatalf("combined: error = %v, want errAgentsMaskPointMissing", err)
+				}
+				if args != nil {
+					t.Errorf("fail-closed: expected nil args, got %q", args)
+				}
+			}
+		})
+	}
+}
+
+// fsEntry is a strong snapshot of one path for the (b) gate: enough to detect any
+// creation, removal, retype, resize or relink under a bind source.
+type fsEntry struct {
+	typ  os.FileMode // Mode().Type()
+	ino  uint64
+	size int64
+	link string // symlink target, else ""
+}
+
+// strongSnapshot records every path under roots by (type, inode, size, link).
+// Walk errors are fatal; symlinks are recorded, not followed, so a create through
+// a link inside a snapshotted root is seen.
+func strongSnapshot(t *testing.T, roots ...string) map[string]fsEntry {
+	t.Helper()
+	m := map[string]fsEntry{}
+	for _, root := range roots {
+		if err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				t.Fatalf("strong snapshot walk %s: %v", p, err)
+			}
+			e := fsEntry{typ: info.Mode().Type(), size: info.Size()}
+			if st, ok := info.Sys().(*syscall.Stat_t); ok {
+				e.ino = st.Ino
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				tgt, lerr := os.Readlink(p)
+				if lerr != nil {
+					t.Fatalf("strong snapshot readlink %s: %v", p, lerr)
+				}
+				e.link = tgt
+			}
+			m[p] = e
+			return nil
+		}); err != nil {
+			t.Fatalf("strong snapshot walk %s: %v", root, err)
+		}
+	}
+	return m
+}
+
+// assertStrongUnchanged fails if the tree under roots differs at all from before.
+func assertStrongUnchanged(t *testing.T, before map[string]fsEntry, roots ...string) {
+	t.Helper()
+	after := strongSnapshot(t, roots...)
+	for p, b := range before {
+		a, ok := after[p]
+		if !ok {
+			t.Errorf("the start removed %s on disk", p)
+			continue
+		}
+		if a != b {
+			t.Errorf("the start changed %s on disk: %+v -> %+v", p, b, a)
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			t.Errorf("the start created %s on disk", p)
+		}
+	}
+}
+
+// TestBuildCommonRunArgs_NestedProjectConfigAgentsNotDir adds the nested
+// symlinked-agents and file-agents rows: a nested .scion directory whose agents/
+// entry is not a directory is refused with errAgentsMaskNotDir on every runtime,
+// creating nothing.
+func TestBuildCommonRunArgs_NestedProjectConfigAgentsNotDir(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		for _, kind := range []string{"symlink", "file"} {
+			t.Run(kind+"/"+rt, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				ws := filepath.Join(t.TempDir(), "workspace")
+				mkdirs(t, filepath.Join(ws, "sub", ".scion", "templates"))
+				agentsPath := filepath.Join(ws, "sub", ".scion", "agents")
+				if kind == "symlink" {
+					mkdirs(t, filepath.Join(ws, "sub", ".scion", "realagents"))
+					if err := os.Symlink("realagents", agentsPath); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					writeFile(t, agentsPath, "not a directory\n")
+				}
+				cfg := minimalRunConfig()
+				cfg.BrokerMode = true
+				cfg.RuntimeName = rt
+				cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+				mkdirs(t, cfg.HomeDir)
+				cfg.Workspace = ws
+				cfg.ProjectConfigPath = filepath.Join(ws, "sub", ".scion")
+				before := fsSnapshot(t, ws)
+				args, err := buildCommonRunArgs(cfg)
+				if !errors.Is(err, errAgentsMaskNotDir) {
+					t.Fatalf("nested agents-%s/%s: error = %v, want errAgentsMaskNotDir", kind, rt, err)
+				}
+				if args != nil {
+					t.Errorf("fail-closed: expected nil args, got %q", args)
+				}
+				assertNothingCreated(t, before, ws)
+			})
+		}
+	}
+}
+
+// TestBuildCommonRunArgs_AgentsMaskRefusalMessages pins (A3) the full refusal
+// messages, with the absolute path and the mkdir remedy, at S4 and N on docker.
+func TestBuildCommonRunArgs_AgentsMaskRefusalMessages(t *testing.T) {
+	for _, site := range []string{"S4", "N"} {
+		t.Run(site+"/missing", func(t *testing.T) {
+			cfg, scionSrc := maskGateSite(t, site, "docker")
+			arrangeMaskState(t, scionSrc, "absent")
+			src := maskGateResolvedSrc(t, scionSrc)
+			agentsPath := filepath.Join(src, "agents")
+			want := fmt.Sprintf("agent %q: %s: %s; run: mkdir %q and start the agent again",
+				cfg.Name, src, errAgentsMaskPointMissing.Error(), agentsPath)
+			_, err := buildCommonRunArgs(cfg)
+			if err == nil || err.Error() != want {
+				t.Fatalf("missing message:\n got %q\nwant %q", errText(err), want)
+			}
+		})
+		for _, kind := range []struct{ state, typ string }{{"file-agents", "regular file"}, {"symlink-agents", "symlink"}} {
+			t.Run(site+"/notdir-"+kind.typ, func(t *testing.T) {
+				cfg, scionSrc := maskGateSite(t, site, "docker")
+				arrangeMaskState(t, scionSrc, kind.state)
+				src := maskGateResolvedSrc(t, scionSrc)
+				agentsPath := filepath.Join(src, "agents")
+				want := fmt.Sprintf("agent %q: %s (%s): %s; replace it with a directory",
+					cfg.Name, agentsPath, kind.typ, errAgentsMaskNotDir.Error())
+				_, err := buildCommonRunArgs(cfg)
+				if err == nil || err.Error() != want {
+					t.Fatalf("not-a-directory message:\n got %q\nwant %q", errText(err), want)
+				}
+			})
+		}
+	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
 }

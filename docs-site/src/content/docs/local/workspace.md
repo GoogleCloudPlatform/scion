@@ -378,6 +378,17 @@ writable; there the host-side git controls additionally refuse to run if a root-
 `gitdir` is present in the repository, so a redirect file cannot steer git that Scion runs on the
 host.
 
+A workspace in a subdirectory of a repository must be a registered git worktree of that repository;
+other subdirectory workspaces are refused at start, because the per-agent git metadata cannot be
+mounted for a plain subdirectory.
+
+On Docker and Podman, a project `.scion` that is mounted read-only — one in a registered outside-root
+checkout, one in a subdirectory of the workspace, or a nested `.scion` directory without `agents/`
+inside the agent's own workspace (config-only agents) — must already contain an `agents` directory.
+The runtime masks `.scion/agents` in the container but does not create it under a read-only mount, so
+when it is missing the start is refused; create it once with `mkdir <path>/.scion/agents` (`scion
+init` lists `.scion/agents/` in `.gitignore`) and start the agent again.
+
 On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
 shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
 its own clone of the repository, or run the project on a local or Docker broker.
