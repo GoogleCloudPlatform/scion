@@ -1066,7 +1066,9 @@ func retriedRunMismatchMessage(first, second *DeleteRunMismatchError) string {
 //   - nil: the engine finalizes. A soft finish records the reported run on
 //     the row (see finish).
 //   - a stale dispatch: abandon, as for the first dispatch.
-//   - a placement refusal: conflict, as for the first dispatch.
+//   - a placement refusal: rollbackPlacement, as for the first dispatch.
+//     The stored code stays conflict, and the answer carries the
+//     refusal's own code and details.
 //   - another run mismatch, whichever run it names: conflict. There is
 //     no second retry, so a run that keeps changing cannot loop the
 //     engine; the next delete starts over.
