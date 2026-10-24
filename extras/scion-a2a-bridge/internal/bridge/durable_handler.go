@@ -35,6 +35,11 @@ type DurableRequestHandler struct {
 	sdkStore   *PostgresTaskStore
 	eventStore *state.PostgresStore
 	notifier   *Notifier
+
+	// bridge re-checks a federated user's access with the hub before a
+	// reply is streamed to it (SetBridge). Without it, a federated user's
+	// subscription streams no new events.
+	bridge *Bridge
 }
 
 // Compile-time check.
@@ -48,6 +53,29 @@ func NewDurableRequestHandler(inner a2asrv.RequestHandler, sdkStore *PostgresTas
 		eventStore: eventStore,
 		notifier:   notifier,
 	}
+}
+
+// SetBridge sets the bridge SubscribeToTask uses to re-check a federated
+// user's access with the hub before it streams a reply.
+func (h *DurableRequestHandler) SetBridge(b *Bridge) {
+	h.bridge = b
+}
+
+// federatedUserStreamRefusal returns nil when a reply may be streamed to the
+// federated user caller on the task's route, otherwise the message the
+// stream ends with (see Bridge.federatedUserReplyRefusal). It fails closed:
+// without a bridge, route, exposed agent or resolvable agent the reply is
+// not streamed.
+func (h *DurableRequestHandler) federatedUserStreamRefusal(ctx context.Context, caller *CallerIdentity) *a2a.Message {
+	route, ok := RouteInfoFrom(ctx)
+	if h.bridge == nil || !ok || h.bridge.AuthorizeExposed(route.ProjectSlug, route.AgentSlug) != nil {
+		return federatedUserRefusalMessage()
+	}
+	agent := h.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug)
+	if agent == nil || agent.ID == "" {
+		return federatedUserRefusalMessage()
+	}
+	return h.bridge.federatedUserReplyRefusal(ctx, caller, agent.ID)
 }
 
 // SubscribeToTask implements a durable, ownership-enforcing subscribe that
@@ -85,7 +113,11 @@ func (h *DurableRequestHandler) SubscribeToTask(
 			return
 		}
 
-		// 4. Stream only NEW events (id > cursor), no old-replay.
+		// 4. Stream only NEW events (id > cursor), no old-replay. A
+		// federated user's access is re-checked with the hub before each
+		// reply (revocation); a refusal ends the stream with the uniform
+		// refusal instead of the reply.
+		caller := callerIdentityFromContext(ctx)
 		var notifyCh <-chan struct{}
 		if h.notifier != nil {
 			var cleanup func()
@@ -101,18 +133,10 @@ func (h *DurableRequestHandler) SubscribeToTask(
 				yield(nil, fmt.Errorf("event read failed: %w", readErr))
 				return
 			}
-			for _, ev := range events {
-				cursor = ev.ID
-				sdkEvent, convErr := taskEventToSDKResubscribeEvent(req.ID, &ev)
-				if convErr != nil {
-					continue
-				}
-				if !yield(sdkEvent, nil) {
-					return
-				}
-				if ev.Final {
-					return
-				}
+			var done bool
+			cursor, done = h.yieldResubscribeEvents(ctx, req.ID, caller, events, cursor, yield)
+			if done {
+				return
 			}
 
 			select {
@@ -123,6 +147,42 @@ func (h *DurableRequestHandler) SubscribeToTask(
 			}
 		}
 	}
+}
+
+// yieldResubscribeEvents yields the SDK events for events, read from the
+// event log after cursor for task taskID, and returns the new cursor and
+// whether the stream is done (a final event, a refusal, or the consumer
+// stopped). For a federated user caller, access is re-checked with the hub
+// (federatedUserStreamRefusal) before each reply; a refusal ends the stream
+// with a failed status carrying the refusal instead of the reply.
+func (h *DurableRequestHandler) yieldResubscribeEvents(
+	ctx context.Context, taskID a2a.TaskID, caller *CallerIdentity,
+	events []state.TaskEvent, cursor int64, yield func(a2a.Event, error) bool,
+) (int64, bool) {
+	federatedUser := caller.IsFederatedUser()
+	for _, ev := range events {
+		cursor = ev.ID
+		if federatedUser && isResponseEvent(ev) {
+			if failMsg := h.federatedUserStreamRefusal(ctx, caller); failMsg != nil {
+				yield(&a2a.TaskStatusUpdateEvent{
+					TaskID: taskID,
+					Status: a2a.TaskStatus{State: a2a.TaskStateFailed, Message: failMsg},
+				}, nil)
+				return cursor, true
+			}
+		}
+		sdkEvent, convErr := taskEventToSDKResubscribeEvent(taskID, &ev)
+		if convErr != nil {
+			continue
+		}
+		if !yield(sdkEvent, nil) {
+			return cursor, true
+		}
+		if ev.Final {
+			return cursor, true
+		}
+	}
+	return cursor, false
 }
 
 // stripBridgeEventID removes internal _bridgeEventID from task metadata

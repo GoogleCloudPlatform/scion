@@ -112,6 +112,12 @@ type Agent struct {
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
 
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
@@ -2409,6 +2415,19 @@ const (
 	// must not read as "dispatched". Terminal: nothing retries it.
 	MessageDispatchNoRecipient = "no_recipient"
 )
+
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
 
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes

@@ -291,6 +291,13 @@ func cutRawAuthority(raw string) (authority, rest string, hasAuthority bool) {
 	return authority, rest, true
 }
 
+// AuthorityIsHost reports whether authority, the part of a URL after its
+// scheme and "://" up to its first '/', '?' or '#', ends in a host (see
+// rawAuthorityIsHost). A text redactor uses it to tell a URL whose
+// authority ends early in a text (at white space or a quote) from one that
+// ends in a host.
+func AuthorityIsHost(authority string) bool { return rawAuthorityIsHost(authority) }
+
 // rawAuthorityIsHost reports whether authority (see cutRawAuthority) ends
 // in a host: after its last '@', if any, a name of ASCII letters, digits,
 // '-', '.' and any non-ASCII character but U+FFFD (none of which can hide

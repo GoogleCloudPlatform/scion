@@ -823,6 +823,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
 		WorkspaceMode: projectInfo.workspaceMode,
+		// A resume after a re-link reaches the broker as a create: the
+		// earlier agent row went with the earlier project (ptone/scion#4476).
+		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 	}
 	// The single setter of the expected runtime target on create-shaped
 	// requests: any non-NULL pin. A stale pin sends the old target, which the
@@ -1372,6 +1375,10 @@ type projectDispatchInfo struct {
 	// telemetryPolicy is the project's projectSettingTelemetryEnabled policy
 	// (projectTelemetryPolicy); nil when unset or unparsable.
 	telemetryPolicy *bool
+	// projectID and gitRemote are the project's ID and stored (normalized)
+	// git remote, for previousProjectIDs.
+	projectID string
+	gitRemote string
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1406,6 +1413,8 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.workspaceMode = dispatchWorkspaceMode(project)
 	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
 	info.telemetryPolicy = projectTelemetryPolicy(project)
+	info.projectID = project.ID
+	info.gitRemote = project.GitRemote
 
 	// First check if the broker has a registered local path for this project.
 	localPath := ""
@@ -3713,6 +3722,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -3988,6 +3998,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ProjectSlug:          projectInfo.projectSlug,
 		SharedDirs:           projectInfo.sharedDirs,
 		ResolvedSecrets:      startEnv.secrets,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)

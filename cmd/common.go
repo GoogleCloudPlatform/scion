@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -84,7 +85,31 @@ var (
 	messageModeFlag       string
 	serviceAccountFlag    string
 	agentLogLevelFlag     string
+	sendEnvFlag           bool
 )
+
+// sendEnvFlagName is the start/resume flag that allows a non-interactive
+// CLI, which cannot show the confirmation prompt, to send values from its
+// local environment to the hub when the hub asks for them.
+const sendEnvFlagName = "send-env"
+
+const sendEnvFlagUsage = "Allow sending values from the local environment that the Hub asks for to provision the agent (required when the confirmation prompt cannot be shown: no terminal, --non-interactive, or agent mode)"
+
+// envSendNeedsOptIn reports whether sending local environment values
+// requires the explicit --send-env opt-in: the CLI is non-interactive
+// (no terminal, --non-interactive, cli.interactive_disabled or agent
+// mode), so no confirmation prompt can be shown.
+func envSendNeedsOptIn() bool {
+	return nonInteractive || !isInteractiveTerminal()
+}
+
+// envSendOptInError names the keys (never their values) that the hub
+// asked for and the flag that allows sending them.
+func envSendOptInError(gathered map[string]string) error {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Errorf("the Hub asked for %d environment value(s) found in the local environment (%s); a non-interactive start or resume sends local environment values only with --%s: rerun with --%s, or store them on the Hub with 'scion hub secret set' or 'scion hub env set'",
+		len(sorted), strings.Join(sorted, ", "), sendEnvFlagName, sendEnvFlagName)
+}
 
 // agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
 // in the agent's environment. Agents never inherit debug settings from the
@@ -2069,6 +2094,12 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	if len(gatheredEnv) == 0 {
 		// All keys were already satisfied by Hub/Broker — should not reach here
 		return resp, nil
+	}
+
+	// A non-interactive CLI sends local environment values only with the
+	// explicit --send-env opt-in; without it nothing is sent.
+	if envSendNeedsOptIn() && !sendEnvFlag {
+		return nil, envSendOptInError(gatheredEnv)
 	}
 
 	// In interactive mode, confirm before sending env vars

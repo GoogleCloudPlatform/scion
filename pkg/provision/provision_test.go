@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3962,11 +3963,10 @@ func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
 	runIn(t, wtPath, "git", "checkout", "-b", "agent-2-work")
 }
 
-func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
-	// core.fsmonitor is a pure .git/config vector (no on-disk file creation
-	// needed), so unlike hooks/info above it cannot be blocked by directory
-	// permissions — this is exactly why SafeGitCommand clears it at the
-	// invocation level (Part B) as belt-and-suspenders over Part A.
+func TestSafeGitCommand_RefusesRepositoryFsmonitorConfig(t *testing.T) {
+	// core.fsmonitor in the base's own config is outside the managed
+	// allow-list, so SafeGitCommand refuses the command before running it
+	// (deny-by-default) rather than running and neutralising it.
 	base := t.TempDir()
 	run(t, "git", "init", "--initial-branch=main", base)
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
@@ -3978,46 +3978,28 @@ func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
 		[]byte(fmt.Sprintf("#!/bin/sh\necho fsmonitor-ran >> %s\necho \"\"\n", marker)), 0755); err != nil {
 		t.Fatal(err)
 	}
-	// An unexpected core.fsmonitor, however it got there.
 	runIn(t, base, "git", "config", "core.fsmonitor", fsmonScript)
 
-	cmd, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git status failed: %v\n%s", err, out)
+	_, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
+	var refused *util.RepoConfigRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("SafeGitCommand error = %v, want *util.RepoConfigRefusedError", err)
 	}
 	if data, _ := os.ReadFile(marker); len(data) != 0 {
-		t.Errorf("expected core.fsmonitor to be neutralized by SafeGitCommand, but it ran: %q", data)
-	}
-
-	// Revert-check: the identical config, invoked WITHOUT the wrapper, DOES
-	// fire — proving the wrapper (not something incidental) is what
-	// neutralizes it.
-	plain := exec.Command("git", "status", "--porcelain")
-	plain.Dir = base
-	if out, err := plain.CombinedOutput(); err != nil {
-		t.Fatalf("git status (unwrapped) failed: %v\n%s", err, out)
-	}
-	if data, _ := os.ReadFile(marker); len(data) == 0 {
-		t.Error("expected core.fsmonitor to fire without the wrapper (revert-check baseline), got no marker")
+		t.Errorf("fsmonitor ran despite the refusal: %q", data)
 	}
 }
 
-func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
-	// Part A only prevents a CONTAINER from writing config/hooks/info; it
-	// does not and must not stop the HOST itself (e.g. `git lfs install`,
-	// run by the broker operator, not a container) from doing so, and
-	// SafeGitCommand must not neutralize what it finds there. git-lfs
-	// isn't available in this environment, so this stands in for it exactly
-	// as instructed: filter.lfs.* configured via the GLOBAL gitconfig (the
-	// way `git lfs install` actually writes it — not repo-local, which would
-	// pass even with a wrongly-cleared GIT_CONFIG_GLOBAL) plus a trusted
-	// post-checkout hook already present in the base's .git/hooks (as
-	// git-lfs install also adds).
+func TestSafeGitCommand_GlobalFilterRunsRepositoryHookAndFilterDoNot(t *testing.T) {
+	// The host's global gitconfig is the host user's and stays in effect:
+	// git-lfs installs its filter.lfs.* driver there. git-lfs isn't
+	// available in this environment, so a global smudge script stands in
+	// for it. Hooks and filter drivers that live in the base's own .git are
+	// repository content that agent containers can write, so the
+	// SafeGitCommand-driven checkout runs neither.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
 	// Ignore the host's system gitconfig. A host with git-lfs installed
 	// system-wide (as on GitHub-hosted runners) sets filter.lfs.process,
 	// which git uses in place of the smudge command configured below, so
@@ -4032,7 +4014,6 @@ func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	if err := os.WriteFile(smudgeScript, []byte("#!/bin/sh\ncat >/dev/null\necho smudge-ran >> \"$MARKER_FILE\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-
 	globalConfig := filepath.Join(home, ".gitconfig")
 	globalConfigBody := fmt.Sprintf(
 		"[filter \"lfs\"]\n\tsmudge = %s\n\tclean = cat\n\trequired = false\n",
@@ -4046,12 +4027,6 @@ func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
 		"commit", "--allow-empty", "-m", "root")
 
-	// A trusted, host-placed post-checkout hook (as `git lfs install` adds).
-	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
-	if err := os.WriteFile(filepath.Join(base, ".git", "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := os.WriteFile(filepath.Join(base, ".gitattributes"), []byte("data.bin filter=lfs -text\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -4060,11 +4035,18 @@ func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	}
 	runIn(t, base, "git", "add", ".")
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
-		"commit", "-m", "add lfs-tracked file")
+		"commit", "-m", "add filtered files")
+
+	// Repository content at the default hook path: it must not run. (A
+	// repository-scope filter driver or core.hooksPath would instead be
+	// refused outright; that is covered by the deny-by-default tests.)
+	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
+	if err := os.WriteFile(filepath.Join(base, ".git", "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	// The exact broker trigger: SafeGitCommand-driven `git worktree add`,
-	// which checks out the new worktree — running the post-checkout hook and
-	// the smudge filter for data.bin.
+	// which checks out the new worktree.
 	wtPath := filepath.Join(t.TempDir(), "wt")
 	cmd, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-1", wtPath)
 	if err != nil {
@@ -4075,11 +4057,14 @@ func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(marker)
-	if !strings.Contains(string(data), "hook-ran") {
-		t.Errorf("expected the trusted post-checkout hook to run, marker: %q", data)
-	}
 	if !strings.Contains(string(data), "smudge-ran") {
-		t.Errorf("expected the trusted global (LFS-style) smudge filter to run, marker: %q", data)
+		t.Errorf("expected the global (LFS-style) smudge filter to run, marker: %q", data)
+	}
+	if strings.Contains(string(data), "hook-ran") {
+		t.Errorf("the repository's post-checkout hook ran, marker: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(wtPath, "data.bin")); err != nil {
+		t.Errorf("data.bin not checked out: %v", err)
 	}
 }
 
@@ -5012,5 +4997,31 @@ func TestProvision_RejectsEmptyPerAgent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "EmptyPerAgent") {
 		t.Errorf("error should mention EmptyPerAgent, got: %v", err)
+	}
+}
+
+func TestGitInSharedCheckout_RunsNoRepositoryHooks(t *testing.T) {
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+	marker := filepath.Join(t.TempDir(), "marker")
+	for _, hook := range []string{"post-checkout", "reference-transaction"} {
+		script := fmt.Sprintf("#!/bin/sh\necho %s >> %s\n", hook, marker)
+		if err := os.WriteFile(filepath.Join(base, ".git", "hooks", hook), []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wt := filepath.Join(base, "worktrees", "agent-1")
+	if out, err := gitInSharedCheckout(context.Background(), base, wt, "worktree", "add", "--relative-paths", "-b", "agent-1", wt); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(marker); len(data) != 0 {
+		t.Errorf("repository hooks ran: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
+		t.Errorf("worktree not created: %v", err)
 	}
 }

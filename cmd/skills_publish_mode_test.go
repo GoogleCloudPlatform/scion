@@ -16,27 +16,20 @@ package cmd
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // TestBuildSkillManifest_CarriesMode pins that `scion skills publish`
 // records each file's normalised mode in the finalize manifest
 // (ptone/scion#5657); without it the Hub serves every skill file 0644.
 func TestBuildSkillManifest_CarriesMode(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
 	files := []publishFile{
-		{path: "SKILL.md", absPath: write("SKILL.md"), size: 8, mode: publishFileMode(0o644)},
-		{path: "run.sh", absPath: write("run.sh"), size: 6, mode: publishFileMode(0o755)},
-		{path: "suid.sh", absPath: write("suid.sh"), size: 7, mode: publishFileMode(os.ModeSetuid | os.ModeSticky | 0o4777)},
-		{path: "group.txt", absPath: write("group.txt"), size: 9, mode: publishFileMode(0o664)},
+		{path: "SKILL.md", size: 8, hash: transfer.HashBytes([]byte("SKILL.md")), mode: publishFileMode(0o644)},
+		{path: "run.sh", size: 6, hash: transfer.HashBytes([]byte("run.sh")), mode: publishFileMode(0o755)},
+		{path: "suid.sh", size: 7, hash: transfer.HashBytes([]byte("suid.sh")), mode: publishFileMode(os.ModeSetuid | os.ModeSticky | 0o4777)},
+		{path: "group.txt", size: 9, hash: transfer.HashBytes([]byte("group.txt")), mode: publishFileMode(0o664)},
 	}
 	m, err := buildSkillManifest(files)
 	if err != nil {
@@ -47,9 +40,18 @@ func TestBuildSkillManifest_CarriesMode(t *testing.T) {
 		if f.Mode != want[f.Path] {
 			t.Errorf("%s: manifest mode %q, want %q", f.Path, f.Mode, want[f.Path])
 		}
-		if f.Hash == "" {
-			t.Errorf("%s: manifest hash missing", f.Path)
+		if want := transfer.HashBytes([]byte(f.Path)); f.Hash != want {
+			t.Errorf("%s: manifest hash %q, want the collected %q", f.Path, f.Hash, want)
 		}
+	}
+}
+
+// TestBuildSkillManifest_RequiresCollectedHash pins that the manifest is
+// built only from hashes recorded at collection.
+func TestBuildSkillManifest_RequiresCollectedHash(t *testing.T) {
+	_, err := buildSkillManifest([]publishFile{{path: "SKILL.md", size: 1, mode: "0644"}})
+	if err == nil {
+		t.Fatal("buildSkillManifest accepted a file with no collected hash")
 	}
 }
 

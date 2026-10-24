@@ -38,12 +38,8 @@ import (
 // of it; nor may any other package of the module reference the opener. A
 // new caller fails this test and needs a security review.
 func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// callersInPackage and valueUsesInPackage read it through readGuardScanDirs (nonTestGoFiles), and moduleSymbolReferences walks the whole module (no SkipDir for it); guards the OpenBoundAttachment call chain.
+	// pkgmove:scan-covers guardScanSubdirs
+	// callersInPackage and valueUsesInPackage read pkg/hub and every guardScanSubdirs entry through readGuardScanDirs (nonTestGoFiles); guards the OpenBoundAttachment call chain.
 	callers := callersInPackage(t, ".")
 	want := map[string][]string{
 		"OpenBoundAttachment":     {"stageArtifactAttachment"},
@@ -90,6 +86,8 @@ func moduleSymbolReferences(t *testing.T, root, name string) []string {
 	}
 	var out []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: skips only dot, testdata, vendor and node_modules directories and nested modules, so it covers every package directory below pkg/hub.
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err

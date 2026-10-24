@@ -83,6 +83,12 @@ type mockManager struct {
 	// and capture its arguments, without needing a real AgentManager/tmux.
 	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 
+	// beforeProvision, when set, runs at the start of Provision (for
+	// example to leave agent files behind before provisionErr).
+	beforeProvision func(opts api.StartOptions)
+	// beforeStart, when set, runs at the start of Start.
+	beforeStart func(opts api.StartOptions)
+
 	// preflightErr, when set, is returned by Preflight (e.g.
 	// config.ErrTemplateNotFound, for the async-create admission 404 case).
 	preflightErr      error
@@ -97,6 +103,9 @@ type mockManager struct {
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if m.beforeProvision != nil {
+		m.beforeProvision(opts)
+	}
 	if m.provisionErr != nil {
 		return nil, m.provisionErr
 	}
@@ -123,6 +132,9 @@ func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*
 }
 
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if m.beforeStart != nil {
+		m.beforeStart(opts)
+	}
 	m.mu.Lock()
 	m.startCalls++
 	m.lastStartOpts = opts
