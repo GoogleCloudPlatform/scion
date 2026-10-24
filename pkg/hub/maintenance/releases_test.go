@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -139,9 +140,54 @@ func TestCheckReleaseRedirect(t *testing.T) {
 			t.Errorf("redirect to %q allowed", bad)
 		}
 	}
-	via := make([]*http.Request, 5)
-	if err := checkReleaseRedirect(req("https://objects.githubusercontent.com/x"), via); err == nil {
-		t.Error("6th redirect allowed")
+	if err := checkReleaseRedirect(req("https://objects.githubusercontent.com/x"), make([]*http.Request, MaxReleaseRedirects)); err != nil {
+		t.Errorf("redirect number %d refused: %v", MaxReleaseRedirects, err)
+	}
+	if err := checkReleaseRedirect(req("https://objects.githubusercontent.com/x"), make([]*http.Request, MaxReleaseRedirects+1)); err == nil {
+		t.Errorf("redirect number %d allowed", MaxReleaseRedirects+1)
+	}
+}
+
+// hopTransport answers https://github.com/start and every
+// https://objects.githubusercontent.com/hop/N with a redirect to the next
+// hop, until hop `hops`, which returns the body.
+type hopTransport struct{ hops int }
+
+func (h hopTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	n := 0
+	if r.URL.Host != "github.com" {
+		_, _ = fmt.Sscanf(r.URL.Path, "/hop/%d", &n)
+	}
+	if n >= h.hops {
+		_, _ = rec.WriteString("payload")
+	} else {
+		http.Redirect(rec, r, fmt.Sprintf("https://objects.githubusercontent.com/hop/%d", n+1), http.StatusFound)
+	}
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// TestDownloadClient_RedirectLimit follows real redirect chains through the
+// client's CheckRedirect: exactly MaxReleaseRedirects hops work, one more
+// fails.
+func TestDownloadClient_RedirectLimit(t *testing.T) {
+	for _, tt := range []struct {
+		hops int
+		ok   bool
+	}{{1, true}, {MaxReleaseRedirects, true}, {MaxReleaseRedirects + 1, false}} {
+		t.Run(fmt.Sprintf("%d hops", tt.hops), func(t *testing.T) {
+			client := downloadClient(&http.Client{Transport: hopTransport{hops: tt.hops}})
+			var buf bytes.Buffer
+			_, err := fetchCapped(context.Background(), client, "https://github.com/start", 1<<10, &buf)
+			if tt.ok && (err != nil || buf.String() != "payload") {
+				t.Fatalf("%d hops: err=%v body=%q", tt.hops, err, buf.String())
+			}
+			if !tt.ok && (err == nil || !strings.Contains(err.Error(), "too many redirects")) {
+				t.Fatalf("%d hops: err=%v, want too many redirects", tt.hops, err)
+			}
+		})
 	}
 }
 

@@ -210,11 +210,17 @@ func isAllowedRedirectHost(host string) bool {
 	return host == "githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com")
 }
 
+// MaxReleaseRedirects is how many redirects an asset download follows. A
+// release download is normally one hop (github.com → *.githubusercontent.com).
+const MaxReleaseRedirects = 5
+
 // checkReleaseRedirect is the http.Client CheckRedirect for asset downloads:
-// HTTPS only, to *.githubusercontent.com only, at most 5 hops.
+// HTTPS only, to *.githubusercontent.com only, at most MaxReleaseRedirects
+// redirects. via holds the requests already made, so the Nth redirect is
+// checked with len(via) == N.
 func checkReleaseRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 5 {
-		return errors.New("too many redirects")
+	if len(via) > MaxReleaseRedirects {
+		return fmt.Errorf("too many redirects (more than %d)", MaxReleaseRedirects)
 	}
 	if req.URL.Scheme != "https" || !isAllowedRedirectHost(req.URL.Hostname()) {
 		return fmt.Errorf("refusing redirect to %s://%s (only https://*.githubusercontent.com is allowed)", req.URL.Scheme, req.URL.Host)
