@@ -70,6 +70,9 @@ describe('broker version helpers', () => {
       'Hub instances run different versions'
     );
     expect(brokerVersionTitle('v1.2.0', 'unknown', '')).toBe('Hub version unknown');
+    expect(brokerVersionTitle('unknown', 'unknown', 'v1.3.0')).toBe(
+      'Cannot be compared with the hub. Hub runs v1.3.0'
+    );
   });
 });
 

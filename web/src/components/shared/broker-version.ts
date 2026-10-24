@@ -60,6 +60,11 @@ export function brokerVersionTitle(
   if (!version) return 'Broker has not reported a version';
   const s = normalizeVersionStatus(status);
   if (s === 'mismatch') return `Differs from the hub. ${hubVersionTitle(hubVersion)}`;
+  // Unknown although both sides report a version: the broker's token cannot
+  // be compared (for example "unknown", a build without build information).
+  if (s === 'unknown' && hubVersion && hubVersion !== HUB_VERSION_MIXED) {
+    return `Cannot be compared with the hub. ${hubVersionTitle(hubVersion)}`;
+  }
   return hubVersionTitle(hubVersion);
 }
 
