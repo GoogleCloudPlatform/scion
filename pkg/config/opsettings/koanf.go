@@ -90,6 +90,9 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Browser policy report samples — the report handler is built at
+	// startup.
+	"server.hub.csp_report_raw_samples",
 	// Membership-standing sweep report-only mode — the sweep reads it from
 	// ServerConfig, set at startup.
 	"server.hub.membership_sweep_report_only",
