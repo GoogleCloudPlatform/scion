@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -211,7 +212,33 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 		return "", fmt.Errorf("unsupported remote template type: %s", uri)
 	}
 
+	// Whatever the fetch path, a fetched template holds regular files and
+	// directories only; refuse it (and drop the cache) otherwise.
+	if err := checkRegularTree(templateCachePath); err != nil {
+		_ = os.RemoveAll(templateCachePath)
+		return "", err
+	}
+
 	return templateCachePath, nil
+}
+
+// checkRegularTree returns an error if the tree at dir contains anything
+// other than directories and regular files (for example a symbolic link).
+// It does not follow links.
+func checkRegularTree(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || d.Type().IsRegular() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			rel = path
+		}
+		return fmt.Errorf("fetched template contains a non-regular file: %s", filepath.ToSlash(rel))
+	})
 }
 
 // generateCacheKey creates a unique, filesystem-safe key for a URI.
@@ -445,12 +472,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 		return err
 	}
 
-	srcPath := filepath.Join(tmpExtract, subPath)
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("path %s not found in repository", subPath)
-	}
-
-	return copyDirExcludingGit(srcPath, destPath)
+	return copyDirExcludingGit(tmpExtract, subPath, destPath)
 }
 
 // GitHubURLParts contains parsed parts of a GitHub URL.
@@ -640,53 +662,169 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 		return fmt.Errorf("git checkout failed: %w", err)
 	}
 
-	// Copy the desired folder to the destination
-	var srcPath string
-	if parts.Path != "" {
-		srcPath = filepath.Join(tmpDir, parts.Path)
-	} else {
-		srcPath = tmpDir
-	}
-
-	// Check if source exists
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("path %s not found in repository", parts.Path)
-	}
-
-	// Copy contents to destination, excluding .git
-	return copyDirExcludingGit(srcPath, destPath)
+	// Copy the desired folder to the destination, excluding .git. The
+	// checkout may contain symbolic links (git materialises them as links);
+	// copyDirExcludingGit never follows or copies them, so the template holds
+	// regular files and directories only.
+	return copyDirExcludingGit(tmpDir, parts.Path, destPath)
 }
 
-// copyDirExcludingGit copies a directory recursively, excluding .git directories.
-func copyDirExcludingGit(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+// copyDirExcludingGit copies the directory subPath of baseDir into dst,
+// excluding .git directories. subPath is relative to baseDir ("" or "." for
+// baseDir itself) and must stay inside it.
+//
+// Fetched content is untrusted, so the copy never follows symbolic links:
+//   - the source is read only through an os.Root opened at baseDir, so no
+//     path (including a ".." in subPath) can resolve outside it;
+//   - every component of subPath must be a real directory, not a link;
+//   - symbolic links and other non-regular entries inside the tree are
+//     skipped (logged), never followed or recreated;
+//   - each regular file is opened only after an Lstat confirms it is a
+//     regular file, and the opened file must be the same file (os.SameFile),
+//     which gives O_NOFOLLOW semantics without relying on the open flag.
+//
+// Writes go through an os.Root opened at dst. The result therefore contains
+// regular files and directories only.
+func copyDirExcludingGit(baseDir, subPath, dst string) error {
+	sub := filepath.Clean(subPath)
+	if subPath == "" {
+		sub = "."
+	}
+	if !filepath.IsLocal(sub) {
+		return fmt.Errorf("path %s is not inside the repository", subPath)
+	}
+
+	srcRoot, err := os.OpenRoot(baseDir)
+	if err != nil {
+		return fmt.Errorf("failed to open source directory: %w", err)
+	}
+	defer func() { _ = srcRoot.Close() }()
+
+	if err := checkRealDirPath(srcRoot, sub, subPath); err != nil {
+		return err
+	}
+
+	dstRoot, err := os.OpenRoot(dst)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	walkRoot := filepath.ToSlash(sub)
+	return fs.WalkDir(srcRoot.FS(), walkRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		srcName := filepath.FromSlash(p)
+		rel, err := filepath.Rel(sub, srcName)
 		if err != nil {
 			return err
 		}
 
-		// Skip .git directories
-		if info.IsDir() && info.Name() == ".git" {
-			return filepath.SkipDir
+		switch {
+		case d.IsDir():
+			if rel == "." {
+				return nil
+			}
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return dstRoot.MkdirAll(rel, dirPerm(info.Mode()))
+		case d.Type().IsRegular():
+			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel)
+		default:
+			// Symbolic links, devices, sockets and pipes are never copied.
+			slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(rel), "type", d.Type().String())
+			return nil
 		}
-
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-
-		target := filepath.Join(dst, rel)
-
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		return os.WriteFile(target, data, info.Mode())
 	})
+}
+
+// checkRealDirPath verifies that every component of sub (a local, cleaned
+// path) inside root is a directory and not a symbolic link. display is the
+// path as the caller named it, used in error messages.
+func checkRealDirPath(root *os.Root, sub, display string) error {
+	if sub == "." {
+		return nil
+	}
+	cur := ""
+	for _, part := range strings.Split(sub, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		info, err := root.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("path %s not found in repository", display)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to inspect path %s: %w", display, err)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("path %s in repository goes through a symbolic link", display)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("path %s in repository is not a directory", display)
+		}
+	}
+	return nil
+}
+
+// copyRegularFileNoFollow copies the regular file srcName in srcRoot to
+// dstName in dstRoot. It refuses anything that is not a regular file at the
+// time of the Lstat, and anything that is not that same file once opened.
+func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string) error {
+	linfo, err := srcRoot.Lstat(srcName)
+	if err != nil {
+		return err
+	}
+	if !linfo.Mode().IsRegular() {
+		slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(dstName), "type", linfo.Mode().Type().String())
+		return nil
+	}
+
+	in, err := srcRoot.Open(srcName)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	oinfo, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !oinfo.Mode().IsRegular() || !os.SameFile(linfo, oinfo) {
+		return fmt.Errorf("file %s changed while copying the remote template", filepath.ToSlash(dstName))
+	}
+
+	return writeFileInRoot(dstRoot, dstName, in, linfo.Mode())
+}
+
+// writeFileInRoot creates (or truncates) the regular file name inside root,
+// creating missing parent directories, and fills it from r. All path
+// resolution goes through root, so the write cannot land outside it.
+func writeFileInRoot(root *os.Root, name string, r io.Reader, mode fs.FileMode) error {
+	if dir := filepath.Dir(name); dir != "." {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, r); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// dirPerm returns the permission bits for a directory created from fetched
+// content: the source's permission bits, always owner-accessible so later
+// entries can be written into it.
+func dirPerm(mode fs.FileMode) fs.FileMode {
+	return mode.Perm() | 0o700
 }
 
 // fetchArchive downloads and extracts a compressed archive.
@@ -733,12 +871,25 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 }
 
 // extractZip extracts a zip archive to the destination path.
+//
+// Only directories and regular files are extracted; symbolic links and other
+// entry types are skipped (a template never needs them, and recreating a link
+// from untrusted content could point outside the template). Entry names keep
+// the lexical checks of sanitizePath, and every write goes through an os.Root
+// opened at destPath, so nothing can be written outside it, including through
+// a symlinked parent directory.
 func extractZip(zipPath, destPath string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
+
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 
 	// Detect if there's a common root directory
 	commonRoot := detectCommonRoot(func(yield func(string) bool) {
@@ -766,34 +917,24 @@ func extractZip(zipPath, destPath string) error {
 			continue
 		}
 
-		fpath := filepath.Join(destPath, name)
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(fpath, f.Mode()); err != nil {
+		mode := f.Mode()
+		if mode.IsDir() {
+			if err := root.MkdirAll(name, dirPerm(mode)); err != nil {
 				return err
 			}
 			continue
 		}
-
-		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
-			return err
-		}
-
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
+		if !mode.IsRegular() {
+			slog.Warn("Skipping non-regular archive entry", "name", f.Name, "type", mode.Type().String())
+			continue
 		}
 
 		rc, err := f.Open()
 		if err != nil {
-			_ = outFile.Close()
 			return err
 		}
-
-		_, err = io.Copy(outFile, rc)
+		err = writeFileInRoot(root, name, rc, mode)
 		_ = rc.Close()
-		_ = outFile.Close()
-
 		if err != nil {
 			return err
 		}
@@ -803,6 +944,14 @@ func extractZip(zipPath, destPath string) error {
 }
 
 // extractTarGz extracts a .tar.gz or .tgz archive to the destination path.
+//
+// Only directories and regular files are extracted. Symbolic-link and
+// hard-link entries are skipped: a template never needs them, and recreating
+// a link from untrusted content lets later entries or later copies reach
+// files outside the template. Entry names keep the lexical checks of
+// sanitizePath, and every write goes through an os.Root opened at destPath,
+// so nothing can be written outside it, including through a symlinked parent
+// directory.
 func extractTarGz(tarGzPath, destPath string) error {
 	f, err := os.Open(tarGzPath)
 	if err != nil {
@@ -860,6 +1009,12 @@ func extractTarGz(tarGzPath, destPath string) error {
 
 	tarReader = tar.NewReader(gzr)
 
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -885,43 +1040,17 @@ func extractTarGz(tarGzPath, destPath string) error {
 			continue
 		}
 
-		fpath := filepath.Join(destPath, name)
-
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(fpath, os.FileMode(header.Mode)); err != nil {
+			if err := root.MkdirAll(name, dirPerm(os.FileMode(header.Mode))); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+			if err := writeFileInRoot(root, name, tarReader, os.FileMode(header.Mode)); err != nil {
 				return err
 			}
-
-			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(header.Mode))
-			if err != nil {
-				return err
-			}
-
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				_ = outFile.Close()
-				return err
-			}
-			_ = outFile.Close()
-		case tar.TypeSymlink:
-			linkTarget := header.Linkname
-			if !filepath.IsAbs(linkTarget) {
-				linkTarget = filepath.Join(filepath.Dir(fpath), linkTarget)
-			}
-			linkTarget = filepath.Clean(linkTarget)
-			if !strings.HasPrefix(linkTarget, filepath.Clean(destPath)+string(os.PathSeparator)) {
-				continue
-			}
-			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
-				return err
-			}
-			if err := os.Symlink(header.Linkname, fpath); err != nil && !os.IsExist(err) {
-				return err
-			}
+		case tar.TypeSymlink, tar.TypeLink:
+			slog.Warn("Skipping link entry in archive", "name", header.Name)
 		}
 	}
 
