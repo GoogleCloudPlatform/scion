@@ -1,0 +1,214 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
+)
+
+func postOperationRun(t *testing.T, srv *Server, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/"+key+"/run",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceOps(rr, req)
+	return rr
+}
+
+func TestExecuteOperation_ParamAllowlist(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	prev := version.Version
+	version.Version = "nightly-20261023"
+	t.Cleanup(func() { version.Version = prev })
+
+	tests := []struct {
+		name, key, body string
+		status          int
+		code            string
+	}{
+		{"download_url", "update-binary", `{"params":{"target_version":"nightly-20261024","download_url":"https://evil.example.com/x.tar.gz"}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
+		{"checksums_url", "update-binary", `{"params":{"target_version":"nightly-20261024","checksums_url":"https://evil.example.com/SHA256SUMS"}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
+		{"current_version", "update-binary", `{"params":{"target_version":"nightly-20261024","current_version":"dev"}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
+		{"non-string unknown param", "update-binary", `{"params":{"target_version":"nightly-20261024","download_url":5}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
+		{"missing target", "update-binary", `{"params":{}}`, http.StatusBadRequest, maintenance.CodeInvalidParam},
+		{"not a tag", "update-binary", `{"params":{"target_version":"../../x"}}`, http.StatusBadRequest, maintenance.CodeInvalidParam},
+		{"same version", "update-binary", `{"params":{"target_version":"nightly-20261023"}}`, http.StatusConflict, maintenance.CodeAlreadyRunning},
+		{"older version", "update-binary", `{"params":{"target_version":"nightly-20261020"}}`, http.StatusConflict, maintenance.CodeDowngradeNotYetSupported},
+		{"rebuild-server unknown", "rebuild-server", `{"params":{"branch":"main","repo":"/tmp/x"}}`, http.StatusBadRequest, maintenance.CodeUnknownParam},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := postOperationRun(t, srv, tt.key, tt.body)
+			if rr.Code != tt.status {
+				t.Fatalf("status = %d, want %d: %s", rr.Code, tt.status, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), `"`+tt.code+`"`) {
+				t.Fatalf("body lacks code %q: %s", tt.code, rr.Body.String())
+			}
+			runs, err := s.ListMaintenanceRuns(context.Background(), tt.key, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("a run was created for a refused request: %+v", runs)
+			}
+		})
+	}
+}
+
+func TestExecuteOperation_RestartingRunBlocksNewRun(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	if err := s.CreateMaintenanceRun(context.Background(), &store.MaintenanceOperationRun{
+		ID: tid("run-restarting"), OperationKey: "pull-images",
+		Status: store.MaintenanceStatusRestarting, StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rr := postOperationRun(t, srv, "pull-images", `{"params":{}}`); rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// restartingExecutor imitates update-binary: it logs, calls the hook, then
+// (when the hook succeeds) "restarts" and logs again.
+type restartingExecutor struct {
+	hookErr error // returned by Run after a failed hook, wrapped
+}
+
+func (e *restartingExecutor) Run(ctx context.Context, w io.Writer, p map[string]string) error {
+	return e.RunWithBeforeRestart(ctx, w, p, nil)
+}
+
+func (e *restartingExecutor) RunWithBeforeRestart(ctx context.Context, w io.Writer, _ map[string]string, before maintenance.BeforeRestartFunc) error {
+	_, _ = fmt.Fprintln(w, "installed nightly-20261024")
+	if before != nil {
+		if err := before(ctx, maintenance.PendingRestart{From: "nightly-20261023", To: "nightly-20261024", Strategy: "symlink"}); err != nil {
+			return fmt.Errorf("hook: %w", err)
+		}
+	}
+	if e.hookErr != nil {
+		return e.hookErr
+	}
+	_, _ = fmt.Fprintln(w, "restart requested")
+	return nil
+}
+
+func waitForRunStatus(t *testing.T, s store.Store, runID string, done func(*store.MaintenanceOperationRun) bool) *store.MaintenanceOperationRun {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		run, err := s.GetMaintenanceRun(context.Background(), runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done(run) {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not settle: %+v", runID, run)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func newRun(t *testing.T, s store.Store) *store.MaintenanceOperationRun {
+	t.Helper()
+	run := &store.MaintenanceOperationRun{
+		ID: api.NewUUID(), OperationKey: "update-binary",
+		Status: store.MaintenanceStatusRunning, StartedAt: time.Now(), StartedBy: "admin@example.com",
+	}
+	if err := s.CreateMaintenanceRun(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestLaunchMaintenanceRun_RecordsRestartingBeforeRestart(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	ctx := context.Background()
+	if _, err := s.UpsertHubSetting(ctx, HubSettingSectionUpdateAvailable, json.RawMessage(`{"version":"nightly-20261024"}`), "test", -1, "managed"); err != nil {
+		t.Fatal(err)
+	}
+
+	run := newRun(t, s)
+	srv.launchMaintenanceRun(run, &restartingExecutor{}, map[string]string{})
+
+	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+		return strings.Contains(r.Log, "restart requested")
+	})
+	if got.Status != store.MaintenanceStatusRestarting {
+		t.Fatalf("status = %q, want restarting", got.Status)
+	}
+	if got.CompletedAt != nil {
+		t.Fatalf("CompletedAt set on a restarting run: %v", got.CompletedAt)
+	}
+	var result map[string]string
+	if err := json.Unmarshal([]byte(got.Result), &result); err != nil {
+		t.Fatalf("result %q: %v", got.Result, err)
+	}
+	if result["from"] != "nightly-20261023" || result["to"] != "nightly-20261024" || result["strategy"] != "symlink" {
+		t.Fatalf("result = %v", result)
+	}
+	if !strings.Contains(got.Log, "installed nightly-20261024") {
+		t.Fatalf("log = %q", got.Log)
+	}
+	if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("update_available not cleared: %v", err)
+	}
+}
+
+func TestLaunchMaintenanceRun_FailureAfterHookIsFailed(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	srv.launchMaintenanceRun(run, &restartingExecutor{hookErr: errors.New("restart failed")}, map[string]string{})
+	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+		return r.Status == store.MaintenanceStatusFailed
+	})
+	if got.CompletedAt == nil || !strings.Contains(got.Result, "restart failed") {
+		t.Fatalf("run = %+v", got)
+	}
+}
+
+func TestLaunchMaintenanceRun_RequestErrorCodeInResult(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	exec := maintenance.NewBinaryUpdateExecutor(maintenance.BinaryUpdateOptions{CurrentVersion: "nightly-20261023"})
+	srv.launchMaintenanceRun(run, exec, map[string]string{"target_version": "nightly-20261023"})
+	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+		return r.Status == store.MaintenanceStatusFailed
+	})
+	if !strings.Contains(got.Result, `"code":"`+maintenance.CodeAlreadyRunning+`"`) {
+		t.Fatalf("result = %s", got.Result)
+	}
+}

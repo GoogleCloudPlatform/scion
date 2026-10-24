@@ -89,7 +89,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 	key, runID := run.OperationKey, run.ID
 
 	go func() {
-		buf := &syncBuffer{}
+		buf := &runLogBuffer{}
 		restarting := false
 
 		defer func() {
@@ -157,7 +157,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 // markRunRestarting records run as "restarting" with the log so far and the
 // update's from/to/strategy, and clears the update-available notification.
 // It runs as the before-restart hook, so a failure aborts the restart.
-func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOperationRun, buf *syncBuffer, p maintenance.PendingRestart) error {
+func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOperationRun, buf *runLogBuffer, p maintenance.PendingRestart) error {
 	result := map[string]interface{}{
 		"from":     p.From,
 		"to":       p.To,
@@ -186,21 +186,21 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 	return nil
 }
 
-// syncBuffer is a mutex-guarded log buffer. It implements only Write (not
+// runLogBuffer is a mutex-guarded log buffer. It implements only Write (not
 // io.ReaderFrom), so a child process started by an executor can keep writing
 // to it while the runner reads it.
-type syncBuffer struct {
+type runLogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func (b *syncBuffer) Write(p []byte) (int, error) {
+func (b *runLogBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.Write(p)
 }
 
-func (b *syncBuffer) String() string {
+func (b *runLogBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
