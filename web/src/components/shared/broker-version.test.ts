@@ -55,6 +55,9 @@ describe('broker version helpers', () => {
     expect(hubVersionTitle('v1.3.0')).toBe('Hub runs v1.3.0');
     expect(hubVersionTitle('')).toBe('Hub version unknown');
     expect(hubVersionTitle('mixed')).toBe('Hub instances run different versions');
+    // A hub built without build information reports "unknown": no token.
+    expect(hubVersionText('unknown')).toBe('unknown');
+    expect(hubVersionTitle('unknown')).toBe('Hub version unknown');
   });
 
   it('explains each broker state in the tooltip', () => {
@@ -73,6 +76,7 @@ describe('broker version helpers', () => {
     expect(brokerVersionTitle('unknown', 'unknown', 'v1.3.0')).toBe(
       'Cannot be compared with the hub. Hub runs v1.3.0'
     );
+    expect(brokerVersionTitle('v1.2.0', 'unknown', 'unknown')).toBe('Hub version unknown');
   });
 });
 

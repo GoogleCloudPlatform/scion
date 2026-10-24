@@ -32,6 +32,14 @@ export type BrokerVersionStatus = 'match' | 'mismatch' | 'unknown';
 /** The fleet hub version the hub sends when its instances disagree. */
 export const HUB_VERSION_MIXED = 'mixed';
 
+/**
+ * True when the hub version is no usable token: empty, or "unknown" (a hub
+ * built without build information).
+ */
+function hubVersionUnknown(hubVersion: string | null | undefined): boolean {
+  return !hubVersion || hubVersion === 'unknown';
+}
+
 /** A missing or unexpected status is unknown, never match. */
 export function normalizeVersionStatus(status: string | null | undefined): BrokerVersionStatus {
   return status === 'match' || status === 'mismatch' ? status : 'unknown';
@@ -39,14 +47,14 @@ export function normalizeVersionStatus(status: string | null | undefined): Broke
 
 /** The hub version as shown after "Hub: ". */
 export function hubVersionText(hubVersion: string | null | undefined): string {
-  if (!hubVersion) return 'unknown';
+  if (hubVersionUnknown(hubVersion)) return 'unknown';
   if (hubVersion === HUB_VERSION_MIXED) return 'mixed versions (upgrade in progress)';
   return hubVersion;
 }
 
 /** The tooltip describing the hub version. */
 export function hubVersionTitle(hubVersion: string | null | undefined): string {
-  if (!hubVersion) return 'Hub version unknown';
+  if (hubVersionUnknown(hubVersion)) return 'Hub version unknown';
   if (hubVersion === HUB_VERSION_MIXED) return 'Hub instances run different versions';
   return `Hub runs ${hubVersion}`;
 }
@@ -62,7 +70,7 @@ export function brokerVersionTitle(
   if (s === 'mismatch') return `Differs from the hub. ${hubVersionTitle(hubVersion)}`;
   // Unknown although both sides report a version: the broker's token cannot
   // be compared (for example "unknown", a build without build information).
-  if (s === 'unknown' && hubVersion && hubVersion !== HUB_VERSION_MIXED) {
+  if (s === 'unknown' && !hubVersionUnknown(hubVersion) && hubVersion !== HUB_VERSION_MIXED) {
     return `Cannot be compared with the hub. ${hubVersionTitle(hubVersion)}`;
   }
   return hubVersionTitle(hubVersion);
