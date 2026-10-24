@@ -328,12 +328,21 @@ scion templates sync --all
 scion --global templates sync code-reviewer
 scion templates sync code-reviewer --name team-reviewer
 
+# Sync a template directory by path (Hub name defaults to its base name)
+scion templates sync ./templates/code-reviewer
+
 # Download a Hub template to the local filesystem
 scion templates pull code-reviewer --to .scion/templates/code-reviewer
 
 # Compare local vs Hub (synced / out of date / local-only / hub-only)
 scion templates status
 ```
+
+`sync` and `push` accept a template name or a directory path. An argument that is absolute, starts with `./` or `../`, or contains a path separator is a path: that directory is synced as is, and the Hub name defaults to its base name unless `--name` is given. A bare name is looked up in the project and global templates directories as before.
+
+:::tip[Agents that share the project workspace]
+Agents that share the project workspace see the project's `.scion` directory read-only, so they cannot edit `.scion/templates/<name>` in place. Edit the template in another directory of the checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`.
+:::
 
 `sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Syncing an existing template mirrors the local directory: files deleted locally are removed from the Hub copy, and sync lists them as it removes them.
 

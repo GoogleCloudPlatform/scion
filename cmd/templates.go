@@ -26,6 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -717,9 +718,20 @@ Use the root --global flag to sync to global scope instead of project scope.
 
 Use --all to sync all project-scoped local templates to the Hub at once.
 
+The template may also be given as a directory path: an absolute path, one
+starting with ./ or ../, or one containing a path separator. The directory is
+synced as is, and the Hub name defaults to its base name (--name overrides it).
+An argument containing a separator is therefore read relative to the current
+directory, not looked up in the templates directories. Agents that share the
+project workspace see the project's .scion directory read-only, so they edit a
+template elsewhere in their checkout and sync it by path.
+
 Examples:
   # Sync a local template to the Hub (project scope by default)
   scion templates sync custom-claude
+
+  # Sync a template directory by path
+  scion templates sync ./templates/planner
 
   # Sync all project templates to Hub
   scion templates sync --all
@@ -739,9 +751,14 @@ var templatesPushCmd = &cobra.Command{
 	Short: "Upload local template to Hub (alias for sync)",
 	Long: `Push a local template to the Hub. This is a semantic alias for 'sync'.
 
+The template may also be given as a directory path; see 'scion templates sync --help'.
+
 Examples:
   # Push a local template to the Hub
   scion templates push custom-claude
+
+  # Push a template directory by path
+  scion templates push ./templates/planner --name planner
 
   # Push all project templates to Hub
   scion templates push --all
@@ -796,6 +813,25 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return newUsageError("requires a template name argument or --all flag")
 	}
 
+	// A directory path argument is resolved before contacting the Hub, so a
+	// bad path or an unusable derived name fails fast.
+	var pathTpl *config.Template
+	if !syncAll {
+		tpl, isPath, err := templateSyncPathSource(args[0])
+		if err != nil {
+			return err
+		}
+		if isPath {
+			if hubName == "" {
+				if err := checkDerivedTemplateName(tpl); err != nil {
+					return err
+				}
+				hubName = tpl.Name
+			}
+			pathTpl = tpl
+		}
+	}
+
 	// Check Hub availability first (we need it for sync anyway). A
 	// --global sync does not link the project (see requireHubForUpload).
 	hubCtx, err := requireHubForUpload(projectPath)
@@ -810,31 +846,34 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return syncAllTemplatesToHub(hubCtx, destScope)
 	}
 
-	localTemplateName := args[0]
+	tpl := pathTpl
+	if tpl == nil {
+		localTemplateName := args[0]
 
-	// If no explicit Hub name, use the local template name
-	if hubName == "" {
-		hubName = localTemplateName
+		// If no explicit Hub name, use the local template name
+		if hubName == "" {
+			hubName = localTemplateName
+		}
+
+		// Build resolution options - local only for source, since we're syncing TO hub
+		opts := &ResolveOpts{
+			LocalOnly:   true,
+			AutoConfirm: autoConfirm,
+		}
+
+		ctx := context.Background()
+		match, err := ResolveTemplate(ctx, localTemplateName, nil, opts, "sync")
+		if err != nil {
+			return fmt.Errorf("template '%s' not found locally: %w", localTemplateName, err)
+		}
+
+		if !match.IsLocal() {
+			return fmt.Errorf("internal error: expected local template but got hub")
+		}
+
+		// Create template object for harness detection
+		tpl = &config.Template{Name: match.Name, Path: match.LocalPath}
 	}
-
-	// Build resolution options - local only for source, since we're syncing TO hub
-	opts := &ResolveOpts{
-		LocalOnly:   true,
-		AutoConfirm: autoConfirm,
-	}
-
-	ctx := context.Background()
-	match, err := ResolveTemplate(ctx, localTemplateName, nil, opts, "sync")
-	if err != nil {
-		return fmt.Errorf("template '%s' not found locally: %w", localTemplateName, err)
-	}
-
-	if !match.IsLocal() {
-		return fmt.Errorf("internal error: expected local template but got hub")
-	}
-
-	// Create template object for harness detection
-	tpl := &config.Template{Name: match.Name, Path: match.LocalPath}
 
 	// Detect harness type from template config (optional - can be resolved during agent provisioning)
 	harnessType, err := detectHarnessType(tpl)
@@ -846,6 +885,38 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 	warnDeprecatedHubAccessScopes(tpl.Name, tpl.Path)
 
 	return syncTemplateToHub(hubCtx, hubName, tpl.Path, destScope, harnessType)
+}
+
+// templateSyncPathSource reports whether arg names a template directory by
+// path rather than by template name: an absolute path, one starting with ./
+// or ../, or one containing a path separator (template names never do). For
+// a path it returns the template in that directory, made absolute, or an
+// error when it is not an existing directory. The template's name is derived
+// as config.FindTemplateWithContext derives it for an absolute path.
+func templateSyncPathSource(arg string) (tpl *config.Template, isPath bool, err error) {
+	if !filepath.IsAbs(arg) && !strings.HasPrefix(arg, "./") && !strings.HasPrefix(arg, "../") &&
+		!strings.ContainsRune(arg, '/') && !strings.ContainsRune(arg, filepath.Separator) {
+		return nil, false, nil
+	}
+	abs, err := filepath.Abs(arg)
+	if err != nil {
+		return nil, true, fmt.Errorf("cannot resolve template path %q: %w", arg, err)
+	}
+	tpl, err = config.TemplateFromDir(abs)
+	if err != nil {
+		return nil, true, err
+	}
+	return tpl, true, nil
+}
+
+// checkDerivedTemplateName refuses a Hub name derived from a template
+// directory that cannot serve as a template name: an empty one (the
+// directory is named after a content hash) or one with no usable characters.
+func checkDerivedTemplateName(tpl *config.Template) error {
+	if tpl.Name == "" || api.Slugify(tpl.Name) == "" {
+		return newUsageError("cannot derive a template name from directory %s; set one with --name", tpl.Path)
+	}
+	return nil
 }
 
 // syncAllTemplatesToHub syncs all local project templates to the Hub.

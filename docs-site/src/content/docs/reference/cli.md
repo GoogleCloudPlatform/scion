@@ -1157,6 +1157,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 Hub-only commands (require an enabled Hub):
 
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
+    - The template may also be a directory path: an absolute path, or one that starts with `./` or `../` or contains a path separator. That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
 - `status`: Show the sync status of templates relative to the Hub.
 
