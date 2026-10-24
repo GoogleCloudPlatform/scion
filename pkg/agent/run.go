@@ -1529,9 +1529,25 @@ authDone:
 
 	// The only hub credential an agent ever gets is the token the hub issued
 	// for it, written to the token file below. No other token is substituted,
-	// this process's own included. A hub-dispatched agent without one could
-	// neither report to the hub nor call it, so its start fails (below, after
-	// any earlier token file is removed) with ErrNoHubToken.
+	// this process's own included. In broker mode that token is
+	// opts.HubIssuedToken, which only the runtime broker sets: a
+	// SCION_AUTH_TOKEN in opts.Env (from the request's config env or the
+	// broker's harness-config env) is not hub-issued, so it is dropped here
+	// and buildAgentEnv drops one from the agent config env. A hub-dispatched
+	// agent without a hub-issued token could neither report to the hub nor
+	// call it, so its start fails (below, after any earlier token file is
+	// removed) with ErrNoHubToken.
+	if opts.BrokerMode {
+		if _, ok := opts.Env["SCION_AUTH_TOKEN"]; ok {
+			delete(opts.Env, "SCION_AUTH_TOKEN")
+			slog.Warn("agent start: a SCION_AUTH_TOKEN the hub did not issue is ignored",
+				"agent_id", agentID, "name", opts.Name)
+			warnings = append(warnings, ignoredAuthTokenWarning)
+		}
+		if opts.HubIssuedToken != "" {
+			opts.Env["SCION_AUTH_TOKEN"] = opts.HubIssuedToken
+		}
+	}
 	missingHubToken := hubDispatchedWithoutToken(opts)
 
 	// Write the agent token to the canonical token file in the agent home
@@ -3581,6 +3597,12 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 					expandedValue = hostVal
 				}
 			}
+			if brokerMode && expandedKey == "SCION_AUTH_TOKEN" {
+				// Not hub-issued: a hub-dispatched agent's hub token comes
+				// only from the hub (StartOptions.HubIssuedToken).
+				warnings = append(warnings, ignoredAuthTokenWarning)
+				continue
+			}
 			combined[expandedKey] = expandedValue
 		}
 	}
@@ -3590,6 +3612,9 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	// Lowest tier: fill only what no layer above set.
 	for k, v := range defaultEnv {
+		if brokerMode && k == "SCION_AUTH_TOKEN" {
+			continue
+		}
 		if combined[k] == "" {
 			combined[k] = v
 		}
@@ -3629,12 +3654,18 @@ var ErrNoHubToken = errors.New("the hub issued no agent token for this start; " 
 
 // hubDispatchedWithoutToken reports whether opts is a hub-dispatched start
 // (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) with no
-// hub-issued token in opts.Env.
+// hub-issued token (opts.HubIssuedToken).
 func hubDispatchedWithoutToken(opts api.StartOptions) bool {
 	return opts.BrokerMode &&
 		(opts.Env["SCION_HUB_ENDPOINT"] != "" || opts.Env["SCION_HUB_URL"] != "") &&
-		opts.Env["SCION_AUTH_TOKEN"] == ""
+		opts.HubIssuedToken == ""
 }
+
+// ignoredAuthTokenWarning is the start warning for a SCION_AUTH_TOKEN that
+// reached a hub-dispatched start from anywhere but the hub (the request's
+// config env, the agent config env, a harness-config env). It names no value.
+const ignoredAuthTokenWarning = "Warning: SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: " +
+	"the agent's hub credential is only the token the hub issues for it."
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
 // config env section with ${VAR} references expanded from the host env, or ""

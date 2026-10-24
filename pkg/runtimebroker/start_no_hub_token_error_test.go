@@ -118,3 +118,94 @@ func TestStartWithoutHubTokenReportsCause(t *testing.T) {
 		}
 	})
 }
+
+// TestStartWithoutHubIssuedTokenStartsNoContainer drives the broker start
+// and restart paths end to end, through a real agent manager over a runtime
+// that counts container starts. A hub-dispatched start with no hub-issued
+// token answers 500 runtime_error naming the cause and starts no container,
+// also when a made-up SCION_AUTH_TOKEN arrives in the resolved env without
+// the hub's secret-bootstrap classification (the hub classifies only the
+// token it issued). The control case, the same request with a hub-issued
+// token, starts exactly one container whose env holds no token value.
+func TestStartWithoutHubIssuedTokenStartsNoContainer(t *testing.T) {
+	// Made-up values; never real credentials.
+	const fakeCreatorToken = "fake.creator.supplied"
+	const fakeHubToken = "fake.lifecycle.hub.token"
+	for _, op := range []string{"start", "restart"} {
+		for _, tc := range []struct {
+			name string
+			body map[string]any
+			// started: the control case (a hub-issued token).
+			started bool
+		}{
+			{name: "no token", body: map[string]any{"hubEndpoint": lifecycleHubEndpoint}},
+			{name: "resolved env token classified plain", body: map[string]any{
+				"hubEndpoint":        lifecycleHubEndpoint,
+				"resolvedEnv":        map[string]string{"SCION_AUTH_TOKEN": fakeCreatorToken},
+				"envClassifications": map[string]api.EnvKind{"SCION_AUTH_TOKEN": api.EnvKindPlain},
+			}},
+			{name: "resolved env token without classifications", body: map[string]any{
+				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": map[string]string{"SCION_AUTH_TOKEN": fakeCreatorToken},
+			}},
+			{name: "control: hub-issued token", started: true, body: map[string]any{
+				"hubEndpoint":        lifecycleHubEndpoint,
+				"resolvedEnv":        lifecycleHubTokenEnv(),
+				"envClassifications": lifecycleHubTokenClass(),
+			}},
+		} {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				f := newLifecycleFixture(t)
+				const name = "tok-e2e-agent"
+				writeSavedAgentProfile(t, f.projectPath, name, lifecycleK8sProfile)
+				listed := lifecycleAgent(name, f.projectPath, "")
+				if op == "start" {
+					f.defaultMgr.agents = []api.AgentInfo{listed}
+				} else {
+					f.registerK8sAgents(listed)
+				}
+				w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/"+op, tc.body)
+				for _, tok := range []string{fakeCreatorToken, fakeHubToken} {
+					if strings.Contains(w.Body.String(), tok) {
+						t.Errorf("response body carries a token value")
+					}
+				}
+				runs, env := f.k8sRun()
+				for _, e := range env {
+					for _, tok := range []string{fakeCreatorToken, fakeHubToken} {
+						if strings.Contains(e, tok) {
+							t.Errorf("container env %s carries a token value", strings.SplitN(e, "=", 2)[0])
+						}
+					}
+				}
+				if tc.started {
+					if w.Code != http.StatusAccepted || runs != 1 {
+						t.Fatalf("control: status %d, container starts %d; want 202 and 1: %s", w.Code, runs, w.Body.String())
+					}
+					return
+				}
+				if runs != 0 {
+					t.Errorf("container starts = %d, want 0", runs)
+				}
+				if w.Code != http.StatusInternalServerError {
+					t.Fatalf("status %d, want 500: %s", w.Code, w.Body.String())
+				}
+				var body struct {
+					Error struct {
+						Code    string `json:"code"`
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if body.Error.Code != ErrCodeRuntimeError {
+					t.Errorf("code %q, want %q", body.Error.Code, ErrCodeRuntimeError)
+				}
+				if !strings.Contains(body.Error.Message, "hub issued no agent token") || !strings.Contains(body.Error.Message, "agent token service") {
+					t.Errorf("message %q does not name the cause", body.Error.Message)
+				}
+			})
+		}
+	}
+}

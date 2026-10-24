@@ -3503,13 +3503,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Parity with the create path: populate the dedicated AgentToken field from
-	// the hub-minted token in ResolvedEnv so buildStartContext treats it as an
-	// explicit token rather than relying on the resolvedEnv-kept fallback. The
-	// precedence in buildStartContext step 3 keeps this token regardless, but
-	// setting it here makes the start path behave like create.
-	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
-
 	// The URL path segment (id) is the agent's slug, not the Hub UUID: the
 	// broker's own dispatch client sends agent.Slug there. It is also the
 	// stable on-disk identity: create keys the agent directory, container
@@ -3591,7 +3584,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		EnvClassifications:       startReq.EnvClassifications,
 		ResolvedSecrets:          startReq.ResolvedSecrets,
 		SharedDirs:               startReq.SharedDirs,
-		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,

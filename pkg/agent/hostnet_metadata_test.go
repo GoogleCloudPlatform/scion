@@ -130,11 +130,11 @@ func startHostNetFixture(t *testing.T, hubEndpoint, mode string) (*api.AgentInfo
 		NoAuth:      true,
 		// A hub-dispatched start carries the token the hub issued for it
 		// (made-up value); a start without one fails with ErrNoHubToken.
+		HubIssuedToken: "fake.hostnet.hub.token",
 		Env: map[string]string{
 			"SCION_AGENT_ID":      "agent-uuid-hostnet",
 			"SCION_HUB_ENDPOINT":  hubEndpoint,
 			"SCION_METADATA_MODE": mode,
-			"SCION_AUTH_TOKEN":    "fake.hostnet.hub.token",
 		},
 	})
 	return info, got, err

@@ -1507,6 +1507,14 @@ type StartOptions struct {
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
 
+	// HubIssuedToken is the agent token the hub issued for this start, set
+	// only by the runtime broker: the create request's dedicated agent token,
+	// or on start and restart the resolved env SCION_AUTH_TOKEN that the hub
+	// classified as secret-bootstrap. In BrokerMode it is the agent's only
+	// hub credential; a SCION_AUTH_TOKEN from any other source is dropped.
+	// Like HostCredentialFiles it is never persisted.
+	HubIssuedToken string `json:"-"`
+
 	// RerenderKeys are the provision-rendered config keys
 	// (RerenderableConfigKeys) whose files this start renders again before
 	// the container starts, from the hub inline config's ChangedFields and
