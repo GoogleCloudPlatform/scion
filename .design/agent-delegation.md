@@ -1039,8 +1039,9 @@ sciontool delegation helper can use it.
 ### 16.1 Transactional revocation through B.3 hooks
 
 G registers one `AgentTxHook` in each of the four registries (§3.4). Each hook revokes the agent's
-active grants and their credentials, with `revoke_reason` and a mutation audit, on the
-transaction-scoped store. A hook error rolls back the lifecycle operation.
+unrevoked grants (expired ones included) and their unrevoked credentials, with `revoke_reason` and a
+mutation audit, on the transaction-scoped store. A hook error rolls back the lifecycle operation.
+The revoke route (§7) and every lifecycle revocation share one per-grant revocation body.
 
 | Registry | Revoke reason | Why it must be transactional |
 | --- | --- | --- |

@@ -78,15 +78,75 @@ func agentDelegationRevokeHook(reason string) AgentTxHook {
 	}
 }
 
+// revokeAgentDelegationGrantTx revokes, on tx, the grant with grantID and
+// every unrevoked credential exchanged from it, expired or not, with
+// reason. It is the one revocation body the revoke route and the lifecycle
+// revocations share. The grant is locked first, so the revocation
+// serializes with a concurrent exchange. It writes one
+// agent_delegation_grant_revoke mutation audit that lists the credentials
+// revoked with the grant; block fills the G block from the locked grant,
+// actor fills the principal (the hub when actor names none), and the
+// record's ID is stored as the grant's revocation_audit_id. A grant that is
+// already revoked is left as it is and the result is nil. An audit write
+// failure wraps errAgentDelegationAuditFailed. Any error leaves the caller
+// to roll back.
+func revokeAgentDelegationGrantTx(ctx context.Context, tx store.Store, grantID, revokedBy, reason string, actor AuditActor, now time.Time, block func(record *store.MutationAuditRecord, grant *store.AgentDelegationGrant)) (*store.AgentDelegationGrant, error) {
+	locked, err := tx.LockAgentDelegationGrant(ctx, grantID)
+	if err != nil {
+		return nil, fmt.Errorf("lock grant %s: %w", grantID, err)
+	}
+	if locked.RevokedAt != nil {
+		return nil, nil
+	}
+	creds, err := tx.ListActiveAgentDelegatedCredentials(ctx, []string{grantID}, time.Time{})
+	if err != nil {
+		return nil, fmt.Errorf("list credentials of grant %s: %w", grantID, err)
+	}
+	credIDs := make([]string, 0, len(creds))
+	for _, cred := range creds {
+		credIDs = append(credIDs, cred.ID)
+	}
+	auditID := uuid.New().String()
+	ok, err := tx.RevokeAgentDelegationGrant(ctx, grantID, revokedBy, reason, auditID, now)
+	if err != nil {
+		return nil, fmt.Errorf("revoke grant %s: %w", grantID, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	before, err := json.Marshal(map[string]interface{}{
+		"grant_id":               grantID,
+		"revoke_reason":          reason,
+		"revoked_credential_ids": credIDs,
+	})
+	if err != nil {
+		return nil, err
+	}
+	record := &store.MutationAuditRecord{
+		ID:            auditID,
+		Timestamp:     now,
+		MutationType:  mutationAgentDelegationGrantRevoke,
+		TargetType:    auditTargetAgentDelegationGrant,
+		TargetID:      grantID,
+		BeforeSummary: string(before),
+		AfterSummary:  "revoked",
+	}
+	if block != nil {
+		block(record, locked)
+	}
+	actor.ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return nil, fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
+	}
+	return locked, nil
+}
+
 // revokeAgentDelegationGrantsTx revokes, on tx, every unrevoked grant that
-// matches filter, expired or not, and every unrevoked credential exchanged
-// from each, with reason. Each grant is locked first, as the revoke route
-// does, so the revocation serializes with a concurrent exchange. Each
-// revoked grant gets one agent_delegation_grant_revoke mutation audit that
-// lists the credentials revoked with it, attributed to actor (the hub when
-// actor names no principal); its ID is stored as the grant's
-// revocation_audit_id. A grant revoked concurrently is skipped. It returns
-// the grants it revoked. Any error leaves the caller to roll back.
+// matches filter, expired or not, through revokeAgentDelegationGrantTx,
+// with reason, attributed to actor. The G block names the grant's agent,
+// issuer and grant. A grant revoked concurrently is skipped. It returns the
+// grants it revoked. Any error leaves the caller to roll back.
 func revokeAgentDelegationGrantsTx(ctx context.Context, tx store.Store, filter store.AgentDelegationGrantFilter, reason string, actor AuditActor, now time.Time) ([]*store.AgentDelegationGrant, error) {
 	grants, err := tx.ListAgentDelegationGrants(ctx, filter)
 	if err != nil {
@@ -98,55 +158,16 @@ func revokeAgentDelegationGrantsTx(ctx context.Context, tx store.Store, filter s
 		if g.RevokedAt != nil {
 			continue
 		}
-		locked, err := tx.LockAgentDelegationGrant(ctx, g.ID)
-		if err != nil {
-			return nil, fmt.Errorf("lock grant %s: %w", g.ID, err)
-		}
-		if locked.RevokedAt != nil {
-			continue
-		}
-		creds, err := tx.ListActiveAgentDelegatedCredentials(ctx, []string{g.ID}, time.Time{})
-		if err != nil {
-			return nil, fmt.Errorf("list credentials of grant %s: %w", g.ID, err)
-		}
-		credIDs := make([]string, 0, len(creds))
-		for _, cred := range creds {
-			credIDs = append(credIDs, cred.ID)
-		}
-		auditID := uuid.New().String()
-		ok, err := tx.RevokeAgentDelegationGrant(ctx, g.ID, revokedBy, reason, auditID, now)
-		if err != nil {
-			return nil, fmt.Errorf("revoke grant %s: %w", g.ID, err)
-		}
-		if !ok {
-			continue
-		}
-		before, err := json.Marshal(map[string]interface{}{
-			"grant_id":               g.ID,
-			"revoke_reason":          reason,
-			"revoked_credential_ids": credIDs,
-		})
+		r, err := revokeAgentDelegationGrantTx(ctx, tx, g.ID, revokedBy, reason, actor, now,
+			func(record *store.MutationAuditRecord, grant *store.AgentDelegationGrant) {
+				agentDelegationAuditBlock(record, grant, nil)
+			})
 		if err != nil {
 			return nil, err
 		}
-		record := &store.MutationAuditRecord{
-			ID:                auditID,
-			Timestamp:         now,
-			MutationType:      mutationAgentDelegationGrantRevoke,
-			TargetType:        auditTargetAgentDelegationGrant,
-			TargetID:          g.ID,
-			BeforeSummary:     string(before),
-			AfterSummary:      "revoked",
-			ActorAgentID:      locked.AgentID,
-			AuthorizingUserID: locked.IssuerUserID,
-			SourceGrantID:     locked.ID,
+		if r != nil {
+			revoked = append(revoked, r)
 		}
-		actor.ApplyActor(record)
-		applyHubActorFallback(record)
-		if err := tx.CreateMutationAudit(ctx, record); err != nil {
-			return nil, fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
-		}
-		revoked = append(revoked, locked)
 	}
 	return revoked, nil
 }

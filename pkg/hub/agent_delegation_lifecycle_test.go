@@ -121,16 +121,23 @@ func assertGrantActive(t *testing.T, s store.Store, lg lifecycleGrant) {
 	assert.Empty(t, recs, "no revocation record")
 }
 
-// errInjectedGrantRevoke is returned by adtLifecycleFaultStore while armed.
-var errInjectedGrantRevoke = errors.New("injected grant revocation fault")
+// errInjectedGrantRevoke and errInjectedGrantRevokeAudit are returned by
+// adtLifecycleFaultStore while armed.
+var (
+	errInjectedGrantRevoke      = errors.New("injected grant revocation fault")
+	errInjectedGrantRevokeAudit = errors.New("injected grant revocation audit fault")
+)
 
-// adtLifecycleFaultStore fails every RevokeAgentDelegationGrant made on a
-// transaction-scoped store while armed: inside WithTx and inside the
-// delete engine's finalize transaction, the two places lifecycle hooks
-// run. Outside a transaction it is transparent.
+// adtLifecycleFaultStore fails, on a transaction-scoped store, every
+// RevokeAgentDelegationGrant while armed, and every
+// agent_delegation_grant_revoke mutation audit write while auditArmed:
+// inside WithTx and inside the delete engine's finalize transaction, the
+// two places lifecycle hooks run. Other audit records and every call
+// outside a transaction are untouched.
 type adtLifecycleFaultStore struct {
 	store.Store
-	armed atomic.Bool
+	armed      atomic.Bool
+	auditArmed atomic.Bool
 }
 
 func (s *adtLifecycleFaultStore) wrap(tx store.Store) store.Store {
@@ -159,13 +166,36 @@ func (t *adtLifecycleFaultTx) RevokeAgentDelegationGrant(ctx context.Context, id
 	return t.Store.RevokeAgentDelegationGrant(ctx, id, revokedBy, reason, auditID, at)
 }
 
-// installLifecycleFault wraps srv.store in an armed adtLifecycleFaultStore.
+func (t *adtLifecycleFaultTx) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if t.parent.auditArmed.Load() && r.MutationType == mutationAgentDelegationGrantRevoke {
+		return errInjectedGrantRevokeAudit
+	}
+	return t.Store.CreateMutationAudit(ctx, r)
+}
+
+// installLifecycleFault wraps srv.store in an adtLifecycleFaultStore whose
+// revocation fault is armed.
 func installLifecycleFault(t *testing.T, srv *Server) *adtLifecycleFaultStore {
+	t.Helper()
+	fault := installLifecycleFaultStore(t, srv)
+	fault.armed.Store(true)
+	return fault
+}
+
+// installLifecycleAuditFault wraps srv.store in an adtLifecycleFaultStore
+// whose revocation audit fault is armed.
+func installLifecycleAuditFault(t *testing.T, srv *Server) *adtLifecycleFaultStore {
+	t.Helper()
+	fault := installLifecycleFaultStore(t, srv)
+	fault.auditArmed.Store(true)
+	return fault
+}
+
+func installLifecycleFaultStore(t *testing.T, srv *Server) *adtLifecycleFaultStore {
 	t.Helper()
 	fault, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *adtLifecycleFaultStore {
 		return &adtLifecycleFaultStore{Store: inner}
 	})
-	fault.armed.Store(true)
 	return fault
 }
 
@@ -317,6 +347,29 @@ func TestAgentDelegationLifecycle_HardDeleteRollsBackWhenRevocationFails(t *test
 	assertGrantActive(t, s, lg)
 }
 
+// A failed revocation audit write rolls the soft delete back too, with the
+// grant revocation (AC-5).
+func TestAgentDelegationLifecycle_SoftDeleteRollsBackWhenRevocationAuditFails(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	srv.config.SoftDeleteRetention = time.Hour
+	agent := setupBrokerAgentInPhase(t, s, "adtlc-soft-auditfail", state.PhaseStopped)
+	lg := seedLifecycleGrant(t, s, agent, lifecycleIssuer(t, s, "adtlc-soft-auditfail").ID)
+	fault := installLifecycleAuditFault(t, srv)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	_, details := errorBody(t, rec)
+	assert.Equal(t, store.DeletionCodeFinalizeFailed, details["deletionCode"])
+
+	assert.True(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "not soft-deleted")
+	assert.Empty(t, agentAudits(t, s, mutationTypeAgentSoftDelete, agent.ID))
+	assertGrantActive(t, s, lg)
+
+	fault.auditArmed.Store(false)
+	softDeleteForTest(t, srv, agent.ID)
+	assertGrantRevoked(t, s, lg, revokeReasonAgentDeleted)
+}
+
 func TestAgentDelegationLifecycle_RestoreRollsBackWhenRevocationFails(t *testing.T) {
 	srv, s, _, _ := engineTestServer(t)
 	srv.config.SoftDeleteRetention = time.Hour
@@ -399,6 +452,23 @@ func TestAgentDelegationLifecycle_SuspendSucceedsWhenRevocationFails(t *testing.
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	assert.Equal(t, string(state.PhaseSuspended), mustGetAgent(t, s, agent.ID).Phase)
+	assertGrantActive(t, s, lg)
+}
+
+// A failed best-effort revocation never fails the issuer suspend; the
+// grant stays active, and exchange and use deny a suspended issuer.
+func TestAgentDelegationLifecycle_IssuerSuspendSucceedsWhenRevocationFails(t *testing.T) {
+	srv, s := testServer(t)
+	issuer := lifecycleIssuer(t, s, "adtlc-issuer-suspend-fail")
+	lg := seedLifecycleGrant(t, s, setupBrokerAgentInPhase(t, s, "adtlc-isf", state.PhaseStopped), issuer.ID)
+	installLifecycleFault(t, srv)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+issuer.ID, map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	u, err := s.GetUser(context.Background(), issuer.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusSuspended, u.Status)
 	assertGrantActive(t, s, lg)
 }
 
@@ -518,6 +588,31 @@ func TestAgentDelegationLifecycle_ProjectDeleteRollsBackWhenRevocationFails(t *t
 
 	_, err := s.GetProject(ctx, f.projectID)
 	require.NoError(t, err, "the project row is kept")
+	assertGrantActive(t, s, lg)
+}
+
+// A failed revocation audit write fails the project delete and rolls back
+// the project row and the grant revocation (AC-5).
+func TestAgentDelegationLifecycle_ProjectDeleteRollsBackWhenRevocationAuditFails(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	f := newProjectEdgeFixture(t, s, "adtlc-pd-auditfail")
+	lg := seedLifecycleGrant(t, s, f.live, lifecycleIssuer(t, s, "adtlc-pd-auditfail").ID)
+	fault := &adtLifecycleFaultStore{Store: s}
+	fault.auditArmed.Store(true)
+
+	svc := NewProjectDeletionService(fault, newTestAuthzService(s), slog.Default())
+	req := f.request()
+	result, decision := svc.Delete(setTestIdentity(ctx, req.Actor), req)
+	require.Nil(t, result)
+	require.NotNil(t, decision, "the audit fault fails the delete")
+	assert.Equal(t, http.StatusInternalServerError, decision.HTTPStatus)
+
+	_, err := s.GetProject(ctx, f.projectID)
+	require.NoError(t, err, "the project row is kept")
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "project_delete", TargetID: f.projectID})
+	require.NoError(t, err)
+	assert.Empty(t, audits, "no project_delete record")
 	assertGrantActive(t, s, lg)
 }
 
