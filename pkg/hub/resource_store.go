@@ -247,17 +247,26 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 		return nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
 	}
 	if rs.within != nil {
-		if err := rs.within.realSubdir(rs.withinPath); err != nil {
+		if err := rs.checkWithin(at, dir); err != nil {
 			_ = root.Close()
-			return nil, fmt.Errorf("%s: %w", rs.withinPath, err)
-		}
-		want, err := rs.within.root.Lstat(filepath.FromSlash(rs.withinPath))
-		if err != nil || !os.SameFile(want, at) {
-			_ = root.Close()
-			return nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
+			return nil, err
 		}
 	}
 	return newCollectedDir(dir, root, files), nil
+}
+
+// checkWithin requires got (the directory dir, as stat'ed) to be the
+// subdirectory rs.within's root has at rs.withinPath, reached through real
+// directories only (no component a link; realSubdir).
+func (rs *ResourceStore) checkWithin(got os.FileInfo, dir string) error {
+	if err := rs.within.realSubdir(rs.withinPath); err != nil {
+		return fmt.Errorf("%s: %w", rs.withinPath, err)
+	}
+	want, err := rs.within.root.Lstat(filepath.FromSlash(rs.withinPath))
+	if err != nil || !os.SameFile(want, got) {
+		return fmt.Errorf("%s %w", dir, errCollectedDirChanged)
+	}
+	return nil
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
@@ -273,7 +282,19 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, fmt.Errorf("storage backend is not configured")
 	}
 
-	if err := transfer.NormalizeDir(dir); err != nil {
+	if rs.within != nil {
+		// A harness-config bundled in a template: it must be the template's
+		// own subdirectory before anything reads or writes it. It is not
+		// normalized again by path: the template's bootstrap normalized the
+		// whole tree before collecting it.
+		got, err := os.Lstat(dir)
+		if err != nil {
+			return false, err
+		}
+		if err := rs.checkWithin(got, dir); err != nil {
+			return false, err
+		}
+	} else if err := transfer.NormalizeDir(dir); err != nil {
 		return false, fmt.Errorf("normalize dir: %w", err)
 	}
 	cd, err := rs.collectFiles(dir)
@@ -878,6 +899,14 @@ func (p *harnessConfigPersistence) CheckDir(_ context.Context, name string, cd *
 	data, present, err := cd.harnessConfigYAML()
 	if err != nil {
 		return fmt.Errorf("%s: harness config in %q not imported: %w", p.Label(), cd.base(), err)
+	}
+	if !present {
+		// A config.yaml that is in the directory but was not collected (a
+		// link or another non-regular entry) refuses the resource: it is
+		// never followed, and the resource is not stored without it.
+		if _, lerr := cd.root.Lstat(harnessConfigYAMLPath); lerr == nil {
+			return fmt.Errorf("%s: harness config in %q not imported: config.yaml is not a regular file (a link or special file), so it was not collected", p.Label(), cd.base())
+		}
 	}
 	if p.nameFromConfig {
 		// The caller named the resource from config.yaml before collection:

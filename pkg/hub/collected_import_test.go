@@ -218,3 +218,60 @@ func TestHarnessConfigImport_NameFromConfigMustMatchCollected(t *testing.T) {
 		}
 	})
 }
+
+// A config.yaml that is a link (not collected) refuses the harness-config,
+// even when the harness could be inferred from its name.
+func TestHarnessConfigBootstrap_LinkedConfigYAMLRefused(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	outside := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\n"})
+	dir := filepath.Join(t.TempDir(), "claude-probe")
+	if err := os.MkdirAll(filepath.Join(dir, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "home", ".rc"), []byte("# rc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "config.yaml"), filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "claude-probe", dir, store.HarnessConfigScopeGlobal, "", "", false)
+	if err == nil || !strings.Contains(err.Error(), "config.yaml is not a regular file") {
+		t.Fatalf("bootstrap error = %v, want the linked config.yaml refusal", err)
+	}
+	if _, ok := harnessConfigsByName(t, s)["claude-probe"]; ok {
+		t.Error("a harness-config whose config.yaml is a link was stored")
+	}
+}
+
+// A bundled harness-config whose harness-configs directory is replaced by a
+// link before its bootstrap is refused before anything reads or rewrites the
+// directory: the file the link leads to is not normalized.
+func TestBundledHarnessConfigBootstrap_LinkBeforeNormalizeRefused(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	parent := bundledTemplateTree(t)
+	pcd := collectTestDir(t, parent)
+	const crlf = "harness: claude\r\n"
+	outside := writeCollectedTestTree(t, map[string]string{"probe/config.yaml": crlf})
+	if err := os.RemoveAll(filepath.Join(parent, "harness-configs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, "harness-configs")); err != nil {
+		t.Fatal(err)
+	}
+	rs := srv.harnessConfigStore("claude")
+	rs.within, rs.withinPath = pcd, "harness-configs/probe"
+	_, err := rs.Bootstrap(context.Background(), "probe", filepath.Join(parent, "harness-configs", "probe"), store.HarnessConfigScopeGlobal, "", "", false)
+	if err == nil {
+		t.Fatal("bootstrap through a linked harness-configs directory succeeded")
+	}
+	got, rerr := os.ReadFile(filepath.Join(outside, "probe", "config.yaml"))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != crlf {
+		t.Errorf("the file behind the link was rewritten: %q", got)
+	}
+	if _, ok := harnessConfigsByName(t, s)["probe"]; ok {
+		t.Error("the bundled harness-config was stored")
+	}
+}
