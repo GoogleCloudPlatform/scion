@@ -1875,6 +1875,8 @@ var (
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "sender_project_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "recipient_project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -1896,7 +1898,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[21]},
+				Columns: []*schema.Column{MessagesColumns[23]},
 			},
 			{
 				Name:    "message_conversation_id",
@@ -1906,17 +1908,17 @@ var (
 			{
 				Name:    "message_conversation_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[23], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[23], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[21], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[23], MessagesColumns[0]},
 			},
 		},
 	}

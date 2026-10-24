@@ -95,6 +95,8 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		CreatedAt:             e.Created,
 		SenderProjectID:       senderProjectID,
 		RecipientProjectID:    recipientProjectID,
+		AuthorizingUserID:     derefString(e.AuthorizingUserID),
+		DelegationGrantID:     derefString(e.DelegationGrantID),
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
@@ -168,6 +170,14 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 			return err
 		}
 		create.SetRecipientProjectID(rpid)
+	}
+	// Delegated-send attribution (.design/agent-delegation.md §14.5). An
+	// empty value persists as NULL.
+	if msg.AuthorizingUserID != "" {
+		create.SetAuthorizingUserID(msg.AuthorizingUserID)
+	}
+	if msg.DelegationGrantID != "" {
+		create.SetDelegationGrantID(msg.DelegationGrantID)
 	}
 	if msg.Type == "" {
 		create.SetType("instruction")

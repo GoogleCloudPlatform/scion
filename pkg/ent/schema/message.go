@@ -105,6 +105,20 @@ func (Message) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// authorizing_user_id / delegation_grant_id attribute a message
+		// sent with an agent delegated credential
+		// (.design/agent-delegation.md §14.5): the grant issuer and the
+		// grant. The sender columns name the actor agent. Nullable: every
+		// other message has neither. Stamped at admission and never
+		// updated afterwards.
+		field.String("authorizing_user_id").
+			Optional().
+			Nillable().
+			Immutable(),
+		field.String("delegation_grant_id").
+			Optional().
+			Nillable().
+			Immutable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
