@@ -176,6 +176,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
 		Classification: RoutePublic,
 	},
+	"POST /api/v1/csp-reports": {
+		Pattern: "POST /api/v1/csp-reports", RouteID: "cspReports.create",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,

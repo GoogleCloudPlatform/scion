@@ -373,7 +373,7 @@ const ENTITY_PATTERNS: EntityPattern[] = [
           {
             class: 'entity-link path-link',
             'data-file-path': path,
-            href: 'javascript:void(0)',
+            href: '#',
             title: `Open ${path}`,
           },
           path
@@ -2184,11 +2184,15 @@ export class ScionChatMessage extends LitElement {
 
   /**
    * A middle-click fires auxclick, not click: keep it from opening the
-   * artifact link's "#" href in a new tab. The preview opens on a plain
-   * click only.
+   * "#" href of an artifact, gs:// or file path link in a new tab. These
+   * links open their preview on a plain click only.
    */
   private handleContentAuxClick(e: MouseEvent): void {
-    if ((e.target as HTMLElement | null)?.closest('.artifact-link[data-artifact-id]')) {
+    if (
+      (e.target as HTMLElement | null)?.closest(
+        '.artifact-link[data-artifact-id], .gcs-link[data-gcs-uri], .path-link[data-file-path]'
+      )
+    ) {
       e.preventDefault();
     }
   }

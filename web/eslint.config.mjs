@@ -161,6 +161,7 @@ export default defineConfig([
       'e2e/test-hub-banner/*.ts',
       'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
+      'e2e/page-policy/*.ts',
       'e2e/iap-driver/*.ts',
       'e2e/iap-journey/*.ts',
       'e2e/harness-selftest/*.ts',
