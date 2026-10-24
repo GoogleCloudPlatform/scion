@@ -269,8 +269,11 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		// other schemes with a password: keep only the username.
 		"ssh://u:p@h/x":       {"ssh://u@h/x", true, false},
 		"socks5://u:p@h:1080": {"socks5://u@h:1080", true, false},
-		// Opaque schemeless proxy with userinfo: dropped.
-		"u:p@proxy.example:8080": {"", false, true},
+		// Schemeless user:password@host is NOT handled by the shared helper (it is
+		// scp form for non-proxy keys); the proxy-only helper handles proxy keys.
+		"u:p@proxy.example:8080": {"u:p@proxy.example:8080", false, false},
+		// scp host:path (opaque "@" after the colon) is kept by the shared helper.
+		"host:repo@x.git": {"host:repo@x.git", false, false},
 		// Bare host:port (scheme-like, no "@"): kept unchanged.
 		"proxy.example:8080": {"proxy.example:8080", false, false},
 	}
@@ -451,5 +454,99 @@ func TestRedactGitConfigSecrets_ProxyHelperAndKeyNameForms(t *testing.T) {
 
 	if _, err := parseGitConfigFile(out); err != nil {
 		t.Errorf("redacted config does not re-parse: %v\n%s", err, outStr)
+	}
+}
+
+// TestRedactGitConfigSecrets_SchemelessProxyDropped checks that a schemeless proxy
+// value user:password@host is dropped on both http.proxy and remote.<name>.proxy,
+// and that a username-only proxy value is kept. Synthetic placeholders only.
+func TestRedactGitConfigSecrets_SchemelessProxyDropped(t *testing.T) {
+	// Each of these (value before the last "@" contains ":") must be dropped on both
+	// proxy keys. The CORP\u case exercises a non-scheme username character.
+	dropVals := []string{
+		"u:p@proxy.example:8080",
+		"john_doe:pw@proxy.example:8080",
+		"u%40corp.example:pw@proxy.example:8080",
+		"1u:pw@proxy.example:8080",
+		`CORP\u:pw@proxy.example:8080`,
+	}
+	for _, v := range dropVals {
+		cfgVal := strings.ReplaceAll(v, `\`, `\\`) // literal backslash in a git config value
+		in := strings.Join([]string{
+			"[http]",
+			"\tproxy = " + cfgVal,
+			"[remote \"origin\"]",
+			"\tproxy = " + cfgVal,
+			"",
+		}, "\n")
+		out, stripped, err := RedactGitConfigSecrets([]byte(in))
+		if err != nil {
+			t.Fatalf("RedactGitConfigSecrets(%q): %v", v, err)
+		}
+		outStr := string(out)
+		if strings.Contains(outStr, "proxy.example") || strings.Contains(outStr, "@") {
+			t.Errorf("proxy value %q not dropped from output:\n%s", v, outStr)
+		}
+		for _, want := range []string{"http.proxy", "remote.origin.proxy"} {
+			found := false
+			for _, s := range stripped {
+				if s == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("value %q: expected %q in stripped, got %v", v, want, stripped)
+			}
+		}
+		if strings.Contains(strings.Join(stripped, "\n"), "@") {
+			t.Errorf("value %q: stripped names contain userinfo: %v", v, stripped)
+		}
+	}
+
+	// Username-only proxy value (no ":" before the last "@") is kept, nothing noted.
+	in := strings.Join([]string{
+		"[http]",
+		"\tproxy = user@proxy.example:8080",
+		"",
+	}, "\n")
+	out, stripped, err := RedactGitConfigSecrets([]byte(in))
+	if err != nil {
+		t.Fatalf("RedactGitConfigSecrets: %v", err)
+	}
+	if len(stripped) != 0 {
+		t.Errorf("username-only proxy should note nothing, got %v", stripped)
+	}
+	if !strings.Contains(string(out), "proxy = \"user@proxy.example:8080\"") {
+		t.Errorf("username-only proxy not kept:\n%s", string(out))
+	}
+}
+
+// TestRedactGitConfigSecrets_ScpKeptAsRemoteAndBase is the regression for the removed
+// opaque-"@" drop: an scp value host:repo@x.git (and git@h:o/r.git) is kept both as a
+// remote url and as a url.<base> insteadOf base, and nothing is noted.
+func TestRedactGitConfigSecrets_ScpKeptAsRemoteAndBase(t *testing.T) {
+	for _, scp := range []string{"host:repo@x.git", "git@h:o/r.git"} {
+		in := strings.Join([]string{
+			"[remote \"origin\"]",
+			"\turl = " + scp,
+			"[url \"" + scp + "\"]",
+			"\tinsteadOf = https://example/",
+			"",
+		}, "\n")
+		out, stripped, err := RedactGitConfigSecrets([]byte(in))
+		if err != nil {
+			t.Fatalf("RedactGitConfigSecrets(%q): %v", scp, err)
+		}
+		outStr := string(out)
+		if len(stripped) != 0 {
+			t.Errorf("scp %q: expected nothing noted, got %v", scp, stripped)
+		}
+		if !strings.Contains(outStr, "url = \""+scp+"\"") {
+			t.Errorf("scp %q: remote url not kept:\n%s", scp, outStr)
+		}
+		if !strings.Contains(outStr, "[url \""+scp+"\"]") {
+			t.Errorf("scp %q: url base not kept:\n%s", scp, outStr)
+		}
 	}
 }

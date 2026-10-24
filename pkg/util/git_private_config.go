@@ -26,7 +26,7 @@ import (
 // config with credential-bearing material removed, together with the names of
 // the keys it changed. The returned names are themselves redacted: a subsection
 // that carries userinfo is never included verbatim (see notedKeyName), so neither
-// the values nor the key names carry a credential. It is used to seed a per-agent
+// the values nor the key names carry userinfo. It is used to seed a per-agent
 // private .git/config so a copy of a linked checkout's host config does not carry
 // the host user's credentials into the agent.
 //
@@ -40,11 +40,13 @@ import (
 //     remote.*.proxy; from url.<base>.*, http.<base>.* and lfs.<base>.* subsection
 //     headers; and from the <url> in an includeIf "hasconfig:remote.*.url:<url>"
 //     subsection (http/https/ftp/ftps userinfo removed; other schemes keep only the
-//     username; remote-helper "transport::url" forms handled recursively), and
+//     username; remote-helper "transport::url" forms handled recursively),
 //   - any such URL-valued key or subsection that is URL-shaped ("://") and cannot
-//     be parsed but still carries userinfo, or whose opaque form hides userinfo
-//     (the key is dropped entirely, so the userinfo cannot survive in a value,
-//     header or key name).
+//     be parsed but still carries userinfo (the key is dropped entirely), and
+//   - a http.proxy or remote.*.proxy value in the schemeless proxy form
+//     user:password@host[:port] (which git accepts without a scheme): such a value
+//     is dropped. Schemeless user:password@host is proxy syntax only; for remote
+//     urls and url/includeIf bases a host:path form is scp and is kept.
 //
 // scp-style git remotes and url bases (git@host:path, with no "://") and an ssh
 // URL with only a username (no password) are kept unchanged.
@@ -84,9 +86,13 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 			continue
 		}
 		// Userinfo in URL-valued keys — rewrite the value, or drop the key when the
-		// value is URL-shaped, cannot be parsed, but still carries userinfo.
+		// value is URL-shaped, cannot be parsed, but still carries userinfo. For the
+		// proxy keys only, also drop the schemeless proxy form user:password@host.
 		if isURLValuedKey(v) {
 			clean, changed, drop := sanitizeURLUserinfo(v.Value)
+			if !drop && isProxyKey(v) && dropSchemelessProxyUserinfo(v.Value) {
+				drop = true
+			}
 			if drop {
 				note(notedKeyName(v))
 				continue
@@ -168,17 +174,23 @@ func isURLValuedKey(v gitConfigVar) bool {
 	return false
 }
 
+// isProxyKey reports whether v is a proxy key (http.proxy, http.<url>.proxy or
+// remote.<name>.proxy) — the only keys for which a schemeless user:password@host
+// value is treated as proxy userinfo rather than an scp host:path.
+func isProxyKey(v gitConfigVar) bool {
+	return (v.Section == "http" || v.Section == "remote") && v.Name == "proxy"
+}
+
 // helperPrefixRe matches a git remote-helper transport prefix, e.g. "http::" in
 // "http::https://host/x". It is "<transport>::" where <transport> is a scheme-like
 // token (a letter then letters/digits/+/-/.) followed by "::". A normal URL scheme
 // ("https://") has a single ":" then "//", so it does not match.
 var helperPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
 
-// sanitizeURLUserinfo strips credential-bearing userinfo from a git config URL,
-// returning the cleaned string, whether it changed, and whether the caller should
-// drop the whole key. It is shared by both callers: URL-valued keys (remote.*.url
-// and friends) and url.<base>/http.<base>/lfs.<base> subsection headers. Applied in
-// order:
+// sanitizeURLUserinfo strips userinfo from a git config URL, returning the cleaned
+// string, whether it changed, and whether the caller should drop the whole key. It
+// is shared by both callers: URL-valued keys (remote.*.url and friends) and
+// url.<base>/http.<base>/lfs.<base> subsection headers. Applied in order:
 //
 //   - A remote-helper prefix "<transport>::<url>" is split off; the remainder is
 //     sanitized recursively and the prefix re-prepended (changed/drop propagate).
@@ -187,16 +199,19 @@ var helperPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
 //   - A parseable URL of any other scheme that carries a password keeps only the
 //     username (e.g. ssh://u:pw@h -> ssh://u@h, socks5 likewise), changed; with no
 //     password it is kept unchanged (e.g. ssh://u@h, scp-like ssh users).
-//   - A parseable opaque form with no authority but an "@" in the opaque part
-//     (e.g. a schemeless proxy "u:pw@proxy:8080") is dropped.
 //   - A string that will not parse but is URL-shaped ("://") and still carries
 //     userinfo before the path is dropped, so the userinfo cannot survive.
 //   - Anything else (e.g. an scp-style git@host:path remote or url.<base> base with
 //     no "://") is kept unchanged.
 //
-// Known limit: a split-authority base whose authority holds a non-numeric port and
-// no "@" (for example [url "https://alice:tok"] used only as an insteadOf alias)
-// does not parse and is kept unchanged.
+// The schemeless proxy form user:password@host[:port] (no "://") is NOT handled
+// here — for a remote url or a url/includeIf base that shape is scp, not userinfo.
+// It is handled only for proxy keys by dropSchemelessProxyUserinfo.
+//
+// Known limit: a base whose authority holds a non-numeric port and no "@", or whose
+// "@" comes only after a "/" (for example a password with an unescaped "/"), does
+// not parse and is kept unchanged. A schemeless host:path value (scp form) in a
+// non-proxy key is kept unchanged; git reads it as a host and path, not as userinfo.
 func sanitizeURLUserinfo(s string) (clean string, changed, drop bool) {
 	t := strings.TrimSpace(s)
 	if m := helperPrefixRe.FindString(t); m != "" {
@@ -225,15 +240,32 @@ func sanitizeURLUserinfo(s string) (clean string, changed, drop bool) {
 				return s, false, false
 			}
 		}
-		if strings.Contains(u.Opaque, "@") {
-			return "", false, true
-		}
 		return s, false, false
 	}
 	if strings.Contains(t, "://") && hasUserinfoBeforePath(t) {
 		return "", false, true
 	}
 	return s, false, false
+}
+
+// dropSchemelessProxyUserinfo reports whether a proxy-key value (http.proxy, with or
+// without a subsection, or remote.<name>.proxy) is the schemeless proxy form
+// user:password@host[:port] and should be dropped. Git accepts a proxy as
+// [protocol://][user[:password]@]host[:port]; a value with no "://" that contains an
+// "@" with a ":" before the last "@" carries a password, so drop it. A username-only
+// value (user@host, no ":" before the last "@") is kept. This is applied only to
+// proxy keys: for a remote url or a url/includeIf base the same host:path shape is
+// scp and must be kept, so it is not handled in sanitizeURLUserinfo.
+func dropSchemelessProxyUserinfo(s string) bool {
+	t := strings.TrimSpace(s)
+	if strings.Contains(t, "://") {
+		return false
+	}
+	at := strings.LastIndex(t, "@")
+	if at < 0 {
+		return false
+	}
+	return strings.Contains(t[:at], ":")
 }
 
 // notedKeyName returns a key name safe to record in the stripped list: a
