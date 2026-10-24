@@ -2466,7 +2466,7 @@ func LoadServerMode() string {
 	}
 
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return ""
 	}
 
@@ -2561,7 +2561,7 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 		return nil, false
 	}
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return nil, false
 	}
 	return raw, true
