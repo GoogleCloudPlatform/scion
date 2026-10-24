@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -72,6 +73,18 @@ func TestTemplateSyncPathSource(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, isPath)
 		assert.Equal(t, tplDir, tpl.Path)
+
+		tpl, isPath, err = templateSyncPathSource(".")
+		require.NoError(t, err)
+		assert.True(t, isPath)
+		assert.Equal(t, tplDir, tpl.Path)
+		assert.Equal(t, "planner", tpl.Name)
+
+		tpl, isPath, err = templateSyncPathSource("..")
+		require.NoError(t, err)
+		assert.True(t, isPath)
+		assert.Equal(t, filepath.Dir(tplDir), tpl.Path)
+		assert.Equal(t, "templates", tpl.Name)
 	})
 
 	t.Run("path that is not a directory", func(t *testing.T) {
@@ -168,13 +181,19 @@ func newMockHubServerForPathSync(t *testing.T, projectID string, calls *pathSync
 // directory, not a same-named template from the templates directories, and
 // the Hub name defaults to the directory's base name; --name overrides it.
 func TestRunTemplateSync_PathArgument(t *testing.T) {
+	hashName := strings.Repeat("ef", 32)
 	for _, tc := range []struct {
 		name     string
+		dirName  string // template directory name under checkout/templates
+		inDir    bool   // run from inside the template directory
+		arg      string
 		flagName string
 		wantName string
 	}{
-		{name: "hub name defaults to base name", wantName: "planner"},
-		{name: "--name overrides", flagName: "team-planner", wantName: "team-planner"},
+		{name: "hub name defaults to base name", dirName: "planner", arg: "./templates/planner", wantName: "planner"},
+		{name: "--name overrides", dirName: "planner", arg: "./templates/planner", flagName: "team-planner", wantName: "team-planner"},
+		{name: "dot from inside the template directory", dirName: "planner", inDir: true, arg: ".", wantName: "planner"},
+		{name: "content-hash directory with --name", dirName: hashName, arg: "./templates/" + hashName, flagName: "planner", wantName: "planner"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := saveTemplateTestState()
@@ -193,7 +212,7 @@ func TestRunTemplateSync_PathArgument(t *testing.T) {
 
 			// The template edited in a checkout has an extra file.
 			checkout := filepath.Join(tmpHome, "checkout")
-			tplDir := filepath.Join(checkout, "templates", "planner")
+			tplDir := filepath.Join(checkout, "templates", tc.dirName)
 			writeTemplateFile(t, tplDir, "scion-agent.json", `{"harness":"claude"}`)
 			writeTemplateFile(t, tplDir, "agents.md", "# planner\n")
 
@@ -202,13 +221,17 @@ func TestRunTemplateSync_PathArgument(t *testing.T) {
 			defer server.Close()
 			projectPath = setupHubProject(t, tmpHome, server.URL, "project-path-123")
 
-			t.Chdir(checkout)
+			if tc.inDir {
+				t.Chdir(tplDir)
+			} else {
+				t.Chdir(checkout)
+			}
 			cmd := &cobra.Command{}
 			cmd.Flags().String("name", tc.flagName, "")
 			cmd.Flags().Bool("all", false, "")
 
 			captureStdout(t, func() {
-				require.NoError(t, runTemplateSync(cmd, []string{"./templates/planner"}))
+				require.NoError(t, runTemplateSync(cmd, []string{tc.arg}))
 			})
 
 			calls.mu.Lock()
@@ -222,15 +245,26 @@ func TestRunTemplateSync_PathArgument(t *testing.T) {
 
 // TestRunTemplateSync_PathArgumentRefusedBeforeHub: a path that is not a
 // directory, or one whose base name cannot be a template name, is refused
-// before any Hub call.
+// before any Hub call. A reachable Hub is configured, so a check that ran
+// after contacting it would show up as a recorded request.
 func TestRunTemplateSync_PathArgumentRefusedBeforeHub(t *testing.T) {
 	orig := saveTemplateTestState()
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	require.NoError(t, os.Unsetenv("SCION_HUB_ENDPOINT"))
 	globalMode = true
 	autoConfirm = true
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	projectPath = setupHubProject(t, tmpHome, server.URL, "project-refused-123")
 
 	hashDir := filepath.Join(tmpHome, strings.Repeat("cd", 32))
 	writeTemplateFile(t, hashDir, "scion-agent.json", `{"harness":"claude"}`)
@@ -246,4 +280,6 @@ func TestRunTemplateSync_PathArgumentRefusedBeforeHub(t *testing.T) {
 	err = runTemplateSync(cmd, []string{hashDir})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "set one with --name")
+
+	assert.Zero(t, requests.Load(), "a refused path must not reach the Hub")
 }

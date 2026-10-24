@@ -48,7 +48,7 @@ A template now describes the agent's **job** (harness config, model, instruction
 
 ## `scion templates sync` and `push` accept a directory path
 
-`scion templates sync` and `scion templates push` now also take a template directory path: an absolute path, or one that starts with `./` or `../` or contains a path separator. The directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Agents that share the project workspace see the project's `.scion` directory read-only, so they now edit a template elsewhere in their checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`. **An argument containing a `/` is now read relative to the current directory**: before, `sync a/b` looked up `<templates dir>/a/b`. Bare names are looked up as before. See [Templates & Roles](/scion/local/templates/#hub-commands).
+`scion templates sync` and `scion templates push` now also take a template directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name`). The directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Agents that share the project workspace see the project's `.scion` directory read-only, so they now edit a template elsewhere in their checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`. **An argument containing a `/`, and `.` or `..`, is now read relative to the current directory**: before, `sync a/b` looked up `<templates dir>/a/b`, and `sync .` resolved to the templates directory itself. Bare names are looked up as before. See [Templates & Roles](/scion/local/templates/#hub-commands).
 
 ## The harness command line uses the Hub-resolved model
 

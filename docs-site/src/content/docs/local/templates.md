@@ -330,6 +330,7 @@ scion templates sync code-reviewer --name team-reviewer
 
 # Sync a template directory by path (Hub name defaults to its base name)
 scion templates sync ./templates/code-reviewer
+cd templates/code-reviewer && scion templates sync .
 
 # Download a Hub template to the local filesystem
 scion templates pull code-reviewer --to .scion/templates/code-reviewer
@@ -338,7 +339,7 @@ scion templates pull code-reviewer --to .scion/templates/code-reviewer
 scion templates status
 ```
 
-`sync` and `push` accept a template name or a directory path. An argument that is absolute, starts with `./` or `../`, or contains a path separator is a path: that directory is synced as is, and the Hub name defaults to its base name unless `--name` is given. A bare name is looked up in the project and global templates directories as before.
+`sync` and `push` accept a template name or a directory path. An argument that is `.` or `..`, is absolute, or contains a path separator (such as `./name`) is a path: that directory is synced as is, and the Hub name defaults to its base name unless `--name` is given. A bare name is looked up in the project and global templates directories as before.
 
 :::tip[Agents that share the project workspace]
 Agents that share the project workspace see the project's `.scion` directory read-only, so they cannot edit `.scion/templates/<name>` in place. Edit the template in another directory of the checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`.

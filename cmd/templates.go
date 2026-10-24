@@ -718,8 +718,8 @@ Use the root --global flag to sync to global scope instead of project scope.
 
 Use --all to sync all project-scoped local templates to the Hub at once.
 
-The template may also be given as a directory path: an absolute path, one
-starting with ./ or ../, or one containing a path separator. The directory is
+The template may also be given as a directory path: . or .., an absolute
+path, or one containing a path separator (such as ./name). The directory is
 synced as is, and the Hub name defaults to its base name (--name overrides it).
 An argument containing a separator is therefore read relative to the current
 directory, not looked up in the templates directories. Agents that share the
@@ -732,6 +732,9 @@ Examples:
 
   # Sync a template directory by path
   scion templates sync ./templates/planner
+
+  # Sync the template in the current directory
+  scion templates sync .
 
   # Sync all project templates to Hub
   scion templates sync --all
@@ -888,13 +891,14 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 }
 
 // templateSyncPathSource reports whether arg names a template directory by
-// path rather than by template name: an absolute path, one starting with ./
-// or ../, or one containing a path separator (template names never do). For
+// path rather than by template name: "." or "..", an absolute path, one
+// starting with ./ or ../, or one containing a path separator (template
+// names never do). For
 // a path it returns the template in that directory, made absolute, or an
 // error when it is not an existing directory. The template's name is derived
 // as config.FindTemplateWithContext derives it for an absolute path.
 func templateSyncPathSource(arg string) (tpl *config.Template, isPath bool, err error) {
-	if !filepath.IsAbs(arg) && !strings.HasPrefix(arg, "./") && !strings.HasPrefix(arg, "../") &&
+	if arg != "." && arg != ".." && !filepath.IsAbs(arg) &&
 		!strings.ContainsRune(arg, '/') && !strings.ContainsRune(arg, filepath.Separator) {
 		return nil, false, nil
 	}
