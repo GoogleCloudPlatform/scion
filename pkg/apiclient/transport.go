@@ -676,7 +676,7 @@ func decode[T any](resp *http.Response, required bool) (*T, error) {
 func CheckResponse(resp *http.Response) error {
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ParseErrorResponse(resp)
 	}
 
