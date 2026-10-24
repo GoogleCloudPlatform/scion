@@ -45,7 +45,7 @@ import { assertNoHarnessCredentialEnv } from '../async-create/credential-guard.j
 import { readHubState, restartHubWithoutDevAuth, runScionCLI, startHub } from '../harness/hub.js';
 import globalTeardown from './global-teardown.js';
 import {
-  FORM_DEFAULT_HARNESS,
+  SUITE_DEFAULT_HARNESS,
   IDENTITY_KEYS,
   createStateFile,
   hubStateFilePath,
@@ -176,7 +176,7 @@ async function setUp(suiteStateFile: string): Promise<void> {
   const registry = process.env.E2E_IMAGE_REGISTRY || undefined;
   const { capable, reason } = launchCapability(registry);
   const imageRegistry = registry ?? PLACEHOLDER_REGISTRY;
-  const harnessConfig = process.env.E2E_HARNESS_CONFIG || FORM_DEFAULT_HARNESS;
+  const harnessConfig = process.env.E2E_HARNESS_CONFIG || SUITE_DEFAULT_HARNESS;
   const agentImage =
     process.env.E2E_AGENT_IMAGE || `${imageRegistry}/scion-${harnessConfig}:latest`;
   console.info(`[setup] Harness config: ${harnessConfig} (no-auth drop-to-shell)`);
@@ -262,6 +262,7 @@ async function setUp(suiteStateFile: string): Promise<void> {
     imageRegistry,
     harnessConfig,
     agentImage,
+    pinnedAgentImage: process.env.E2E_AGENT_IMAGE || null,
     experimentAfterEnable,
     identities,
     p2,

@@ -73,7 +73,13 @@ export const AO_SELECTORS = {
   agentPage: 'scion-page-agent-detail',
   agentHeaderDelete:
     'scion-page-agent-detail scion-detail-header sl-button[variant="danger"]:has(sl-icon[name="trash"])',
-  agentDeletedState: '[data-testid="agent-deleted-state"]',
+  /** Project page and its agent list, rendered: an agent card or table row, or the empty state (project-detail.ts). */
+  projectPage: 'scion-page-project-detail',
+  projectAgentListRendered:
+    'scion-page-project-detail .agent-card, scion-page-project-detail .agent-table-container tbody tr, scion-page-project-detail .empty-state',
+  /** Signed-out pages (components/pages/login.ts scion-login-page, unauthorized.ts). */
+  loginPage: 'scion-login-page',
+  unauthorizedPage: 'scion-page-unauthorized',
   /** The test-hub banner (shared test-hub banner, see e2e/test-hub-banner). */
   testHubBanner: 'sl-alert.test-hub-banner',
 } as const;

@@ -36,8 +36,14 @@ export type IdentityKey = (typeof IDENTITY_KEYS)[number];
 /** The deviation recorded on every row (grader's ruling on Q-L1). */
 export const DEVIATION = 'member test-mode; local issuer, no workload delegation';
 
-/** The create form's default harness config (agent-create.ts). */
-export const FORM_DEFAULT_HARNESS = 'antigravity';
+/**
+ * The harness config the journey picks in the create form: gemini-cli is the
+ * shipped harness whose no-auth fallback runs no login command, so the
+ * agent's pane is a plain `exec bash` (pkg/runtime/common.go
+ * buildNoAuthCmdLine); the others (antigravity, the form's default, included)
+ * first run their interactive login, which would take the typed keys.
+ */
+export const SUITE_DEFAULT_HARNESS = 'gemini-cli';
 
 /** One identity issued by the local issuer before the restart. */
 export interface IssuedIdentity {
@@ -74,6 +80,12 @@ export interface LocalSuiteState {
   imageRegistry: string;
   harnessConfig: string;
   agentImage: string;
+  /**
+   * E2E_AGENT_IMAGE when set (for example a digest-pinned ref): typed into the
+   * create form's Container image field, and P7 requires appliedConfig.image
+   * to equal it. Null: the harness default image, recorded only.
+   */
+  pinnedAgentImage: string | null;
   /** hub.artifacts as the admin experiments API reported it after enabling, before the restart. */
   experimentAfterEnable: { enabled: boolean | null; override: boolean | null };
   identities: Record<IdentityKey, IssuedIdentity>;

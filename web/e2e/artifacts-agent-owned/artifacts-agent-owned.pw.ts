@@ -15,7 +15,7 @@
 /**
  * Access to an artifact OWNED BY AN AGENT, graded at the UI per role (R1-B),
  * end to end on a local throwaway hub restarted without development
- * sign-in (spec R1B-journey-spec rev 2).
+ * sign-in (spec R1B-journey-spec rev 3).
  *
  * Five member test identities, each in its own browser context: powner
  * (creates the home project: project owner), aowner (project member; creates
@@ -46,10 +46,10 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { expect, request, test } from '@playwright/test';
+import { expect, request, test, type Page } from '@playwright/test';
 
 import { assertTestIdentity, redeemTestIdentity } from '../harness/auth.js';
-import { readHubState } from '../harness/hub.js';
+import { keepHubState, readHubState } from '../harness/hub.js';
 import {
   createJourney,
   errorCode,
@@ -80,6 +80,7 @@ import {
   tab,
   uploadVersionButton,
 } from '../artifacts-access/selectors.js';
+import { markdownFrame } from '../artifacts-access/render-selectors.js';
 import { parseTimeoutMs } from '../async-create/journey-lib.js';
 import { SELECTORS as AC, confirmDialogButton, phaseBadge } from '../async-create/selectors.js';
 import {
@@ -92,6 +93,7 @@ import {
   WHOAMI_DONE,
   markerSeen,
   missingScopes,
+  shellPromptShown,
   parsePublish,
   parseScopes,
 } from './agent-shell.js';
@@ -186,6 +188,8 @@ interface Caps {
   ownerRef: string | null;
   scopeRef: string | null;
   currentSeq: number | null;
+  /** artifact.expiresAt as returned (null when absent). */
+  expiresAt: unknown;
   /** The flag keys exactly as returned (raw fact). */
   raw: Record<string, unknown>;
 }
@@ -200,6 +204,8 @@ const suite = {
   shell: { sent: [] as unknown[], captures: [] as unknown[] },
   ownerPolls: [] as Array<{ t: number; status: number; body: unknown }>,
   grantsAfterReview: null as Array<{ subjectRef: string; permission: string }> | null,
+  /** artifact.expiresAt as powner read it in R1B-10 (raw); R1B-14 compares each role's read with it. */
+  expiresAtBefore: undefined as unknown,
   invalid: null as string | null,
 };
 
@@ -286,6 +292,7 @@ async function caps(key: IdentityKey, rec: RowRecord, label: string = key): Prom
     ownerRef: typeof a.ownerRef === 'string' ? a.ownerRef : null,
     scopeRef: typeof a.scopeRef === 'string' ? a.scopeRef : null,
     currentSeq: typeof a.currentSeq === 'number' ? a.currentSeq : null,
+    expiresAt: 'expiresAt' in a ? a.expiresAt : null,
     raw,
   };
   rec.ui[`${label}Caps`] = out;
@@ -327,7 +334,12 @@ async function snapshot(
   if (headerRendered) {
     await page.locator(AA.versionMenu).waitFor({ state: 'visible' });
     await page.locator(AA.markdownFrame).waitFor({ state: 'attached' });
-    previewRendered = true;
+    // Observed, not assumed: the fixture's heading rendered inside the markdown frame.
+    previewRendered = await markdownFrame(page)
+      .locator('h1', { hasText: ARTIFACT_TITLE })
+      .waitFor({ state: 'visible' })
+      .then(() => true)
+      .catch(() => false);
   }
   const visible: AoHeaderControl[] = [];
   const hidden: AoHeaderControl[] = [];
@@ -473,6 +485,28 @@ async function grantsAsPowner(
   return items.map((g) => ({ subjectRef: g.subjectRef, permission: g.permission }));
 }
 
+/**
+ * Types a query into the Grant review access dialog's people input and
+ * returns the people-search answer for exactly that query (status, and
+ * whether the user id is in it).
+ */
+async function searchReviewPeople(
+  page: Page,
+  query: string,
+  userId: string
+): Promise<{ status: number; inAnswer: boolean }> {
+  const answer = page.waitForResponse(
+    (res) =>
+      res.request().method() === 'GET' &&
+      new URL(res.url()).pathname === '/api/v1/users' &&
+      new URL(res.url()).searchParams.get('search') === query
+  );
+  await page.locator(AO.reviewUserInput).fill(query);
+  const res = await answer;
+  const body = (await res.json().catch(() => ({}))) as { users?: Array<{ id: string }> };
+  return { status: res.status(), inAnswer: (body.users ?? []).some((u) => u.id === userId) };
+}
+
 // ---- Agent shell (fixture F3) ------------------------------------------
 
 /** Types text into the agent's shell as aowner (keys operation), then Enter. */
@@ -505,33 +539,45 @@ async function capture(step: string): Promise<string> {
   return output;
 }
 
-/** Polls the capture until done(capture) holds; returns that capture. */
+/** Polls the capture (every 3 s, one deadline) until done(capture) holds; returns that capture. */
 async function waitCapture(
   step: string,
   done: (c: string) => boolean,
   timeout: number
 ): Promise<string> {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const last = await capture(step);
-    if (done(last)) return last;
-    await new Promise((r) => setTimeout(r, 3_000));
-  }
-  throw new Error(`${step}: the agent shell did not show the expected output in ${timeout} ms`);
+  let last = '';
+  await expect
+    .poll(
+      async () => {
+        last = await capture(step);
+        return done(last);
+      },
+      {
+        message: `${step}: the agent shell shows the expected output`,
+        intervals: [3_000],
+        timeout,
+      }
+    )
+    .toBe(true);
+  return last;
 }
 
-/** Waits for the shell to answer the ready marker, typing it again every 30 s. */
+/**
+ * Waits for the agent's bash prompt before typing anything (keys sent
+ * before the shell exists would be lost), then types the ready marker once
+ * and waits for it. No retype.
+ */
 async function waitShellReady(): Promise<void> {
-  const deadline = Date.now() + SHELL_READY_TIMEOUT;
-  while (Date.now() < deadline) {
-    await typeLine('ready', SHELL_COMMANDS.ready);
-    const until = Math.min(deadline, Date.now() + 30_000);
-    while (Date.now() < until) {
-      if (markerSeen(await capture('ready'), READY)) return;
-      await new Promise((r) => setTimeout(r, 3_000));
-    }
+  // One deadline; no prompt by then is a STOP of the run (the caller records it as F3 with a FINDING).
+  try {
+    await waitCapture('prompt', shellPromptShown, SHELL_READY_TIMEOUT);
+  } catch {
+    throw new Error(
+      `STOP: no bash prompt in the agent's terminal within ${SHELL_READY_TIMEOUT} ms`
+    );
   }
-  throw new Error(`the agent shell did not answer within ${SHELL_READY_TIMEOUT} ms`);
+  await typeLine('ready', SHELL_COMMANDS.ready);
+  await waitCapture('ready', (c) => markerSeen(c, READY), SHELL_COMMAND_TIMEOUT);
 }
 
 // ---- The journey -------------------------------------------------------
@@ -567,6 +613,7 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       state.evidence.fixture = {
         harnessConfig: l.harnessConfig,
         expectedAgentImage: l.agentImage,
+        pinnedAgentImage: l.pinnedAgentImage,
         runningPath: 'no-auth drop-to-shell (no harness credentials; credential guard passed)',
         shellDriver: 'keys operation plus terminal capture, as aowner (Q-A1)',
       };
@@ -665,9 +712,23 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           const page = await context.newPage();
           await page.goto('/', { waitUntil: 'domcontentloaded' });
           await page.waitForLoadState('domcontentloaded');
+          // The login page or the 401 page (spec P2); which one is recorded.
+          await expect(
+            page.locator(`${AO.loginPage}, ${AO.unauthorizedPage}`).first(),
+            'no session: a login or 401 page'
+          ).toBeAttached();
           const landed = new URL(page.url()).pathname;
           r.ui.anonymousLanding = landed;
-          expect.soft(landed, 'no session: / lands on the login page').toMatch(/^\/(auth\/)?login/);
+          r.ui.anonymousLandingPage =
+            (await page.locator(AO.unauthorizedPage).count()) > 0
+              ? '401 page'
+              : (await page.locator(AO.loginPage).count()) > 0
+                ? 'login page'
+                : 'neither';
+          expect
+            .soft(r.ui.anonymousLandingPage, 'no session: / shows the login or the 401 page')
+            .not.toBe('neither');
+          expect.soft(await page.locator('scion-nav').count(), 'no signed-in navigation').toBe(0);
           const after = await context.request.get('/auth/me', { maxRedirects: 0 });
           r.ui.anonymousAuthMeAfterLanding = after.status();
           expect.soft(after.status(), 'still not signed in after the landing').toBe(401);
@@ -839,6 +900,13 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         await harness.locator(`${AC.selectOption}[value="${l.harnessConfig}"]`).first().click();
         await expect(harness).toHaveJSProperty('value', l.harnessConfig);
         await form.locator(AC.createTaskInput).fill('provision only');
+        if (l.pinnedAgentImage) {
+          // A pinned image (E2E_AGENT_IMAGE, e.g. by digest): the form's Container image field (config.image).
+          await form.locator(AC.createAdvancedHeader).click();
+          const imageInput = form.locator(AC.createImageInput);
+          await expect(imageInput).toBeVisible();
+          await imageInput.fill(l.pinnedAgentImage);
+        }
         const created = page.waitForResponse(
           (res) =>
             res.request().method() === 'POST' &&
@@ -891,6 +959,9 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         expect.soft([aowner.id, aowner.email], 'created by aowner').toContain(agent.createdBy);
         expect.soft(agent.projectId, 'agent project').toBe(projectId());
         expect.soft(agent.appliedConfig?.noAuth, 'started without credentials').toBe(true);
+        if (l.pinnedAgentImage) {
+          expect.soft(agent.appliedConfig?.image, 'runs the pinned image').toBe(l.pinnedAgentImage);
+        }
       })
     );
 
@@ -955,7 +1026,7 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         expect.soft(item?.key, 'listed with its key').toBe(ARTIFACT_KEY);
         const listed = await listRow('aowner');
         r.ui.listRow = listed;
-        expect.soft(listed?.access, 'aowner: /artifacts row badged Project').toBe('Project');
+        expect.soft(listed, 'aowner: the artifact is listed in /artifacts').not.toBeNull();
         const snap = await snapshot('aowner', 'R1B-01');
         r.ui.snapshot = snap;
         expect.soft(snap.title, 'title').toBe(ARTIFACT_TITLE);
@@ -983,6 +1054,11 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       expect.soft(c.shareAuthority, 'shareAuthority').toBe('delegator');
       expect.soft(c.canRetire, 'canRetire').toBe(true);
       expect.soft(c.ownerDeleted, 'ownerDeleted').toBe(false);
+      const listed = await listRow('aowner');
+      r.ui.listRow = listed;
+      expect
+        .soft(listed?.access, 'aowner: /artifacts row badged Project (not Owned)')
+        .toBe('Project');
     });
 
     await row('R1B-03', async (r) => {
@@ -1142,7 +1218,7 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         .isVisible();
       expect.soft(r.ui.readNote, 'note: only for people who can already read').toBe(true);
       const member = who('member');
-      await page.locator(AO.reviewUserInput).fill(member.email);
+      r.ui.search = await searchReviewPeople(page, member.email, member.id);
       const suggestion = reviewSuggestion(page, member.email);
       await expect(suggestion, 'people search offers the member').toBeVisible();
       await suggestion.click();
@@ -1186,12 +1262,12 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       try {
         await headerControl(page, 'Grant review access').click();
         await expect(page.locator(AO.reviewSection)).toBeVisible();
-        await page.locator(AO.reviewUserInput).fill(outsider.email);
+        // Decided from the people-search answer for this query, not a timeout.
+        const searched = await searchReviewPeople(page, outsider.email, outsider.id);
+        ui.search = searched;
         const suggestion = reviewSuggestion(page, outsider.email);
-        ui.offered = await suggestion
-          .waitFor({ state: 'visible', timeout: 5_000 })
-          .then(() => true)
-          .catch(() => false);
+        if (searched.inAnswer) await expect(suggestion, 'the answer is rendered').toBeVisible();
+        ui.offered = (await suggestion.count()) > 0;
         if (ui.offered) {
           await suggestion.click();
           const answer = page.waitForResponse(
@@ -1203,12 +1279,12 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           const a = await answer;
           ui.postStatus = a.status();
           ui.postCode = errorCode(await a.json().catch(() => null));
-          ui.errorShown = await page
-            .locator(AO.dialogError)
-            .first()
-            .waitFor({ state: 'visible', timeout: 5_000 })
-            .then(() => true)
-            .catch(() => false);
+          // After the answer, wait for one outcome, then record which appeared.
+          await expect(
+            page.locator(AO.dialogError).or(page.locator(AO.reviewGranted)).first(),
+            'the dialog shows an outcome'
+          ).toBeVisible();
+          ui.errorShown = await isShown(page.locator(AO.dialogError));
           ui.errorText = ui.errorShown
             ? ((await page.locator(AO.dialogError).first().textContent()) ?? '').trim()
             : null;
@@ -1323,7 +1399,9 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         const c = await caps(key, r);
         expect.soft(c.ownerKind, `${key}: owner kind`).toBe('agent');
         expect.soft(c.ownerRef, `${key}: owner unchanged`).toBe(suite.agent?.id);
+        if (key === 'powner') suite.expiresAtBefore = c.expiresAt;
       }
+      r.ui.expiresAtBefore = suite.expiresAtBefore;
       suite.grantsAfterReview = await grantsAsPowner(r);
       r.ui.grants = suite.grantsAfterReview;
     });
@@ -1332,6 +1410,14 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     await row('R1B-11', async (r) => {
       const page = await pageOf('aowner');
       const agentId = suite.agent!.id;
+      // Positive anchor first: the project's agent list shows the agent before the delete.
+      const agentLink = page.locator(`${AO.projectPage} a[href="/agents/${agentId}"]`);
+      await page.goto(`/projects/${projectId()}`, { waitUntil: 'domcontentloaded' });
+      await expect(
+        agentLink,
+        'the project agent list shows the agent before the delete'
+      ).toBeVisible();
+      r.ui.listedBefore = true;
       await page.goto(`/agents/${agentId}`, { waitUntil: 'domcontentloaded' });
       const del = page.locator(AO.agentHeaderDelete);
       await expect(del, 'agent page offers Delete').toBeVisible();
@@ -1372,22 +1458,16 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
       r.ui.forced = forced;
       state.evidence.agentDelete = { pageDeleteStatuses: deletes, forced, at: Date.now() };
       expect.soft(forced, 'deleted without a force').toBe(false);
-      await page.goto(`/agents/${agentId}`, { waitUntil: 'domcontentloaded' });
-      r.ui.agentPageAfter = {
-        deletedState: await page
-          .locator(`${AO.agentDeletedState}, ${AA.notFound}`)
-          .first()
-          .waitFor({ state: 'visible', timeout: 15_000 })
-          .then(() => true)
-          .catch(() => false),
-        deleteOffered: await isShown(page.locator(AO.agentHeaderDelete)),
-      };
-      expect
-        .soft(
-          (r.ui.agentPageAfter as { deletedState: boolean }).deletedState,
-          'the agent page shows the agent as deleted or not found'
-        )
-        .toBe(true);
+      // The agent leaves the project's agent list: the list rendered (an agent row or the empty state), then no link
+      // to the agent.
+      await page.goto(`/projects/${projectId()}`, { waitUntil: 'domcontentloaded' });
+      await expect(
+        page.locator(AO.projectAgentListRendered).first(),
+        'the project agent list rendered'
+      ).toBeVisible();
+      await expect.soft(agentLink, 'the agent left the project agent list').toHaveCount(0);
+      r.ui.listedAfter = (await agentLink.count()) > 0;
+      r.ui.emptyStateAfter = await isShown(page.locator(`${AO.projectPage} .empty-state`));
     });
 
     await row(
@@ -1440,10 +1520,13 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           const c = await caps(key, r);
           expect.soft(c.ownerDeleted, `${key}: ownerDeleted`).toBe(true);
           expect.soft(c.currentSeq, `${key}: versions unchanged`).toBe(2);
+          expect.soft(c.expiresAt, `${key}: expiry unchanged`).toEqual(suite.expiresAtBefore);
+          const listed = await listRow(key);
+          r.ui[`${key}ListRow`] = listed;
+          expect
+            .soft(listed?.ownerDeleted, `${key}: /artifacts row shows Owner deleted`)
+            .toBe(true);
         }
-        const listed = await listRow('member');
-        r.ui.memberListRow = listed;
-        expect.soft(listed?.ownerDeleted, 'member: /artifacts row shows Owner deleted').toBe(true);
         const grants = await grantsAsPowner(r);
         r.ui.grants = grants;
         expect.soft(grants, 'grants unchanged').toEqual(suite.grantsAfterReview);
@@ -1559,7 +1642,8 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           residue.push(`cleanup error (artifact read as ${key}): ${firstLine(err)}`);
         }
       }
-      for (const key of ['padmin', 'member'] as const) {
+      for (const key of IDENTITY_KEYS) {
+        if (!state.ids[key]) continue;
         try {
           const snap = await snapshot(key, `R1B-17 after delete (${key})`, {
             path: artifactPath(id),
@@ -1640,7 +1724,10 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
     cleanup.identities =
       'local hub: no issuer credential after the restart; the identities and the hub.artifacts ' +
       'override end when the global teardown discards the hub (after this evidence is written)';
-    cleanup.hubDiscarded = true;
+    // Scheduled, not done: the global teardown runs after this evidence is written, and keeps the
+    // hub's temp dir (database included) when E2E_KEEP_HUB_STATE=1.
+    cleanup.keepHubState = keepHubState();
+    cleanup.hubDiscardScheduled = !keepHubState();
 
     for (const [what, s] of Object.entries(states)) {
       if (s !== 'absent' && !isGone(s as Parameters<typeof isGone>[0])) {

@@ -49,7 +49,11 @@ Environment:
 
 - `E2E_IMAGE_REGISTRY`: the registry the broker pulls agent images from.
 - `E2E_HARNESS_CONFIG`: harness config picked in the form (default
-  `antigravity`); `E2E_AGENT_IMAGE` overrides the expected image.
+  `gemini-cli`: its no-auth fallback is a plain `exec bash`, while the
+  other shipped harnesses first run an interactive login that would take
+  the typed keys). `E2E_AGENT_IMAGE` pins the agent image (for example by
+  digest): it is typed into the form's Container image field, and R1B-P7
+  requires `appliedConfig.image` to equal it.
 - `E2E_LAUNCH_CAPABLE=1|0`: whether agents can start here. Without it, a
   working `docker info` and `E2E_IMAGE_REGISTRY` decide. Not launch
   capable: every agent row is a declared skip

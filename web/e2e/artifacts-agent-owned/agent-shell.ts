@@ -70,6 +70,18 @@ function lines(capture: string): string[] {
   return capture.split('\n').map((l) => l.replace(/\s+$/, ''));
 }
 
+/**
+ * Whether the capture's last non-blank line is a bash prompt (ends in "$"
+ * or "#", as bash's default prompts do): the no-auth fallback's
+ * `exec bash` is up and reads input.
+ */
+export function shellPromptShown(capture: string): boolean {
+  const last = lines(capture)
+    .filter((l) => l.trim() !== '')
+    .at(-1);
+  return last !== undefined && /[$#]$/.test(last);
+}
+
 /** Whether the capture holds the marker as a whole output line. */
 export function markerSeen(capture: string, m: { line: string }): boolean {
   return lines(capture).some((l) => l === m.line);

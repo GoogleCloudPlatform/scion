@@ -31,6 +31,7 @@ import {
   missingScopes,
   parsePublish,
   parseScopes,
+  shellPromptShown,
 } from '../artifacts-agent-owned/agent-shell.js';
 import {
   AGENT_ROW_IDS,
@@ -39,6 +40,7 @@ import {
   ROW_IDS,
   TITLE_CLEANUP,
   TITLE_JOURNEY,
+  NON_DISCLOSURE_ERROR,
   noRuntimeReason,
 } from '../artifacts-agent-owned/rows.js';
 import { DEVIATION, refuseRemoteTarget } from '../artifacts-agent-owned/state.js';
@@ -95,9 +97,42 @@ test('parsePublish reads the exit status and the reference, not the typed format
   expect(parsePublish(`${typed}\nR1B-PUBLISH-EXIT=1\nError: forbidden\n`).exit).toBe(1);
 });
 
-test('the row map is complete and every row is mapped once', () => {
-  expect(Object.keys(ORACLE_ROW_MAP).sort()).toEqual([...ROW_IDS].sort());
-  for (const id of ROW_IDS) {
+/** The spec's row list (R1B-journey-spec rev 3 sections 3 and 5), pinned as a literal: 27 ids. */
+const SPEC_ROW_IDS = [
+  'R1B-P1',
+  'R1B-P2',
+  'R1B-P3',
+  'R1B-P4',
+  'R1B-P5',
+  'R1B-P6',
+  'R1B-P7',
+  'R1B-P8',
+  'R1B-01',
+  'R1B-02',
+  'R1B-03',
+  'R1B-04',
+  'R1B-05',
+  'R1B-06',
+  'R1B-07',
+  'R1B-08a',
+  'R1B-08b',
+  'R1B-09',
+  'R1B-10',
+  'R1B-11',
+  'R1B-12',
+  'R1B-13',
+  'R1B-14',
+  'R1B-15',
+  'R1B-16',
+  'R1B-17',
+  'R1B-18',
+];
+
+test('the row table is exactly the spec rows, and the row map covers each once', () => {
+  expect(SPEC_ROW_IDS).toHaveLength(27);
+  expect(ROW_IDS).toEqual(SPEC_ROW_IDS);
+  expect(Object.keys(ORACLE_ROW_MAP)).toEqual(SPEC_ROW_IDS);
+  for (const id of SPEC_ROW_IDS) {
     expect([TITLE_JOURNEY, TITLE_CLEANUP]).toContain(ORACLE_ROW_MAP[id].test);
   }
   for (const id of [
@@ -109,15 +144,37 @@ test('the row map is complete and every row is mapped once', () => {
     'R1B-P6',
     'R1B-P7',
     'R1B-P8',
+    'R1B-01',
   ]) {
     expect(ROWS[id]?.stop, `${id} is a STOP row`).toBe(true);
   }
+  expect(SPEC_ROW_IDS.filter((id) => ROWS[id]?.stop)).toHaveLength(9);
+  for (const id of ['R1B-17', 'R1B-18']) {
+    expect(ROWS[id].where, `${id} runs in the cleanup`).toBe('cleanup');
+    expect(ORACLE_ROW_MAP[id].test).toBe(TITLE_CLEANUP);
+  }
+  for (const id of ['R1B-06', 'R1B-15']) {
+    expect(ROWS[id].genericError, `${id} carries the generic public text`).toBe(
+      NON_DISCLOSURE_ERROR
+    );
+  }
   expect(ROWS['R1B-12'].graded).toBe(false);
+  expect(AGENT_ROW_IDS).toHaveLength(20);
   expect(AGENT_ROW_IDS).not.toContain('R1B-17');
   expect(AGENT_ROW_IDS).not.toContain('R1B-P1');
   expect(AGENT_ROW_IDS).toContain('R1B-P8');
-  expect(noRuntimeReason('x')).toMatch(/^NOT RUN: no container runtime in this lane/);
+  expect(noRuntimeReason('E2E_LAUNCH_CAPABLE=0')).toBe(
+    'NOT RUN: no container runtime in this lane (E2E_LAUNCH_CAPABLE=0)'
+  );
   expect(DEVIATION).toBe('member test-mode; local issuer, no workload delegation');
+});
+
+test('the shell prompt reader takes the last non-blank line', () => {
+  expect(shellPromptShown('')).toBe(false);
+  expect(shellPromptShown('This agent started without credentials.\n')).toBe(false);
+  expect(shellPromptShown('This agent started without credentials.\nscion@abc:~$ \n\n')).toBe(true);
+  expect(shellPromptShown('root@abc:/# ')).toBe(true);
+  expect(shellPromptShown('scion@abc:~$ printf x\nx\n')).toBe(false);
 });
 
 test('a remote target is refused', () => {
