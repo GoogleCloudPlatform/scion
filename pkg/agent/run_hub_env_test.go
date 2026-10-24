@@ -689,7 +689,9 @@ func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEn
 // path directly (not just substrateEgressHostnames), so that capturing
 // callerHubEndpoint anywhere other than the top of Start — in particular,
 // after the agent-level Hub-config override applies — fails one of these
-// cases.
+// cases. The broker-mode cases are hub-dispatched starts, so each carries a
+// made-up hub-issued token (a start without one fails, see
+// TestStartHubCredentialIsHubIssuedOnly).
 func TestStartTrustedHubEndpoint(t *testing.T) {
 	const (
 		brokerHubEndpoint      = "http://broker-hub:9810"
@@ -715,7 +717,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath:        projectScionDir,
 			BrokerMode:         true,
 			NoAuth:             true,
-			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint, "SCION_AUTH_TOKEN": fakeHubIssuedToken},
 			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
@@ -744,7 +746,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath:        projectScionDir,
 			BrokerMode:         true,
 			NoAuth:             true,
-			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint, "SCION_AUTH_TOKEN": fakeHubIssuedToken},
 			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
@@ -773,7 +775,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath:        projectScionDir,
 			BrokerMode:         true,
 			NoAuth:             true,
-			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint, "SCION_AUTH_TOKEN": fakeHubIssuedToken},
 			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
@@ -815,7 +817,10 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			ProjectPath: projectScionDir,
 			BrokerMode:  true,
 			NoAuth:      true,
-			// No SCION_HUB_ENDPOINT in opts.Env at all.
+			// No SCION_HUB_ENDPOINT in opts.Env at all; the agent config's
+			// hub.endpoint makes it a hub-dispatched start, so it carries a
+			// hub-issued token.
+			Env: map[string]string{"SCION_AUTH_TOKEN": fakeHubIssuedToken},
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -854,7 +859,7 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 			// when every operator tier is empty — but TrustedHubEndpoint
 			// itself is left unset, as buildStartContext now does in that
 			// case.
-			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254", "SCION_AUTH_TOKEN": fakeHubIssuedToken},
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)

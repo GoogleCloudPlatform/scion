@@ -402,7 +402,14 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // going through writeRuntimeOpError — err's text still always reaches the
 // log on every path (through sanitizeFailureCause on the create and start
 // paths), just not through this one function.
+//
+// A start that failed with agent.ErrNoHubToken gets that error's fixed text
+// after the lead: it names the cause (the hub issued no agent token) and no
+// credential value, so the hub relays an actionable create or start error.
 func runtimeOpError(op string, err error) *OpaqueError {
+	if errors.Is(err, agent.ErrNoHubToken) {
+		return NewOpaqueError(failedOpText(op)+": "+agent.ErrNoHubToken.Error(), err)
+	}
 	return NewOpaqueError(failedOpText(op), err)
 }
 

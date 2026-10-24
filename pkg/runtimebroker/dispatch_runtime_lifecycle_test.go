@@ -45,6 +45,13 @@ const (
 	lifecycleBridgedHubEP = "http://host.docker.internal:8080"
 )
 
+// lifecycleHubTokenEnv returns the resolved env of a start or restart
+// request carrying a made-up hub-issued agent token: a hub-dispatched start
+// without one fails (agent.ErrNoHubToken).
+func lifecycleHubTokenEnv() map[string]string {
+	return map[string]string{"SCION_AUTH_TOKEN": "fake.lifecycle.hub.token"}
+}
+
 // lifecycleFixture is a docker-default broker whose agents live in a project
 // that is not the broker's working directory. That project's settings add a
 // kubernetes profile (lifecycleK8sProfile); the broker's working-directory
@@ -279,6 +286,7 @@ func TestStartAgent_NoProjectPathResolvesFromAgentProject(t *testing.T) {
 
 			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": lifecycleHubTokenEnv(),
 			})
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -312,6 +320,7 @@ func TestRestartAgent_FindsAgentOnNonDefaultRuntime(t *testing.T) {
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
 		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": lifecycleHubTokenEnv(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -422,6 +431,7 @@ func TestStartAgent_RecoveredProjectPathWritesNoProjectMarker(t *testing.T) {
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start?projectId="+projectID, map[string]any{
 		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": lifecycleHubTokenEnv(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -465,6 +475,7 @@ func TestProjectScopedLookup_SameNameInTwoProjects(t *testing.T) {
 
 			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/"+op+"?projectId="+k8sProj, map[string]any{
 				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": lifecycleHubTokenEnv(),
 			})
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -503,6 +514,7 @@ func TestStartAgent_ProvidedProjectPathUsedAsIs(t *testing.T) {
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": lifecycleHubTokenEnv(),
 		"projectPath": f.projectPath,
 	})
 	if w.Code != http.StatusAccepted {
@@ -563,6 +575,7 @@ func TestStartAgent_RecoversPathFromEntryWithoutContainerID(t *testing.T) {
 
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": lifecycleHubTokenEnv(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())

@@ -36,18 +36,17 @@ const (
 )
 
 // TestStartHubCredentialIsHubIssuedOnly pins that an agent's hub credential
-// is the token the hub issued for it, or none. Every case plants a dev
-// credential in this process's SCION_AUTH_TOKEN, SCION_DEV_TOKEN and
-// SCION_DEV_TOKEN_FILE and in ~/.scion/dev-token; none of it may reach the
-// container env or the agent token file, whatever the endpoint (co-located
-// bridge endpoint, remote hub, agent config or config env override, no
-// trusted endpoint, not broker mode). A hub-dispatched agent without a
-// hub-issued token gets a start warning, also carried for the hub, that
-// names no credential value. A token file an earlier start left in the
-// agent home (a file or a link) is removed on a tokenless start, a link
-// without following it, and replaced by a hub-issued token. Each case
-// asserts the hub and token keys of the container env exactly, and the
-// agent token file.
+// is the token the hub issued for it. Each case sets made-up values in the
+// process env and the dev token file and asserts that the container env and
+// the agent token file hold no token other than the hub-issued one, whatever
+// the endpoint (co-located bridge endpoint, remote hub, agent config or
+// config env override, no trusted endpoint, not broker mode). A
+// hub-dispatched start without a hub-issued token fails with ErrNoHubToken,
+// whose text names no credential value, and starts no container. A token
+// file an earlier start left in the agent home (a file or a link) is removed
+// on a tokenless start, a link without following it, and replaced by a
+// hub-issued token. Each started case asserts the hub and token keys of the
+// container env exactly; every case asserts the agent token file.
 func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 	const (
 		bridgeEndpoint = "http://host.docker.internal:8080"
@@ -66,8 +65,9 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 		wantEndpoint string
 		// wantURL is the container's SCION_HUB_URL; "" means wantEndpoint.
 		wantURL string
-		// wantWarning: the start reports that the agent has no hub credential.
-		wantWarning bool
+		// wantErr: the start fails with ErrNoHubToken and starts no
+		// container (a hub-dispatched start with no hub-issued token).
+		wantErr bool
 		// seed plants a token file holding the dev credential in the agent
 		// home before the start, as an earlier build left it: "file" (plus
 		// a temp file) or "symlink" (a link to a file outside the home).
@@ -81,7 +81,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: bridgeEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name: "co-located dispatch, no hub-issued token, earlier token file removed",
@@ -91,7 +91,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: bridgeEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 			seed:         "file",
 		},
 		{
@@ -102,7 +102,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: bridgeEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 			seed:         "symlink",
 		},
 		{
@@ -113,7 +113,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: remoteEndpoint,
 			},
 			wantEndpoint: remoteEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name:     "agent config hub.endpoint override, no hub-issued token",
@@ -124,7 +124,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: agentEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name:         "config env SCION_HUB_ENDPOINT override, no hub-issued token",
@@ -135,7 +135,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: configEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name:     "agent config hub.endpoint equal to the trusted endpoint, no hub-issued token",
@@ -146,7 +146,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				TrustedHubEndpoint: bridgeEndpoint,
 			},
 			wantEndpoint: bridgeEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name: "no trusted endpoint, no hub-issued token",
@@ -155,7 +155,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				Env:        map[string]string{"SCION_HUB_ENDPOINT": bridgeEndpoint, "SCION_HUB_URL": bridgeEndpoint},
 			},
 			wantEndpoint: bridgeEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
 			name: "SCION_HUB_URL differs from SCION_HUB_ENDPOINT, no hub-issued token",
@@ -166,10 +166,10 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 			},
 			wantEndpoint: bridgeEndpoint,
 			wantURL:      remoteEndpoint,
-			wantWarning:  true,
+			wantErr:      true,
 		},
 		{
-			name: "not broker mode: no token, no warning",
+			name: "not broker mode: no token, start succeeds",
 			opts: api.StartOptions{
 				Env:                map[string]string{"SCION_HUB_ENDPOINT": "http://localhost:9810", "SCION_HUB_URL": "http://localhost:9810"},
 				TrustedHubEndpoint: "http://localhost:9810",
@@ -240,11 +240,13 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 			seedAgentTokenFile(t, agentScionDir, linkTarget, tt.seed)
 
 			var captured runtime.RunConfig
+			ran := false
 			mgr := NewManager(&runtime.MockRuntime{
 				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 					return []api.AgentInfo{}, nil
 				},
 				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					ran = true
 					captured = cfg
 					return "mock-id", nil
 				},
@@ -255,8 +257,39 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 			opts.ProjectPath = projectScionDir
 			opts.NoAuth = true
 			info, err := mgr.Start(context.Background(), opts)
+			agentHome := filepath.Dir(agentScionDir)
+			if tt.wantErr {
+				if !errors.Is(err, ErrNoHubToken) {
+					t.Fatalf("Start: err = %v, want ErrNoHubToken", err)
+				}
+				if info != nil {
+					t.Errorf("Start returned agent info %+v with the error", info)
+				}
+				if ran {
+					t.Error("container started for a start with no hub-issued token")
+				}
+				msg := err.Error()
+				for _, tok := range []string{fakeHostDevToken, fakeHubIssuedToken} {
+					if strings.Contains(msg, tok) {
+						t.Errorf("start error carries a token value: %q", msg)
+					}
+				}
+				if !strings.Contains(msg, "hub issued no agent token") || !strings.Contains(msg, "agent token service") || !strings.Contains(msg, agentName) {
+					t.Errorf("start error %q does not name the agent and the cause", msg)
+				}
+				assertNoAgentTokenFile(t, agentHome)
+				if tt.seed == "symlink" {
+					if got, err := os.ReadFile(linkTarget); err != nil || string(got) != fakeHostDevToken {
+						t.Errorf("token file link target changed (err %v): the link must be removed, not followed", err)
+					}
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Start: %v", err)
+			}
+			if !ran {
+				t.Fatal("container not started")
 			}
 
 			got := map[string]string{}
@@ -319,26 +352,13 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 					t.Errorf("start warning carries a token value: %q", w)
 				}
 			}
-			hasNoCredential := func(ws []string) bool {
-				for _, w := range ws {
-					if strings.Contains(w, "starts without a hub credential") && strings.Contains(w, agentName) {
-						return true
-					}
-				}
-				return false
-			}
-			if got := hasNoCredential(info.Warnings); got != tt.wantWarning {
-				t.Errorf("no-hub-credential start warning present = %v, want %v; warnings: %v", got, tt.wantWarning, info.Warnings)
-			}
-			if got := hasNoCredential(info.RelayedWarnings); got != tt.wantWarning {
-				t.Errorf("no-hub-credential warning relayed to the hub = %v, want %v; relayed: %v", got, tt.wantWarning, info.RelayedWarnings)
-			}
 		})
 	}
 
-	// noHubCredentialWarning directly: either hub key marks a hub-dispatched
-	// start; a hub-issued token or a non-broker start gets no warning.
-	t.Run("noHubCredentialWarning", func(t *testing.T) {
+	// hubDispatchedWithoutToken directly: either hub key marks a
+	// hub-dispatched start; a hub-issued token or a non-broker start is not
+	// one without a token.
+	t.Run("hubDispatchedWithoutToken", func(t *testing.T) {
 		for _, c := range []struct {
 			broker bool
 			env    map[string]string
@@ -350,12 +370,8 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 			{true, map[string]string{"SCION_HUB_URL": remoteEndpoint, "SCION_AUTH_TOKEN": fakeHubIssuedToken}, false},
 			{false, map[string]string{"SCION_HUB_ENDPOINT": remoteEndpoint}, false},
 		} {
-			w := noHubCredentialWarning(api.StartOptions{Name: "a", BrokerMode: c.broker, Env: c.env})
-			if (w != "") != c.want {
-				t.Errorf("broker=%v env keys=%v: warning %q, want present=%v", c.broker, slices.Sorted(maps.Keys(c.env)), w, c.want)
-			}
-			if strings.Contains(w, fakeHubIssuedToken) {
-				t.Errorf("warning carries a token value")
+			if got := hubDispatchedWithoutToken(api.StartOptions{Name: "a", BrokerMode: c.broker, Env: c.env}); got != c.want {
+				t.Errorf("broker=%v env keys=%v: got %v, want %v", c.broker, slices.Sorted(maps.Keys(c.env)), got, c.want)
 			}
 		}
 	})
@@ -386,6 +402,17 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 		}
 	})
 
+}
+
+// assertNoAgentTokenFile fails t when the agent home holds a token file or
+// its temp file (a file or a link).
+func assertNoAgentTokenFile(t *testing.T, agentHome string) {
+	t.Helper()
+	for _, name := range []string{"scion-token", "scion-token.tmp"} {
+		if _, err := os.Lstat(filepath.Join(agentHome, ".scion", name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("agent token file %s: lstat err = %v, want not exist", name, err)
+		}
+	}
 }
 
 // seedAgentTokenFile plants, in the agent home's .scion directory, a token

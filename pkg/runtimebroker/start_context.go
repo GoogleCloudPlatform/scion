@@ -617,9 +617,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//      above — on the start/resume path the hub mints the agent JWT into
 	//      resolvedEnv, so it is already present here and must be kept.
 	// There is no third source: this process's own SCION_AUTH_TOKEN is never
-	// given to an agent, co-located hub or not. An agent the hub issued no
-	// token for starts with no hub credential; the agent manager logs that
-	// and reports it in the start response (pkg/agent/run.go).
+	// given to an agent, co-located hub or not. A hub-dispatched start the
+	// hub issued no token for fails in the agent manager with
+	// agent.ErrNoHubToken (pkg/agent/run.go), relayed to the hub as the
+	// start's error message.
 	if in.AgentToken != "" {
 		env["SCION_AUTH_TOKEN"] = in.AgentToken
 		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by

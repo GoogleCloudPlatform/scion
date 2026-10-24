@@ -288,6 +288,7 @@ func TestStartAgent_ResolvableSavedProfileUsesItsRuntime(t *testing.T) {
 	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 		"projectPath": f.projectPath,
 		"hubEndpoint": lifecycleHubEndpoint,
+		"resolvedEnv": lifecycleHubTokenEnv(),
 	})
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())

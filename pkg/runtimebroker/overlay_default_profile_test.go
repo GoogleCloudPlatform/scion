@@ -108,18 +108,21 @@ func overlayDispatches() []overlayDispatch {
 			return lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 				"projectPath": f.projectPath,
 				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": lifecycleHubTokenEnv(),
 			})
 		}},
 		{name: "resume", run: func(t *testing.T, f *lifecycleFixture, name string) *httptest.ResponseRecorder {
 			return lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
 				"projectPath": f.projectPath,
 				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": lifecycleHubTokenEnv(),
 				"resume":      true,
 			})
 		}},
 		{name: "restart", run: func(t *testing.T, f *lifecycleFixture, name string) *httptest.ResponseRecorder {
 			return lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
 				"hubEndpoint": lifecycleHubEndpoint,
+				"resolvedEnv": lifecycleHubTokenEnv(),
 			})
 		}},
 	}

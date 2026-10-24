@@ -1529,15 +1529,10 @@ authDone:
 
 	// The only hub credential an agent ever gets is the token the hub issued
 	// for it, written to the token file below. No other token is substituted,
-	// this process's own included: a hub-dispatched agent without one starts
-	// with no hub credential, and the start says so, in the log and in the
-	// hub's response.
-	noHubTokenWarning := noHubCredentialWarning(opts)
-	if noHubTokenWarning != "" {
-		slog.Warn("agent start: the hub issued no agent token; the agent starts without a hub credential",
-			"agent_id", agentID, "name", opts.Name)
-		warnings = append(warnings, noHubTokenWarning)
-	}
+	// this process's own included. A hub-dispatched agent without one could
+	// neither report to the hub nor call it, so its start fails (below, after
+	// any earlier token file is removed) with ErrNoHubToken.
+	missingHubToken := hubDispatchedWithoutToken(opts)
 
 	// Write the agent token to the canonical token file in the agent home
 	// directory so that all processes inside the container read from the file
@@ -1578,6 +1573,11 @@ authDone:
 		// the container reads that file first. Refusing to start when it
 		// cannot be removed is the same choice as for a failed write above.
 		return nil, fmt.Errorf("cannot start agent %q: remove the previous hub credential: %w", opts.Name, err)
+	}
+	if missingHubToken {
+		slog.Error("agent start refused: the hub issued no agent token",
+			"agent_id", agentID, "name", opts.Name)
+		return nil, fmt.Errorf("cannot start agent %q: %w", opts.Name, ErrNoHubToken)
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -1708,10 +1708,6 @@ authDone:
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
-	if noHubTokenWarning != "" {
-		// Relayed to the hub too: the user sees it in the start response.
-		relayedWarnings = append(relayedWarnings, noHubTokenWarning)
-	}
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
 	if hostNetErr != nil {
 		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
@@ -3624,17 +3620,20 @@ func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
 }
 
-// noHubCredentialWarning returns the start warning for a hub-dispatched
-// agent (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) that has
-// no hub-issued token in opts.Env, or "" otherwise. It names no credential
-// value. The hub issues every agent a token unless its agent token service
-// is unavailable, so the warning points the operator at the hub log.
-func noHubCredentialWarning(opts api.StartOptions) string {
-	if !opts.BrokerMode || (opts.Env["SCION_HUB_ENDPOINT"] == "" && opts.Env["SCION_HUB_URL"] == "") || opts.Env["SCION_AUTH_TOKEN"] != "" {
-		return ""
-	}
-	return fmt.Sprintf("Warning: the hub issued no agent token, so agent %s starts without a hub credential "+
-		"and cannot report its status to the hub or call it. Check the hub log: its agent token service may have failed to start.", opts.Name)
+// ErrNoHubToken is the error a hub-dispatched start fails with when the hub
+// issued no agent token for it. Its text names the cause and no credential
+// value; the runtime broker returns it to the hub as the start's error
+// message.
+var ErrNoHubToken = errors.New("the hub issued no agent token for this start; " +
+	"check the hub's agent token service (see the hub log)")
+
+// hubDispatchedWithoutToken reports whether opts is a hub-dispatched start
+// (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) with no
+// hub-issued token in opts.Env.
+func hubDispatchedWithoutToken(opts api.StartOptions) bool {
+	return opts.BrokerMode &&
+		(opts.Env["SCION_HUB_ENDPOINT"] != "" || opts.Env["SCION_HUB_URL"] != "") &&
+		opts.Env["SCION_AUTH_TOKEN"] == ""
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
