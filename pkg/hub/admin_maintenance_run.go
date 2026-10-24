@@ -237,8 +237,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 }
 
 // markRunRestarting records run as "restarting" with the log so far and the
-// update's from/to/strategy, and clears the update-available notification.
-// It runs as the before-restart hook, so a failure aborts the restart.
+// update's from/to/strategy. It runs as the before-restart hook, so a failure aborts the restart.
 func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOperationRun, buf *runLogBuffer, p maintenance.PendingRestart) error {
 	result := map[string]interface{}{
 		"from":     p.From,
@@ -261,10 +260,10 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 		run.Status, run.Result, run.Log = prevStatus, prevResult, prevLog
 		return fmt.Errorf("record run as restarting: %w", err)
 	}
-
-	if err := s.store.DeleteHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil && err != store.ErrNotFound {
-		s.maintenanceLog.Warn("Failed to clear update_available setting", "error", err)
-	}
+	// system.update_available is deliberately left alone: the update is not
+	// confirmed until the new binary boots (boot reconciliation clears it on
+	// "verified"), and a restart that fails and rolls back must keep the
+	// banner an admin retries from.
 	return nil
 }
 

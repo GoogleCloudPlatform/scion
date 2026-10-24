@@ -193,7 +193,8 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 		"target_version", result.LatestVersion)
 
 	// Same runner as executeOperation: the run is recorded as "restarting"
-	// before the hub restarts, and update_available is cleared then.
+	// before the hub restarts. update_available stays until boot
+	// reconciliation verifies the new version.
 	s.launchMaintenanceRun(run, executor, map[string]string{
 		maintenance.ParamTargetVersion: result.LatestVersion,
 	})

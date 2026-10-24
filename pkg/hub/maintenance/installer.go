@@ -79,7 +79,7 @@ type Installer interface {
 
 // Deactivator is implemented by installers that can undo their last
 // Activate. The update-binary executor calls it when the before-restart hook
-// fails, so the failed run leaves the old release active. The symlink
+// or Restart fails, so the failed run leaves the old release active. The symlink
 // installer implements it; sudo-install cannot (no sudoers rule allows a
 // backup of the installed binary).
 type Deactivator interface {

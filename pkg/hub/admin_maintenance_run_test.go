@@ -183,13 +183,18 @@ func TestLaunchMaintenanceRun_RecordsRestartingBeforeRestart(t *testing.T) {
 	if !strings.Contains(got.Log, "installed nightly-20261024") {
 		t.Fatalf("log = %q", got.Log)
 	}
-	if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("update_available not cleared: %v", err)
+	// The notification stays until boot reconciliation verifies the update.
+	if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
+		t.Fatalf("update_available cleared before the update was verified: %v", err)
 	}
 }
 
 func TestLaunchMaintenanceRun_FailureAfterHookIsFailed(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
+	ctx := context.Background()
+	if _, err := s.UpsertHubSetting(ctx, HubSettingSectionUpdateAvailable, json.RawMessage(`{"version":"nightly-20261024"}`), "test", -1, "managed"); err != nil {
+		t.Fatal(err)
+	}
 	run := newRun(t, s)
 	srv.launchMaintenanceRun(run, &restartingExecutor{hookErr: errors.New("restart failed")}, map[string]string{})
 	got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
@@ -197,6 +202,10 @@ func TestLaunchMaintenanceRun_FailureAfterHookIsFailed(t *testing.T) {
 	})
 	if got.CompletedAt == nil || !strings.Contains(got.Result, "restart failed") {
 		t.Fatalf("run = %+v", got)
+	}
+	// The hub did not change version: the Apply banner must survive.
+	if _, err := s.GetHubSetting(ctx, HubSettingSectionUpdateAvailable); err != nil {
+		t.Fatalf("update_available lost after a failure past the hook: %v", err)
 	}
 }
 

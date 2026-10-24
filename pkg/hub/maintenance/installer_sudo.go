@@ -173,8 +173,10 @@ func (s *sudoInstaller) Activate(ctx context.Context, staged string) error {
 }
 
 // Restart implements Installer. With the --no-block rule systemctl returns
-// once the restart job is queued; with only the plain rule the command is
-// started and not waited for, since it stops this process.
+// once the restart job is queued. With only the plain rule the command
+// blocks while systemd stops this process, so it is started and watched for
+// plainRestartGrace: only a normal non-zero exit in that window (nothing was
+// restarted) fails Restart.
 func (s *sudoInstaller) Restart(ctx context.Context) error {
 	if s.useNoBlock() {
 		args := append([]string{"-n"}, s.restartArgv(true)...)
@@ -206,6 +208,9 @@ func (s *sudoInstaller) Restart(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
+		// The child was started and has not failed so far; as with the
+		// grace timer, assume the restart is under way rather than fail a
+		// run whose unit may already be stopping.
 		return nil
 	}
 }
