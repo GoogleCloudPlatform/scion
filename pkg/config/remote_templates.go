@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
+	iofs "io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -226,7 +226,7 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 // other than directories and regular files (for example a symbolic link).
 // It does not follow links.
 func checkRegularTree(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(dir, func(path string, d iofs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -711,7 +711,7 @@ func copyDirExcludingGit(baseDir, subPath, dst string) error {
 	defer func() { _ = dstRoot.Close() }()
 
 	walkRoot := filepath.ToSlash(sub)
-	return fs.WalkDir(srcRoot.FS(), walkRoot, func(p string, d fs.DirEntry, err error) error {
+	return iofs.WalkDir(srcRoot.FS(), walkRoot, func(p string, d iofs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -727,7 +727,7 @@ func copyDirExcludingGit(baseDir, subPath, dst string) error {
 				return nil
 			}
 			if d.Name() == ".git" {
-				return fs.SkipDir
+				return iofs.SkipDir
 			}
 			info, err := d.Info()
 			if err != nil {
@@ -755,13 +755,13 @@ func checkRealDirPath(root *os.Root, sub, display string) error {
 	for _, part := range strings.Split(sub, string(filepath.Separator)) {
 		cur = filepath.Join(cur, part)
 		info, err := root.Lstat(cur)
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, iofs.ErrNotExist) {
 			return fmt.Errorf("path %s not found in repository", display)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to inspect path %s: %w", display, err)
 		}
-		if info.Mode()&fs.ModeSymlink != 0 {
+		if info.Mode()&iofs.ModeSymlink != 0 {
 			return fmt.Errorf("path %s in repository goes through a symbolic link", display)
 		}
 		if !info.IsDir() {
@@ -803,7 +803,7 @@ func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root,
 // writeFileInRoot creates (or truncates) the regular file name inside root,
 // creating missing parent directories, and fills it from r. All path
 // resolution goes through root, so the write cannot land outside it.
-func writeFileInRoot(root *os.Root, name string, r io.Reader, mode fs.FileMode) error {
+func writeFileInRoot(root *os.Root, name string, r io.Reader, mode iofs.FileMode) error {
 	if dir := filepath.Dir(name); dir != "." {
 		if err := root.MkdirAll(dir, 0755); err != nil {
 			return err
@@ -823,7 +823,7 @@ func writeFileInRoot(root *os.Root, name string, r io.Reader, mode fs.FileMode) 
 // dirPerm returns the permission bits for a directory created from fetched
 // content: the source's permission bits, always owner-accessible so later
 // entries can be written into it.
-func dirPerm(mode fs.FileMode) fs.FileMode {
+func dirPerm(mode iofs.FileMode) iofs.FileMode {
 	return mode.Perm() | 0o700
 }
 
