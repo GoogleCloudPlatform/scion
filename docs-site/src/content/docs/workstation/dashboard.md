@@ -138,7 +138,7 @@ Monitor the infrastructure nodes where your agents are executing.
 
 After a Hub upgrade, the **Brokers** page and the **Health** page show which Runtime Brokers run a different Scion version from the Hub. The Hub compares versions and every page shows its result:
 
-- **Version**: a Runtime Broker reports its build version when it joins and on every heartbeat. It is the release tag for a tagged build and the first 8 characters of the commit otherwise, the same form the Hub reports for itself.
+- **Version**: a Runtime Broker reports its build version when it joins or registers, and refreshes it with every heartbeat it sends with its own credentials. A co-located Runtime Broker that runs without its own credentials (for example under development authentication) records the server's version each time the server starts, so its version stays current without the heartbeat. The version is the release tag for a tagged build and the first 8 characters of the commit otherwise, the same form the Hub reports for itself.
 - **Hub version**: the version every live Hub instance reports. While Hub instances run different versions (a rolling upgrade), there is no single Hub version, so every Runtime Broker is shown as unknown.
 - **Match rule**: the two versions must be identical. There is no normalisation, so `1.2.0` and `v1.2.0` differ.
 - **Needs attention**: an online Runtime Broker whose version differs adds a `broker_version_mismatch` warning to the Health page (it does not change the overall status) and counts for the **Needs attention** filter of the Brokers area. An offline Runtime Broker keeps only its offline item. A Runtime Broker whose version is unknown adds nothing.
