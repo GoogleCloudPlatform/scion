@@ -901,12 +901,10 @@ func (p *harnessConfigPersistence) CheckDir(_ context.Context, name string, cd *
 		return fmt.Errorf("%s: harness config in %q not imported: %w", p.Label(), cd.base(), err)
 	}
 	if !present {
-		// A config.yaml that is in the directory but was not collected (a
-		// link or another non-regular entry) refuses the resource: it is
-		// never followed, and the resource is not stored without it.
-		if _, lerr := cd.root.Lstat(harnessConfigYAMLPath); lerr == nil {
-			return fmt.Errorf("%s: harness config in %q not imported: config.yaml is not a regular file (a link or special file), so it was not collected", p.Label(), cd.base())
-		}
+		// No config.yaml was collected (missing, a link or another
+		// non-regular entry): the resource is refused, never stored without
+		// it. Every caller requires config.yaml before collection.
+		return fmt.Errorf("%s: harness config in %q not imported: no config.yaml was collected (missing, a link or not a regular file)", p.Label(), cd.base())
 	}
 	if p.nameFromConfig {
 		// The caller named the resource from config.yaml before collection:

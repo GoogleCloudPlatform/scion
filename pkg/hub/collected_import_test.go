@@ -219,8 +219,21 @@ func TestHarnessConfigImport_NameFromConfigMustMatchCollected(t *testing.T) {
 	})
 }
 
-// A config.yaml that is a link (not collected) refuses the harness-config,
-// even when the harness could be inferred from its name.
+// A harness-config with no collected config.yaml is refused, even when its
+// harness could be inferred from its name: a missing config.yaml, and one
+// that is a link (not collected).
+func TestHarnessConfigBootstrap_MissingConfigYAMLRefused(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	dir := filepath.Join(writeCollectedTestTree(t, map[string]string{"claude-missing/home/.rc": "# rc\n"}), "claude-missing")
+	_, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "claude-missing", dir, store.HarnessConfigScopeGlobal, "", "", false)
+	if err == nil || !strings.Contains(err.Error(), "no config.yaml was collected") {
+		t.Fatalf("bootstrap error = %v, want the missing config.yaml refusal", err)
+	}
+	if _, ok := harnessConfigsByName(t, s)["claude-missing"]; ok {
+		t.Error("a harness-config without config.yaml was stored")
+	}
+}
+
 func TestHarnessConfigBootstrap_LinkedConfigYAMLRefused(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	outside := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\n"})
@@ -235,8 +248,8 @@ func TestHarnessConfigBootstrap_LinkedConfigYAMLRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "claude-probe", dir, store.HarnessConfigScopeGlobal, "", "", false)
-	if err == nil || !strings.Contains(err.Error(), "config.yaml is not a regular file") {
-		t.Fatalf("bootstrap error = %v, want the linked config.yaml refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "no config.yaml was collected") {
+		t.Fatalf("bootstrap error = %v, want the uncollected config.yaml refusal", err)
 	}
 	if _, ok := harnessConfigsByName(t, s)["claude-probe"]; ok {
 		t.Error("a harness-config whose config.yaml is a link was stored")

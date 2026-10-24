@@ -267,6 +267,12 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	}
 
 	// 2. The content check.
+	if opts.collected != nil {
+		// A bootstrap or import commit needs the collected config.yaml.
+		if _, ok := opts.collected.entry(harnessConfigYAMLPath); !ok {
+			return fmt.Errorf("harness-config commit: no config.yaml was collected for %q (missing, a link or not a regular file)", hc.Name)
+		}
+	}
 	configYAML, present, err := s.readHarnessConfigYAML(ctx, stor, base, next, opts)
 	if err != nil {
 		return fmt.Errorf("harness-config commit: %w", err)
