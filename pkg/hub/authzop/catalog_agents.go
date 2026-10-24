@@ -517,9 +517,11 @@ var agentOperations = []OperationSpec{
 		},
 		// authorizeAgentMessage applies the recipient's message mode and,
 		// for a user access token, the agent:message selector and the token
-		// boundary before any piercing rule.
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// boundary before any piercing rule. An agent delegated credential
+		// may send a direct message to the route's own agent only, and
+		// pierces no message mode (.design/agent-delegation.md §12.3).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.message",
 		Effects:          []SecurityEffect{EffectEmitExternal},
@@ -555,8 +557,11 @@ var agentOperations = []OperationSpec{
 			// pins this entry point to the live route.
 			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/pty", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// An agent delegated credential is authorized at the handshake
+		// only, on the broker terminal path; its established session is
+		// not re-checked (.design/agent-delegation.md §16.6).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.attach",
 		Effects:          []SecurityEffect{EffectReadOne},

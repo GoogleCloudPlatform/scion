@@ -242,7 +242,6 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),
 			"the primary permission of %s is not delegable", entry.Operation)
-		assert.NotEqual(t, authzop.OperationID("agent.attach"), entry.Operation)
 		tableOps[entry.Operation] = true
 	}
 	for _, spec := range authzop.Catalog {
