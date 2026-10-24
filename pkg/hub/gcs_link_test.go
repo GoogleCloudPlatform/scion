@@ -1452,9 +1452,10 @@ func TestGCSLink_SAReassignment(t *testing.T) {
 	})
 	f.source.putObject("bkt", "o.txt", &storage.ObjectAttrs{Size: 2, Generation: 1}, []byte("hi"))
 
-	// Reassign the agent to sa-b.
+	// Reassign the agent to sa-b, recorded as the assignment handlers would.
 	agent.AppliedConfig.GCPIdentity = gcsAssignedIdentity(saB)
 	require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
+	gcsRecordAssignment(t, f.store, agent, saB.ID)
 
 	rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

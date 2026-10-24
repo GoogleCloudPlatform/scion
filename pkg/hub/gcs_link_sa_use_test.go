@@ -1,0 +1,247 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"cloud.google.com/go/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// A gs:// link opens only while the sending agent may use its account the
+// way the GCP token mint requires (authorizeGCSLinkServiceAccountUse): the
+// use decision for the stored sender, whose step 10 denies an unrecorded hop
+// on the agent's chain and is otherwise the account's parent ceiling, then
+// actAs on the recorded source in enforce mode. A refusal answers the same
+// not-found response as every other unavailable object, before any token is
+// minted; the audit event names sa_use_not_authorized.
+
+// gcsUseScenario is an agent-sent message in a project topic, read by a
+// project member, with the agent assigned a verified project account and
+// the assignment recorded from gcsAssignerID(agent).
+type gcsUseScenario struct {
+	gcsSAScenario
+	agent *store.Agent
+}
+
+func newGCSUseScenario(t *testing.T, f *gcsFixture, seed string) gcsUseScenario {
+	t.Helper()
+	project := gcsTestProject(t, f, seed+"-project")
+	sa := gcsTestSA(t, f.store, project, seed+"-sa", "sa-"+seed+"@test.iam.gserviceaccount.com")
+	agent := gcsTestAgent(t, f.store, project, seed+"-agent", gcsAssignedIdentity(sa))
+	conv := gcsTestTopic(t, f.store, project, seed+"-topic")
+	msg := gcsTestMessage(t, f.store, gcsMessageSpec{
+		seed: seed + "-msg", projectID: project.ID, sender: "agent:" + agent.Slug, senderID: agent.ID,
+		body: "see gs://bkt/o.txt", agentID: agent.ID, conversationID: conv.ID,
+	})
+	viewer := gcsTestUser(t, f.store, seed+"-viewer")
+	addProjectMemberWithRole(t, f.store, project, viewer.ID, store.GroupMemberRoleMember)
+	f.source.putObject("bkt", "o.txt", &storage.ObjectAttrs{Size: 2, Generation: 1}, []byte("hi"))
+	return gcsUseScenario{gcsSAScenario: gcsSAScenario{viewer: viewer, msg: msg, sa: sa}, agent: agent}
+}
+
+// useDecision is the stored-agent use decision the proxy makes for the
+// scenario's sender and account.
+func (sc gcsUseScenario) useDecision(t *testing.T, f *gcsFixture) Decision {
+	t.Helper()
+	agent, err := f.store.GetAgent(context.Background(), sc.agent.ID)
+	require.NoError(t, err)
+	return f.srv.authzService.decideStoredAgentServiceAccountUse(context.Background(), agent, sc.sa)
+}
+
+// gcsEnforceActAs turns on the enforce check mode with checker, keeping the
+// fixture's fake token generator (enforceSAAssign would replace it).
+func gcsEnforceActAs(srv *Server, checker store.CallerPermissionChecker) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	srv.saAssignCheckMode = SAAssignCheckEnforce
+	srv.saAssignChecker = checker
+}
+
+func requireGCSFetchAllowed(t *testing.T, f *gcsFixture, rec *httptest.ResponseRecorder, sa *store.GCPServiceAccount) {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	call, ok := f.gen.lastCall()
+	require.True(t, ok, "expected a mint call")
+	require.Equal(t, sa.Email, call.email)
+}
+
+// TestGCSLink_SAUse_RecordedSourceWithAssignAdmitted: a live recorded source
+// holding assign on the exact account admits the fetch, and the use decision
+// names the parent proof.
+func TestGCSLink_SAUse_RecordedSourceWithAssignAdmitted(t *testing.T) {
+	f := newGCSFixture(t)
+	sc := newGCSUseScenario(t, f, "use-admit")
+
+	requireGCSFetchAllowed(t, f, sc.fetch(t, f), sc.sa)
+	d := sc.useDecision(t, f)
+	require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
+	require.NotNil(t, d.parentProof)
+	assert.Equal(t, gcsAssignerID(sc.agent), d.parentProof.SourcePrincipal.ID)
+	assert.Contains(t, d.Reason, "parent proof: gcp_service_account.assign")
+}
+
+// TestGCSLink_SAUse_RefusedAboveCeiling: a recorded source without assign,
+// from the start or after it lost it, refuses the fetch.
+func TestGCSLink_SAUse_RefusedAboveCeiling(t *testing.T) {
+	t.Run("source loses assign", func(t *testing.T) {
+		f := newGCSFixture(t)
+		sc := newGCSUseScenario(t, f, "use-lost")
+		d := sc.useDecision(t, f)
+		require.True(t, d.Allowed, "control: the source holds assign: cause=%q reason=%q", d.DenyCause, d.Reason)
+
+		_, err := f.store.DeleteRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, gcsAssignerID(sc.agent))
+		require.NoError(t, err)
+		requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+		requireUseDeniedWithCause(t, sc.useDecision(t, f), DenyCauseCeilingDelegatorLacksPermission)
+	})
+	t.Run("source never held assign", func(t *testing.T) {
+		f := newGCSFixture(t)
+		sc := newGCSUseScenario(t, f, "use-noassign")
+		noAssign := tid("use-noassign-source")
+		scaCreateDelegatorWithoutAssign(t, f.store, noAssign, "use-noassign-source@test.com", sc.agent.ProjectID)
+		seedAssignment(t, f.store, sc.agent, noAssign, sc.sa.ID)
+
+		requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+		requireUseDeniedWithCause(t, sc.useDecision(t, f), DenyCauseCeilingDelegatorLacksPermission)
+	})
+}
+
+// TestGCSLink_SAUse_RefusedUnrecorded: no recorded assignment, or an
+// unrecorded edge on the sender's own chain, refuses the fetch. The same
+// sender with a recorded edge is admitted, so only the edge differs.
+func TestGCSLink_SAUse_RefusedUnrecorded(t *testing.T) {
+	t.Run("assignment not recorded", func(t *testing.T) {
+		f := newGCSFixture(t)
+		sc := newGCSUseScenario(t, f, "use-noprov")
+		_, err := f.store.DeactivateAgentServiceAccountAssignments(context.Background(), sc.agent.ID,
+			store.Deactivation{Cause: store.EdgeDeactivationSACleared, OpID: "op-gcs-clear"})
+		require.NoError(t, err)
+
+		requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+		requireUseDeniedWithCause(t, sc.useDecision(t, f), DenyCauseCeilingProvenanceMissing)
+	})
+	for _, tc := range []struct {
+		name     string
+		edge     func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)
+		admitted bool
+	}{
+		{"unrecorded edge", createDCEdge, false},
+		{"recorded edge", seedRecordedDelegationEdge, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGCSFixture(t)
+			seed := "use-edge-recorded"
+			if !tc.admitted {
+				seed = "use-edge-unrecorded"
+			}
+			sc := newGCSUseScenario(t, f, seed)
+			setBackfillCompleted(t, f.store)
+			root := tid(seed + "-root")
+			createDCUser(t, f.store, root, seed+"-root@test.com", sc.agent.ProjectID, store.ProjectRoleOwner)
+			tc.edge(t, f.store, store.DelegationPrincipalUser, root, store.DelegationPrincipalAgent, sc.agent.ID,
+				store.RoleScopeProject, sc.agent.ProjectID, store.ProjectRoleOwner)
+
+			if tc.admitted {
+				requireGCSFetchAllowed(t, f, sc.fetch(t, f), sc.sa)
+				return
+			}
+			requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+			requireUseDeniedWithCause(t, sc.useDecision(t, f), DenyCauseCeilingUnrecorded)
+		})
+	}
+}
+
+// TestGCSLink_SAUse_ActAsEnforceMode: in enforce mode the recorded source,
+// never the agent or the viewer, must pass actAs on the account; a denial
+// refuses the fetch before any token is minted.
+func TestGCSLink_SAUse_ActAsEnforceMode(t *testing.T) {
+	for _, allowed := range []bool{true, false} {
+		name := "denied"
+		if allowed {
+			name = "allowed"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newGCSFixture(t)
+			sc := newGCSUseScenario(t, f, "use-actas-"+name)
+			checker := store.NewFakeCallerPermissionChecker()
+			if allowed {
+				checker.AllowTarget(sc.sa.Email)
+			} else {
+				checker.DenyTarget(sc.sa.Email, "no actAs grant")
+			}
+			gcsEnforceActAs(f.srv, checker)
+
+			rec := sc.fetch(t, f)
+			if allowed {
+				requireGCSFetchAllowed(t, f, rec, sc.sa)
+			} else {
+				requireGCSUniformDeny(t, f, rec, GCSLinkReasonSAUseNotAuthorized)
+			}
+			calls := checker.Calls()
+			require.Len(t, calls, 1, "one actAs check for the fetch")
+			assert.Equal(t, store.PrincipalUser, calls[0].Caller.Kind)
+			assert.Equal(t, gcsAssignerID(sc.agent), calls[0].Caller.ID, "the recorded source is the actAs caller")
+			assert.Equal(t, sc.sa.ID, calls[0].TargetSAID)
+		})
+	}
+}
+
+// TestGCSLink_SAUse_DecisionAlwaysAudited: the stored-agent use decision is
+// recorded for every fetch that reaches it, allow and deny, with the sender
+// as principal and gcp_service_account.use as the permission.
+func TestGCSLink_SAUse_DecisionAlwaysAudited(t *testing.T) {
+	f := newGCSFixture(t)
+	f.srv.authzService.DecisionAuditSampleRate = 0
+	em := &recordingDecisionAuditEmitter{}
+	prev := f.srv.authzService.decisionAuditEmitter
+	f.srv.authzService.SetDecisionAuditEmitter(em)
+	t.Cleanup(func() { f.srv.authzService.SetDecisionAuditEmitter(prev) })
+	sc := newGCSUseScenario(t, f, "use-audit")
+
+	useRecords := func() []*store.DecisionAuditRecord {
+		var out []*store.DecisionAuditRecord
+		for _, r := range em.records {
+			if r.PermissionID == "gcp_service_account.use" && r.ResourceID == sc.sa.ID {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+
+	requireGCSFetchAllowed(t, f, sc.fetch(t, f), sc.sa)
+	got := useRecords()
+	require.Len(t, got, 1)
+	assert.Equal(t, "allow", got[0].Result)
+	assert.Equal(t, sc.agent.ID, got[0].PrincipalID)
+
+	_, err := f.store.DeleteRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, gcsAssignerID(sc.agent))
+	require.NoError(t, err)
+	rec := sc.fetch(t, f)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	got = useRecords()
+	require.Len(t, got, 2)
+	assert.Equal(t, "deny", got[1].Result)
+	assert.Equal(t, string(DeniedByDelegationCeiling), got[1].DeniedBy)
+}

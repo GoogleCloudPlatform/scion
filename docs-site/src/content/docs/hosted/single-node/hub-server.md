@@ -163,13 +163,19 @@ calls, and never a token the browser can see or reuse directly.
   time — not a snapshot from when the message was originally posted. If the
   agent's identity was later reassigned or removed, the fetch uses the new
   identity (or fails, if none is assigned).
+- **Whose authority is checked**: the same rule as an agent's own token
+  request (see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)).
+  The principal recorded as the source of the agent's assignment must still
+  hold `gcp_service_account.assign` on the account and, in
+  `gcp_iam_check_mode: enforce`, still pass the `actAs` check. If it no
+  longer does, the link fails like any other unavailable object.
 - **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
   JPEG, GIF and WebP objects preview as images; other text — including SVG,
   which is always shown as source rather than rendered — previews inline up
   to 512 KB (larger text offers Download only); binary objects show "This
   file can't be previewed." with Download.
 - **Errors and the Cloud Console fallback**: an object that can't be opened
-  (not found, access denied, or no Service Account currently assigned) shows
+  (not found, access denied, or no Service Account currently usable) shows
   a single generic message rather than revealing which case applied; an
   object over 10 MiB shows a size-limit message instead. Every such case also
   offers an **Open in Cloud Console** link, so you can still inspect the

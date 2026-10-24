@@ -788,10 +788,11 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 
 // TestSAParentCeiling_ReachedOnlyThroughDecide pins that no file but
 // authz_resource_parent_ceiling.go names the evaluator: Decide reaches it
-// through step 10 (applyResourceParentCeiling), and the GCP token endpoints
+// through step 10 (applyResourceParentCeiling), the GCP token endpoints
 // reach it only through Decide(gcp_service_account.use) in
-// authorizeAgentGCPMint, so the audited use decision and the mint can never
-// apply different parent rules.
+// authorizeAgentGCPMint, and the GCS link proxy only through the same step
+// 10 in decideStoredAgentServiceAccountUse, so the audited use decision,
+// the mint and the proxy can never apply different parent rules.
 func TestSAParentCeiling_ReachedOnlyThroughDecide(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// scanned through guardScanSubdirs; guards EvaluateServiceAccountParentCeiling callers.

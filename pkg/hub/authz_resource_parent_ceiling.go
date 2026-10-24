@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -38,7 +39,11 @@ import (
 // one audited decision has permission gcp_service_account.use and names
 // Proof.Permission as the parent proof. The GCP token mint handlers compose
 // that decision with the mode-aware actAs check on the recorded source
-// (authorizeAgentGCPMint, handlers_gcp_identity_mint_authority.go).
+// (authorizeAgentGCPMint, handlers_gcp_identity_mint_authority.go). The GCS
+// link proxy, which uses the sending agent's account without the agent's
+// credential, runs the same step 10 through
+// decideStoredAgentServiceAccountUse and composes it with the same actAs
+// check.
 
 const (
 	gcpServiceAccountUsePermission    = "gcp_service_account.use"
@@ -511,6 +516,46 @@ func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentId
 			return DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), false
 		}
 	}
+}
+
+// decideStoredAgentServiceAccountUse decides gcp_service_account.use for a
+// stored agent on a Hub path that uses the agent's assigned account on the
+// agent's behalf without the agent's credential: the GCS link proxy mints a
+// read-only token for the sending agent's account to fetch an object the
+// agent named in a message. With no agent credential on the request, the
+// token-scope and grant steps of Decide do not apply. The caller's record
+// checks stand in for them: the agent's applied identity is in assign mode
+// for exactly this account, and the account passes the same admissibility
+// rule as the token mint (resolveCurrentSA). Step 10 is Decide's own
+// (applyResourceParentCeiling): the unrecorded-hop check, then the
+// account's parent ceiling. The decision is always audited, allow or deny,
+// as Decide audits a step-10 parent-ceiling decision.
+func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, agent *store.Agent, sa *store.GCPServiceAccount) Decision {
+	if a == nil || agent == nil || sa == nil {
+		return Decision{Allowed: false, Reason: "invalid stored-agent use request", DeniedBy: DeniedByDelegationCeiling, DenyCause: DenyCauseCeilingError}
+	}
+	ident := &storedAgentIdentity{agent: agent}
+	// No agent credential was presented, so the request names none; the
+	// audit record shows the agent as principal with no credential.
+	request := AuthzRequest{
+		Principal:   principalContextForIdentity(ident),
+		Resource:    gcpServiceAccountResource(sa),
+		Action:      ActionUse,
+		Permission:  permissions.PermissionGCPServiceAccountUse,
+		AlwaysAudit: true,
+	}
+	decision := Decision{Allowed: true, Reason: "stored agent record names the account in assign mode"}
+	m, ok := ResourceParentCeilingFor(gcpServiceAccountUsePermission)
+	if !ok {
+		decision = parentCeilingDenyDecision(decision, DenyCauseCeilingError, "no parent ceiling for the permission", ParentProof{})
+	} else {
+		decision = a.applyResourceParentCeiling(maskAuthzInputs(ctx), m, ident, request.Resource, decision)
+	}
+	decision = decorateDecision(decision, request, request.Principal, request.Credential, auditPermissionID(request))
+	if a.decisionAuditEmitter != nil {
+		a.emitDecisionAudit(ctx, request, decision)
+	}
+	return decision
 }
 
 // parentProofReason appends the parent proof to an allow reason.

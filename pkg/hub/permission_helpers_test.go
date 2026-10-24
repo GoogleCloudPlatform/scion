@@ -174,8 +174,12 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"conduit_agent_check.go", "conduitAgentScopeCheck"},
 	},
 	"agent.identity_token": {{"handlers_oidc.go", "Server.handleAgentIdentityToken"}},
-	// Both GCP token mint endpoints decide it through this one function.
-	"gcp_service_account.use": {{"handlers_gcp_identity_mint_authority.go", "Server.authorizeAgentGCPMint"}},
+	// Both GCP token mint endpoints decide it through authorizeAgentGCPMint;
+	// the GCS link proxy decides it for the stored sending agent.
+	"gcp_service_account.use": {
+		{"handlers_gcp_identity_mint_authority.go", "Server.authorizeAgentGCPMint"},
+		{"authz_resource_parent_ceiling.go", "AuthzService.decideStoredAgentServiceAccountUse"},
+	},
 }
 
 // routeGuardPermissionIDs returns the permissions the RouteHubAdmin guard

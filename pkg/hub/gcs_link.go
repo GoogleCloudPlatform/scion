@@ -528,8 +528,8 @@ func gcsContentType(contentEncoding string, sniffedPrefix []byte, truncated bool
 
 // gcsWriteDeny writes the fixed body for a deny status. The 404 branch is
 // the enumeration-resistant one: every 404 deny path (missing message,
-// unreadable message, URI not in body, non-agent sender, no SA, GCS
-// 404/403/401) calls this exact function with this exact literal, so the
+// unreadable message, URI not in body, non-agent sender, no SA, SA use not
+// authorized, GCS 404/403/401) calls this exact function with this exact literal, so the
 // bytes on the wire never vary by reason.
 func gcsWriteDeny(w http.ResponseWriter, status int) {
 	switch status {
@@ -668,6 +668,16 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	sa, saReason := s.resolveCurrentSA(ctx, sender)
 	if sa == nil {
 		deny(saReason, http.StatusNotFound)
+		return
+	}
+
+	// Step 9b: the sender's authority to use that account, decided as the
+	// GCP token mint decides it: the use decision with the account's parent
+	// ceiling for the stored sender, then actAs on the recorded source in
+	// enforce mode (authorizeGCSLinkServiceAccountUse). A refusal answers
+	// the same not-found response.
+	if !s.authorizeGCSLinkServiceAccountUse(ctx, sender, sa) {
+		deny(GCSLinkReasonSAUseNotAuthorized, http.StatusNotFound)
 		return
 	}
 	event.SAEmail = sa.Email

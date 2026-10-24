@@ -146,7 +146,32 @@ func gcsTestAgent(t *testing.T, s store.Store, project *store.Project, seed stri
 		a.AppliedConfig = &store.AgentAppliedConfig{GCPIdentity: gcpIdentity}
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), a))
+	if gcpIdentity != nil && gcpIdentity.MetadataMode == store.GCPMetadataModeAssign && gcpIdentity.ServiceAccountID != "" {
+		gcsRecordAssignment(t, s, a, gcpIdentity.ServiceAccountID)
+	}
 	return a
+}
+
+// gcsAssignerID is the ID of the user gcsRecordAssignment records as the
+// source of agent's assignment.
+func gcsAssignerID(agent *store.Agent) string {
+	return tid(agent.Slug + "-assigner")
+}
+
+// gcsRecordAssignment records agent's assignment of saID, as the assignment
+// handlers would, from a member of the agent's project who holds
+// gcp_service_account.assign there and is a hub member (for a hub-scoped
+// account). That is the state in which the GCS link proxy's use decision
+// admits the account (authorizeGCSLinkServiceAccountUse). Calling it again
+// for another account re-records the assignment from the same source.
+func gcsRecordAssignment(t *testing.T, s store.Store, agent *store.Agent, saID string) {
+	t.Helper()
+	assigner := gcsAssignerID(agent)
+	if _, err := s.GetUser(context.Background(), assigner); err != nil {
+		createDCUser(t, s, assigner, agent.Slug+"-assigner@test.com", agent.ProjectID, store.ProjectRoleMember)
+		ensureHubMembership(context.Background(), s, assigner)
+	}
+	seedAssignment(t, s, agent, assigner, saID)
 }
 
 // gcsTestSA creates a verified service account scoped to project: the
