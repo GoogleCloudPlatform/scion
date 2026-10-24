@@ -158,6 +158,26 @@ func TestHarnessConfigBootstrap_StoresCollectedHarnessOrFails(t *testing.T) {
 			t.Errorf("an active row was stored with harness %q", hc.Harness)
 		}
 	})
+	t.Run("collected config.yaml over the parse limit keeps the stored harness", func(t *testing.T) {
+		// A config.yaml larger than maxHarnessConfigFileSize is not parsed on
+		// the collected path (derived as unparsable), so its harness is not
+		// derived; the commit keeps the harness the row was created with and
+		// logs a warning, as before. LoadHarnessConfigDir has no size limit,
+		// so such a file passes the validation before collection.
+		srv, s, _ := testTemplateBootstrapServer(t)
+		big := "harness: gemini-cli\n# " + strings.Repeat("x", maxHarnessConfigFileSize) + "\n"
+		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": big})
+		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
+			t.Fatalf("validation before collection: %v", err)
+		}
+		if _, err := srv.harnessConfigStore("claude").Bootstrap(context.Background(), "my-config", dir, store.HarnessConfigScopeGlobal, "", "", false); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		hc := harnessConfigsByName(t, s)["my-config"]
+		if hc.Harness != "claude" || hc.Status != store.HarnessConfigStatusActive {
+			t.Errorf("stored harness %q status %q, want the kept harness claude, active", hc.Harness, hc.Status)
+		}
+	})
 	t.Run("a config.yaml that passes validation gives a harness", func(t *testing.T) {
 		dir := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\nimage: example:latest\n"})
 		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
