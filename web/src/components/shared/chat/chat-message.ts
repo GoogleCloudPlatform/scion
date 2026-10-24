@@ -2429,8 +2429,7 @@ export class ScionChatMessage extends LitElement {
                 </div>
               `
             : nothing}
-          ${this.renderAuthorizedBy()}
-          ${this.replyPreview ? this.renderReplyPreview() : nothing}
+          ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
             ? html`<div class="bubble-content">
                 <span class="deleted-message">This message was deleted</span>
