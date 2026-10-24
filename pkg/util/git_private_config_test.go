@@ -227,7 +227,7 @@ func TestRedactedPrivateConfig_IsUsableByGit(t *testing.T) {
 	}
 }
 
-func TestStripURLUserinfo(t *testing.T) {
+func TestSanitizeURLUserinfo(t *testing.T) {
 	cases := map[string]struct {
 		want    string
 		changed bool
@@ -236,19 +236,55 @@ func TestStripURLUserinfo(t *testing.T) {
 		"https://u:p@h/x": {"https://h/x", true, false},
 		"https://u@h/x":   {"https://h/x", true, false},
 		"https://h/x":     {"https://h/x", false, false},
-		"git@h:o/r.git":   {"git@h:o/r.git", false, false}, // scp-style, not http(s)
+		"git@h:o/r.git":   {"git@h:o/r.git", false, false}, // scp-style, kept unchanged
 		"ssh://u@h/x":     {"ssh://u@h/x", false, false},   // not http(s), userinfo kept
-		// Unparseable header that still carries userinfo (an invalid percent escape
-		// in the userinfo): drop the key so the userinfo cannot reach the header.
+		// Unparseable but URL-shaped ("://") and carries userinfo (an invalid percent
+		// escape in the userinfo): drop the key so the userinfo cannot survive.
 		"https://u:p%zz@host/x": {"", false, true},
-		// Unparseable header without userinfo: kept unchanged.
+		// Unparseable, URL-shaped, but no userinfo: kept unchanged.
 		"https://host/x%zz": {"https://host/x%zz", false, false},
+		// Unparseable scp-style base with userinfo but no "://": kept unchanged.
+		"git@github.com:o/r.git": {"git@github.com:o/r.git", false, false},
 	}
 	for in, want := range cases {
-		got, changed, drop := stripURLUserinfo(in)
+		got, changed, drop := sanitizeURLUserinfo(in)
 		if got != want.want || changed != want.changed || drop != want.drop {
-			t.Errorf("stripURLUserinfo(%q) = (%q,%v,%v), want (%q,%v,%v)", in, got, changed, drop, want.want, want.changed, want.drop)
+			t.Errorf("sanitizeURLUserinfo(%q) = (%q,%v,%v), want (%q,%v,%v)", in, got, changed, drop, want.want, want.changed, want.drop)
 		}
+	}
+}
+
+// TestRedactGitConfigSecrets_ScpStyleKept confirms scp-style git remotes and url
+// bases (git@host:path, no "://") survive redaction byte-equal on both the value
+// path and the subsection path, and nothing is reported stripped for them.
+func TestRedactGitConfigSecrets_ScpStyleKept(t *testing.T) {
+	in := strings.Join([]string{
+		"[remote \"origin\"]",
+		"\turl = git@github.com:o/r.git",
+		"[url \"git@github.com:\"]",
+		"\tinsteadOf = https://github.com/",
+		"",
+	}, "\n")
+
+	out, stripped, err := RedactGitConfigSecrets([]byte(in))
+	if err != nil {
+		t.Fatalf("RedactGitConfigSecrets: %v", err)
+	}
+	outStr := string(out)
+
+	if len(stripped) != 0 {
+		t.Errorf("expected no keys stripped for scp-style config, got %v", stripped)
+	}
+	for _, keep := range []string{
+		"[remote \"origin\"]\n\turl = \"git@github.com:o/r.git\"\n",
+		"[url \"git@github.com:\"]\n\tinsteadof = \"https://github.com/\"\n",
+	} {
+		if !strings.Contains(outStr, keep) {
+			t.Errorf("scp-style entry not kept byte-equal (%q):\n%s", keep, outStr)
+		}
+	}
+	if _, err := parseGitConfigFile(out); err != nil {
+		t.Errorf("redacted config does not re-parse: %v\n%s", err, outStr)
 	}
 }
 
