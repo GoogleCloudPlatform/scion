@@ -392,12 +392,14 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 	assertMintDenied(t, f)
 }
 
-// TestGCPServiceAccountUse_MintAndDecisionFollowParentProof replaces the
-// F.2g characterization (direct Decide denied with
+// TestGCPServiceAccountUse_MintAndDecisionFollowParentProof pins that the
+// direct decision and the mint endpoints agree. Before the mint decided
+// gcp_service_account.use, a direct decision denied with
 // DenyCauseCeilingDelegatorLacksPermission while the endpoints minted on the
-// record checks alone). It runs in production-like state: the delegation-edge
-// backfill marker is restored (testServer removes it) and a real
-// owner-to-agent delegation edge is recorded. The recorded source holds
+// record checks alone. It runs in production-like state: the delegation-edge
+// backfill marker is restored (testServer removes it) and an owner-to-agent
+// delegation edge with recorded provenance is written (an unrecorded edge
+// would deny at step 10 before the parent ceiling). The recorded source holds
 // gcp_service_account.assign but not gcp_service_account.use; step 10 now
 // applies the account's parent ceiling instead of asking the delegator for
 // use, so a direct decision and both endpoints allow. When the source loses
@@ -406,7 +408,7 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 func TestGCPServiceAccountUse_MintAndDecisionFollowParentProof(t *testing.T) {
 	f := newGCPMintFixture(t, "parent-authority")
 	setBackfillCompleted(t, f.Store)
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
 		store.RoleScopeProject, f.ProjectID, store.ProjectRoleOwner)
 
 	decide := func() Decision {

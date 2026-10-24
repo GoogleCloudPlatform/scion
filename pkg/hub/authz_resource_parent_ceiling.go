@@ -385,25 +385,132 @@ func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m Reso
 }
 
 // applyResourceParentCeiling is Decide's step 10 for a permission with a
-// resource parent ceiling. decision must be allowed on entry. On allow the
-// reason names the parent proof and the decision is always audited, so the
-// record of the use decision carries the parent permission and the recorded
-// source; on deny the evaluator's cause and neutral reason replace the
+// resource parent ceiling. decision must be allowed on entry. In order:
+//   - a nil agent (an agent-kind principal whose identity is not an
+//     AgentIdentity) denies with ceiling_error;
+//   - parentCeilingChainDeny: an unrecorded hop on the agent's own chain
+//     denies, with the cause the chain check gives it;
+//   - the parent ceiling evaluator for mapping m.
+//
+// On allow the reason names the parent proof and the decision is always
+// audited, so the record of the use decision carries the parent permission
+// and the recorded source; on deny the cause and neutral reason replace the
 // decision's. The proof is attached either way (Decision.parentProof).
-func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agentID string, resource Resource, decision Decision) Decision {
-	pc := a.evaluateResourceParentCeiling(ctx, m, agentID, resource)
-	proof := pc.Proof
-	decision.parentProof = &proof
-	if !pc.Allowed {
-		decision.Allowed = false
-		decision.Reason = "parent ceiling: " + pc.Reason
-		decision.DeniedBy = DeniedByDelegationCeiling
-		decision.DenyCause = pc.DenyCause
+func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agent AgentIdentity, resource Resource, decision Decision) Decision {
+	if agent == nil || isNilIdentity(agent) || agent.ID() == "" {
+		return parentCeilingDenyDecision(decision, DenyCauseCeilingError,
+			"parent ceiling: the principal is not an agent identity", ParentProof{Permission: m.ParentPermission})
+	}
+	if cause, reason, adoptable := a.parentCeilingChainDeny(ctx, agent, m.DecisionPermission); cause != "" {
+		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Permission: m.ParentPermission})
+		decision.adoptionRemediable = cause == DenyCauseCeilingUnrecorded && adoptable
 		return decision
 	}
+	pc := a.evaluateResourceParentCeiling(ctx, m, agent.ID(), resource)
+	if !pc.Allowed {
+		return parentCeilingDenyDecision(decision, pc.DenyCause, "parent ceiling: "+pc.Reason, pc.Proof)
+	}
+	proof := pc.Proof
+	decision.parentProof = &proof
 	decision.AlwaysAudit = true
 	decision.Reason = parentProofReason(decision.Reason, proof)
 	return decision
+}
+
+// parentCeilingDenyDecision turns decision into a step-10 deny with cause
+// and reason, and attaches proof.
+func parentCeilingDenyDecision(decision Decision, cause DenyCause, reason string, proof ParentProof) Decision {
+	decision.Allowed = false
+	decision.Reason = reason
+	decision.DeniedBy = DeniedByDelegationCeiling
+	decision.DenyCause = cause
+	decision.parentProof = &proof
+	return decision
+}
+
+// parentCeilingChainDeny keeps, under a resource parent ceiling, the one
+// chain property every permission in recordedProvenanceRequired has: an
+// unrecorded hop never allows it. The parent ceiling reads the agent's
+// recorded assignment, not its delegation chain, so without this check a
+// legacy agent whose own edge was never recorded would be admitted once its
+// assignment was re-recorded by a live assigner.
+//
+// It walks the agent's active delegation edges in its own project, from the
+// agent up to the first user delegator, and reads only what each hop
+// recorded. It never asks whether a delegator holds the permission: the
+// parent ceiling replaces that question. It returns a non-empty cause to
+// deny, and adoptable for a ceiling_unrecorded deny that delegation
+// adoption can address (see unrecordedHopNote). In order, per hop:
+//   - an edge lookup error, a cycle, a chain deeper than
+//     maxDelegationDepth, an agent with no project, a ceiling kind or
+//     delegator type this binary does not know: ceiling_error;
+//   - no active edge: no deny. There is no recorded hop to read; the parent
+//     ceiling's recorded assignment is the proof. The chain check also
+//     admits a hub-attested agent with no edge before the edge backfill;
+//   - more than one active edge: ceiling_provenance_ambiguous;
+//   - a migration-sentinel edge: ceiling_orphaned, the cause the chain check
+//     gives it for a permission that is not a registered read;
+//   - an unrecorded edge (unrecorded kind, or a provenance version this
+//     binary does not understand): ceiling_unrecorded, with the chain
+//     check's reason.
+func (a *AuthzService) parentCeilingChainDeny(ctx context.Context, agent AgentIdentity, permissionID string) (DenyCause, string, bool) {
+	scopeID := agent.ProjectID()
+	if scopeID == "" {
+		return DenyCauseCeilingError, "delegation ceiling: the agent has no project scope", false
+	}
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := agent.ID()
+	for depth := 0; ; depth++ {
+		if depth > maxDelegationDepth {
+			return DenyCauseCeilingError, "delegation chain exceeded maximum depth", false
+		}
+		if visited[delegateID] {
+			return DenyCauseCeilingError, "delegation chain contains a cycle", false
+		}
+		visited[delegateID] = true
+
+		edges, err := a.getCachedDelegationEdges(ctx, store.DelegationPrincipalAgent, delegateID)
+		if err != nil {
+			return DenyCauseCeilingError, "delegation ceiling check failed (fail-closed): delegation edge lookup failed", false
+		}
+		var active []*store.DelegationEdge
+		for _, e := range filterEdgesByScope(edges, store.RoleScopeProject, scopeID) {
+			if e.Active {
+				active = append(active, e)
+			}
+		}
+		switch len(active) {
+		case 0:
+			return "", "", false
+		case 1:
+		default:
+			return DenyCauseCeilingProvenanceAmbiguous,
+				fmt.Sprintf("multiple active delegation edges for agent:%s (fail-closed on invariant violation)", delegateID), false
+		}
+		edge := active[0]
+		if isMigrationSentinel(edge) {
+			return DenyCauseCeilingOrphaned,
+				fmt.Sprintf("migration-provenance delegation permits registered non-sensitive reads only; %s denied", permissionID), false
+		}
+		if hopUnrecorded(edge) {
+			var note unrecordedHopNote
+			a.logUnrecordedHop(&note, DenyCauseCeilingUnrecorded, edge, permissionID)
+			return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), note.adoptable
+		}
+		switch edge.Kind {
+		case store.EffectCeilingPrincipal, store.EffectCeilingBounded:
+		default:
+			return DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported ceiling kind", edge.ID), false
+		}
+		switch edge.DelegatorType {
+		case store.DelegationPrincipalUser:
+			return "", "", false
+		case store.DelegationPrincipalAgent:
+			delegateID = edge.DelegatorID
+		default:
+			return DenyCauseCeilingError, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), false
+		}
+	}
 }
 
 // parentProofReason appends the parent proof to an allow reason.
