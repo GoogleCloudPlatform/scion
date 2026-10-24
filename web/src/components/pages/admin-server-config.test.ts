@@ -5777,23 +5777,26 @@ describe('env values in effect (env_values)', () => {
     expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('db@example.com');
   });
 
-  it('shows a masked environment value only as the placeholder', async () => {
+  it('a masked entry (no in-effect state) keeps the plain badge and shows nothing raw', async () => {
     element = await createComponent(
       createFetchHandler(
         dbConfig({
           env_overrides: ['server.auth.authorized_domains'],
           env_values: {
-            'server.auth.authorized_domains': {
-              value: 'not-the-placeholder',
-              masked: true,
-              in_effect: true,
-            },
+            // The server sends neither in_effect nor saved_differs for a
+            // masked key; even if a value slipped in, the page must not show it.
+            'server.auth.authorized_domains': { value: 'not-the-placeholder', masked: true },
           },
         })
       )
     );
     const field = fieldByLabel(element, 'Authorized Domains');
-    expect(field.querySelector('.env-value-in-effect')?.textContent).toContain('********');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-saved-label')).toBeNull();
     expect(shadowText(element)).not.toContain('not-the-placeholder');
   });
 
@@ -5868,9 +5871,28 @@ describe('env values in effect (env_values)', () => {
       'Environment value not in effect on this node'
     );
     expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('0.0.0.0');
+    // The value shown is the configured one, not the start-up value in effect.
+    expect(field.querySelector('.env-value-configured-label')?.textContent).toContain(
+      'Configured value (settings.yaml or default), not the value in effect'
+    );
     const line = field.querySelector('.env-value-not-in-effect')?.textContent ?? '';
     expect(line).toContain('10.0.0.1');
     expect(line).toContain('a start-up default or flag wins');
+  });
+
+  it('a value a saved setting wins with is not labelled as merely configured', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-configured-label')).toBeNull();
   });
 
   it('the profiles section badge reflects env_values', async () => {
@@ -5879,7 +5901,9 @@ describe('env values in effect (env_values)', () => {
         dbConfig({
           env_overrides: ['profiles.local.runtime'],
           env_values: {
-            'profiles.local.runtime': { value: '********', masked: true, in_effect: false },
+            // Profile keys are always masked, so the server reports no
+            // in-effect state for them.
+            'profiles.local.runtime': { value: '********', masked: true },
           },
         })
       )
@@ -5887,9 +5911,10 @@ describe('env values in effect (env_values)', () => {
     const items = queryAll(element, '.env-values-under li').map((li) => li.textContent ?? '');
     const item = items.find((t) => t.includes('profiles.local.runtime'));
     expect(item).toBeDefined();
-    expect(item).toContain('not in effect');
+    expect(item).toContain('whether it is in effect is not reported');
     const badges = queryAll(element, '.env-badge').map((b) => b.textContent ?? '');
-    expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(true);
+    expect(badges.some((t) => t.includes('Overridden by environment on this node'))).toBe(true);
+    expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(false);
   });
 
   it('without env_values the field renders as before', async () => {

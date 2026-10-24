@@ -4,6 +4,7 @@ import {
   envValueFor,
   envValuesUnder,
   formatEnvValue,
+  hasInEffect,
 } from './admin-server-config-env-values.js';
 
 describe('formatEnvValue', () => {
@@ -22,6 +23,16 @@ describe('formatEnvValue', () => {
       MASKED_ENV_VALUE
     );
     expect(formatEnvValue({ masked: true, in_effect: false })).toBe(MASKED_ENV_VALUE);
+  });
+});
+
+describe('hasInEffect', () => {
+  it('is true only for an unmasked entry with a reported state', () => {
+    expect(hasInEffect({ value: 'x', in_effect: true })).toBe(true);
+    expect(hasInEffect({ value: 'x', in_effect: false })).toBe(true);
+    expect(hasInEffect({ value: '********', masked: true })).toBe(false);
+    expect(hasInEffect({ value: '********', masked: true, in_effect: true })).toBe(false);
+    expect(hasInEffect({ value: 'x' })).toBe(false);
   });
 });
 

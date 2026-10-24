@@ -70,6 +70,7 @@ import {
   envValueFor,
   envValuesUnder,
   formatEnvValue,
+  hasInEffect,
 } from './admin-server-config-env-values.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
@@ -1516,6 +1517,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .env-value-saved-label,
     .env-value-saved,
+    .env-value-configured-label,
     .env-value-not-in-effect {
       display: block;
     }
@@ -2325,7 +2327,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     // A read-only field whose key the environment sets on this node (any
     // reason but a pinned public URL, whose read-only value is already the
     // one in effect).
-    const env = reason && reason !== 'pinned' ? envValueFor(this.envValues, [koanfKey]) : null;
+    // A masked entry carries no in-effect state, so it keeps the field's
+    // plain rendering (hasInEffect).
+    const found = reason && reason !== 'pinned' ? envValueFor(this.envValues, [koanfKey]) : null;
+    const env = found && hasInEffect(found.ev) ? found : null;
     if (reason && env && env.ev.in_effect) {
       // The value in effect is the environment value; a stored value that
       // differs is shown only as a secondary line, and only when one exists.
@@ -2337,18 +2342,27 @@ export class ScionPageAdminServerConfig extends LitElement {
           : nothing}${this.renderFieldErrors(koanfKey)}`;
     }
     if (reason && env) {
-      // The environment sets the key, but another value wins on this node
-      // (a saved value, or a start-up default or flag): show that value, and
-      // the environment value as not in effect, without the env lock text.
-      // Only a Layer-1 key on a DB-backed hub can lose to a saved value;
-      // anything else loses to a start-up default or flag.
+      // The environment sets the key, but another value wins on this node,
+      // without the env lock text. Only a Layer-1 key on a DB-backed hub can
+      // lose to a saved value, which is the value shown and wins. Anything
+      // else loses to a start-up default or flag, whose value the page does
+      // not receive: the value shown is then only the configured one
+      // (settings.yaml or the default), labelled so it does not read as the
+      // value in effect.
       const cause: ReadOnlyReason =
         this.settingsTier === 'db' && this.layer1Keys.has(koanfKey) ? 'env' : 'flag';
+      const configuredLabel =
+        cause === 'flag'
+          ? html`<span class="hint env-value-configured-label"
+              >Configured value (settings.yaml or default), not the value in effect:</span
+            >`
+          : nothing;
       return html`${reason === 'env'
           ? nothing
-          : this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate(false, cause)}<span
-          class="read-only-value"
-          >${displayValue || '—'}</span
+          : this.renderReadOnlyBadge(reason)}${this.envBadgeTemplate(
+          false,
+          cause
+        )}${configuredLabel}<span class="read-only-value">${displayValue || '—'}</span
         >${this.renderEnvValueLine(env.ev, cause)}${this.renderFieldErrors(koanfKey)}`;
     }
     if (reason) {
@@ -2358,7 +2372,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     // A key whose environment value is in effect is not superseded by the
     // saved value, whatever superseded_keys says.
-    const envInEffect = envValueFor(this.envValues, [koanfKey])?.ev.in_effect === true;
+    const own = envValueFor(this.envValues, [koanfKey]);
+    const envInEffect = own !== null && hasInEffect(own.ev) && own.ev.in_effect;
     return html`${envInEffect
       ? nothing
       : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
@@ -3315,7 +3330,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     // With several keys, only the first one env_values reports is shown
     // (envValueFor).
     const env = envValueFor(this.envValues, koanfKeys);
-    if (!env) return this.envBadgeTemplate();
+    // No entry, or a masked one (no in-effect state reported): the plain badge.
+    if (!env || !hasInEffect(env.ev)) return this.envBadgeTemplate();
     return html`${this.envBadgeTemplate(env.ev.in_effect)}${this.renderEnvValueLine(env.ev)}`;
   }
 
@@ -3462,13 +3478,20 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderEnvValuesList(
     entries: Array<{ key: string; ev: EnvKeyValue }>
   ): ReturnType<typeof html> {
-    return html`${this.envBadgeTemplate(entries.some((e) => e.ev.in_effect))}
+    // Entries without an in-effect state (masked) make no claim; the badge
+    // says "not in effect" only when every reported state is false.
+    const known = entries.filter((e) => hasInEffect(e.ev));
+    return html`${this.envBadgeTemplate(known.length === 0 || known.some((e) => e.ev.in_effect))}
       <ul class="env-values-under">
         ${entries.map(
           (e) =>
             html`<li>
               <code>${e.key}</code> = <code>${formatEnvValue(e.ev) || '—'}</code>
-              (${e.ev.in_effect ? 'in effect on this node' : 'not in effect: the saved value wins'})
+              (${!hasInEffect(e.ev)
+                ? 'secret: whether it is in effect is not reported'
+                : e.ev.in_effect
+                  ? 'in effect on this node'
+                  : 'not in effect: the saved value wins'})
             </li>`
         )}
       </ul>`;

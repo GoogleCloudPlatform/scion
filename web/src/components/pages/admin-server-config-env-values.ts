@@ -25,12 +25,18 @@ export interface EnvKeyValue {
   value?: unknown;
   /** True when value is the masked placeholder (a secret, or not shown). */
   masked?: boolean;
-  /** True when the hub on this node runs with the environment value. */
-  in_effect: boolean;
+  /**
+   * True when the hub on this node runs with the environment value. Absent
+   * for a masked entry: the server does not report it for secrets (it would
+   * let a settings writer confirm a guessed value), and the page then makes
+   * no in-effect claim.
+   */
+  in_effect?: boolean;
   /**
    * True when a stored value (settings.yaml, or a managed database row for
    * a Layer-1 key) exists and differs from the environment value: only
-   * then is the stored value labelled "saved, not in effect".
+   * then is the stored value labelled "saved, not in effect". Never set for
+   * a masked entry.
    */
   saved_differs?: boolean;
 }
@@ -73,6 +79,14 @@ export function envValueFor(
 }
 
 /** The env_values entries at prefix or below it, sorted by key. */
+/**
+ * Whether the server reported the in-effect state of an entry (it does not
+ * for a masked entry).
+ */
+export function hasInEffect(ev: EnvKeyValue): ev is EnvKeyValue & { in_effect: boolean } {
+  return typeof ev.in_effect === 'boolean' && !ev.masked;
+}
+
 export function envValuesUnder(
   envValues: Record<string, EnvKeyValue> | null | undefined,
   prefix: string

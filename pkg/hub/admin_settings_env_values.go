@@ -36,15 +36,28 @@ type EnvKeyValue struct {
 	Masked bool `json:"masked,omitempty"`
 	// InEffect is true when the hub on this node runs with the environment
 	// value; false when another value (a saved database value, or a value
-	// start-up sets from a flag or the workstation defaults) wins.
-	InEffect bool `json:"in_effect"`
+	// start-up sets from a flag or the workstation defaults) wins. Nil
+	// (omitted) when Masked: see maskedEnvKeyValue.
+	InEffect *bool `json:"in_effect,omitempty"`
 	// SavedDiffers is true when a stored value of the key exists (in
 	// settings.yaml, or in a managed database row for a Layer-1 key on a
 	// DB-backed hub) and differs from the environment value. Only then does
 	// the page label the stored value as "saved, not in effect"; a default,
 	// or a stored value equal to the environment value, is never so
-	// labelled.
+	// labelled. Always false (omitted) when Masked: see maskedEnvKeyValue.
 	SavedDiffers bool `json:"saved_differs,omitempty"`
+}
+
+// maskedEnvKeyValue is the env_values entry of a masked key: the masked
+// placeholder only, with neither InEffect nor SavedDiffers. Both bits
+// compare the environment value with a stored or running value, so for a
+// secret they would let a caller who can write settings confirm a guessed
+// environment value (write the guess, read the bit). They are therefore
+// neither computed nor returned for any key shownEnvValue masks: the GET
+// body masking (viewMaskedEnvValue) plus the keys envValueMayBeShown or the
+// never-API-writable filter refuse, and any key that cannot be decoded.
+func maskedEnvKeyValue() EnvKeyValue {
+	return EnvKeyValue{Value: maskedValue, Masked: true}
 }
 
 // envSavedDiffers reports whether stored (flattened stored values, keyed by
@@ -339,11 +352,15 @@ func fileTierEnvValues(envK *koanf.Koanf, keys []string, startup *config.V1Serve
 	out := make(map[string]EnvKeyValue, len(keys))
 	for _, key := range keys {
 		v, masked := shownEnvValue(envK, key)
+		if masked {
+			out[key] = maskedEnvKeyValue()
+			continue
+		}
 		inEffect, ok := startupEnvInEffect(envK, key, startup)
 		if !ok {
 			inEffect = true
 		}
-		out[key] = EnvKeyValue{Value: v, Masked: masked, InEffect: inEffect, SavedDiffers: envSavedDiffers(envK, key, stored)}
+		out[key] = EnvKeyValue{Value: v, InEffect: boolPtr(inEffect), SavedDiffers: envSavedDiffers(envK, key, stored)}
 	}
 	return out
 }
@@ -372,10 +389,13 @@ func (s *Server) dbTierEnvValues(envK *koanf.Koanf, keys []string, view *ServerC
 	out := make(map[string]EnvKeyValue, len(keys))
 	for _, key := range keys {
 		v, masked := shownEnvValue(envK, key)
+		if masked {
+			out[key] = maskedEnvKeyValue()
+			continue
+		}
 		out[key] = EnvKeyValue{
 			Value:        v,
-			Masked:       masked,
-			InEffect:     s.dbTierEnvInEffect(envK, key, running),
+			InEffect:     boolPtr(s.dbTierEnvInEffect(envK, key, running)),
 			SavedDiffers: envSavedDiffers(envK, key, stored),
 		}
 	}

@@ -197,10 +197,10 @@ func TestGetServerConfigDB_EnvValues(t *testing.T) {
 	}
 
 	want := map[string]EnvKeyValue{
-		"server.auth.authorized_domains": {Value: envDomains, InEffect: true, SavedDiffers: true},
-		"server.hub.admin_emails":        {Value: []any{"env@example.com"}, InEffect: false, SavedDiffers: true},
-		"telemetry.enabled":              {Value: true, InEffect: true},
-		"server.database.driver":         {Value: "postgres", InEffect: true},
+		"server.auth.authorized_domains": {Value: envDomains, InEffect: boolPtr(true), SavedDiffers: true},
+		"server.hub.admin_emails":        {Value: []any{"env@example.com"}, InEffect: boolPtr(false), SavedDiffers: true},
+		"telemetry.enabled":              {Value: true, InEffect: boolPtr(true)},
+		"server.database.driver":         {Value: "postgres", InEffect: boolPtr(true)},
 	}
 	for k, w := range want {
 		got, ok := resp.EnvValues[k]
@@ -295,8 +295,8 @@ func assertEnvValuesMatchOverrides(t *testing.T, overrides []string, values map[
 			t.Errorf("env_values lacks %s", k)
 			continue
 		}
-		if !ev.Masked || ev.Value != maskedValue {
-			t.Errorf("env_values[%s] = %#v, want masked placeholder", k, ev)
+		if !reflect.DeepEqual(ev, maskedEnvKeyValue()) {
+			t.Errorf("env_values[%s] = %#v, want the masked placeholder with neither bit", k, ev)
 		}
 	}
 	for _, nw := range []string{config.KeyringFileKey, config.KeyringFileAllowWorldReadableKey, config.HubClassKey, config.ConduitPeerSecretKey} {
@@ -350,7 +350,7 @@ func TestFileMode_EnvValues(t *testing.T) {
 	if strings.Contains(rr.Body.String(), "SENTINEL-") {
 		t.Fatalf("raw secret env value in the file-mode GET body: %s", rr.Body.String())
 	}
-	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example", "env-b.example"}, InEffect: true, SavedDiffers: true}) {
+	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example", "env-b.example"}, InEffect: boolPtr(true), SavedDiffers: true}) {
 		t.Errorf("env_values[server.auth.authorized_domains] = %#v", got)
 	}
 	// The keyring file path is never-API-writable: not listed at all.
@@ -363,8 +363,8 @@ func TestFileMode_EnvValues(t *testing.T) {
 		}
 	}
 	for _, k := range []string{"server.auth.dev_token", "server.database.url"} {
-		if got := resp.EnvValues[k]; !got.Masked || got.Value != maskedValue || !got.InEffect {
-			t.Errorf("env_values[%s] = %#v, want masked and in effect", k, got)
+		if got := resp.EnvValues[k]; !reflect.DeepEqual(got, maskedEnvKeyValue()) {
+			t.Errorf("env_values[%s] = %#v, want the masked placeholder with neither bit", k, got)
 		}
 	}
 	if resp.Server == nil || resp.Server.Auth == nil || !reflect.DeepEqual(resp.Server.Auth.AuthorizedDomains, []string{"saved.example"}) {
@@ -378,7 +378,7 @@ func TestFileMode_EnvValuesNoSettingsFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "env-a.example")
 	_, resp := fileTierGET(t)
-	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example"}, InEffect: true}) {
+	if got := resp.EnvValues["server.auth.authorized_domains"]; !reflect.DeepEqual(got, EnvKeyValue{Value: []any{"env-a.example"}, InEffect: boolPtr(true)}) {
 		t.Errorf("env_values[server.auth.authorized_domains] = %#v", got)
 	}
 }
@@ -454,11 +454,11 @@ func TestGetServerConfigDB_EnvValuesWorkstationStartupOverrides(t *testing.T) {
 			Secrets: &config.V1SecretsConfig{Backend: "local"},
 		}
 	})
-	wantEnvValue(t, values, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: false})
-	wantEnvValue(t, values, "server.hub.port", EnvKeyValue{Value: float64(9810), InEffect: true})
-	wantEnvValue(t, values, "server.storage.provider", EnvKeyValue{Value: "gcs", InEffect: false})
-	wantEnvValue(t, values, "server.broker.enabled", EnvKeyValue{Value: true, InEffect: true})
-	wantEnvValue(t, values, "server.secrets.backend", EnvKeyValue{Value: "local", InEffect: true})
+	wantEnvValue(t, values, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: boolPtr(false)})
+	wantEnvValue(t, values, "server.hub.port", EnvKeyValue{Value: float64(9810), InEffect: boolPtr(true)})
+	wantEnvValue(t, values, "server.storage.provider", EnvKeyValue{Value: "gcs", InEffect: boolPtr(false)})
+	wantEnvValue(t, values, "server.broker.enabled", EnvKeyValue{Value: true, InEffect: boolPtr(true)})
+	wantEnvValue(t, values, "server.secrets.backend", EnvKeyValue{Value: "local", InEffect: boolPtr(true)})
 }
 
 // TestFileMode_EnvValuesStartupOverrides: a flag or workstation value beats
@@ -478,8 +478,8 @@ func TestFileMode_EnvValuesStartupOverrides(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	wantEnvValue(t, resp.EnvValues, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: false})
-	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: true})
+	wantEnvValue(t, resp.EnvValues, "server.hub.host", EnvKeyValue{Value: "0.0.0.0", InEffect: boolPtr(false)})
+	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: boolPtr(true)})
 }
 
 // TestGetServerConfigDB_EnvValuesSavedDiffers: saved_differs is set only
@@ -501,12 +501,12 @@ func TestGetServerConfigDB_EnvValuesSavedDiffers(t *testing.T) {
 		"telemetry.enabled":                   true,
 	}, func(s *Server) { s.config.AuthorizedDomains = []string{"env.example"} })
 	// A managed row equal to the environment value: in effect, nothing to label.
-	wantEnvValue(t, values, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: true})
+	wantEnvValue(t, values, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: boolPtr(true)})
 	// No row: the bootstrap (environment) value is in effect, nothing saved.
-	wantEnvValue(t, values, "telemetry.enabled", EnvKeyValue{Value: true, InEffect: true})
+	wantEnvValue(t, values, "telemetry.enabled", EnvKeyValue{Value: true, InEffect: boolPtr(true)})
 	// A seeded row holding another replica's value wins over this node's
 	// environment, but it is not a saved value.
-	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: false})
+	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: boolPtr(false)})
 }
 
 // TestGetServerConfigDB_EnvValuesSeededRowFromThisBootstrap: a seeded row
@@ -517,7 +517,7 @@ func TestGetServerConfigDB_EnvValuesSeededRowFromThisBootstrap(t *testing.T) {
 	}, nil, map[string]any{
 		"server.hub.monitoring_dashboard_url": "https://env.example",
 	}, nil)
-	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: true})
+	wantEnvValue(t, values, "server.hub.monitoring_dashboard_url", EnvKeyValue{Value: "https://env.example", InEffect: boolPtr(true)})
 }
 
 // TestGetServerConfigDB_EnvValuesManagedRowLackingKey: a managed row that
@@ -532,7 +532,7 @@ func TestGetServerConfigDB_EnvValuesManagedRowLackingKey(t *testing.T) {
 	}, map[string]any{
 		"server.hub.auto_suspend_stalled": true,
 	}, nil)
-	wantEnvValue(t, values, "server.hub.auto_suspend_stalled", EnvKeyValue{Value: true, InEffect: false})
+	wantEnvValue(t, values, "server.hub.auto_suspend_stalled", EnvKeyValue{Value: true, InEffect: boolPtr(false)})
 }
 
 // TestGetServerConfigDB_EnvValuesPinnedPublicURL: an operator setting pins
@@ -548,7 +548,7 @@ func TestGetServerConfigDB_EnvValuesPinnedPublicURL(t *testing.T) {
 	}, func(s *Server) {
 		s.config.HubEndpoints = &HubEndpoints{Operator: "https://env.example", Public: "https://env.example", Pin: "SCION_SERVER_HUB_PUBLICURL"}
 	})
-	wantEnvValue(t, values, config.PublicURLKey, EnvKeyValue{Value: "https://env.example", InEffect: true, SavedDiffers: true})
+	wantEnvValue(t, values, config.PublicURLKey, EnvKeyValue{Value: "https://env.example", InEffect: boolPtr(true), SavedDiffers: true})
 }
 
 // TestFileMode_EnvValuesSavedDiffers: in the settings.yaml tier
@@ -558,7 +558,107 @@ func TestFileMode_EnvValuesSavedDiffers(t *testing.T) {
 	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "env@example.com")
 	t.Setenv("SCION_SERVER_HUB_PORT", "9090")
 	_, resp := fileTierGET(t)
-	wantEnvValue(t, resp.EnvValues, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: true})
+	wantEnvValue(t, resp.EnvValues, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: boolPtr(true)})
 	// Not in the file: the page's default is not a saved value.
-	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: true})
+	wantEnvValue(t, resp.EnvValues, "server.hub.port", EnvKeyValue{Value: float64(9090), InEffect: boolPtr(true)})
+}
+
+// envValuesJSON returns the raw JSON of the env_values member of a GET body.
+func envValuesJSON(t *testing.T, body []byte) string {
+	t.Helper()
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return string(top["env_values"])
+}
+
+// TestFileMode_MaskedEnvValueIsNoGuessOracle (G1): for a masked key,
+// env_values carries neither in_effect nor saved_differs, so a caller who
+// can write settings cannot confirm a guess of the secret: with the stored
+// value (settings.yaml) and the start-up value set to the secret itself or
+// to a wrong guess, the GET bodies are byte-identical. A non-masked key in
+// the same body keeps both bits.
+func TestFileMode_MaskedEnvValueIsNoGuessOracle(t *testing.T) {
+	const secret = "postgres://user:SENTINEL-db-secret@db.example/scion"
+	get := func(guess string) []byte {
+		writeFileTierSettings(t, "schema_version: \"1\"\nserver:\n  database:\n    url: \""+guess+"\"\n  hub:\n    admin_emails:\n      - saved@example.com\n")
+		t.Setenv("SCION_SERVER_DATABASE_URL", secret)
+		t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "env@example.com")
+		srv := &Server{maintenance: NewMaintenanceState(false, "")}
+		srv.config.StartupServerSettings = &config.V1ServerConfig{Database: &config.V1DatabaseConfig{URL: guess}}
+		rr := httptest.NewRecorder()
+		srv.handleAdminServerConfig(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("file-mode GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		return rr.Body.Bytes()
+	}
+	right := get(secret)
+	wrong := get("postgres://user:wrong-guess@db.example/scion")
+	if string(right) != string(wrong) {
+		t.Fatalf("GET bodies differ between a right and a wrong guess:\nright: %s\nwrong: %s", right, wrong)
+	}
+	if strings.Contains(string(right), "SENTINEL-db-secret") {
+		t.Fatalf("raw secret in the body: %s", right)
+	}
+	var resp ServerConfigResponse
+	if err := json.Unmarshal(right, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantEnvValue(t, resp.EnvValues, "server.database.url", maskedEnvKeyValue())
+	if strings.Contains(envValuesJSON(t, right), `"server.database.url":{"value":"********","masked":true,"`) {
+		t.Errorf("masked entry carries more than value and masked: %s", envValuesJSON(t, right))
+	}
+	// A non-masked key keeps both bits.
+	wantEnvValue(t, resp.EnvValues, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: boolPtr(true), SavedDiffers: true})
+}
+
+// TestGetServerConfigDB_MaskedEnvValueIsNoGuessOracle (G1, DB tier): a
+// Layer-1 secret (a telemetry cloud header) whose managed row holds the
+// secret or a wrong guess gives byte-identical env_values (neither bit);
+// with no bootstrap value for it the whole bodies are byte-identical too.
+// A non-masked Layer-1 key keeps both bits.
+func TestGetServerConfigDB_MaskedEnvValueIsNoGuessOracle(t *testing.T) {
+	const secret = "Bearer SENTINEL-header-secret"
+	get := func(guess string) ([]byte, map[string]EnvKeyValue) {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+		fakeStore := newFakeHubSettingStore()
+		fakeStore.seedWithOrigin("telemetry", json.RawMessage(`{"enabled":true,"cloud":{"headers":{"authorization":"`+guess+`"}}}`), "managed")
+		fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["saved@example.com"]}`), "managed")
+		envK := newEnvKoanf(t, map[string]any{
+			"telemetry.cloud.headers.authorization": secret,
+			"server.hub.admin_emails":               []any{"env@example.com"},
+		})
+		ops := NewOperationalSettings(fakeStore, emptyKoanf(), envK)
+		if _, err := ops.Refresh(context.Background()); err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
+		srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+		srv.SetOperationalSettings(ops)
+		rr := httptest.NewRecorder()
+		srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var resp ServerConfigDBResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return rr.Body.Bytes(), resp.EnvValues
+	}
+	right, rv := get(secret)
+	wrong, _ := get("Bearer wrong-guess")
+	if envValuesJSON(t, right) != envValuesJSON(t, wrong) {
+		t.Fatalf("env_values differ between a right and a wrong guess:\nright: %s\nwrong: %s", envValuesJSON(t, right), envValuesJSON(t, wrong))
+	}
+	if string(right) != string(wrong) {
+		t.Fatalf("GET bodies differ between a right and a wrong guess:\nright: %s\nwrong: %s", right, wrong)
+	}
+	if strings.Contains(string(right), "SENTINEL-header-secret") {
+		t.Fatalf("raw secret in the body: %s", right)
+	}
+	wantEnvValue(t, rv, "telemetry.cloud.headers.authorization", maskedEnvKeyValue())
+	wantEnvValue(t, rv, "server.hub.admin_emails", EnvKeyValue{Value: []any{"env@example.com"}, InEffect: boolPtr(false), SavedDiffers: true})
 }
