@@ -330,7 +330,7 @@
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
-- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
+- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
@@ -12263,19 +12263,20 @@
 
 **Domain:** gcp.identity
 
-**Description:** Mint a GCP access token for a service account
+**Description:** Mint a GCP access or identity token for the agent's assigned service account
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agent/gcp-token` |
+| http_route | POST | `/api/v1/agent/gcp-identity-token` |
 
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
 
-**Base Permission:** `gcp_service_account.mint`
+**Base Permission:** `gcp_service_account.use`
 
 **Resource Resolver:** agent-gcp-service-account
 
@@ -12284,7 +12285,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Agent mints GCP tokens scoped to its assigned service account
+- Agent mints GCP tokens for its assigned service account while the principal recorded as the assignment's source holds gcp_service_account.assign on it (and passes actAs in enforce mode)
 
 ### Audit
 
