@@ -1060,7 +1060,7 @@ func isTemplateNoFilesError(err error) bool {
 //
 // Sync mirrors the local directory, so a successful retry replaces the
 // other push's version with this one (ptone/scion#4221).
-func resyncTemplateAfterConflict(ctx context.Context, hubCtx *HubContext, name, templateID string, files []hubclient.FileInfo, manifest *hubclient.TemplateManifest) (*hubclient.Template, error) {
+func resyncTemplateAfterConflict(ctx context.Context, hubCtx *HubContext, name, templateID string, root *os.Root, files []hubclient.FileInfo, manifest *hubclient.TemplateManifest) (*hubclient.Template, error) {
 	fmt.Printf("Template '%s' was changed on the Hub by another push during this sync; re-checking and retrying once...\n", name)
 
 	current, err := hubCtx.Client.Templates().Get(ctx, templateID)
@@ -1087,7 +1087,7 @@ func resyncTemplateAfterConflict(ctx context.Context, hubCtx *HubContext, name, 
 			toUpload = append(toUpload, hubclient.FileUploadRequest{Path: f.Path, Size: f.Size})
 		}
 	}
-	uploadID, err := uploadTemplateFiles(ctx, hubCtx, templateID, toUpload, files, "Uploaded")
+	uploadID, err := uploadTemplateFiles(ctx, hubCtx, templateID, root, toUpload, files, "Uploaded")
 	if err != nil {
 		return nil, err
 	}
@@ -1103,40 +1103,38 @@ func resyncTemplateAfterConflict(ctx context.Context, hubCtx *HubContext, name, 
 }
 
 // uploadTemplateFiles requests upload URLs for reqs and uploads the matching
-// local files, printing "  <verb>: <path>" for each. It returns the upload ID
-// of the upload response, which the following finalize sends back
-// (ptone/scion#4223); it is empty when reqs is empty or the Hub predates
-// upload IDs.
-func uploadTemplateFiles(ctx context.Context, hubCtx *HubContext, templateID string, reqs []hubclient.FileUploadRequest, files []hubclient.FileInfo, verb string) (string, error) {
+// collected files, read through root, printing "  <verb>: <path>" for each.
+// It returns the upload ID of the upload response, which the following
+// finalize sends back (ptone/scion#4223); it is empty when reqs is empty or
+// the Hub predates upload IDs.
+func uploadTemplateFiles(ctx context.Context, hubCtx *HubContext, templateID string, root *os.Root, reqs []hubclient.FileUploadRequest, files []hubclient.FileInfo, verb string) (string, error) {
 	if len(reqs) == 0 {
 		return "", nil
-	}
-	byPath := make(map[string]*hubclient.FileInfo, len(files))
-	for i := range files {
-		byPath[files[i].Path] = &files[i]
 	}
 	uploadResp, err := hubCtx.Client.Templates().RequestUploadURLs(ctx, templateID, reqs)
 	if err != nil {
 		return "", fmt.Errorf("failed to get upload URLs: %w", err)
 	}
-	for _, urlInfo := range uploadResp.UploadURLs {
-		fileInfo := byPath[urlInfo.Path]
-		if fileInfo == nil {
-			fmt.Printf("  Warning: no matching file for %s\n", urlInfo.Path)
-			continue
-		}
-		f, err := os.Open(fileInfo.FullPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
-		}
-		err = hubCtx.Client.Templates().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		_ = f.Close()
-		if err != nil {
-			return "", fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
-		}
-		fmt.Printf("  %s: %s\n", verb, fileInfo.Path)
+	if err := uploadTemplateURLs(ctx, hubCtx.Client.Templates(), root, files, uploadResp.UploadURLs, verb); err != nil {
+		return "", err
 	}
 	return uploadResp.UploadID, nil
+}
+
+// uploadTemplateURLs uploads the collected template files that have an
+// upload URL. Each file is read through root, which must be opened at the
+// collected template directory, and verified against its collected size and
+// hash with transfer.ReadCollectedFile; a mismatch fails before any byte of
+// that file is sent, and stops the upload. With a non-empty verb it prints
+// "  <verb>: <path>" for each uploaded file and a warning for a URL with no
+// matching file; with an empty verb it prints nothing.
+func uploadTemplateURLs(ctx context.Context, up signedURLUploader, root *os.Root, files []hubclient.FileInfo, urls []hubclient.UploadURLInfo, verb string) error {
+	var missing, sent func(string)
+	if verb != "" {
+		missing = func(path string) { fmt.Printf("  Warning: no matching file for %s\n", path) }
+		sent = func(path string) { fmt.Printf("  %s: %s\n", verb, path) }
+	}
+	return uploadCollectedFiles(ctx, up, root, collectedByPath(files), urls, missing, sent)
 }
 
 // syncTemplateToHub creates or updates a template in the Hub.
@@ -1162,6 +1160,12 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	if len(files) == 0 {
 		return fmt.Errorf("no files to sync in %s; a template needs at least one file", localPath)
 	}
+	// Uploads read through this root; see transfer.ReadCollectedFile.
+	root, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open template directory %s: %w", localPath, err)
+	}
+	defer func() { _ = root.Close() }()
 
 	// Build file upload request
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
@@ -1325,7 +1329,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	var uploadID string
 	if len(filesToUpload) > 0 {
 		fmt.Printf("Uploading %d file(s)...\n", len(filesToUpload))
-		uploadID, err = uploadTemplateFiles(ctx, hubCtx, templateID, filesToUpload, files, "Uploaded")
+		uploadID, err = uploadTemplateFiles(ctx, hubCtx, templateID, root, filesToUpload, files, "Uploaded")
 		if err != nil {
 			return err
 		}
@@ -1350,7 +1354,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	fmt.Println("Finalizing template...")
 	template, err := hubCtx.Client.Templates().Finalize(ctx, templateID, manifest, expectedHash, uploadID)
 	if hubclient.IsTemplateConflictError(err) {
-		template, err = resyncTemplateAfterConflict(ctx, hubCtx, name, templateID, files, manifest)
+		template, err = resyncTemplateAfterConflict(ctx, hubCtx, name, templateID, root, files, manifest)
 		if err != nil {
 			return err
 		}
@@ -1364,7 +1368,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 
 		fmt.Println("Some files missing from storage, re-uploading all files...")
 		var retryUploadID string
-		retryUploadID, err = uploadTemplateFiles(ctx, hubCtx, templateID, fileReqs, files, "Re-uploaded")
+		retryUploadID, err = uploadTemplateFiles(ctx, hubCtx, templateID, root, fileReqs, files, "Re-uploaded")
 		if err != nil {
 			return fmt.Errorf("re-upload for retry: %w", err)
 		}
