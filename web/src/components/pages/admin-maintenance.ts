@@ -1395,13 +1395,14 @@ export class ScionPageAdminMaintenance extends LitElement {
    * and the run was marked failed), so the wait need not run out. Reads
    * the list without touching page state, at most every few seconds.
    */
-  private async trackedRunFinished(runId: string): Promise<boolean> {
+  private async trackedRunFinished(runId: string, signal: AbortSignal): Promise<boolean> {
     const now = Date.now();
     if (now - this.lastRunCheckAt < RUN_CHECK_INTERVAL_MS) return false;
     this.lastRunCheckAt = now;
     try {
       const res = await apiFetch('/api/v1/admin/maintenance/operations', {
         authErrors: 'caller',
+        signal,
       });
       if (!res.ok) return false;
       const data = (await res.json()) as MaintenanceResponse;
@@ -1439,6 +1440,9 @@ export class ScionPageAdminMaintenance extends LitElement {
     // A poll or peek that resolves after the page was left must not start
     // a wait nothing would abort.
     if (this.updateReconnecting || !tracked || !this.isConnected) return;
+    // This run is handled here: if it is still restarting after the wait,
+    // the post-wait reload must not adopt it for a second wait.
+    this.peekedRestartingRunId = tracked.runId;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
@@ -1458,7 +1462,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       const result = await waitForHubRestart({
         expectVersion,
         signal,
-        stopWhen: () => this.trackedRunFinished(tracked.runId),
+        stopWhen: () => this.trackedRunFinished(tracked.runId, signal),
       });
       if (!result.ok && result.aborted) return;
       this.trackedUpdate = null;

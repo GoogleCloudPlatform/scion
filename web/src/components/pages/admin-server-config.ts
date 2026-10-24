@@ -7304,24 +7304,28 @@ export class ScionPageAdminServerConfig extends LitElement {
   /**
    * update-binary params: the checked release tag when the check returned
    * one, otherwise the latest release in the checked channel, which the hub
-   * resolves. The hub rejects any other param.
+   * resolves. The hub rejects any other param. Null when neither is known.
    */
-  private updateBinaryParams(): Record<string, string> {
+  private updateBinaryParams(): Record<string, string> | null {
     const r = this.updateCheckResult;
     const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
-    return { target_version: target, pin: 'latest' };
+    return target ? { target_version: target, pin: 'latest' } : null;
   }
 
   private async triggerUpdate(): Promise<void> {
+    const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
+    const params = opKey === 'update-binary' ? this.updateBinaryParams() : {};
+    if (!params) {
+      this.updateCheckError =
+        'No update target is known. Run Check for Updates first, then update.';
+      return;
+    }
     this.updateRunning = true;
     try {
-      const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
       const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          params: opKey === 'update-binary' ? this.updateBinaryParams() : {},
-        }),
+        body: JSON.stringify({ params }),
       });
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);

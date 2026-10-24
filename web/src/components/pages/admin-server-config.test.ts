@@ -2871,6 +2871,25 @@ describe('scion-page-admin-server-config', () => {
       expect(ranBody).toEqual({ params: { target_version: '1.1.0', pin: 'latest' } });
     });
 
+    it('does not post update-binary when the check gave no tag or channel', async () => {
+      let ran = false;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'binary', update_available: true },
+          onOperationRun: () => {
+            ran = true;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).triggerUpdate();
+
+      expect(ran).toBe(false);
+      expect((element as any).updateCheckError).toContain('Run Check for Updates first');
+      expect((element as any).updateRunning).toBe(false);
+    });
+
     it('posts latest:<channel> for update-binary when the check has no tag', async () => {
       let ranBody: unknown = null;
       element = await createComponent(

@@ -930,6 +930,45 @@ describe('Reconnect after an update restart', () => {
     expect((el as unknown as { trackedUpdate: unknown }).trackedUpdate).toBeNull();
   });
 
+  it('does not wait again on a run still restarting after a timed-out wait', async () => {
+    vi.mocked(waitForHubRestart).mockResolvedValue({
+      ok: false,
+      observed: { version: 'nightly-20261022', uptime: '2h0m0s', uptimeSeconds: 7200 },
+    });
+    const hub = await startUpdate('nightly-20261023');
+    // Restart() returned but the process never restarted: the run stays
+    // restarting and pendingUpdate keeps naming it.
+    hub.setStatus(updateStatus({ pendingUpdate: PENDING }));
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    const alert = versionSection(el!).querySelector('sl-alert.update-reconnect-error');
+    expect(alert?.textContent).toContain('journalctl -u scion-hub');
+    expect(versionSection(el!).querySelector('.update-reconnecting')).toBeNull();
+  });
+
+  it('passes the wait signal to the run status check', async () => {
+    let checkSignal: AbortSignal | null | undefined;
+    vi.mocked(waitForHubRestart).mockImplementation(async (opts) => {
+      await opts!.stopWhen!({ version: 'nightly-20261022', uptime: '2h0m0s', uptimeSeconds: 7200 });
+      const call = fetchMock.mock.calls
+        .filter((c) => pathOf(c[0] as string) === '/api/v1/admin/maintenance/operations')
+        .at(-1);
+      checkSignal = (call?.[1] as RequestInit | undefined)?.signal;
+      return new Promise(() => {});
+    });
+    const hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(checkSignal).toBeDefined();
+    expect(checkSignal).toBe(waitArgs()?.signal);
+  });
+
   it('aborts the wait when the page is left', async () => {
     vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
     const hub = await startUpdate('nightly-20261023');
