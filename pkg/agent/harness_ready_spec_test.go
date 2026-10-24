@@ -370,9 +370,9 @@ func TestRealTmuxTwoLineInitRunGatesOnMarkerAndSettle(t *testing.T) {
 
 // TestReadySpecFromEmbeddedConfig checks the reader chain for every built-in
 // harness: the embedded config's ReadySpec, written to the init-run file,
-// gives the readiness mode of the legacy hard-coded table, except copilot,
-// which is delay (hook for claude, gemini-cli and grok-build; settle with 8s
-// for the rest), with the legacy timings.
+// gives the readiness mode of the legacy hard-coded table (hook for claude,
+// gemini-cli and grok-build; settle with 8s for the rest), except that
+// copilot is now settle too, with the legacy timings.
 func TestReadySpecFromEmbeddedConfig(t *testing.T) {
 	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "grok-build": true}
 	names := harness.AllHarnessNames()
