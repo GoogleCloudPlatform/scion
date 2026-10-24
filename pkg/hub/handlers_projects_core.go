@@ -253,7 +253,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -2910,7 +2910,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -2942,7 +2942,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
 	for i := range result.Items {
 		item := result.Items[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	capsDone()

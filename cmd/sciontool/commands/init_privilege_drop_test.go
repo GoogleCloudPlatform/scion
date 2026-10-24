@@ -1231,6 +1231,7 @@ var scionMetadataAndSecretEnvVars = []string{
 	"SCION_METADATA_SA_EMAIL",
 	"SCION_METADATA_PROJECT_ID",
 	"SCION_NETWORK_MODE",
+	"SCION_METADATA_INTERCEPTION",
 	"SCION_SECRET_KEYS",
 	// SCION_STAGED_SECRETS carries a base64-encoded secrets blob RunInit
 	// decodes and writes to agentHome before re-execing itself; it isn't a
@@ -1295,6 +1296,7 @@ var setupRunInitAsRootlessScionEnvVarsUnderTest = []string{
 	"SCION_METADATA_SA_EMAIL",
 	"SCION_METADATA_PROJECT_ID",
 	"SCION_NETWORK_MODE",
+	"SCION_METADATA_INTERCEPTION",
 	"SCION_SECRET_KEYS",
 	"SCION_STAGED_SECRETS",
 }

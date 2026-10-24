@@ -106,6 +106,7 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`config.example.env`](config.example.env) | The single config contract (names only, never secret values) |
 | [`mediator/`](mediator/) | Go Cloud Run service: `/webhook`, `/internal/claim`, `/reconcile`, `/health`; standard library only. Must run with `max-instances=1` |
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
+| [`runner/golangci-lint/`](runner/golangci-lint/) | The patched golangci-lint build (dominikh/go-tools#1839): pins, patch, `build.sh`. **Upstream `.github/workflows/ci.yml` and the root `Makefile` use it too**, so they depend on this cr-ci path; see below |
 | [`scripts/`](scripts/) | Deploy, secret and teardown scripts (dry-run by default, `--apply` to execute), their test harness and golden transcripts; see [`scripts/README.md`](scripts/README.md) |
 | [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
@@ -114,6 +115,17 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`docs/gcp-setup.md`](docs/gcp-setup.md) | GCP project, IAM, secrets, deploy (outline; P4) |
 | [`docs/poc-checklist.md`](docs/poc-checklist.md) | Every runtime checkpoint for the P6 PoC (open U-items, runner checkpoints, cache sharing, success criteria) with commands and expected results |
 | [`docs/operations.md`](docs/operations.md) | Rollout, fallback, rotation, quotas, troubleshooting (outline) |
+
+## A repository-wide dependency on cr-ci
+
+[`runner/golangci-lint/`](runner/golangci-lint/README.md) is the single copy of
+the interim golangci-lint build with the go-tools#1839 patch. Three users run
+its `build.sh`: the `lint` job of `.github/workflows/ci.yml` (on GitHub-hosted
+runners and the cr-ci runner alike), `make golangci-lint`, and the runner image
+([`runner/Dockerfile`](runner/Dockerfile)). So upstream CI **depends on a
+`cr-ci/` path**: moving, renaming or deleting that directory breaks the lint
+job, and a change there re-runs it (the `changes` job's regex covers it). Its
+README has the removal plan for when a golangci-lint release ships the fix.
 
 ## Go module
 
