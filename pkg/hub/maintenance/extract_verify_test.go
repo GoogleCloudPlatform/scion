@@ -588,6 +588,85 @@ func TestExtractScionBinary_StreamCapMidCopyCleansUp(t *testing.T) {
 	}
 }
 
+// oldGNUSparseScionTarball returns a gzipped tar whose only entry is an
+// old-GNU sparse file (Typeflag 'S', GNU magic, sparse map in the header)
+// named "scion": 4 stored bytes at offset 0, realsize bytes in total.
+// archive/tar's writer cannot produce this format, so it is built by hand.
+func oldGNUSparseScionTarball(t *testing.T, realsize int64) []byte {
+	t.Helper()
+	b := make([]byte, 512)
+	copy(b[0:100], "scion")
+	copy(b[100:108], "0000755\x00")
+	copy(b[108:116], "0000000\x00")
+	copy(b[116:124], "0000000\x00")
+	copy(b[124:136], fmt.Sprintf("%011o\x00", 4)) // stored data size
+	copy(b[136:148], "00000000000\x00")
+	b[156] = tar.TypeGNUSparse
+	copy(b[257:265], "ustar  \x00")                      // GNU magic + version
+	copy(b[386:398], fmt.Sprintf("%011o\x00", 0))        // sparse[0].offset
+	copy(b[398:410], fmt.Sprintf("%011o\x00", 4))        // sparse[0].numbytes
+	b[482] = 0                                           // isextended
+	copy(b[483:495], fmt.Sprintf("%011o\x00", realsize)) // realsize
+	for i := 148; i < 156; i++ {
+		b[i] = ' '
+	}
+	sum := 0
+	for _, c := range b {
+		sum += int(c)
+	}
+	copy(b[148:156], fmt.Sprintf("%06o\x00 ", sum))
+
+	raw := append(b, padTarBlock([]byte("ABCD"))...)
+	raw = append(raw, make([]byte, 1024)...)
+
+	// archive/tar reads it as an old-GNU sparse "scion" of the real size.
+	tr := tar.NewReader(bytes.NewReader(raw))
+	hdr, err := tr.Next()
+	if err != nil || hdr.Name != "scion" || hdr.Typeflag != tar.TypeGNUSparse || hdr.Size != realsize {
+		t.Fatalf("old-GNU sparse fixture not parsed as such: hdr=%+v err=%v", hdr, err)
+	}
+	if n, err := io.Copy(io.Discard, tr); err != nil || n != realsize {
+		t.Fatalf("old-GNU sparse fixture produced %d bytes (%v), want %d", n, err, realsize)
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractScionBinary_OldGNUSparseRefused(t *testing.T) {
+	const testCap = 1 << 20
+	for name, realsize := range map[string]int64{
+		"under the cap":  64 << 10,
+		"beyond the cap": 8 * testCap,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, "release.tar.gz")
+			if err := os.WriteFile(p, oldGNUSparseScionTarball(t, realsize), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := extractScionBinary(p, dir, &bytes.Buffer{}, testCap); err == nil {
+				t.Fatal("old-GNU sparse scion entry accepted")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "extracted", "scion")); !os.IsNotExist(err) {
+				t.Fatalf("scion written for a refused old-GNU sparse entry: %v", err)
+			}
+		})
+	}
+	// isSparseEntry also recognises the format on its own (defence in depth
+	// behind the regular-file check).
+	if !isSparseEntry(&tar.Header{Typeflag: tar.TypeGNUSparse}) {
+		t.Fatal("isSparseEntry does not recognise TypeGNUSparse")
+	}
+}
+
 // boundedZeros yields zeros and counts what is read. It fails once more
 // than limit bytes are requested, so a copy that ignores its own bound
 // errors out instead of filling the disk.
