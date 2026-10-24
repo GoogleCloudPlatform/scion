@@ -995,6 +995,10 @@ var unresolvedResourceTypeValues = []string{
 	"authz_hub_target.go: meta.Resource",
 	"authz_hub_target.go: resourceType",
 	"authz_relationship_rules.go: kind",
+	// materialDeliveryResource: kind is a MaterialKind, which launch
+	// selection sets only to MaterialKindSecret or MaterialKindEnvVar
+	// ("secret", "env_var"), both registry resource types.
+	"material_resources.go: string(kind)",
 }
 
 // TestResourceTypeLiterals_DetectsUnknownType proves the guard reports an

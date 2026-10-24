@@ -179,8 +179,9 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 }
 
 // permissions.RelationshipPrincipalKind maps federated_agent to "agent".
-// Every candidate an agent-kind row can admit uses the hub-attested
-// ancestry stage, so a federated agent matches no agent row even when the
+// Every candidate an agent-kind row can admit either uses the hub-attested
+// ancestry stage or is built only for a local principal type (launcher,
+// association), so a federated agent matches no agent row even when the
 // row, fact shape and scopes would otherwise hold.
 func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 	f := newGoldenFixture(t)
@@ -217,6 +218,18 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
 		}), ActionRead, "skill.read", false},
 		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, false},
+		// Association candidates are built only for the internal delivery
+		// credential (authz_material_association.go), never for a
+		// federated agent, even on a named delivery item.
+		"project_association": {RelationshipRuleProjectAssociation, materialDeliveryResource(MaterialKindSecret, materialRecordSecret,
+			f.secretID, "golden-secret", store.ScopeProject, f.projectBeta.ID, fed.ID(), GrantProjectAssociation, PurposeRestart),
+			ActionDeliver, "secret.deliver", true},
+		"hub_association": {RelationshipRuleHubAssociation, materialDeliveryResource(MaterialKindEnvVar, materialRecordEnvVar,
+			f.envVarID, "golden-envvar", store.ScopeHub, tid("relrule-fedrow-hub"), fed.ID(), GrantHubAssociation, PurposeRestart),
+			ActionDeliver, "env_var.deliver", true},
+		"broker_association": {RelationshipRuleBrokerAssociation, materialDeliveryResource(MaterialKindSecret, materialRecordSecret,
+			f.secretID, "golden-secret", store.ScopeRuntimeBroker, tid("relrule-fedrow-broker"), fed.ID(), GrantBrokerAssociation, PurposeRestart),
+			ActionDeliver, "secret.deliver", true},
 	}
 
 	// Every relationship with an agent-kind row has a case here.

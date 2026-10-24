@@ -149,6 +149,14 @@ type Resource struct {
 	// launcher status-read rule (authz_launcher_read.go) decides from it
 	// alone. It is unexported so no decoded request can carry it.
 	launchedTarget *store.Agent
+
+	// deliveryItem names the stored material record a deliver request is
+	// for, set only by materialDeliveryResource (material_resources.go).
+	// The association rules (authz_material_association.go) re-read the
+	// record it names from the store and decide from that record and the
+	// delivery credential's stored agent. It is unexported so no decoded
+	// request can carry it.
+	deliveryItem *materialDeliveryItem
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.

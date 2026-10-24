@@ -232,6 +232,49 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   "env_var",
 		PermissionIDs:  []string{"env_var.deliver"},
 	},
+	// Association rows (ptone/scion#2129): launch delivery of a project-,
+	// hub- or broker-scope secret or env var to an agent whose stored record
+	// is associated with that scope. They admit only the deliver
+	// permissions, and only for the internal delivery credential: pkg/hub's
+	// association candidate (authz_material_association.go) is built for no
+	// other principal, and its fact reads the stored material record and the
+	// stored agent, never request input.
+	{
+		Relationship:   "project_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.deliver"},
+	},
+	{
+		Relationship:   "project_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
+	},
+	{
+		Relationship:   "hub_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.deliver"},
+	},
+	{
+		Relationship:   "hub_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
+	},
+	{
+		Relationship:   "broker_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.deliver"},
+	},
+	{
+		Relationship:   "broker_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
+	},
 }
 
 // RelationshipPolicyAllows reports whether relationship (for principalKind,
