@@ -5911,7 +5911,7 @@ describe('env values in effect (env_values)', () => {
     const items = queryAll(element, '.env-values-under li').map((li) => li.textContent ?? '');
     const item = items.find((t) => t.includes('profiles.local.runtime'));
     expect(item).toBeDefined();
-    expect(item).toContain('whether it is in effect is not reported');
+    expect(item).toContain('masked: whether it is in effect is not reported');
     const badges = queryAll(element, '.env-badge').map((b) => b.textContent ?? '');
     expect(badges.some((t) => t.includes('Overridden by environment on this node'))).toBe(true);
     expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(false);

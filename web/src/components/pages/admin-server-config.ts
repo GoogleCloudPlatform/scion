@@ -3488,7 +3488,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             html`<li>
               <code>${e.key}</code> = <code>${formatEnvValue(e.ev) || '—'}</code>
               (${!hasInEffect(e.ev)
-                ? 'secret: whether it is in effect is not reported'
+                ? 'masked: whether it is in effect is not reported'
                 : e.ev.in_effect
                   ? 'in effect on this node'
                   : 'not in effect: the saved value wins'})
