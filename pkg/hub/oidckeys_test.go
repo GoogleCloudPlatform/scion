@@ -352,9 +352,10 @@ func TestOIDCKeyManager_JWKS(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -435,18 +436,20 @@ func TestOIDCKeyManager_LoadFromStore(t *testing.T) {
 
 	// First initialization: generates and stores a key
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid1 := mgr1.JWKS().Keys[0].KeyID
 
 	// Second initialization with the same store: should load the same key
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -475,10 +478,11 @@ func TestOIDCKeyManager_LoadFromBackend(t *testing.T) {
 
 	// First initialization with backend: generates and stores to both backend and store
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		Backend:   backend,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		Backend:     backend,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid1 := mgr1.JWKS().Keys[0].KeyID
@@ -491,10 +495,11 @@ func TestOIDCKeyManager_LoadFromBackend(t *testing.T) {
 	// Create a new store (simulating fresh start) but same backend
 	s2 := createOIDCTestStore(t)
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s2,
-		Backend:   backend,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s2,
+		Backend:     backend,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -524,10 +529,11 @@ func TestOIDCKeyManager_GenerateWhenNoKey(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-				Store:     s,
-				Backend:   tc.backend,
-				HubID:     "test-hub-gen-" + tc.name,
-				IssuerURL: "https://hub.example.com",
+				ValueCipher: secret.NewLegacyValueCipher(""),
+				Store:       s,
+				Backend:     tc.backend,
+				HubID:       "test-hub-gen-" + tc.name,
+				IssuerURL:   "https://hub.example.com",
 			})
 			require.NoError(t, err)
 			require.NotNil(t, mgr)
@@ -571,6 +577,7 @@ func TestOIDCKeyManager_RequireStableSigningKey(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+				ValueCipher:             secret.NewLegacyValueCipher(""),
 				Store:                   s,
 				Backend:                 tc.backend,
 				HubID:                   "test-hub-require-stable-" + tc.name,
@@ -589,16 +596,18 @@ func TestOIDCKeyManager_RequireStableSigningKey(t *testing.T) {
 
 		// First: create a key normally
 		mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-			Store:     s,
-			Backend:   be,
-			HubID:     hubID,
-			IssuerURL: "https://hub.example.com",
+			ValueCipher: secret.NewLegacyValueCipher(""),
+			Store:       s,
+			Backend:     be,
+			HubID:       hubID,
+			IssuerURL:   "https://hub.example.com",
 		})
 		require.NoError(t, err)
 		kid1 := mgr1.JWKS().Keys[0].KeyID
 
 		// Second: load with RequireStableSigningKey — should succeed
 		mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+			ValueCipher:             secret.NewLegacyValueCipher(""),
 			Store:                   s,
 			Backend:                 be,
 			HubID:                   hubID,
@@ -626,9 +635,10 @@ func TestOIDCKeyManager_IssuerURL(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-				Store:     s,
-				HubID:     "test-hub-issuer-" + tc.name,
-				IssuerURL: tc.issuerURL,
+				ValueCipher: secret.NewLegacyValueCipher(""),
+				Store:       s,
+				HubID:       "test-hub-issuer-" + tc.name,
+				IssuerURL:   tc.issuerURL,
 			})
 			require.NoError(t, err)
 			assert.Equal(t, tc.issuerURL, mgr.IssuerURL())
@@ -690,9 +700,10 @@ func TestOIDCKeyManager_RotateKey(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub-rotate",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub-rotate",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -797,9 +808,10 @@ func TestOIDCKeyManager_CleanupExpiredKeys(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub-cleanup",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub-cleanup",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -876,9 +888,10 @@ func TestOIDCKeyManager_RotateKey_MultipleRotations(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub-multi-rotate",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub-multi-rotate",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -925,10 +938,11 @@ func TestOIDCKeyManager_RotateKey_WithBackend(t *testing.T) {
 	backend := newOIDCMockSecretBackend()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		Backend:   backend,
-		HubID:     "test-hub-rotate-backend",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		Backend:     backend,
+		HubID:       "test-hub-rotate-backend",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -954,9 +968,10 @@ func TestOIDCKeyManager_StartCleanupLoop(t *testing.T) {
 	defer cancel()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub-cleanup-loop",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub-cleanup-loop",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -991,9 +1006,10 @@ func TestOIDCKeyManager_CleanupUsesDeactivationTime(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     "test-hub-deactivation-time",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       "test-hub-deactivation-time",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1022,9 +1038,10 @@ func TestOIDCKeyManager_RotateKey_PersistFailure(t *testing.T) {
 
 	// Initialize with a backend (no store) so there is only one persistence path.
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Backend:   backend,
-		HubID:     "test-hub-persist-fail",
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Backend:     backend,
+		HubID:       "test-hub-persist-fail",
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1063,9 +1080,10 @@ func TestOIDCKeyManager_KeysetSaveAndLoad(t *testing.T) {
 	hubID := "test-hub-keyset"
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1083,9 +1101,10 @@ func TestOIDCKeyManager_KeysetSaveAndLoadAfterRotation(t *testing.T) {
 	hubID := "test-hub-keyset-rotate"
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1120,9 +1139,10 @@ func TestOIDCKeyManager_RestoreRotatedKeysOnStartup(t *testing.T) {
 
 	// First manager: create key and rotate.
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1136,9 +1156,10 @@ func TestOIDCKeyManager_RestoreRotatedKeysOnStartup(t *testing.T) {
 
 	// Second manager: simulates a restart. Should restore the rotated key.
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1160,9 +1181,10 @@ func TestOIDCKeyManager_RestoreSkipsExpiredKeys(t *testing.T) {
 
 	// First manager: create key and rotate.
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1184,9 +1206,10 @@ func TestOIDCKeyManager_RestoreSkipsExpiredKeys(t *testing.T) {
 
 	// Second manager: should NOT restore the expired key.
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1201,9 +1224,10 @@ func TestOIDCKeyManager_CASOnKeyGeneration(t *testing.T) {
 
 	// First manager: generates and persists a key.
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid1 := mgr1.JWKS().Keys[0].KeyID
@@ -1211,9 +1235,10 @@ func TestOIDCKeyManager_CASOnKeyGeneration(t *testing.T) {
 	// Second manager with the SAME store: should load the existing key,
 	// not generate a new one (the key already exists in the DB).
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 	kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -1243,9 +1268,10 @@ func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
 	hubID := "test-hub-cas-direct"
 
 	mgr := &OIDCKeyManager{
-		store: s,
-		hubID: hubID,
-		log:   slog.Default(),
+		store:  s,
+		hubID:  hubID,
+		log:    slog.Default(),
+		cipher: secret.NewLegacyValueCipher(""),
 	}
 
 	// Generate two different keys.
@@ -1261,7 +1287,8 @@ func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
 
 	t.Run("first writer wins", func(t *testing.T) {
 		// First call: should create successfully, return nil (caller uses theirs).
-		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem1), hubID)
+		result, err := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem1), hubID)
+		require.NoError(t, err)
 		assert.Nil(t, result, "First writer should win — nil means 'use your own key'")
 
 		// Verify the key was stored.
@@ -1273,7 +1300,8 @@ func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
 	t.Run("second writer loses and loads winner key", func(t *testing.T) {
 		// Second call with a different key: should hit ErrAlreadyExists,
 		// load the first writer's key, and return it.
-		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem2), hubID)
+		result, err := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem2), hubID)
+		require.NoError(t, err)
 		require.NotNil(t, result, "Second writer should lose and return winner's key")
 
 		// The returned key should be the FIRST key, not the second.
@@ -1291,16 +1319,18 @@ func TestOIDCKeyManager_RefreshKeysFromDB(t *testing.T) {
 
 	// Create two managers sharing the same DB.
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1332,9 +1362,10 @@ func TestOIDCKeyManager_CleanupPersistsToDB(t *testing.T) {
 	hubID := "test-hub-cleanup-persist"
 
 	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1368,16 +1399,18 @@ func TestOIDCKeyManager_CrossInstanceTokenVerification(t *testing.T) {
 	hubID := "test-hub-cross-instance"
 
 	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
 	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
-		Store:     s,
-		HubID:     hubID,
-		IssuerURL: "https://hub.example.com",
+		ValueCipher: secret.NewLegacyValueCipher(""),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://hub.example.com",
 	})
 	require.NoError(t, err)
 
@@ -1423,14 +1456,13 @@ func TestOIDCKeyManager_BackupIsEncrypted(t *testing.T) {
 	s := createOIDCTestStore(t)
 	hubID := "test-oidc-encrypt"
 	sharedSecret := "test-oidc-secret"
-	encKey := secret.DeriveLocalEncryptionKey(sharedSecret)
 
 	mgr, err := NewOIDCKeyManager(context.Background(), OIDCKeyManagerConfig{
-		Store:         s,
-		HubID:         hubID,
-		IssuerURL:     "https://example.com",
-		EncryptionKey: encKey,
-		Log:           slog.Default(),
+		Store:       s,
+		HubID:       hubID,
+		IssuerURL:   "https://example.com",
+		ValueCipher: secret.NewLegacyValueCipher(sharedSecret),
+		Log:         slog.Default(),
 	})
 	require.NoError(t, err, "NewOIDCKeyManager should succeed")
 	require.NotNil(t, mgr)

@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -151,9 +152,9 @@ func TestStartConduitRelay_StartupChecks(t *testing.T) {
 			srv, _ := testServer(t)
 			setConduitExperiment(t, srv, tc.flag)
 			if tc.noKey {
-				srv.encryptionKey = nil
+				srv.cipher = secret.NewLegacyValueCipher("")
 			} else {
-				srv.encryptionKey = testGrantEncryptionKey
+				srv.cipher = testGrantCipher
 			}
 			assert.Equal(t, !tc.noKey, srv.ConduitGrantRingShared())
 			st := entadapter.NewConduitRegistryStore(enttest.NewClient(t))

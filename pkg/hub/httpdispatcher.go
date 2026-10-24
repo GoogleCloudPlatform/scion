@@ -2063,7 +2063,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			if req.ResolvedEnv == nil {
@@ -2275,7 +2279,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return nil, asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			finalized, err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
@@ -2453,7 +2461,11 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		// mirroring the pattern in DispatchAgentCreateWithGather.
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return nil, asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			for k, v := range asNeededEnv {
@@ -2884,7 +2896,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	agent *store.Agent,
 	keys []string,
 	alternatives map[string][]string,
-) map[string]string {
+) (map[string]string, error) {
 	result := make(map[string]string)
 	keySet := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
@@ -3003,6 +3015,11 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		if err == nil {
 			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
 		}
+		if errors.Is(err, secret.ErrResolveDecrypt) {
+			// A stored secret could not be decrypted: never answer the
+			// broker's needs as if it were missing (ptone/scion#1530 §5).
+			return nil, err
+		}
 		if err != nil {
 			if d.debug {
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
@@ -3057,7 +3074,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	}
 
 	delete(result, agentTZEnvKey)
-	return result
+	return result, nil
 }
 
 // buildEnvSources creates a map of env key -> scope for reporting to the CLI.

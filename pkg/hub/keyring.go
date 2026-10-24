@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // The /readyz reasons of a keyring file whose signing ring cannot issue.
@@ -66,6 +67,27 @@ func validateKeyringConfig(cfg ServerConfig) error {
 		return errors.New("keyring mode cannot be combined with an explicit user token signing key (UserTokenConfig.SigningKey)")
 	}
 	return nil
+}
+
+// serverValueCipher returns the shared ValueCipher for cfg
+// (ptone/scion#1530 §5): cfg.ValueCipher when set (it must wrap the
+// keyring file's encryption ring, if there is one), else one built from
+// the keyring file, else the legacy cipher over SharedSigningSecret.
+func serverValueCipher(cfg ServerConfig) (*secret.ValueCipher, error) {
+	file := cfg.Keyring != nil && cfg.Keyring.Source() == keyring.SourceFile
+	if cfg.ValueCipher != nil {
+		if file && !cfg.ValueCipher.UsesRing(cfg.Keyring.Encryption()) {
+			return nil, errors.New("keyring mode: ValueCipher must wrap the keyring file's encryption ring")
+		}
+		if lb, ok := cfg.SecretBackend.(*secret.LocalBackend); ok && lb.Cipher() != cfg.ValueCipher {
+			return nil, errors.New("the local secret backend must share the server's ValueCipher")
+		}
+		return cfg.ValueCipher, nil
+	}
+	if file {
+		return secret.NewValueCipher(cfg.Keyring)
+	}
+	return secret.NewLegacyValueCipher(cfg.SharedSigningSecret), nil
 }
 
 // keyringNow is the keyring deadline clock.
