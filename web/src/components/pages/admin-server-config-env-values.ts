@@ -41,7 +41,9 @@ export function formatEnvValue(ev: EnvKeyValue): string {
   if (ev.masked) return MASKED_ENV_VALUE;
   const v = ev.value;
   if (v === undefined || v === null) return '';
-  if (Array.isArray(v)) return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
+  if (Array.isArray(v)) {
+    return v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(', ');
+  }
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
 }

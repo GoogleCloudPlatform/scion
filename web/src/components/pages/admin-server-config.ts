@@ -2326,8 +2326,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (env && env.ev.in_effect) {
       // Env-pinned and read-only: the value in effect is the environment
       // value; the stored one is shown only as a secondary line.
-      return html`${this.renderReadOnlyBadge('env')}<span
-          class="read-only-value env-value-primary"
+      return html`${this.renderReadOnlyBadge('env')}<span class="read-only-value env-value-primary"
           >${formatEnvValue(env.ev) || '—'}</span
         >${this.renderSavedNotInEffect(displayValue)}${this.renderFieldErrors(koanfKey)}`;
     }
@@ -2339,7 +2338,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     // A key whose environment value is in effect is not superseded by the
     // saved value, whatever superseded_keys says.
     const envInEffect = envValueFor(this.envValues, [koanfKey])?.ev.in_effect === true;
-    return html`${envInEffect ? nothing : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+    return html`${envInEffect
+      ? nothing
+      : this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
       koanfKey
     )}`;
   }
@@ -3306,7 +3307,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ev.in_effect) {
       return html`<span class="env-value-in-effect"
           >In effect on this node: <code>${text}</code> (environment variable)</span
-        ><span class="hint env-value-saved-label">Saved value below, not in effect on this node:</span>`;
+        ><span class="hint env-value-saved-label"
+          >Saved value below, not in effect on this node:</span
+        >`;
     }
     return html`<span class="hint env-value-not-in-effect"
       >Environment value on this node, not in effect: <code>${text}</code> (the saved value
