@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // resetDelegationFlags restores the delegation command flags to their
@@ -277,6 +278,21 @@ func TestHubDelegationRevokeAll_ConfirmationAndOutput(t *testing.T) {
 	require.NoError(t, err, "--non-interactive confirms")
 	got = requests()
 	assert.Equal(t, "/api/v1/agents/agent-1/delegations/revoke-all", got[len(got)-1].path)
+}
+
+// TestHubDelegationConfirm_DefaultRefusesWithoutTerminal: the real
+// confirmation refuses without --yes when stdin is not a terminal (as in CI
+// and in gate windows, which run with stdin from /dev/null) and accepts with
+// the shared flag. On a terminal the real prompt would wait for an answer,
+// so the test does not run there.
+func TestHubDelegationConfirm_DefaultRefusesWithoutTerminal(t *testing.T) {
+	if util.IsTerminal() {
+		t.Skip("stdin is a terminal: the real confirmation would prompt")
+	}
+	resetDelegationFlags(t)
+	assert.False(t, hubDelegationConfirm("revoke?"))
+	autoConfirm = true
+	assert.True(t, hubDelegationConfirm("revoke?"))
 }
 
 // TestHubDelegationFlags_ParseThroughRootTree: the subcommands' flags parse
