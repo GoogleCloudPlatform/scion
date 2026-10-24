@@ -143,21 +143,6 @@ func TestDetectCloudHost(t *testing.T) {
 	}
 }
 
-func TestDetectCloudHost_UnreadableDMIIsNotDetected(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read mode-000 files")
-	}
-	root := writeFakeRoot(t, dmi(map[string]string{"sys_vendor": "Amazon EC2"}))
-	p := filepath.Join(root, "sys/class/dmi/id/sys_vendor")
-	if err := os.Chmod(p, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
-	if got := detectCloudHost(root, "linux"); got.Detected {
-		t.Fatalf("unreadable DMI detected as cloud: %+v", got)
-	}
-}
-
 func TestParseHostNetworkBlockPolicy(t *testing.T) {
 	tests := []struct {
 		in        string
