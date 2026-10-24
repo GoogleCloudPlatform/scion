@@ -48,6 +48,8 @@
 #       server.maintenance.update_policy per POLICY: auto|notify|disabled
 #       writes that value; "default" rewrites auto to notify (design D7),
 #       keeps notify/disabled, and writes notify when the key is absent.
+#       Run as root, it re-runs itself as the settings file's owner for the
+#       edit, and verifies the result before replacing the file.
 #
 # Environment (defaults are what deploy.sh uses; tests override them):
 #   SCION_INSTALL_ROOT    install root            (default /opt/scion)
@@ -336,7 +338,7 @@ settings_to_json() {
   if [[ -n "${SCION_LAYOUT_YAML_TO_JSON:-}" ]]; then
     bash -c "$SCION_LAYOUT_YAML_TO_JSON" < "$1" > "$2"
   else
-    python3 -c "$YAML_TO_JSON_PY" < "$1" > "$2"
+    python3 -I -c "$YAML_TO_JSON_PY" < "$1" > "$2"
   fi
 }
 
@@ -351,12 +353,12 @@ verify_settings_edit() {
     settings_to_json "$new" "$nj" 2>/dev/null || rc=2
   fi
   if [[ "$rc" -eq 0 ]]; then
-    python3 -c "$EXPECT_PY" "$oj" "$nj" "$INSTALL_ROOT" "$policy" || rc=3
+    python3 -I -c "$EXPECT_PY" "$oj" "$nj" "$INSTALL_ROOT" "$policy" || rc=3
   fi
   rm -f "$oj" "$nj"
   case "$rc" in
     0) return 0 ;;
-    1) echo "scion-layout: could not parse $orig as YAML (or no YAML parser: python3 with PyYAML)" >&2 ;;
+    1) echo "scion-layout: could not parse $orig as YAML, or no YAML parser is available (python3 with PyYAML). Install it with 'sudo apt-get install python3-yaml', or edit the file by hand and re-run." >&2 ;;
     2) echo "scion-layout: the edited settings would not parse as YAML" >&2 ;;
     3) echo "scion-layout: the edited settings would change more than server.maintenance.install_root/update_policy" >&2 ;;
   esac
@@ -378,13 +380,37 @@ cmd_set_maintenance() {
     auto|notify|disabled|default) ;;
     *) die "invalid update policy: '$policy' (expected auto, notify, disabled or default)" ;;
   esac
+  refuse_symlink "$file"
   [[ -f "$file" ]] || die "settings file not found: $file"
-  local manual="set server.maintenance.install_root: \"$INSTALL_ROOT\" (and update_policy) in $file by hand"
-  local tmp="$file.scion-layout.tmp" rc=0
+  # Edit as the file's owner, not as root: the file (and its directory)
+  # belong to the hub user, so root gains nothing by editing it and must
+  # not write through anything that user could plant next to it. The
+  # script re-runs itself from stdin (its temp file is not readable by the
+  # owner) with the same settings.
+  local file_owner
+  file_owner="$(stat -c %U "$file")"
+  if [[ "$(id -u)" == "0" && "$file_owner" != "root" ]]; then
+    exec runuser -u "$file_owner" -- env \
+      SCION_INSTALL_ROOT="$INSTALL_ROOT" \
+      SCION_LAYOUT_YAML_TO_JSON="${SCION_LAYOUT_YAML_TO_JSON:-}" \
+      bash -s -- set-maintenance "$file" "$policy" < "${BASH_SOURCE[0]}"
+  fi
+  local manual="set server.maintenance.install_root: \"$INSTALL_ROOT\" (and update_policy) in $file by hand, then re-run"
+  local tmp rc=0
+  # A fresh, randomly named file (O_EXCL), never a fixed name that could
+  # already exist as a symlink.
+  tmp="$(mktemp "$file.XXXXXX")"
   awk -v root="$INSTALL_ROOT" -v policy="$policy" '
     function indent_of(s) { match(s, /^ */); return RLENGTH }
     function pad(n) { return sprintf("%" n "s", "") }
     function step() { return sci ? sci : 2 }
+    # value_of(LINE, KEY) -- the scalar after "KEY:", without a trailing
+    # comment or surrounding quotes. A line whose value already matches is
+    # kept byte-for-byte, so a correct hand edit counts as up to date.
+    function value_of(l, key,   v) {
+      v = l; sub("^ *" key ":[ \t]*", "", v); sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v); gsub(/"|\047/, "", v)
+      return v
+    }
     function emit_missing(ind) {
       handled = 1
       if (!seen_root) print pad(ind) "install_root: \"" root "\""
@@ -422,15 +448,18 @@ cmd_set_maintenance() {
       if (in_maint && !blank) {
         if (!child_ind) child_ind = ind
         if (ind == child_ind && line ~ /^ *install_root:/) {
-          print pad(ind) "install_root: \"" root "\""; seen_root = 1; next
+          seen_root = 1
+          if (value_of(line, "install_root") == root) { print; next }
+          print pad(ind) "install_root: \"" root "\""; next
         }
         if (ind == child_ind && line ~ /^ *update_policy:/) {
           seen_policy = 1
+          v = value_of(line, "update_policy")
           if (policy == "default") {
-            v = line; sub(/^ *update_policy:[ \t]*/, "", v); sub(/[ \t]*#.*$/, "", v); gsub(/"|\047/, "", v)
             if (v == "auto") { print pad(ind) "update_policy: \"notify\""; next }
             print; next
           }
+          if (v == policy) { print; next }
           print pad(ind) "update_policy: \"" policy "\""; next
         }
       }
@@ -456,7 +485,7 @@ cmd_set_maintenance() {
     rm -f "$tmp"
     die "refusing to write $file; nothing changed. Please $manual"
   fi
-  chown --reference="$file" "$tmp" 2>/dev/null || true
+  # Same owner already (the edit runs as the file's owner); keep the mode.
   chmod --reference="$file" "$tmp"
   mv -f "$tmp" "$file"
   log "updated server.maintenance in $file"

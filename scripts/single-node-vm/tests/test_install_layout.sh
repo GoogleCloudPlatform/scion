@@ -1184,3 +1184,121 @@ test_layout_rerun_kept_release_aged_out_explains() {
   assert_not_contains "$RUN_OUTPUT" "ALLOW_UNVERIFIED_RELEASE" "the unverified override is not the fix here"
   assert_not_contains "$(gcloud_log)" "services enable" "it must stop before any GCP change"
 }
+
+# =====================================================================
+# Review round 2: settings edit as the file owner, default PyYAML parser
+# =====================================================================
+
+# The old fixed temp name (settings.yaml.scion-layout.tmp) planted as a
+# symlink must not be written or chowned through: the temp file is a fresh
+# mktemp name, and settings.yaml stays a regular file.
+test_layout_settings_ignores_planted_temp_symlink() {
+  _layout_new_host
+  _deploy_rendered_settings auto > "${LH_DIR}/settings.yaml"
+  echo "sentinel" > "${LH_DIR}/victim"
+  chmod 0600 "${LH_DIR}/victim"
+  ln -s "${LH_DIR}/victim" "${LH_DIR}/settings.yaml.scion-layout.tmp"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_eq "0" "$LAYOUT_RC" "the edit must succeed (output: ${LAYOUT_OUT})"
+  assert_eq "sentinel" "$(cat "${LH_DIR}/victim")" "the symlink target must not be written"
+  assert_eq "600" "$(stat -c %a "${LH_DIR}/victim")" "the symlink target's mode must not change"
+  assert_false "$([[ -L "${LH_DIR}/settings.yaml" ]] && echo true || echo false)" "settings.yaml must stay a regular file"
+  assert_contains "$(cat "${LH_DIR}/settings.yaml")" '    update_policy: "notify"' "the edit must have been applied"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_settings_refuses_symlinked_settings_file() {
+  _layout_new_host
+  _deploy_rendered_settings auto > "${LH_DIR}/real.yaml"
+  ln -s "${LH_DIR}/real.yaml" "${LH_DIR}/settings.yaml"
+  _layout set-maintenance "${LH_DIR}/settings.yaml" default
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked settings file must be refused"
+  assert_contains "$(cat "${LH_DIR}/real.yaml")" '    update_policy: "auto"' "the link target must be unchanged"
+  rm -rf "$LH_DIR"
+}
+
+# Run "as root" (stub id -u = 0), set-maintenance must re-run itself as the
+# settings file's owner through runuser (stub: records the user, then runs
+# the command), passing the install root and parser along, and the edit
+# must then be applied by that re-run.
+test_layout_settings_as_root_reexecs_as_file_owner() {
+  _layout_new_host
+  _deploy_rendered_settings auto > "${LH_DIR}/settings.yaml"
+  chmod 0640 "${LH_DIR}/settings.yaml"
+  local stub="${LH_DIR}/stub" me
+  me="$(id -un)"
+  mkdir -p "$stub"
+  cat > "${stub}/id" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && $# -eq 1 && -z "${LAYOUT_STUB_DROPPED:-}" ]]; then echo 0; exit 0; fi
+exec /usr/bin/id "$@"
+STUB
+  cat > "${stub}/runuser" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == "-u" && "\$3" == "--" ]] || { echo "runuser stub: unexpected args: \$*" >&2; exit 2; }
+echo "\$2" > "${LH_DIR}/runuser-user"
+shift 3
+LAYOUT_STUB_DROPPED=1 exec "\$@"
+STUB
+  chmod 0755 "${stub}/id" "${stub}/runuser"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+  LAYOUT_RC=$?
+  assert_eq "0" "$LAYOUT_RC" "the re-run as the owner must succeed (output: ${LAYOUT_OUT})"
+  assert_eq "$me" "$(cat "${LH_DIR}/runuser-user" 2>/dev/null || echo '<runuser not called>')" \
+    "as root, the edit must run as the settings file's owner"
+  assert_contains "$(cat "${LH_DIR}/settings.yaml")" "    install_root: \"${LH_ROOT}\"" \
+    "the re-run must receive the install root and apply the edit"
+  assert_eq "640" "$(stat -c %a "${LH_DIR}/settings.yaml")" "the file mode must be preserved"
+  rm -rf "$LH_DIR"
+}
+
+# The parser the VM actually uses: python3 + PyYAML with duplicate keys
+# rejected. Runs when PyYAML is importable (CI installs python3-yaml);
+# otherwise prints a visible SKIP line instead of passing silently.
+test_layout_settings_default_pyyaml_parser() {
+  if ! python3 -I -c 'import yaml' 2>/dev/null; then
+    echo "SKIP [${CURRENT_TEST}]: python3 cannot import yaml (install python3-yaml to run this test)"
+    return 0
+  fi
+  _layout_new_host
+  _go_written_yaml '{"server":{"hub":{"hub_name":"demo"},"storage":{"local_path":"/a"}}}' > "${LH_DIR}/settings.yaml"
+  LAYOUT_OUT="$(env -u SCION_LAYOUT_YAML_TO_JSON SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+  LAYOUT_RC=$?
+  assert_eq "0" "$LAYOUT_RC" "the PyYAML path must accept a valid 4-space insert (output: ${LAYOUT_OUT})"
+  assert_eq "true" "$(_json_eq "$(_settings_json "${LH_DIR}/settings.yaml")" "{\"server\":{\"hub\":{\"hub_name\":\"demo\"},\"storage\":{\"local_path\":\"/a\"},\"maintenance\":{\"install_root\":\"${LH_ROOT}\",\"update_policy\":\"notify\"}}}")" \
+    "the PyYAML-verified result must parse with the hub's parser as intended"
+
+  printf 'server:\n  "maintenance":\n    update_policy: auto\n' > "${LH_DIR}/settings.yaml"
+  cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+  LAYOUT_OUT="$(env -u SCION_LAYOUT_YAML_TO_JSON SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "the PyYAML path must reject a duplicate key"
+  assert_contains "$LAYOUT_OUT" "would not parse" "the refusal must come from the duplicate-key check"
+  assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "the file must be unchanged"
+  rm -rf "$LH_DIR"
+}
+
+# The documented recovery after a refused edit: the operator sets the two
+# keys by hand (block style, quoting optional) and re-runs. That re-run
+# must count as up to date without a YAML parser and leave the file alone.
+test_layout_settings_hand_edit_is_up_to_date_without_parser() {
+  _layout_new_host
+  printf 'server:\n  maintenance:\n    install_root: %s   # set by hand\n    update_policy: notify\n' "$LH_ROOT" \
+    > "${LH_DIR}/settings.yaml"
+  cp "${LH_DIR}/settings.yaml" "${LH_DIR}/orig.yaml"
+  LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_LAYOUT_YAML_TO_JSON="exit 1" bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" default 2>&1)"
+  LAYOUT_RC=$?
+  assert_eq "0" "$LAYOUT_RC" "a correct hand edit must count as up to date without a parser (output: ${LAYOUT_OUT})"
+  assert_contains "$LAYOUT_OUT" "already up to date" "the re-run must report no change"
+  assert_true "$(cmp -s "${LH_DIR}/orig.yaml" "${LH_DIR}/settings.yaml" && echo true || echo false)" "the file must be untouched"
+
+  printf 'server:\n  maintenance:\n    install_root: "%s"\n    update_policy: auto\n' "$LH_ROOT" > "${LH_DIR}/settings.yaml"
+  LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    SCION_LAYOUT_YAML_TO_JSON="exit 1" bash "$LAYOUT_SH" set-maintenance "${LH_DIR}/settings.yaml" auto 2>&1)"
+  assert_eq "0" "$?" "an explicit policy that already matches must also be up to date (output: ${LAYOUT_OUT})"
+  rm -rf "$LH_DIR"
+}

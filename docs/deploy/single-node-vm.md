@@ -238,26 +238,42 @@ command:
 3. points `/opt/scion/current` at it;
 4. replaces `/usr/local/bin/scion` with a symlink to
    `/opt/scion/current/scion`;
-5. re-renders the systemd unit with
-   `ExecStart=/opt/scion/current/scion ...`;
-6. edits `settings.yaml` in place: adds
+5. edits `settings.yaml` in place, as the file's owner (`scion`): adds
    `server.maintenance.install_root: "/opt/scion"` and applies the update
    policy rule below. Comments and all other keys are left as they are.
    The edited file is parsed (with the VM's PyYAML) and compared with the
-   original before it replaces it. If the file has a shape the script
-   cannot edit safely (for example a flow-style `maintenance: {...}`), it
-   changes nothing, stops, and tells you to set the two keys by hand;
+   original before it replaces it;
+6. re-renders the systemd unit with
+   `ExecStart=/opt/scion/current/scion ...`;
 7. runs `systemctl daemon-reload`, restarts the Hub, and waits for
    `/healthz`.
 
 It is safe to re-run. On a converted VM the layout step does nothing, the
 settings edit changes only what is out of date, and the unit is re-rendered
-and the Hub restarted. If the installed binary's version cannot be read,
-or the binary cannot be copied completely (for example, the disk is
-full), the command stops before `current`, `/usr/local/bin/scion` or the
-unit change. For an unreadable version, run a full
-`deploy.sh --version <tag>` instead. For a failed copy, free disk space and
-re-run. A normal re-run of `deploy.sh` also
+and the Hub restarted.
+
+If something goes wrong, the command stops at that step:
+
+- **The installed binary's version cannot be read, or the binary cannot be
+  copied completely** (for example, the disk is full). The command stops
+  before `current`, `/usr/local/bin/scion` or the unit change, so nothing
+  is converted. For an unreadable version, run a full
+  `deploy.sh --version <tag>` instead. For a failed copy, free disk space
+  and re-run.
+- **The settings edit is refused.** This happens if the file has a shape the
+  script cannot edit safely (for example a flow-style `maintenance: {...}`),
+  or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this
+  point steps 1-4 are done: `/opt/scion` exists and `/usr/local/bin/scion`
+  is already the symlink. `settings.yaml` is unchanged, and the unit change
+  and restart (steps 6-7) are skipped. The Hub keeps running the same
+  binary through the symlink. To finish, set
+  `install_root: "/opt/scion"` and `update_policy` by hand as block-style
+  keys under `server:` → `maintenance:` in `settings.yaml`, then re-run
+  `migrate-layout`. The re-run finds
+  the settings already up to date (no parser needed), then renders the unit
+  and restarts the Hub.
+
+A normal re-run of `deploy.sh` also
 converts the VM: it keeps the old binary as the `previous` release and
 installs the requested version as `current`.
 

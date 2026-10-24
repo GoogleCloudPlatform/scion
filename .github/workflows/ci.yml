@@ -1743,8 +1743,13 @@ jobs:
       # Never contacts GCP: a stub `gcloud` shadows any real one on PATH.
       # ubuntu-latest already ships bash >= 4 and python3; see
       # scripts/single-node-vm/tests/README.md for what this covers.
+      # python3-yaml lets test_install_layout.sh exercise scion-layout.sh's
+      # default (PyYAML) settings parser, the one the VM uses; without it
+      # that test is skipped.
       - name: Run scripts/single-node-vm/tests/run.sh
-        run: ./scripts/single-node-vm/tests/run.sh
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/tests/run.sh
 
   starter-hub-tests:
     name: starter-hub script tests
