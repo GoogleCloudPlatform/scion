@@ -15,13 +15,12 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -149,8 +148,7 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 	log := logging.Subsystem("hub.maintenance.release-update-check")
 
 	log.Info("Auto-applying update",
-		"version", result.LatestVersion,
-		"download_url", result.DownloadURL)
+		"version", result.LatestVersion)
 
 	// Check for an already-running update operation.
 	recentRuns, err := s.store.ListMaintenanceRuns(ctx, "update-binary", 1)
@@ -158,7 +156,7 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 		log.Error("Failed to check for running update operations", "error", err)
 		return
 	}
-	if len(recentRuns) > 0 && recentRuns[0].Status == store.MaintenanceStatusRunning {
+	if len(recentRuns) > 0 && maintenanceRunInFlight(recentRuns[0].Status) {
 		log.Info("Update operation already running, skipping auto-apply",
 			"run_id", recentRuns[0].ID)
 		return
@@ -190,70 +188,11 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 		"run_id", runID,
 		"target_version", result.LatestVersion)
 
-	// Execute asynchronously (same pattern as executeOperation in admin_maintenance.go).
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("Auto-update executor panicked",
-					"run_id", runID, "panic", fmt.Sprint(r))
-				finishedAt := time.Now()
-				run.CompletedAt = &finishedAt
-				run.Status = store.MaintenanceStatusFailed
-				panicResult := map[string]interface{}{
-					"error": fmt.Sprintf("executor panic: %v", r),
-				}
-				resultJSON, _ := json.Marshal(panicResult)
-				run.Result = string(resultJSON)
-				if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-					log.Error("Failed to update run record after panic",
-						"run_id", runID, "error", err)
-				}
-			}
-		}()
-
-		params := map[string]string{
-			"target_version": result.LatestVersion,
-			"download_url":   result.DownloadURL,
-			"checksums_url":  result.ChecksumsURL,
-		}
-
-		var buf bytes.Buffer
-		execErr := executor.Run(context.Background(), &buf, params)
-
-		finishedAt := time.Now()
-		run.CompletedAt = &finishedAt
-		run.Log = buf.String()
-
-		if execErr != nil {
-			run.Status = store.MaintenanceStatusFailed
-			failResult := map[string]interface{}{
-				"error": execErr.Error(),
-			}
-			resultJSON, _ := json.Marshal(failResult)
-			run.Result = string(resultJSON)
-			log.Error("Auto-update operation failed",
-				"run_id", runID, "error", execErr,
-				"duration", finishedAt.Sub(run.StartedAt))
-		} else {
-			run.Status = store.MaintenanceStatusCompleted
-
-			// Clear the update_available notification on success.
-			if delErr := s.store.DeleteHubSetting(context.Background(),
-				HubSettingSectionUpdateAvailable); delErr != nil && delErr != store.ErrNotFound {
-				log.Warn("Failed to clear update_available setting after successful update",
-					"error", delErr)
-			}
-
-			log.Info("Auto-update operation completed",
-				"run_id", runID,
-				"duration", finishedAt.Sub(run.StartedAt))
-		}
-
-		if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-			log.Error("Failed to update run record",
-				"run_id", runID, "error", err)
-		}
-	}()
+	// Same runner as executeOperation: the run is recorded as "restarting"
+	// before the hub restarts, and update_available is cleared then.
+	s.launchMaintenanceRun(run, executor, map[string]string{
+		maintenance.ParamTargetVersion: result.LatestVersion,
+	})
 }
 
 // ClearUpdateAvailable removes the system.update_available hub setting.

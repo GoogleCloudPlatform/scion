@@ -1,0 +1,305 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package maintenance
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// RetainedReleases is how many release directories the symlink installer
+// keeps, in addition to whatever current and previous point to.
+const RetainedReleases = 5
+
+const (
+	releasesDirName = "releases"
+	currentLinkName = "current"
+	prevLinkName    = "previous"
+	partialSuffix   = ".partial"
+	binaryName      = "scion"
+)
+
+// releaseDirRE limits release directory names to one safe path element:
+// release tags (nightly-YYYYMMDD, v0.3.0-preview.4) and, later, git-<sha12>.
+var releaseDirRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// symlinkInstaller installs releases into <root>/releases/<tag>/scion and
+// switches the <root>/current symlink, which the systemd unit's ExecStart
+// goes through. <root> is owned by the hub user, so no privilege is needed.
+// Restart is a SIGTERM to this process; systemd restarts it.
+type symlinkInstaller struct {
+	root       string
+	executable func() (string, error)
+	signal     func() error
+	uid        func() int
+	keep       int
+}
+
+func newSymlinkInstaller(opts DetectOptions) *symlinkInstaller {
+	return &symlinkInstaller{
+		root:       opts.InstallRoot,
+		executable: opts.Executable,
+		signal:     opts.Signal,
+		uid:        opts.UID,
+		keep:       RetainedReleases,
+	}
+}
+
+func (s *symlinkInstaller) releasesDir() string { return filepath.Join(s.root, releasesDirName) }
+func (s *symlinkInstaller) linkPath(name string) string {
+	return filepath.Join(s.root, name)
+}
+
+// Name implements Installer.
+func (s *symlinkInstaller) Name() string { return StrategySymlink }
+
+// Status implements Installer.
+func (s *symlinkInstaller) Status() InstallerStatus {
+	return InstallerStatus{Strategy: StrategySymlink, Supported: true}
+}
+
+// Preflight implements Installer: the running binary resolves under
+// <root>/releases/, <root>/current is a symlink owned by the hub user, and
+// the root and releases directories are writable.
+func (s *symlinkInstaller) Preflight(context.Context) error {
+	root, err := filepath.EvalSymlinks(s.root)
+	if err != nil {
+		return fmt.Errorf("install root %s not found", s.root)
+	}
+	releases := filepath.Join(root, releasesDirName)
+
+	exe, err := s.executable()
+	if err != nil {
+		return fmt.Errorf("cannot determine the running binary: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	rel, err := filepath.Rel(releases, exe)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || !strings.Contains(rel, string(filepath.Separator)) {
+		return fmt.Errorf("running binary %s is not under %s", exe, filepath.Join(s.root, releasesDirName))
+	}
+
+	current := s.linkPath(currentLinkName)
+	fi, err := os.Lstat(current)
+	if err != nil {
+		return fmt.Errorf("%s does not exist", current)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("%s is not a symlink", current)
+	}
+	if owner, ok := fileOwnerUID(fi); !ok || owner != s.uid() {
+		return fmt.Errorf("%s is not owned by the hub user (uid %d)", current, s.uid())
+	}
+
+	for _, dir := range []string{s.root, s.releasesDir()} {
+		if !isWritableDir(dir) {
+			return fmt.Errorf("%s is not writable by the hub user", dir)
+		}
+	}
+	return nil
+}
+
+// Stage implements Installer: it copies bin to releases/<tag>.partial/scion
+// and renames the directory to releases/<tag>. It refuses to replace the
+// release current points to.
+func (s *symlinkInstaller) Stage(_ context.Context, tag, bin string) (string, error) {
+	if !releaseDirRE.MatchString(tag) || strings.HasSuffix(tag, partialSuffix) {
+		return "", fmt.Errorf("invalid release name %q", tag)
+	}
+	final := filepath.Join(s.releasesDir(), tag)
+	partial := final + partialSuffix
+
+	if tag == s.linkTarget(currentLinkName) {
+		return "", fmt.Errorf("release %s is the active release", tag)
+	}
+
+	if err := os.RemoveAll(partial); err != nil {
+		return "", fmt.Errorf("remove stale %s: %w", partial, err)
+	}
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		return "", fmt.Errorf("create %s: %w", partial, err)
+	}
+	if err := copyExecutable(bin, filepath.Join(partial, binaryName)); err != nil {
+		_ = os.RemoveAll(partial)
+		return "", err
+	}
+	// A retained copy of the same tag (for example the one previous points
+	// to) is replaced by the freshly verified one.
+	if err := os.RemoveAll(final); err != nil {
+		_ = os.RemoveAll(partial)
+		return "", fmt.Errorf("remove old %s: %w", final, err)
+	}
+	if err := os.Rename(partial, final); err != nil {
+		_ = os.RemoveAll(partial)
+		return "", fmt.Errorf("rename %s into place: %w", partial, err)
+	}
+	return final, nil
+}
+
+// Activate implements Installer: previous is pointed at the old current
+// target, then current is swapped to the staged release with
+// symlink(current.new) + rename, which is atomic. If the current swap fails
+// previous is restored. Old releases are then pruned (best effort).
+func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
+	if filepath.Clean(filepath.Dir(staged)) != filepath.Clean(s.releasesDir()) {
+		return fmt.Errorf("staged release %s is not in %s", staged, s.releasesDir())
+	}
+	tag := filepath.Base(staged)
+	if fi, err := os.Stat(filepath.Join(staged, binaryName)); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("staged release %s has no %s binary", staged, binaryName)
+	}
+	target := filepath.Join(releasesDirName, tag)
+
+	oldCurrent, _ := os.Readlink(s.linkPath(currentLinkName))
+	oldPrevious, prevErr := os.Readlink(s.linkPath(prevLinkName))
+
+	swappedPrevious := false
+	if oldCurrent != "" && filepath.Base(oldCurrent) != tag {
+		if err := s.swapLink(prevLinkName, oldCurrent); err != nil {
+			return fmt.Errorf("update %s: %w", prevLinkName, err)
+		}
+		swappedPrevious = true
+	}
+	if err := s.swapLink(currentLinkName, target); err != nil {
+		if swappedPrevious {
+			if prevErr == nil {
+				_ = s.swapLink(prevLinkName, oldPrevious)
+			} else {
+				_ = os.Remove(s.linkPath(prevLinkName))
+			}
+		}
+		return fmt.Errorf("update %s: %w", currentLinkName, err)
+	}
+
+	_ = s.prune()
+	return nil
+}
+
+// Restart implements Installer: SIGTERM to this process.
+func (s *symlinkInstaller) Restart(context.Context) error {
+	return s.signal()
+}
+
+// Retained implements Installer: the release directories, newest first.
+func (s *symlinkInstaller) Retained() []InstalledRelease {
+	rels, _ := s.listReleases()
+	return rels
+}
+
+// swapLink atomically points <root>/<name> at target.
+func (s *symlinkInstaller) swapLink(name, target string) error {
+	link := s.linkPath(name)
+	tmp := link + ".new"
+	_ = os.Remove(tmp)
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// linkTarget returns the release directory name the given link points to,
+// or "" when the link does not exist.
+func (s *symlinkInstaller) linkTarget(name string) string {
+	t, err := os.Readlink(s.linkPath(name))
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(t)
+}
+
+func (s *symlinkInstaller) listReleases() ([]InstalledRelease, error) {
+	entries, err := os.ReadDir(s.releasesDir())
+	if err != nil {
+		return nil, err
+	}
+	current, previous := s.linkTarget(currentLinkName), s.linkTarget(prevLinkName)
+	var rels []InstalledRelease
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasSuffix(e.Name(), partialSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		rels = append(rels, InstalledRelease{
+			Tag:         e.Name(),
+			Path:        filepath.Join(s.releasesDir(), e.Name()),
+			InstalledAt: info.ModTime(),
+			Current:     e.Name() == current,
+			Previous:    e.Name() == previous,
+		})
+	}
+	sort.SliceStable(rels, func(i, j int) bool {
+		return rels[i].InstalledAt.After(rels[j].InstalledAt)
+	})
+	return rels, nil
+}
+
+// prune removes release directories beyond the newest s.keep, never the ones
+// current or previous point to.
+func (s *symlinkInstaller) prune() error {
+	rels, err := s.listReleases()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for i, r := range rels {
+		if i < s.keep || r.Current || r.Previous {
+			continue
+		}
+		if err := os.RemoveAll(r.Path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// copyExecutable copies src to dst (mode 0755) and syncs it to disk.
+func copyExecutable(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy to %s: %w", dst, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("sync %s: %w", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	return os.Chmod(dst, 0o755)
+}

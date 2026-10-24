@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -398,14 +399,14 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			ObjectPath: harnessConfigFileObjectPath,
 		}), nil
 	case "update-binary":
+		installer := s.detectUpdateInstaller()
 		log.Debug("Resolved update-binary executor",
-			"service_name", mc.ServiceName, "github_repo", mc.GitHubRepo,
+			"installer", installer.Name(), "github_repo", mc.GitHubRepo,
 			"release_channel", mc.ReleaseChannel)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			ServiceName: mc.ServiceName,
-			GitHubRepo:  mc.GitHubRepo,
-			Channel:     mc.ReleaseChannel,
-			Store:       s.store,
+			GitHubRepo: mc.GitHubRepo,
+			Channel:    mc.ReleaseChannel,
+			Installer:  installer,
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -461,7 +462,7 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
 		return
 	}
-	if len(recentRuns) > 0 && recentRuns[0].Status == store.MaintenanceStatusRunning {
+	if len(recentRuns) > 0 && maintenanceRunInFlight(recentRuns[0].Status) {
 		log.Debug("Rejected: operation already running",
 			maintenanceLogAttrs(key, "run_id", recentRuns[0].ID, "user", user.Email())...)
 		writeError(w, http.StatusConflict, ErrCodeConflict, "Operation is already running", map[string]interface{}{
@@ -478,12 +479,29 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	}
 	params := parseMigrationParams(body) // reuse same param parser
 
+	// Operations with a parameter allowlist refuse anything else, whatever
+	// its JSON type, before a run is created.
+	if allowed, ok := operationParamAllowlist[key]; ok {
+		if err := maintenance.CheckAllowedParams(rawRequestParams(body), allowed); err != nil {
+			writeMaintenanceRequestError(w, err)
+			return
+		}
+	}
+
 	// Resolve the executor.
 	executor, err := s.resolveMaintenanceExecutor(key)
 	if err != nil {
 		log.Error("Failed to resolve executor", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
+	}
+
+	if v, ok := executor.(maintenance.ParamValidator); ok {
+		if err := v.ValidateParams(params); err != nil {
+			log.Debug("Rejected: invalid parameters", maintenanceLogAttrs(key, "error", err)...)
+			writeMaintenanceRequestError(w, err)
+			return
+		}
 	}
 
 	// Create a run record.
@@ -504,50 +522,7 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 
 	log.Info("Operation started", maintenanceLogAttrs(key, "run_id", runID, "user", user.Email())...)
 
-	// Execute asynchronously.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("Operation executor panicked", maintenanceLogAttrs(key, "run_id", runID, "panic", fmt.Sprint(r))...)
-				finishedAt := time.Now()
-				run.CompletedAt = &finishedAt
-				run.Status = store.MaintenanceStatusFailed
-				result := map[string]interface{}{
-					"error": fmt.Sprintf("executor panic: %v", r),
-				}
-				resultJSON, _ := json.Marshal(result)
-				run.Result = string(resultJSON)
-				if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-					log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-				}
-			}
-		}()
-
-		var buf bytes.Buffer
-		execErr := executor.Run(context.Background(), &buf, params)
-
-		finishedAt := time.Now()
-		run.CompletedAt = &finishedAt
-		run.Log = buf.String()
-
-		if execErr != nil {
-			run.Status = store.MaintenanceStatusFailed
-			result := map[string]interface{}{
-				"error": execErr.Error(),
-			}
-			resultJSON, _ := json.Marshal(result)
-			run.Result = string(resultJSON)
-			log.Error("Operation failed", maintenanceLogAttrs(key, "run_id", runID, "error", execErr, "duration", finishedAt.Sub(run.StartedAt))...)
-			log.Debug("Operation failure log output", maintenanceLogAttrs(key, "run_id", runID, "log", buf.String())...)
-		} else {
-			run.Status = store.MaintenanceStatusCompleted
-			log.Info("Operation completed successfully", maintenanceLogAttrs(key, "run_id", runID, "duration", finishedAt.Sub(run.StartedAt))...)
-		}
-
-		if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-			log.Error("Failed to update run record", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-		}
-	}()
+	s.launchMaintenanceRun(run, executor, params)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"runId":  runID,
