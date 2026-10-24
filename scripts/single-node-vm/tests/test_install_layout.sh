@@ -544,7 +544,7 @@ test_layout_deploy_installs_binary_into_layout() {
   cmd="$(_layout_binary_install_cmd "$(gcloud_log)")"
   assert_contains "$cmd" "SCIONLAYOUTEOF" "the binary install must carry scion-layout.sh"
   # shellcheck disable=SC2016 # a literal from the generated command
-  assert_contains "$cmd" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
+  assert_contains "$cmd" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test "$SCION_EXTRACT_DIR/scion"' \
     "the verified binary must be installed as releases/<VERSION> through scion-layout.sh"
   assert_not_contains "$cmd" "sudo mv /tmp/scion /usr/local/bin/scion" \
     "the binary must no longer be moved over /usr/local/bin/scion"
@@ -607,7 +607,10 @@ test_layout_deploy_install_cmd_end_to_end_with_bogus_self_entry() {
     "the verified payload must land in releases/<VERSION>/scion"
   assert_eq "releases/v1.0.0-test" "$(readlink "$LH_ROOT/current")" "current must point at the installed release"
   assert_eq "$LH_ROOT/current/scion" "$(readlink "$LH_BIN")" "the CLI path must be the symlink"
-  assert_false "$([[ -e "${work}/scion" ]] && echo true || echo false)" "the extracted temp binary must be cleaned up"
+  assert_eq "" "$(find "$work" -maxdepth 1 -name 'scion-extract.*')" "the private extraction dir must be cleaned up"
+  # shellcheck disable=SC2016 # a literal from the generated command
+  assert_contains "$cmd" 'SCION_EXTRACT_DIR="$(mktemp -d /tmp/scion-extract.XXXXXX)"' \
+    "the tarball must be extracted into a fresh mktemp directory, not a fixed /tmp name"
   rm -rf "$fixdir" "$work" "$LH_DIR"
 }
 
@@ -932,7 +935,7 @@ test_layout_rerun_explicit_older_version_warns_and_proceeds() {
     "an explicit older nightly must be flagged as a downgrade"
   assert_contains "$DEPLOY_LOG" "Proceeding because --version was given explicitly" "the warning must say it proceeds, and why"
   # shellcheck disable=SC2016 # a literal from the generated command
-  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install nightly-20261001 /tmp/scion' \
+  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install nightly-20261001 "$SCION_EXTRACT_DIR/scion"' \
     "the explicit version must still be installed"
 
   _layout_rerun_with_version v1.0.0-test releases/v1.0.0
@@ -947,7 +950,7 @@ test_layout_rerun_explicit_newer_or_same_version_no_warning() {
     assert_not_contains "$DEPLOY_LOG" "DOWNGRADE" "no downgrade warning for v1.0.0-test over ${current}"
     assert_not_contains "$DEPLOY_LOG" "cannot be ordered" "no channel warning for v1.0.0-test over ${current}"
     # shellcheck disable=SC2016 # a literal from the generated command
-    assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
+    assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test "$SCION_EXTRACT_DIR/scion"' \
       "the explicit version must be installed over ${current}"
   done
   _layout_rerun_with_version nightly-20261024 releases/nightly-20261001
@@ -959,7 +962,7 @@ test_layout_rerun_explicit_cross_channel_version_warns() {
   assert_contains "$DEPLOY_LOG" "cannot be ordered (different channels)" \
     "a version on another channel must get a may-be-a-downgrade warning"
   # shellcheck disable=SC2016 # a literal from the generated command
-  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test /tmp/scion' \
+  assert_contains "$(gcloud_log)" 'sudo bash "$SCION_LAYOUT_SH" install v1.0.0-test "$SCION_EXTRACT_DIR/scion"' \
     "and still be installed"
 }
 
@@ -1616,7 +1619,7 @@ EOF
     else
       assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" \
         "a root-owned <root> whose parent is not root's must be refused, not resumed"
-      assert_contains "$LAYOUT_OUT" "found: directory, root, 755" "the refusal must say what was found"
+      assert_contains "$LAYOUT_OUT" "is owned by mallory, not root" "the refusal must name the unsafe parent, not <root>"
     fi
     rm -rf "$LH_DIR"
   done
@@ -1751,7 +1754,99 @@ test_layout_fresh_create_requires_safe_parent() {
     bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
   LAYOUT_RC=$?
   assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a parent owned by another user must be refused (output: ${LAYOUT_OUT})"
-  assert_contains "$LAYOUT_OUT" "must be owned by root" "the refusal must say why"
+  assert_contains "$LAYOUT_OUT" "is owned by mallory, not root" "the refusal must say why"
   assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created under a parent owned by another user"
   rm -rf "$LH_DIR"
+}
+
+# =====================================================================
+# F2/F3 review round 1: whole ancestor chains, plain bin link dir
+# =====================================================================
+
+# R1: a plain <bin-link> in a directory another user controls could be
+# swapped between the check and root's copy, so root must not read it:
+# the owner step gets the raw path. (stat stub: the bin dir is mallory's.)
+test_layout_adopt_plain_bin_link_in_unsafe_dir_is_read_by_owner() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log" bindir
+  bindir="$(dirname "$LH_BIN")"
+  _layout_root_stubs "$stub" "$log"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/mallory}"; fi\nprintf "%%s\\n" "$out"\n' \
+    "$bindir" > "${stub}/stat"
+  chmod 0755 "${stub}/stat"
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
+  assert_eq "0" "$?" "the adopt must succeed through the owner step (output: ${LAYOUT_OUT})"
+  assert_contains "$(cat "$log")" "__as-owner nightly-20261001 ${LH_BIN}" \
+    "a plain <bin-link> in a directory another user controls must be handed to the owner as the raw path"
+  assert_not_contains "$(cat "$log")" "scion-layout-input." "root must not copy it"
+  rm -rf "$LH_DIR"
+}
+
+# R2 + N2 + N3: every ancestor of <root> counts, a symlinked ancestor is
+# named as such, and nothing is created before the check.
+test_layout_fresh_create_checks_whole_ancestor_chain() {
+  # Unsafe grandparent (group-writable), safe existing parent.
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  chmod 0755 "$(dirname "$LH_ROOT")"
+  chmod 0775 "$LH_DIR"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a group-writable grandparent must be refused"
+  assert_contains "$LAYOUT_OUT" "${LH_DIR} is writable by group or others" "the refusal must name the unsafe ancestor"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created under an unsafe ancestor"
+  chmod 0700 "$LH_DIR"
+  rm -rf "$LH_DIR"
+
+  # N3: the parent does not exist yet and the grandparent is unsafe: the
+  # check runs on the nearest existing ancestor first, so the parent is
+  # never created.
+  _layout_new_host
+  chmod 0775 "$LH_DIR"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a missing parent under an unsafe ancestor must be refused"
+  assert_false "$([[ -e "$(dirname "$LH_ROOT")" ]] && echo true || echo false)" "the missing parent must not be created before the check"
+  chmod 0700 "$LH_DIR"
+  rm -rf "$LH_DIR"
+
+  # N2: a symlinked parent is refused and named as a symlink.
+  _layout_new_host
+  mkdir -m 0755 "${LH_DIR}/real-opt"
+  ln -s "${LH_DIR}/real-opt" "$(dirname "$LH_ROOT")"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked parent must be refused"
+  assert_contains "$LAYOUT_OUT" "$(dirname "$LH_ROOT") is a symlink" "the refusal must say it is a symlink"
+  assert_eq "" "$(ls -A "${LH_DIR}/real-opt")" "nothing may be created through the symlinked parent"
+  rm -rf "$LH_DIR"
+
+  # A sticky world-writable ancestor (like /tmp) is fine.
+  _layout_new_host
+  chmod 1777 "$LH_DIR"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_eq "0" "$LAYOUT_RC" "a sticky world-writable ancestor must be accepted (output: ${LAYOUT_OUT})"
+  chmod 0700 "$LH_DIR"
+  rm -rf "$LH_DIR"
+}
+
+# FYI-2: chat plugins are extracted into a fresh mktemp directory and
+# copied into the scion user's plugins directory by that user; root no
+# longer moves or chowns anything there.
+test_layout_deploy_plugin_installed_by_scion_user() {
+  fresh_gcloud_state
+  layout_deploy_through_settings "$(layout_config_json "$HUB" auto | sed 's/"chat_plugins": \[\]/"chat_plugins": ["telegram"]/')"
+  local log
+  log="$(gcloud_log)"
+  # shellcheck disable=SC2016 # literals from the generated command
+  assert_contains "$log" 'PLUGIN_EXTRACT_DIR="$(mktemp -d /tmp/scion-extract.XXXXXX)"' "plugins must be extracted into a fresh directory"
+  # shellcheck disable=SC2016
+  assert_contains "$log" 'sudo -u scion install -m 0755 "$PLUGIN_EXTRACT_DIR/scion-plugin-telegram" /home/scion/.scion/plugins/broker/scion-plugin-telegram' \
+    "the plugin must be copied in by the scion user"
+  assert_not_contains "$log" "sudo chown scion:scion /home/scion/.scion/plugins" "root must not chown inside the plugins directory"
+  assert_not_contains "$log" "sudo mv /tmp/scion-plugin" "root must not move a fixed /tmp name into the plugins directory"
 }

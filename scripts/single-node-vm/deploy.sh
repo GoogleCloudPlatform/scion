@@ -2753,9 +2753,12 @@ else
       echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
       exit 1
     fi
-    tar -xzf /tmp/${SCION_ARCHIVE} -C /tmp
-$(install_layout_command install "${VERSION}" /tmp/scion)
-    rm -f /tmp/scion /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
+    # Extract into a fresh private directory, not a fixed /tmp name another
+    # local user could pre-create; root (scion-layout.sh) reads the binary.
+    SCION_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+    tar -xzf /tmp/${SCION_ARCHIVE} -C \"\$SCION_EXTRACT_DIR\"
+$(install_layout_command install "${VERSION}" "\"\$SCION_EXTRACT_DIR/scion\"")
+    rm -rf \"\$SCION_EXTRACT_DIR\" /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
     "
 fi
@@ -2792,11 +2795,14 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
           echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
           exit 1
         fi
-        tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
-        sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -f /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
+        # Extract into a fresh private directory (not a fixed /tmp name),
+        # then let the scion user copy the plugin into its own plugins
+        # directory: root never writes or chowns inside a scion-owned tree.
+        PLUGIN_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+        tar -xzf /tmp/${PLUGIN_ARCHIVE} -C \"\$PLUGIN_EXTRACT_DIR\"
+        chmod 0755 \"\$PLUGIN_EXTRACT_DIR\" \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\"
+        sudo -u scion install -m 0755 \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\" /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
+        rm -rf \"\$PLUGIN_EXTRACT_DIR\" /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done

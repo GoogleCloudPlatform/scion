@@ -271,6 +271,13 @@ If something goes wrong, the command stops at that step:
   and hands it to `scion`. Its parent, `/opt`, must be owned by root and not
   writable by group or others (the image default, `root 0755`). Otherwise
   `/opt/scion` is neither created nor resumed.
+- **`/usr/local/bin/scion` is a symlink to a binary only root can read**
+  (for example a hand-made `/usr/local/bin/scion -> /usr/local/lib/scion`
+  at mode 0700). A binary reached through a symlink is copied by the
+  `scion` user, not by root, so `migrate-layout` (and a `deploy.sh` re-run
+  over the old layout) stops with "input unreadable by scion". Make the
+  binary readable (`sudo chmod 0755 …`), or replace the symlink with the
+  plain binary, and re-run.
 - **The settings edit is refused.** This happens if the file has a shape the
   script cannot edit safely (for example a flow-style `maintenance: {...}`),
   or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this

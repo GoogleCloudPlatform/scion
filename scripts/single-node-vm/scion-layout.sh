@@ -144,8 +144,12 @@ ensure_root() {
   local d parent
   parent="$(dirname "$INSTALL_ROOT")"
   if [[ ! -e "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]]; then
-    mkdir -p "$parent"
-    parent_is_safe "$parent" || die "$parent (the parent of $INSTALL_ROOT) must be owned by root and not writable by group or others; refusing to create $INSTALL_ROOT there"
+    # Check before creating anything: the nearest existing ancestor and
+    # everything above it. Missing parents are then made 0755, and the
+    # full chain is checked again.
+    dir_chain_is_safe "$(nearest_existing "$parent")" || unsafe_parent_die
+    (umask 022 && mkdir -p "$parent")
+    dir_chain_is_safe "$parent" || unsafe_parent_die
     mkdir -m 0755 "$INSTALL_ROOT"
     build_and_hand_over "created"
     return 0
@@ -155,8 +159,11 @@ ensure_root() {
   # root-owned parent, so the owner cannot have touched its entries and
   # root may safely finish the job.
   if [[ "$(owner_user)" != "root" \
-        && "$(stat -c '%F|%U' -- "$INSTALL_ROOT")" == "directory|root" \
-        && "$(stat -c '%U' -- "$parent")" == "root" ]] && parent_is_safe "$parent"; then
+        && "$(stat -c '%F|%U' -- "$INSTALL_ROOT")" == "directory|root" ]]; then
+    if [[ "$(stat -c '%U' -- "$parent")" != "root" ]] || ! dir_chain_is_safe "$parent"; then
+      [[ "$(stat -c '%U' -- "$parent")" == "root" ]] || UNSAFE_REASON="$parent is owned by $(stat -c '%U' -- "$parent"), not root"
+      unsafe_parent_die
+    fi
     build_and_hand_over "resumed the handover of"
     return 0
   fi
@@ -168,19 +175,58 @@ ensure_root() {
   done
 }
 
-# parent_is_safe DIR -- DIR (the parent of <root>) is a real directory
-# owned by root (or by the user running this, for unprivileged tests) and
-# not writable by group or others, so the owner cannot replace <root>
-# while root builds it. /opt on the VM image is root 0755.
-parent_is_safe() {
-  local info owner mode
-  info="$(stat -c '%F|%U|%a' -- "$1")" || return 1
-  [[ "${info%%|*}" == "directory" ]] || return 1
-  owner="$(cut -d'|' -f2 <<< "$info")"
-  mode="${info##*|}"
-  [[ "$owner" == "root" || "$owner" == "$(id -un)" ]] || return 1
-  # No group (020) or other (002) write bit.
-  (( (8#$mode & 8#022) == 0 ))
+# dir_is_safe DIR -- DIR is a real directory (not a symlink) owned by root
+# (or by the user running this, for unprivileged tests), and not writable
+# by group or others unless it is sticky (like /tmp, whose entries other
+# users cannot rename or remove). Inspected with stat, which does not
+# follow a final symlink. On failure sets UNSAFE_REASON.
+dir_is_safe() {
+  local info type owner mode
+  info="$(stat -c '%F|%U|%a' -- "$1" 2>/dev/null)" || { UNSAFE_REASON="$1 cannot be inspected"; return 1; }
+  IFS='|' read -r type owner mode <<< "$info"
+  if [[ "$type" == "symbolic link" ]]; then
+    UNSAFE_REASON="$1 is a symlink"
+    return 1
+  fi
+  if [[ "$type" != "directory" ]]; then
+    UNSAFE_REASON="$1 is not a directory ($type)"
+    return 1
+  fi
+  if [[ "$owner" != "root" && "$owner" != "$(id -un)" ]]; then
+    UNSAFE_REASON="$1 is owned by $owner, not root"
+    return 1
+  fi
+  # Group (020) or other (002) write is only acceptable with the sticky bit.
+  if (( (8#$mode & 8#022) != 0 && (8#$mode & 8#1000) == 0 )); then
+    UNSAFE_REASON="$1 is writable by group or others (mode $mode)"
+    return 1
+  fi
+}
+
+# dir_chain_is_safe DIR -- dir_is_safe for DIR and every ancestor up to /.
+# Any owner-writable ancestor would let the owner swap the directories
+# below it after the check.
+dir_chain_is_safe() {
+  local d="$1"
+  while :; do
+    dir_is_safe "$d" || return 1
+    [[ "$d" == "/" ]] && return 0
+    d="$(dirname "$d")"
+  done
+}
+
+# nearest_existing DIR -- DIR, or its closest ancestor that exists.
+nearest_existing() {
+  local d="$1"
+  while [[ ! -e "$d" && ! -L "$d" ]]; do
+    d="$(dirname "$d")"
+  done
+  printf '%s' "$d"
+}
+
+# unsafe_parent_die -- refuse with the reason the parent chain is unsafe.
+unsafe_parent_die() {
+  die "$UNSAFE_REASON; the directories above $INSTALL_ROOT must be real directories owned by root and not writable by group or others. Refusing to set up $INSTALL_ROOT there."
 }
 
 # build_and_hand_over VERB -- with <root> a real directory only root can
@@ -243,17 +289,18 @@ stage_inputs() {
 }
 
 # adopt_reader -- who may read the binary being adopted: "root" only when
-# <bin-link> is a plain file, i.e. in root's own directory where only root
-# can replace it. If <bin-link> is a symlink it can lead anywhere, including
+# <bin-link> is a plain file in a directory chain only root can change
+# (dir_chain_is_safe; /usr/local/bin on the VM), so it cannot be swapped
+# between this check and root's copy. If <bin-link> is a symlink it can lead anywhere, including
 # through <root> (e.g. <root>/current/scion with current a directory),
 # where the owner can swap the file after its version was read; that copy
 # is then made by the owner step ("owner"), so root never reads through an
 # owner-controlled path.
 adopt_reader() {
-  if [[ -L "$BIN_LINK" ]]; then
-    echo owner
-  else
+  if [[ ! -L "$BIN_LINK" ]] && dir_chain_is_safe "$(dirname "$BIN_LINK")"; then
     echo root
+  else
+    echo owner
   fi
 }
 
