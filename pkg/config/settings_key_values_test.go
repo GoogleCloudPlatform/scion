@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -172,10 +173,11 @@ func TestDecodeSettingsKey_SplitsCommaSeparatedListEnv(t *testing.T) {
 // TestDecodeSettingsKey_ListEnvMatchesBootstrapMerge covers every list-typed
 // setting the SCION_SERVER_* table holds: set as a comma-separated variable,
 // the value env_values decodes from the env layer (LoadEnvKoanf, then
-// DecodeSettingsKey) equals the value the hub's bootstrap merge
-// (LoadBootstrapKoanf: the same env provider, then splitCommaSeparatedKoanfKeys)
-// gives the same key. The keys the bootstrap splits (commaSplitKoanfKeys)
-// decode to two elements; the others keep the single string, in both.
+// DecodeSettingsKey) has the same entries as the value the hub's bootstrap
+// merge itself holds for the key (LoadBootstrapKoanf().Get, read directly, so
+// the bootstrap side does not go through DecodeSettingsKey). The keys the
+// bootstrap splits (commaSplitKoanfKeys) give two entries; the others keep
+// the single string, in both.
 func TestDecodeSettingsKey_ListEnvMatchesBootstrapMerge(t *testing.T) {
 	split := map[string]bool{}
 	for _, k := range commaSplitKoanfKeys {
@@ -213,20 +215,31 @@ func TestDecodeSettingsKey_ListEnvMatchesBootstrapMerge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			bvs, err := DecodeSettingsKey(LoadBootstrapKoanf(), e.Path)
-			if err != nil {
-				t.Fatalf("decode from the bootstrap merge: %v", err)
-			}
-			want, err := FlattenSettingsJSON(bvs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(got[e.Path], want[e.Path]) {
-				t.Errorf("env layer %#v != bootstrap merge %#v", got[e.Path], want[e.Path])
+			// The bootstrap merge's own value for the key: a list after its
+			// split, else the raw string (one entry).
+			var want []string
+			switch b := LoadBootstrapKoanf().Get(e.Path).(type) {
+			case []any:
+				for _, x := range b {
+					want = append(want, fmt.Sprint(x))
+				}
+			case []string:
+				want = append(want, b...)
+			case string:
+				want = []string{b}
+			default:
+				t.Fatalf("bootstrap merge value %#v (%T) is neither a list nor a string", b, b)
 			}
 			list, ok := got[e.Path].([]any)
 			if !ok {
 				t.Fatalf("decoded value %#v is not a list", got[e.Path])
+			}
+			var have []string
+			for _, x := range list {
+				have = append(have, fmt.Sprint(x))
+			}
+			if !reflect.DeepEqual(have, want) {
+				t.Errorf("env layer entries %#v != bootstrap merge entries %#v", have, want)
 			}
 			wantN := 1
 			if split[e.Path] {
