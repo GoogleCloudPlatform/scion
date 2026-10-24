@@ -206,6 +206,8 @@ func moduleFieldUses(t *testing.T, names map[string]bool, skip ...string) []stri
 	}
 	var uses []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module from its root: SkipDir only for the module-relative directories in skipDirs (.git, node_modules, web, docs-site, extras, vendor, .scion and the caller's pkg/store and pkg/ent), so it covers every package directory below pkg/hub.
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
