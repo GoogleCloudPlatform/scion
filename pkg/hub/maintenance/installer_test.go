@@ -693,6 +693,12 @@ func TestSymlinkInstaller_LinkValidation(t *testing.T) {
 			}
 			replaceLink(t, root, prevLinkName, "releases/sneaky")
 		}, "resolves outside"},
+		{"previous is the install root", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, ".")
+		}, "resolves outside"},
+		{"previous is the releases directory", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, "releases")
+		}, "resolves outside"},
 		{"previous dangling", func(t *testing.T, root string) {
 			replaceLink(t, root, prevLinkName, "releases/gone")
 		}, "does not resolve"},
@@ -751,7 +757,8 @@ func TestSymlinkInstaller_LinkValidation(t *testing.T) {
 		replaceLink(t, root, prevLinkName, "releases/gone")
 		err := newSymlinkInstaller(symlinkOpts(root)).Preflight(ctx)
 		prev := filepath.Join(root, prevLinkName)
-		if err == nil || !strings.Contains(err.Error(), "repoint "+prev) || !strings.Contains(err.Error(), "or remove it") {
+		if err == nil || !strings.Contains(err.Error(), "repoint "+prev) || !strings.Contains(err.Error(), "or remove it") ||
+			!strings.Contains(err.Error(), "as the hub user") {
 			t.Fatalf("Preflight = %v, want an actionable fix for %s", err, prev)
 		}
 	})
