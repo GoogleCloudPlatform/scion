@@ -1282,10 +1282,12 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 }
 
 // rollbackPlacement fails the delete for a placement refusal (the claimed
-// snapshot's check or the dispatcher's backstop): nothing was dispatched,
-// so it rolls back as a conflict and restores the prior phase. The stored
-// deletion code stays conflict; the outcome carries the refusal, so the
-// answer names the specific placement code, as the claim's pre-check does
+// snapshot's check, the dispatcher's backstop on the first dispatch, or its
+// backstop on the delete of the run the broker reported holding,
+// retryReportedRunDelete): nothing was deleted, so it rolls back as a
+// conflict and restores the prior phase. The stored deletion code stays
+// conflict; the outcome carries the refusal, so the answer names the
+// specific placement code, as the claim's pre-check does
 // (writeDeletionFailureWithRefusal). The refusal is remembered for this
 // claim before the rollback publishes, so a joiner on this hub process
 // woken by that event already finds it (deletionPlacementRefusals).
