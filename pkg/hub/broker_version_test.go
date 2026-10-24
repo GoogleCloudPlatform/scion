@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,14 +177,14 @@ type hubInstancesProbeStore struct {
 	store.Store
 	fault *storeFaultSwitch
 	fail  bool
-	reads int
+	reads atomic.Int32
 }
 
 func (f *hubInstancesProbeStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
 	if !f.fault.Active() {
 		return f.Store.ListHubInstances(ctx, window)
 	}
-	f.reads++
+	f.reads.Add(1)
 	if f.fail {
 		return nil, time.Time{}, errors.New("registry unavailable")
 	}
@@ -231,7 +232,7 @@ func TestHealthSummary_OneRegistryRead(t *testing.T) {
 	fault.Arm()
 
 	resp, _ := getHealthSummary(t, srv)
-	assert.Equal(t, 1, probe.reads, "one ListHubInstances per summary")
+	assert.Equal(t, int32(1), probe.reads.Load(), "one ListHubInstances per summary")
 	assert.Equal(t, "v1.2.0", resp.Hub.Version)
 	require.Len(t, resp.Brokers.Items, 1)
 	assert.Equal(t, "match", resp.Brokers.Items[0].VersionStatus)
