@@ -1318,10 +1318,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
-			if override.Cloud.TLS.CertFile != "" {
+			// The client certificate and its key are one setting: a layer
+			// that sets either replaces both, so the pair never mixes
+			// files from different layers. A layer that sets only one
+			// leaves the other empty, which ValidateTelemetryTLS reports.
+			if override.Cloud.TLS.CertFile != "" || override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
-			}
-			if override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}
