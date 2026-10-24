@@ -117,6 +117,15 @@ const (
 	// confirm the reload. The credential file is in place; the hub relays the
 	// code to the caller.
 	BrokerErrCodeReloadUnconfirmed = "reload_unconfirmed"
+
+	// BrokerErrCodeAgentSlugHeld marks a create, start or restart refused
+	// because the agent's slug is held in the project by another agent of a
+	// flat Runtime Broker instance: this instance, or another instance of the
+	// same host (409). The error details carry "slug", "holderAgentId" (the
+	// holding agent's ID) and "runtimeBrokerId" (the instance holding it). A
+	// slug still held by an unconfirmed delete, or a reservation that cannot
+	// be read, does not use this code.
+	BrokerErrCodeAgentSlugHeld = "agent_slug_held"
 )
 
 // ReloadUnconfirmedMessage is the caller-facing text for
