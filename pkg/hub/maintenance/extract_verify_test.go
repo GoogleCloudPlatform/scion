@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,32 +432,66 @@ func paxRecord(k, v string) string {
 	}
 }
 
-// sparseScionTarball returns a gzipped tar whose only entry is a PAX
-// GNU-sparse 1.0 file named "scion" with the given real size: 4 bytes of
-// data, the rest holes that archive/tar synthesizes as zeros without
-// reading any input.
-func sparseScionTarball(t *testing.T, realsize int64) []byte {
+// PAX GNU sparse encodings understood by archive/tar.
+const (
+	sparseV00          = "0.0" // GNU.sparse.offset/numbytes pairs
+	sparseV01          = "0.1" // GNU.sparse.map, with version keys
+	sparseV01NoVersion = "0.1-no-version"
+	sparseV10          = "1.0" // map at the start of the data section
+)
+
+// sparseScionTarball returns a gzipped tar whose only entry is a PAX GNU
+// sparse file named "scion" in the given encoding, with the given real
+// size: 4 bytes of data, the rest holes that archive/tar synthesizes as
+// zeros without reading any input.
+func sparseScionTarball(t *testing.T, version string, realsize int64) []byte {
 	t.Helper()
+	size := fmt.Sprint(realsize)
+	var kvs [][2]string
+	name := "scion"
+	data := []byte("ABCD")
+	switch version {
+	case sparseV00:
+		kvs = [][2]string{{"GNU.sparse.size", size}, {"GNU.sparse.numblocks", "1"},
+			{"GNU.sparse.offset", "0"}, {"GNU.sparse.numbytes", "4"}}
+	case sparseV01:
+		kvs = [][2]string{{"GNU.sparse.major", "0"}, {"GNU.sparse.minor", "1"},
+			{"GNU.sparse.size", size}, {"GNU.sparse.numblocks", "1"}, {"GNU.sparse.map", "0,4"}}
+	case sparseV01NoVersion:
+		// No GNU.sparse.major/minor: archive/tar still guesses 0.1 from
+		// the map, so the check must not key on the version records.
+		kvs = [][2]string{{"GNU.sparse.realsize", size}, {"GNU.sparse.numblocks", "1"}, {"GNU.sparse.map", "0,4"}}
+	case sparseV10:
+		kvs = [][2]string{{"GNU.sparse.major", "1"}, {"GNU.sparse.minor", "0"},
+			{"GNU.sparse.name", "scion"}, {"GNU.sparse.realsize", size}}
+		name = "GNUSparseFile.0/scion"
+		data = append(padTarBlock([]byte("1\n0\n4\n")), data...)
+	default:
+		t.Fatalf("unknown sparse version %q", version)
+	}
 	var recs string
-	for _, kv := range [][2]string{
-		{"GNU.sparse.major", "1"}, {"GNU.sparse.minor", "0"},
-		{"GNU.sparse.name", "scion"}, {"GNU.sparse.realsize", fmt.Sprint(realsize)},
-	} {
+	for _, kv := range kvs {
 		recs += paxRecord(kv[0], kv[1])
 	}
-	data := append(padTarBlock([]byte("1\n0\n4\n")), "ABCD"...)
 	var raw []byte
 	raw = append(raw, rawTarBlock("PaxHeaders/scion", 'x', int64(len(recs)))...)
 	raw = append(raw, padTarBlock([]byte(recs))...)
-	raw = append(raw, rawTarBlock("GNUSparseFile.0/scion", '0', int64(len(data)))...)
+	raw = append(raw, rawTarBlock(name, '0', int64(len(data)))...)
 	raw = append(raw, padTarBlock(data)...)
 	raw = append(raw, make([]byte, 1024)...)
 
-	// The fixture really is sparse: archive/tar reports the real size and
-	// produces it from a ~2 KiB stream.
-	hdr, err := tar.NewReader(bytes.NewReader(raw)).Next()
-	if err != nil || hdr.Name != "scion" || hdr.Size != realsize {
-		t.Fatalf("sparse fixture not parsed as sparse: hdr=%+v err=%v", hdr, err)
+	// The fixture really is sparse: archive/tar reports it as a regular
+	// "scion" of the real size and produces that many bytes from a ~2 KiB
+	// stream.
+	tr := tar.NewReader(bytes.NewReader(raw))
+	hdr, err := tr.Next()
+	if err != nil || hdr.Name != "scion" || hdr.Typeflag != tar.TypeReg || hdr.Size != realsize {
+		t.Fatalf("%s fixture not parsed as sparse: hdr=%+v err=%v", version, hdr, err)
+	}
+	if realsize <= 1<<20 {
+		if n, err := io.Copy(io.Discard, tr); err != nil || n != realsize {
+			t.Fatalf("%s fixture produced %d bytes (%v), want %d", version, n, err, realsize)
+		}
 	}
 
 	var buf bytes.Buffer
@@ -473,18 +508,20 @@ func sparseScionTarball(t *testing.T, realsize int64) []byte {
 func TestExtractScionBinary_SparseAndDeclaredSize(t *testing.T) {
 	const testCap = 1 << 20
 
-	t.Run("sparse scion entry is refused", func(t *testing.T) {
-		// Real size under the cap: refused for being sparse, not for size.
-		_, err := extractTarball(t, sparseScionTarball(t, 64<<10), testCap)
-		if err == nil || !strings.Contains(err.Error(), "sparse") {
-			t.Fatalf("err = %v, want sparse-entry refusal", err)
-		}
-	})
+	for _, v := range []string{sparseV00, sparseV01, sparseV01NoVersion, sparseV10} {
+		t.Run("sparse "+v+" scion entry is refused", func(t *testing.T) {
+			// Real size under the cap: refused for being sparse, not for size.
+			_, err := extractTarball(t, sparseScionTarball(t, v, 64<<10), testCap)
+			if err == nil || !strings.Contains(err.Error(), "sparse") {
+				t.Fatalf("err = %v, want sparse-entry refusal", err)
+			}
+		})
+	}
 
 	t.Run("sparse scion entry beyond the cap writes nothing", func(t *testing.T) {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "release.tar.gz")
-		if err := os.WriteFile(p, sparseScionTarball(t, 8*testCap), 0o644); err != nil {
+		if err := os.WriteFile(p, sparseScionTarball(t, sparseV10, 8*testCap), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := extractScionBinary(p, dir, &bytes.Buffer{}, testCap); err == nil {
@@ -521,14 +558,68 @@ func TestExtractScionBinary_SparseAndDeclaredSize(t *testing.T) {
 		}
 	})
 
-	t.Run("declared size exactly at the cap is accepted", func(t *testing.T) {
-		// The stream cap also counts headers, so give it room; the entry
-		// itself is exactly maxBytes.
+	t.Run("declared size under the cap is accepted", func(t *testing.T) {
+		// The stream cap also counts the 512-byte header, so through
+		// extractScionBinary an entry can never be exactly maxBytes; the
+		// exact bound is tested on writeExtracted directly.
 		body := make([]byte, 4096)
 		if _, err := extractTarball(t, orderedTarball(t, tarEntry{name: "scion", body: body}), int64(len(body))+4096); err != nil {
 			t.Fatalf("extract: %v", err)
 		}
 	})
+}
+
+func TestExtractScionBinary_StreamCapMidCopyCleansUp(t *testing.T) {
+	// The header fits and declares less than the cap, but header plus body
+	// exceed it, so the stream cap trips while the binary is being written.
+	body := make([]byte, 8192)
+	tarball := orderedTarball(t, tarEntry{name: "scion", body: body})
+	dir := t.TempDir()
+	p := filepath.Join(dir, "release.tar.gz")
+	if err := os.WriteFile(p, tarball, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := extractScionBinary(p, dir, &bytes.Buffer{}, int64(len(body))+100)
+	if !errors.Is(err, errExtractTooLarge) {
+		t.Fatalf("err = %v, want size-limit error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "extracted", "scion")); !os.IsNotExist(err) {
+		t.Fatalf("partial scion left behind: %v", err)
+	}
+}
+
+// boundedZeros yields zeros and counts what is read. It fails once more
+// than limit bytes are requested, so a copy that ignores its own bound
+// errors out instead of filling the disk.
+type boundedZeros struct {
+	read, limit int64
+}
+
+func (z *boundedZeros) Read(p []byte) (int, error) {
+	if z.read >= z.limit {
+		return 0, errors.New("read past the test's hard limit")
+	}
+	if int64(len(p)) > z.limit-z.read {
+		p = p[:z.limit-z.read]
+	}
+	clear(p)
+	z.read += int64(len(p))
+	return len(p), nil
+}
+
+func TestWriteExtracted_StopsReadingAtTheBound(t *testing.T) {
+	const bound = 4096
+	src := &boundedZeros{limit: 1 << 20} // effectively endless for this bound
+	dst := filepath.Join(t.TempDir(), "scion")
+	if err := writeExtracted(dst, src, bound); !errors.Is(err, errExtractTooLarge) {
+		t.Fatalf("err = %v, want size-limit error", err)
+	}
+	if src.read > bound+1 {
+		t.Fatalf("read %d bytes from the source, want at most bound+1 = %d", src.read, bound+1)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("oversize output left behind: %v", err)
+	}
 }
 
 func TestWriteExtracted_OutputBound(t *testing.T) {
