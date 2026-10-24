@@ -50,7 +50,7 @@ var errParentSourceUnresolved = errors.New("recorded source cannot be resolved")
 //     (step 5b3 and the step 7b restriction), and step 10 is the account's
 //     parent ceiling: the source recorded on the agent's assignment must
 //     currently hold gcp_service_account.assign on this account, within the
-//     recorded effect ceiling (EvaluateServiceAccountParentCeiling).
+//     recorded effect ceiling (the evaluator in authz_resource_parent_ceiling.go).
 //     Configured defaults, passthrough translation and past assignments
 //     grant nothing by themselves.
 //  2. With gcpIamCheckMode enforce, store.EvaluateActAs for that recorded
