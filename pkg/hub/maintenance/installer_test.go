@@ -655,3 +655,171 @@ func (r shellStartRunner) Start(name string, args ...string) (<-chan error, erro
 	_, _ = r.fakeRunner.Start(name, args...)
 	return ExecRunner{}.Start("sh", "-c", r.script)
 }
+
+// replaceLink points <root>/<name> at target (creating or replacing it).
+func replaceLink(t *testing.T, root, name, target string) {
+	t.Helper()
+	p := filepath.Join(root, name)
+	_ = os.Remove(p)
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSymlinkInstaller_LinkValidation(t *testing.T) {
+	ctx := context.Background()
+	outside := t.TempDir() // a real directory outside the install root
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		want  string
+	}{
+		{"previous outside releases (absolute)", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, outside)
+		}, "resolves outside"},
+		{"previous escaping with ..", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, "releases/../..")
+		}, "resolves outside"},
+		{"previous nested below a release", func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, releasesDirName, "nightly-20261021", "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			replaceLink(t, root, prevLinkName, "releases/nightly-20261021/sub")
+		}, "resolves outside"},
+		{"previous via a symlink that leaves releases", func(t *testing.T, root string) {
+			if err := os.Symlink(outside, filepath.Join(root, releasesDirName, "sneaky")); err != nil {
+				t.Fatal(err)
+			}
+			replaceLink(t, root, prevLinkName, "releases/sneaky")
+		}, "resolves outside"},
+		{"previous dangling", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, "releases/gone")
+		}, "does not resolve"},
+		{"previous is a directory", func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, prevLinkName), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a symlink"},
+		{"previous points at a file", func(t *testing.T, root string) {
+			replaceLink(t, root, prevLinkName, "releases/nightly-20261021/scion")
+		}, "resolves outside"},
+		{"current outside releases", func(t *testing.T, root string) {
+			replaceLink(t, root, currentLinkName, outside)
+		}, "resolves outside"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := installLayout(t, "nightly-20261022", "nightly-20261021")
+			// Keep the executable resolvable under releases/ even when the
+			// test repoints current.
+			opts := symlinkOpts(root)
+			opts.Executable = func() (string, error) {
+				return filepath.Join(root, releasesDirName, "nightly-20261022", binaryName), nil
+			}
+			tt.setup(t, root)
+			inst := newSymlinkInstaller(opts)
+
+			if err := inst.Preflight(ctx); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Preflight = %v, want %q", err, tt.want)
+			}
+
+			// Activate re-validates (Preflight may be stale) and changes nothing.
+			before, _ := os.Readlink(filepath.Join(root, currentLinkName))
+			staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = inst.Activate(ctx, staged)
+			if err == nil || !strings.Contains(err.Error(), "refusing to activate") || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Activate = %v, want refusal with %q", err, tt.want)
+			}
+			if after, _ := os.Readlink(filepath.Join(root, currentLinkName)); after != before {
+				t.Fatalf("current changed from %q to %q", before, after)
+			}
+		})
+	}
+
+	t.Run("valid previous passes", func(t *testing.T) {
+		root := installLayout(t, "nightly-20261022", "nightly-20261021")
+		replaceLink(t, root, prevLinkName, "releases/nightly-20261021")
+		if err := newSymlinkInstaller(symlinkOpts(root)).Preflight(ctx); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+	})
+
+	t.Run("previous owned by another user", func(t *testing.T) {
+		// The owner check is shared with current; checkReleaseLink is
+		// called directly so current's check does not fire first.
+		root := installLayout(t, "nightly-20261022", "nightly-20261021")
+		replaceLink(t, root, prevLinkName, "releases/nightly-20261021")
+		opts := symlinkOpts(root)
+		opts.UID = func() int { return os.Getuid() + 1 }
+		_, err := newSymlinkInstaller(opts).checkReleaseLink(prevLinkName)
+		if err == nil || !strings.Contains(err.Error(), "not owned by the hub user") {
+			t.Fatalf("checkReleaseLink = %v", err)
+		}
+	})
+}
+
+func TestSymlinkInstaller_DeactivateValidates(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (string, *symlinkInstaller) {
+		t.Helper()
+		root := installLayout(t, "nightly-20261022", "nightly-20261021")
+		replaceLink(t, root, prevLinkName, "releases/nightly-20261021")
+		inst := newSymlinkInstaller(symlinkOpts(root))
+		staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := inst.Activate(ctx, staged); err != nil {
+			t.Fatal(err)
+		}
+		return root, inst
+	}
+
+	t.Run("previous tampered after activation", func(t *testing.T) {
+		root, inst := setup(t)
+		replaceLink(t, root, prevLinkName, t.TempDir())
+		err := inst.Deactivate(ctx)
+		if err == nil || !strings.Contains(err.Error(), "refusing to roll back") {
+			t.Fatalf("Deactivate = %v, want refusal", err)
+		}
+		if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261023" {
+			t.Fatalf("current changed by a refused rollback: %q", cur)
+		}
+	})
+
+	t.Run("old current release removed", func(t *testing.T) {
+		root, inst := setup(t)
+		if err := os.RemoveAll(filepath.Join(root, releasesDirName, "nightly-20261022")); err != nil {
+			t.Fatal(err)
+		}
+		// previous points at the removed release too; drop it so the
+		// refusal comes from the restore target check.
+		if err := os.Remove(filepath.Join(root, prevLinkName)); err != nil {
+			t.Fatal(err)
+		}
+		err := inst.Deactivate(ctx)
+		if err == nil || !strings.Contains(err.Error(), "refusing to roll back") || !strings.Contains(err.Error(), "does not resolve") {
+			t.Fatalf("Deactivate = %v, want refusal", err)
+		}
+		if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261023" {
+			t.Fatalf("current = %q", cur)
+		}
+	})
+
+	t.Run("valid links roll back", func(t *testing.T) {
+		root, inst := setup(t)
+		if err := inst.Deactivate(ctx); err != nil {
+			t.Fatalf("Deactivate: %v", err)
+		}
+		if cur := readLink(t, root, currentLinkName); cur != "releases/nightly-20261022" {
+			t.Fatalf("current = %q", cur)
+		}
+		if prev := readLink(t, root, prevLinkName); prev != "releases/nightly-20261021" {
+			t.Fatalf("previous = %q", prev)
+		}
+	})
+}

@@ -83,8 +83,9 @@ func (s *symlinkInstaller) Status() InstallerStatus {
 }
 
 // Preflight implements Installer: the running binary resolves under
-// <root>/releases/, <root>/current is a symlink owned by the hub user, and
-// the root and releases directories are writable.
+// <root>/releases/, <root>/current (and <root>/previous, when present) is a
+// symlink owned by the hub user that resolves to a release directory
+// (checkReleaseLink), and the root and releases directories are writable.
 func (s *symlinkInstaller) Preflight(context.Context) error {
 	if !filepath.IsAbs(s.root) {
 		return fmt.Errorf("install root %q is not an absolute path", s.root)
@@ -107,16 +108,15 @@ func (s *symlinkInstaller) Preflight(context.Context) error {
 		return fmt.Errorf("running binary %s is not under %s", exe, filepath.Join(s.root, releasesDirName))
 	}
 
-	current := s.linkPath(currentLinkName)
-	fi, err := os.Lstat(current)
-	if err != nil {
-		return fmt.Errorf("%s does not exist", current)
+	if _, err := s.checkReleaseLink(currentLinkName); err != nil {
+		return err
 	}
-	if fi.Mode()&os.ModeSymlink == 0 {
-		return fmt.Errorf("%s is not a symlink", current)
-	}
-	if owner, ok := fileOwnerUID(fi); !ok || owner != s.uid() {
-		return fmt.Errorf("%s is not owned by the hub user (uid %d)", current, s.uid())
+	// previous is optional, but when present it must be as trustworthy as
+	// current: Activate records it and Deactivate restores it.
+	if s.linkExists(prevLinkName) {
+		if _, err := s.checkReleaseLink(prevLinkName); err != nil {
+			return err
+		}
 	}
 
 	for _, dir := range []string{s.root, s.releasesDir()} {
@@ -179,9 +179,20 @@ func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 	}
 	target := filepath.Join(releasesDirName, tag)
 
-	oldCurrent, _ := os.Readlink(s.linkPath(currentLinkName))
-	oldPrevious, prevErr := os.Readlink(s.linkPath(prevLinkName))
-	undo := &activation{oldCurrent: oldCurrent, oldPrevious: oldPrevious, hadPrevious: prevErr == nil}
+	// Both links are re-validated here (Preflight ran before the download),
+	// so the undo record only ever holds targets inside releases/.
+	oldCurrent, err := s.checkReleaseLink(currentLinkName)
+	if err != nil {
+		return fmt.Errorf("refusing to activate: %w", err)
+	}
+	undo := &activation{oldCurrent: oldCurrent}
+	if s.linkExists(prevLinkName) {
+		oldPrevious, err := s.checkReleaseLink(prevLinkName)
+		if err != nil {
+			return fmt.Errorf("refusing to activate: %w", err)
+		}
+		undo.oldPrevious, undo.hadPrevious = oldPrevious, true
+	}
 
 	swappedPrevious := false
 	if oldCurrent != "" && filepath.Base(oldCurrent) != tag {
@@ -201,7 +212,7 @@ func (s *symlinkInstaller) Activate(_ context.Context, staged string) error {
 	s.last = undo
 	s.mu.Unlock()
 
-	_ = s.prune(filepath.Base(oldPrevious))
+	_ = s.prune(filepath.Base(undo.oldPrevious))
 	return nil
 }
 
@@ -223,8 +234,18 @@ func (s *symlinkInstaller) Deactivate(context.Context) error {
 	if undo == nil {
 		return errors.New("no activation to undo")
 	}
-	if undo.oldCurrent == "" {
-		return errors.New("current did not exist before the activation; cannot restore it")
+	// Validate the links as they are now and the targets to restore, so a
+	// rollback never writes a link that points outside releases/.
+	for _, name := range []string{currentLinkName, prevLinkName} {
+		if name == prevLinkName && !s.linkExists(name) {
+			continue
+		}
+		if _, err := s.checkReleaseLink(name); err != nil {
+			return fmt.Errorf("refusing to roll back: %w", err)
+		}
+	}
+	if err := s.checkReleaseTarget(currentLinkName, undo.oldCurrent); err != nil {
+		return fmt.Errorf("refusing to roll back: previous %s target: %w", currentLinkName, err)
 	}
 	if err := s.swapLink(currentLinkName, undo.oldCurrent); err != nil {
 		return fmt.Errorf("restore %s: %w", currentLinkName, err)
@@ -233,16 +254,11 @@ func (s *symlinkInstaller) Deactivate(context.Context) error {
 }
 
 // restorePrevious points previous back at its pre-activation target, or
-// removes it if there was none (or its release has since been removed).
+// removes it if there was none (or that target is no longer a release
+// directory: a link outside releases/ is never written back).
 func (s *symlinkInstaller) restorePrevious(undo *activation) error {
-	if undo.hadPrevious {
-		resolved := undo.oldPrevious
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(s.root, resolved)
-		}
-		if _, err := os.Stat(resolved); err == nil {
-			return s.swapLink(prevLinkName, undo.oldPrevious)
-		}
+	if undo.hadPrevious && s.checkReleaseTarget(prevLinkName, undo.oldPrevious) == nil {
+		return s.swapLink(prevLinkName, undo.oldPrevious)
 	}
 	if err := os.Remove(s.linkPath(prevLinkName)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove %s: %w", prevLinkName, err)
@@ -259,6 +275,66 @@ func (s *symlinkInstaller) Restart(context.Context) error {
 func (s *symlinkInstaller) Retained() []InstalledRelease {
 	rels, _ := s.listReleases()
 	return rels
+}
+
+// linkExists reports whether <root>/<name> exists (as anything).
+func (s *symlinkInstaller) linkExists(name string) bool {
+	_, err := os.Lstat(s.linkPath(name))
+	return err == nil
+}
+
+// checkReleaseLink validates <root>/<name>: a symlink, owned by the hub
+// user, whose target resolves to a directory directly under
+// <root>/releases/. It returns the target as stored in the link.
+func (s *symlinkInstaller) checkReleaseLink(name string) (string, error) {
+	link := s.linkPath(name)
+	fi, err := os.Lstat(link)
+	if err != nil {
+		return "", fmt.Errorf("%s does not exist", link)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("%s is not a symlink", link)
+	}
+	if owner, ok := fileOwnerUID(fi); !ok || owner != s.uid() {
+		return "", fmt.Errorf("%s is not owned by the hub user (uid %d)", link, s.uid())
+	}
+	target, err := os.Readlink(link)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", link, err)
+	}
+	if err := s.checkReleaseTarget(name, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// checkReleaseTarget checks that a link target (relative to the root, or
+// absolute) resolves to a directory directly under <root>/releases/.
+func (s *symlinkInstaller) checkReleaseTarget(name, target string) error {
+	if target == "" {
+		return fmt.Errorf("%s has no target", name)
+	}
+	abs := target
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(s.root, abs)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("%s target %q does not resolve: %v", name, target, err)
+	}
+	releases, err := filepath.EvalSymlinks(s.releasesDir())
+	if err != nil {
+		return fmt.Errorf("%s not found", s.releasesDir())
+	}
+	rel, err := filepath.Rel(releases, resolved)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) ||
+		strings.Contains(rel, string(filepath.Separator)) {
+		return fmt.Errorf("%s target %q resolves outside %s", name, target, s.releasesDir())
+	}
+	if fi, err := os.Stat(resolved); err != nil || !fi.IsDir() {
+		return fmt.Errorf("%s target %q is not a release directory", name, target)
+	}
+	return nil
 }
 
 // swapLink atomically points <root>/<name> at target.
