@@ -39,8 +39,9 @@ import (
 //     lfs.url / lfs.pushurl, url.*.insteadof / pushinsteadof, http.proxy and
 //     remote.*.proxy; from url.<base>.*, http.<base>.* and lfs.<base>.* subsection
 //     headers; and from the <url> in an includeIf "hasconfig:remote.*.url:<url>"
-//     subsection (http/https/ftp/ftps userinfo removed; other schemes keep only the
-//     username; remote-helper "transport::url" forms handled recursively),
+//     subsection (http/https/ftp/ftps userinfo removed; any other scheme with a
+//     password has all userinfo removed, username-only kept; remote-helper
+//     "transport::url" forms handled recursively),
 //   - any such URL-valued key or subsection that is URL-shaped ("://") and cannot
 //     be parsed but still carries userinfo (the key is dropped entirely), and
 //   - a http.proxy or remote.*.proxy value in the schemeless proxy form
@@ -104,16 +105,15 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 		}
 		// includeIf "hasconfig:remote.*.url:<url>" — sanitize the <url> after the
 		// prefix; drop the key if that would drop.
-		const hasConfigPrefix = "hasconfig:remote.*.url:"
-		if v.Section == "includeif" && v.HasSubsection && strings.HasPrefix(v.Subsection, hasConfigPrefix) {
-			clean, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigPrefix):])
+		if v.Section == "includeif" && v.HasSubsection && strings.HasPrefix(v.Subsection, hasConfigURLPrefix) {
+			clean, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigURLPrefix):])
 			if drop {
 				note(notedKeyName(v))
 				continue
 			}
 			if changed {
 				note(notedKeyName(v))
-				v.Subsection = hasConfigPrefix + clean
+				v.Subsection = hasConfigURLPrefix + clean
 			}
 		}
 		// Userinfo in a url.<base>.*, http.<base>.* or lfs.<base>.* subsection (the
@@ -196,8 +196,8 @@ var helperPrefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*::`)
 //     sanitized recursively and the prefix re-prepended (changed/drop propagate).
 //   - A parseable http/https/ftp/ftps URL that carries userinfo has it removed
 //     entirely (changed).
-//   - A parseable URL of any other scheme that carries a password keeps only the
-//     username (e.g. ssh://u:pw@h -> ssh://u@h, socks5 likewise), changed; with no
+//   - A parseable URL of any other scheme that carries a password has ALL userinfo
+//     removed (e.g. ssh://u:pw@h -> ssh://h, socks5 likewise), changed; with no
 //     password it is kept unchanged (e.g. ssh://u@h, scp-like ssh users).
 //   - A string that will not parse but is URL-shaped ("://") and still carries
 //     userinfo before the path is dropped, so the userinfo cannot survive.
@@ -233,8 +233,10 @@ func sanitizeURLUserinfo(s string) (clean string, changed, drop bool) {
 				u.User = nil
 				return u.String(), true, false
 			default:
+				// Any other scheme: a password is non-functional or secret, so remove
+				// ALL userinfo; a username with no password is kept (e.g. ssh://git@h).
 				if _, hasPW := u.User.Password(); hasPW {
-					u.User = url.User(u.User.Username())
+					u.User = nil
 					return u.String(), true, false
 				}
 				return s, false, false
@@ -268,22 +270,36 @@ func dropSchemelessProxyUserinfo(s string) bool {
 	return strings.Contains(t[:at], ":")
 }
 
+// hasConfigURLPrefix is the includeIf condition prefix whose remainder is a URL
+// that may carry userinfo. It is shared by the redaction branch and notedKeyName so
+// both strip the same prefix before sanitizing the <url>.
+const hasConfigURLPrefix = "hasconfig:remote.*.url:"
+
 // notedKeyName returns a key name safe to record in the stripped list: a
 // subsection that carries userinfo is never included verbatim. The subsection is
 // run through sanitizeURLUserinfo — its cleaned form if that changed it,
-// "<redacted>" if it would be dropped — and any credential.<url> subsection is
-// always "<redacted>".
+// "<redacted>" if it would be dropped. Any credential.<url> subsection is always
+// "<redacted>"; for an includeIf "hasconfig:remote.*.url:<url>" subsection only the
+// <url> after the prefix can carry userinfo, so the name is redacted when sanitizing
+// that <url> would change or drop it.
 func notedKeyName(v gitConfigVar) string {
 	if !v.HasSubsection {
 		return v.Key()
 	}
 	sub := v.Subsection
-	if v.Section == "credential" {
+	switch {
+	case v.Section == "credential":
 		sub = "<redacted>"
-	} else if clean, changed, drop := sanitizeURLUserinfo(v.Subsection); drop {
-		sub = "<redacted>"
-	} else if changed {
-		sub = clean
+	case v.Section == "includeif" && strings.HasPrefix(v.Subsection, hasConfigURLPrefix):
+		if _, changed, drop := sanitizeURLUserinfo(v.Subsection[len(hasConfigURLPrefix):]); changed || drop {
+			sub = "<redacted>"
+		}
+	default:
+		if clean, changed, drop := sanitizeURLUserinfo(v.Subsection); drop {
+			sub = "<redacted>"
+		} else if changed {
+			sub = clean
+		}
 	}
 	return v.Section + "." + sub + "." + v.Name
 }

@@ -263,12 +263,16 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		"http::https://u:p@h/x": {"http::https://h/x", true, false},
 		// helper prefix over an unparseable URL-shaped remainder with userinfo: drop.
 		"http::https://u:p%zz@h/x": {"", false, true},
-		// ftp/ftps: userinfo removed entirely.
-		"ftp://u:p@h/x": {"ftp://h/x", true, false},
-		"ftps://u@h/x":  {"ftps://h/x", true, false},
-		// other schemes with a password: keep only the username.
-		"ssh://u:p@h/x":       {"ssh://u@h/x", true, false},
-		"socks5://u:p@h:1080": {"socks5://u@h:1080", true, false},
+		// http family (http/https/ftp/ftps): any userinfo removed, username-only too.
+		"ftp://u:p@h/x":  {"ftp://h/x", true, false},
+		"ftps://u@h/x":   {"ftps://h/x", true, false},
+		"git://u:p@h/x":  {"git://h/x", true, false},
+		"git://u@h/x":    {"git://u@h/x", false, false}, // git scheme, username only: kept
+		"file://u:p@h/x": {"file://h/x", true, false},
+		"file://u@h/x":   {"file://u@h/x", false, false}, // username only: kept
+		// Any other scheme with a password: ALL userinfo removed (no username kept).
+		"ssh://u:p@h/x":       {"ssh://h/x", true, false},
+		"socks5://u:p@h:1080": {"socks5://h:1080", true, false},
 		// Schemeless user:password@host is NOT handled by the shared helper (it is
 		// scp form for non-proxy keys); the proxy-only helper handles proxy keys.
 		"u:p@proxy.example:8080": {"u:p@proxy.example:8080", false, false},
@@ -281,6 +285,10 @@ func TestSanitizeURLUserinfo(t *testing.T) {
 		got, changed, drop := sanitizeURLUserinfo(in)
 		if got != want.want || changed != want.changed || drop != want.drop {
 			t.Errorf("sanitizeURLUserinfo(%q) = (%q,%v,%v), want (%q,%v,%v)", in, got, changed, drop, want.want, want.changed, want.drop)
+		}
+		// A changed/dropped result must not retain the synthetic password placeholder.
+		if (changed || drop) && strings.Contains(got, ":p") {
+			t.Errorf("sanitizeURLUserinfo(%q) result still contains a password: %q", in, got)
 		}
 	}
 }
@@ -547,6 +555,45 @@ func TestRedactGitConfigSecrets_ScpKeptAsRemoteAndBase(t *testing.T) {
 		}
 		if !strings.Contains(outStr, "[url \""+scp+"\"]") {
 			t.Errorf("scp %q: url base not kept:\n%s", scp, outStr)
+		}
+	}
+}
+
+// TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted asserts that the noted
+// key name for an includeIf "hasconfig:remote.*.url:<url>" key never carries the
+// <url>'s userinfo — it is recorded as includeif.<redacted>.path — across an http(s)
+// password, an ssh password, a remote-helper-prefixed url, and an unparseable url.
+// The "leaks userinfo" failure text is what the gate's mutant step selects on.
+func TestRedactGitConfigSecrets_IncludeIfHasconfigNamesRedacted(t *testing.T) {
+	cases := map[string]string{ // <url> after the prefix -> placeholder that must not leak
+		"https://iu:ip@ic.example/**":       "iu:ip",
+		"ssh://su:sp@sc.example/**":         "su:sp",
+		"http::https://hu:hp@hc.example/**": "hu:hp",
+		"https://zu:zp%zz@zc.example/**":    "zu:zp",
+	}
+	for form, placeholder := range cases {
+		in := strings.Join([]string{
+			"[includeIf \"hasconfig:remote.*.url:" + form + "\"]",
+			"\tpath = /x/.gitconfig",
+			"",
+		}, "\n")
+		out, stripped, err := RedactGitConfigSecrets([]byte(in))
+		if err != nil {
+			t.Fatalf("form %q: RedactGitConfigSecrets: %v", form, err)
+		}
+		joined := strings.Join(stripped, "\n")
+		foundRedacted := false
+		for _, s := range stripped {
+			if s == "includeif.<redacted>.path" {
+				foundRedacted = true
+				break
+			}
+		}
+		if !foundRedacted {
+			t.Errorf("includeIf hasconfig noted name leaks userinfo: form %q gave stripped=%v, want includeif.<redacted>.path", form, stripped)
+		}
+		if strings.Contains(joined, placeholder) || strings.Contains(string(out), placeholder) {
+			t.Errorf("includeIf hasconfig noted name leaks userinfo: placeholder %q present for form %q (stripped=%v)", placeholder, form, stripped)
 		}
 	}
 }
