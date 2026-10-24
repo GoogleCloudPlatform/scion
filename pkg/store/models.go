@@ -4388,7 +4388,8 @@ type EdgeDeactivationCause string
 const (
 	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
 	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
-	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// EdgeDeactivationDelegatorDeleted is recorded by a user delete on the
+	// edges where the deleted user is the delegator (ptone/scion#2143).
 	// Agent deletes deactivate only the edges where the agent is the
 	// delegate, and a project delete records agent_hard_delete on both
 	// sides. ValidEdgeDeactivationCause accepts it.
