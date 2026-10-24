@@ -993,9 +993,19 @@ test_deploy_create_tier_off_full_run_removes_temp_files() {
 # deploy.sh registers exactly one EXIT trap: a second registration would
 # replace, not extend, the first.
 test_deploy_sh_registers_a_single_exit_trap() {
-  local count
-  count="$(grep -cE '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" || true)"
+  local count remote
+  # The binary and plugin install commands each set an EXIT trap inside
+  # their remote --command string (it runs in the VM's shell, not in
+  # deploy.sh) to remove their private download dir; those are written
+  # with escaped quotes (\"\$SCION_EXTRACT_DIR\"), which only appear
+  # inside such double-quoted strings. Every other trap line is deploy.sh's
+  # own, and there must be exactly one.
+  # shellcheck disable=SC2016 # a regex for literal text in deploy.sh
+  remote='trap .rm -rf \\"\\\$(SCION|PLUGIN)_EXTRACT_DIR\\". EXIT'
+  count="$(grep -E '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" | grep -cvE "$remote" || true)"
   assert_eq "1" "$count" "deploy.sh must register exactly one EXIT trap"
+  assert_eq "2" "$(grep -cE "$remote" "$DEPLOY_SH" || true)" \
+    "the two remote install commands must each clean up their private dir with an EXIT trap"
 }
 
 # =====================================================================
