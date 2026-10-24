@@ -578,7 +578,9 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			// The admin test tier is on and U reads as an admin-kind test
 			// identity. Declared overlap: the test-identity clamp may also
 			// withdraw U's project admission (S4a), with the same cause.
+			// A fresh service, so no kind read from the base check is cached.
 			f.st.userKind = map[string]string{f.userID: store.UserKindTestHubAdmin}
+			f.a = NewAuthzService(f.st, slog.Default())
 			setAuthzTestAdminTier(f.a, func(string) bool { return true }, time.Now)
 			return base(f)
 		}, DenyCauseCeilingDelegatorLacksPermission, ""},
