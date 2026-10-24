@@ -891,9 +891,8 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 }
 
 // templateSyncPathSource reports whether arg names a template directory by
-// path rather than by template name: "." or "..", an absolute path, one
-// starting with ./ or ../, or one containing a path separator (template
-// names never do). For
+// path rather than by template name: "." or "..", an absolute path, or one
+// containing a path separator such as ./name (template names never do). For
 // a path it returns the template in that directory, made absolute, or an
 // error when it is not an existing directory. The template's name is derived
 // as config.FindTemplateWithContext derives it for an absolute path.
