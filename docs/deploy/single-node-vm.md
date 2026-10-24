@@ -270,7 +270,9 @@ If something goes wrong, the command stops at that step:
   an earlier first run stopped partway. The next run finishes setting it up
   and hands it to `scion`. Its parent, `/opt`, must be owned by root and not
   writable by group or others (the image default, `root 0755`). Otherwise
-  `/opt/scion` is neither created nor resumed.
+  `/opt/scion` is neither created nor resumed. The same rule applies to
+  `/usr/local/bin` and every directory above it, because root writes the
+  `scion` symlink there. The script refuses before changing anything.
 - **`/usr/local/bin/scion` is a symlink to a binary only root can read**
   (for example a hand-made `/usr/local/bin/scion -> /usr/local/lib/scion`
   at mode 0700). A binary reached through a symlink is copied by the

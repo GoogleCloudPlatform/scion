@@ -2732,15 +2732,20 @@ else
     --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
+    # Download, verify and extract inside a fresh private directory (never
+    # a fixed /tmp name another local user could pre-create); root
+    # (scion-layout.sh) reads the binary from it. Removed on any exit.
+    SCION_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+    trap 'rm -rf \"\$SCION_EXTRACT_DIR\"' EXIT
+    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o \"\$SCION_EXTRACT_DIR/${SCION_ARCHIVE}\"
     echo 'Downloading release checksums...'
-    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-      if grep -qE '^${EMPTY_SHA256} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
+      if grep -qE '^${EMPTY_SHA256} [ *]${SCION_ARCHIVE_RE}\$' \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
         echo 'ERROR: the SHA256SUMS entry for ${SCION_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
         exit 1
-      elif grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+      elif grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
         echo 'Verifying checksum...'
-        (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+        (cd \"\$SCION_EXTRACT_DIR\" && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
       elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
         echo 'WARNING: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
       else
@@ -2753,12 +2758,9 @@ else
       echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
       exit 1
     fi
-    # Extract into a fresh private directory, not a fixed /tmp name another
-    # local user could pre-create; root (scion-layout.sh) reads the binary.
-    SCION_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
-    tar -xzf /tmp/${SCION_ARCHIVE} -C \"\$SCION_EXTRACT_DIR\"
+    tar -xzf \"\$SCION_EXTRACT_DIR/${SCION_ARCHIVE}\" -C \"\$SCION_EXTRACT_DIR\"
 $(install_layout_command install "${VERSION}" "\"\$SCION_EXTRACT_DIR/scion\"")
-    rm -rf \"\$SCION_EXTRACT_DIR\" /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
+    rm -rf \"\$SCION_EXTRACT_DIR\"
     echo \"Installed scion binary (${VERSION})\"
     "
 fi
@@ -2776,13 +2778,17 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
       --command="
         set -euo pipefail
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
-        curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
-        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-          if grep -qE '^${EMPTY_SHA256} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+        # Download, verify and extract inside a fresh private directory
+        # (never a fixed /tmp name), removed on any exit.
+        PLUGIN_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+        trap 'rm -rf \"\$PLUGIN_EXTRACT_DIR\"' EXIT
+        curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_ARCHIVE}\"
+        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
+          if grep -qE '^${EMPTY_SHA256} [ *]${PLUGIN_ARCHIVE_RE}\$' \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
             echo 'ERROR: the SHA256SUMS entry for ${PLUGIN_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
             exit 1
-          elif grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
-            (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+          elif grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
+            (cd \"\$PLUGIN_EXTRACT_DIR\" && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
           elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
             echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
           else
@@ -2795,14 +2801,12 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
           echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
           exit 1
         fi
-        # Extract into a fresh private directory (not a fixed /tmp name),
-        # then let the scion user copy the plugin into its own plugins
-        # directory: root never writes or chowns inside a scion-owned tree.
-        PLUGIN_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
-        tar -xzf /tmp/${PLUGIN_ARCHIVE} -C \"\$PLUGIN_EXTRACT_DIR\"
+        tar -xzf \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_ARCHIVE}\" -C \"\$PLUGIN_EXTRACT_DIR\"
+        # The scion user copies the plugin into its own plugins directory:
+        # root never writes or chowns inside a scion-owned tree.
         chmod 0755 \"\$PLUGIN_EXTRACT_DIR\" \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\"
         sudo -u scion install -m 0755 \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\" /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -rf \"\$PLUGIN_EXTRACT_DIR\" /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
+        rm -rf \"\$PLUGIN_EXTRACT_DIR\"
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done

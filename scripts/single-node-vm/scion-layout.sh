@@ -68,8 +68,21 @@ INSTALL_ROOT="${SCION_INSTALL_ROOT:-/opt/scion}"
 BIN_LINK="${SCION_BIN_LINK:-/usr/local/bin/scion}"
 OWNER="${SCION_INSTALL_OWNER-scion:scion}"
 
+# canonical_abs PATH -- an absolute path in plain form: starts with /, no
+# empty, "." or ".." components, no trailing /. Everything below walks
+# paths with dirname and compares them as strings, which only terminates
+# and means what it says for such paths.
+canonical_abs() {
+  local p="$1"
+  [[ "$p" == /?* && "$p" != */ && "$p" != *//* ]] || return 1
+  [[ "/$p/" != */./* && "/$p/" != */../* ]]
+}
+
 log() { echo "scion-layout: $*"; }
 die() { echo "scion-layout: ERROR: $*" >&2; exit 1; }
+
+canonical_abs "$INSTALL_ROOT" || die "SCION_INSTALL_ROOT must be an absolute path without '.', '..', '//' or a trailing '/' (got '$INSTALL_ROOT')"
+canonical_abs "$BIN_LINK" || die "SCION_BIN_LINK must be an absolute path without '.', '..', '//' or a trailing '/' (got '$BIN_LINK')"
 
 # valid_tag TAG -- a release tag (nightly-20261023, v0.3.0-preview.4) or a
 # git build id (git-<sha12>). Same character rule as deploy.sh's VERSION
@@ -148,7 +161,7 @@ ensure_root() {
     # everything above it. Missing parents are then made 0755, and the
     # full chain is checked again.
     dir_chain_is_safe "$(nearest_existing "$parent")" || unsafe_parent_die
-    (umask 022 && mkdir -p "$parent")
+    make_dirs_down_to "$parent"
     dir_chain_is_safe "$parent" || unsafe_parent_die
     mkdir -m 0755 "$INSTALL_ROOT"
     build_and_hand_over "created"
@@ -175,13 +188,16 @@ ensure_root() {
   done
 }
 
-# dir_is_safe DIR -- DIR is a real directory (not a symlink) owned by root
-# (or by the user running this, for unprivileged tests), and not writable
-# by group or others unless it is sticky (like /tmp, whose entries other
-# users cannot rename or remove). Inspected with stat, which does not
-# follow a final symlink. On failure sets UNSAFE_REASON.
+# dir_is_safe DIR [sticky-ok] -- DIR is a real directory (not a symlink)
+# owned by root (or by the user running this, for unprivileged tests), and
+# not writable by group or others. With sticky-ok, a sticky group/other-
+# writable DIR (like /tmp) is accepted too: there, others cannot rename or
+# remove an entry they do not own -- but they can create, rename and
+# remove their own entries, so sticky-ok is only for ancestors ABOVE a
+# strictly safe directory (see dir_chain_is_safe). Inspected with stat,
+# which does not follow a final symlink. On failure sets UNSAFE_REASON.
 dir_is_safe() {
-  local info type owner mode
+  local info type owner mode sticky_ok="${2:-}"
   info="$(stat -c '%F|%U|%a' -- "$1" 2>/dev/null)" || { UNSAFE_REASON="$1 cannot be inspected"; return 1; }
   IFS='|' read -r type owner mode <<< "$info"
   if [[ "$type" == "symbolic link" ]]; then
@@ -196,22 +212,27 @@ dir_is_safe() {
     UNSAFE_REASON="$1 is owned by $owner, not root"
     return 1
   fi
-  # Group (020) or other (002) write is only acceptable with the sticky bit.
-  if (( (8#$mode & 8#022) != 0 && (8#$mode & 8#1000) == 0 )); then
-    UNSAFE_REASON="$1 is writable by group or others (mode $mode)"
-    return 1
+  # Group (020) or other (002) write: refused, except sticky with sticky-ok.
+  if (( (8#$mode & 8#022) != 0 )); then
+    if [[ -z "$sticky_ok" ]] || (( (8#$mode & 8#1000) == 0 )); then
+      UNSAFE_REASON="$1 is writable by group or others (mode $mode)"
+      return 1
+    fi
   fi
 }
 
-# dir_chain_is_safe DIR -- dir_is_safe for DIR and every ancestor up to /.
-# Any owner-writable ancestor would let the owner swap the directories
-# below it after the check.
+# dir_chain_is_safe DIR -- DIR must be strictly safe (no group/other write,
+# sticky or not), and every ancestor up to / safe, where a sticky ancestor
+# is accepted: the entry below it is owned by root (or the running user),
+# so nobody else can rename or replace it. Any other owner-writable
+# component would let the owner swap the directories below it after the
+# check. DIR must be canonical (canonical_abs), so the walk ends at /.
 dir_chain_is_safe() {
   local d="$1"
-  while :; do
-    dir_is_safe "$d" || return 1
-    [[ "$d" == "/" ]] && return 0
+  dir_is_safe "$d" || return 1
+  while [[ "$d" != "/" ]]; do
     d="$(dirname "$d")"
+    dir_is_safe "$d" sticky-ok || return 1
   done
 }
 
@@ -222,6 +243,28 @@ nearest_existing() {
     d="$(dirname "$d")"
   done
   printf '%s' "$d"
+}
+
+# make_dirs_down_to DIR -- create DIR's missing components one at a time,
+# top down, never with mkdir -p (which would follow a symlink someone
+# planted between components). Each component is created with a plain
+# mkdir (which fails if anything, including a symlink, already has that
+# name) inside a parent just verified as strictly safe, and is then itself
+# verified as a strictly safe real directory.
+make_dirs_down_to() {
+  local target="$1" base rest comp
+  base="$(nearest_existing "$target")"
+  [[ "$base" == "$target" ]] && return 0
+  rest="${target#"$base"}"
+  rest="${rest#/}"
+  while [[ -n "$rest" ]]; do
+    comp="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    dir_is_safe "$base" || unsafe_parent_die
+    base="${base%/}/$comp"
+    mkdir -m 0755 -- "$base" || die "could not create $base"
+    dir_is_safe "$base" || unsafe_parent_die
+  done
 }
 
 # unsafe_parent_die -- refuse with the reason the parent chain is unsafe.
@@ -289,15 +332,18 @@ stage_inputs() {
 }
 
 # adopt_reader -- who may read the binary being adopted: "root" only when
-# <bin-link> is a plain file in a directory chain only root can change
-# (dir_chain_is_safe; /usr/local/bin on the VM), so it cannot be swapped
-# between this check and root's copy. If <bin-link> is a symlink it can lead anywhere, including
+# <bin-link> is a plain file owned by root, in a directory chain only root
+# can change (dir_chain_is_safe; /usr/local/bin on the VM), so nobody else
+# can swap it between this check and root's copy. If <bin-link> is a symlink it can lead anywhere, including
 # through <root> (e.g. <root>/current/scion with current a directory),
 # where the owner can swap the file after its version was read; that copy
 # is then made by the owner step ("owner"), so root never reads through an
 # owner-controlled path.
 adopt_reader() {
-  if [[ ! -L "$BIN_LINK" ]] && dir_chain_is_safe "$(dirname "$BIN_LINK")"; then
+  local file_owner
+  file_owner="$(stat -c '%U' -- "$BIN_LINK" 2>/dev/null || true)"
+  if [[ ! -L "$BIN_LINK" ]] && [[ "$file_owner" == "root" || "$file_owner" == "$(id -un)" ]] \
+     && dir_chain_is_safe "$(dirname "$BIN_LINK")"; then
     echo root
   else
     echo owner
@@ -420,9 +466,11 @@ link_bin() {
   if [[ -L "$BIN_LINK" && "$(readlink "$BIN_LINK")" == "$want" ]]; then
     return 0
   fi
-  mkdir -p "$(dirname "$BIN_LINK")"
-  rm -f "$BIN_LINK.new"
-  ln -s "$want" "$BIN_LINK.new"
+  # Root writes here, so the directory chain must be root's (and exist).
+  dir_chain_is_safe "$(dirname "$BIN_LINK")" || die "$UNSAFE_REASON; refusing to write $BIN_LINK"
+  # -T/-n: never treat an existing $BIN_LINK.new (even a symlink to a
+  # directory) as a directory to create the link in.
+  ln -sfnT "$want" "$BIN_LINK.new"
   mv -T "$BIN_LINK.new" "$BIN_LINK"
   log "$BIN_LINK -> $want"
 }
@@ -469,6 +517,13 @@ adopt_source() {
   printf '%s' "$src"
 }
 
+# check_bin_dir -- root writes <bin-link>, so its directory chain must be
+# root's (dir_chain_is_safe). Checked before anything changes, so an unsafe
+# bin dir is refused up front rather than after the tree was converted.
+check_bin_dir() {
+  dir_chain_is_safe "$(dirname "$BIN_LINK")" || die "$UNSAFE_REASON; the directories above $BIN_LINK must be real directories owned by root and not writable by group or others. Refusing to write $BIN_LINK there."
+}
+
 # Every step below is a plain statement (never on the left of || or in an
 # if condition), so set -e stays in force: a failed step stops the script
 # before <bin-link> changes.
@@ -478,6 +533,7 @@ cmd_install() {
   local pairs=()
   valid_tag "$tag" || die "invalid release tag: '$tag'"
   [[ -f "$bin" ]] || die "binary not found: $bin"
+  check_bin_dir
   ensure_root
   if ! is_converted && [[ -e "$BIN_LINK" ]] && [[ ! -e "$INSTALL_ROOT/current" && ! -L "$INSTALL_ROOT/current" ]]; then
     # Old layout: keep the binary being replaced as a release, so previous
@@ -506,6 +562,7 @@ cmd_adopt() {
     return 0
   fi
   [[ -e "$BIN_LINK" ]] || die "$BIN_LINK not found; nothing to adopt (run a full deploy.sh with --version instead)"
+  check_bin_dir
   src="$(adopt_source)"
   tag="$(binary_tag "$src")"
   if [[ -z "$tag" ]]; then

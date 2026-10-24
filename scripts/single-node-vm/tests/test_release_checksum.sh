@@ -258,14 +258,14 @@ test_release_checksum_install_commands_verify_before_extract() {
   local binary_verify_line binary_extract_line
   binary_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
   # shellcheck disable=SC2016 # a literal from the generated command
-  binary_extract_line="$(line_number 'tar -xzf /tmp/scion-linux-amd64.tar.gz -C "$SCION_EXTRACT_DIR"' "$log")"
+  binary_extract_line="$(line_number 'tar -xzf "$SCION_EXTRACT_DIR/scion-linux-amd64.tar.gz" -C "$SCION_EXTRACT_DIR"' "$log")"
   assert_true "$([[ -n "$binary_verify_line" && -n "$binary_extract_line" && "$binary_verify_line" -lt "$binary_extract_line" ]] && echo true || echo false)" \
     "the scion binary must be checksum-verified before it is extracted"
 
   local plugin_verify_line plugin_extract_line
   plugin_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-plugin-telegram-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
   # shellcheck disable=SC2016 # a literal from the generated command
-  plugin_extract_line="$(line_number 'tar -xzf /tmp/scion-plugin-telegram-linux-amd64.tar.gz -C "$PLUGIN_EXTRACT_DIR"' "$log")"
+  plugin_extract_line="$(line_number 'tar -xzf "$PLUGIN_EXTRACT_DIR/scion-plugin-telegram-linux-amd64.tar.gz" -C "$PLUGIN_EXTRACT_DIR"' "$log")"
   assert_true "$([[ -n "$plugin_verify_line" && -n "$plugin_extract_line" && "$plugin_verify_line" -lt "$plugin_extract_line" ]] && echo true || echo false)" \
     "the telegram plugin must be checksum-verified before it is extracted"
 
@@ -295,8 +295,8 @@ _extracted_payload() {
 
 # _extract_binary_install_snippet LOG — prints the scion-binary install
 # command's own body, from its "Downloading scion binary..." echo through
-# its "tar -xzf ... -C \"$SCION_EXTRACT_DIR\"" line (inclusive; the
-# extraction goes into a fresh mktemp -d directory), stripping deploy.sh's
+# its "tar -xzf ..." line (inclusive; download, verification and
+# extraction all happen in a fresh mktemp -d directory), stripping deploy.sh's
 # own leading indentation. Excludes the scion-layout.sh install step after
 # it (it runs as root, which this suite deliberately never provides -- see
 # tests/lib/gcloud's "compute ssh" case; test_install_layout.sh runs it
@@ -307,7 +307,7 @@ _extract_binary_install_snippet() {
   printf '%s\n' "$log" | awk '
     /Downloading scion binary\.\.\./ { on = 1 }
     on { print }
-    /tar -xzf \/tmp\/scion-linux-amd64\.tar\.gz -C / { if (on) exit }
+    /tar -xzf .*scion-linux-amd64\.tar\.gz/ { if (on) exit }
   ' | sed -E 's/^[[:space:]]+//'
 }
 
@@ -333,6 +333,10 @@ _run_extracted_snippet() {
   # already-rewritten text would find and mangle /tmp again inside
   # WORKDIR's own value.
   rewritten="${snippet//\/tmp/${workdir}}"
+  # The generated command removes its private download/extract directory
+  # on exit (an EXIT trap). Drop that trap here so the test can inspect
+  # what was downloaded and extracted; WORKDIR is removed by the test.
+  rewritten="$(printf '%s\n' "$rewritten" | grep -v "^trap 'rm -rf ")"
   bash -c "set -euo pipefail
 $rewritten" 2>&1
 }

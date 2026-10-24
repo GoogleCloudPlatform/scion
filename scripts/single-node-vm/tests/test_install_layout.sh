@@ -1763,26 +1763,33 @@ test_layout_fresh_create_requires_safe_parent() {
 # F2/F3 review round 1: whole ancestor chains, plain bin link dir
 # =====================================================================
 
-# R1: a plain <bin-link> in a directory another user controls could be
-# swapped between the check and root's copy, so root must not read it:
-# the owner step gets the raw path. (stat stub: the bin dir is mallory's.)
-test_layout_adopt_plain_bin_link_in_unsafe_dir_is_read_by_owner() {
-  _layout_new_host
-  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log" bindir
-  bindir="$(dirname "$LH_BIN")"
-  _layout_root_stubs "$stub" "$log"
-  # shellcheck disable=SC2016 # script text written to a stub file
-  printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/mallory}"; fi\nprintf "%%s\\n" "$out"\n' \
-    "$bindir" > "${stub}/stat"
-  chmod 0755 "${stub}/stat"
-  _fake_scion "$LH_BIN" "nightly-20261001"
-  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
-    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
-  assert_eq "0" "$?" "the adopt must succeed through the owner step (output: ${LAYOUT_OUT})"
-  assert_contains "$(cat "$log")" "__as-owner nightly-20261001 ${LH_BIN}" \
-    "a plain <bin-link> in a directory another user controls must be handed to the owner as the raw path"
-  assert_not_contains "$(cat "$log")" "scion-layout-input." "root must not copy it"
-  rm -rf "$LH_DIR"
+# A <bin-link> whose directory another user controls is refused up front:
+# root writes <bin-link> there (link_bin) and would read a plain binary
+# from it. Nothing changes. (stat stub: the bin dir is mallory's.)
+test_layout_unsafe_bin_dir_is_refused_before_any_change() {
+  local cmd
+  for cmd in adopt install; do
+    _layout_new_host
+    local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log" bindir
+    bindir="$(dirname "$LH_BIN")"
+    _layout_root_stubs "$stub" "$log"
+    # shellcheck disable=SC2016 # script text written to a stub file
+    printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/mallory}"; fi\nprintf "%%s\\n" "$out"\n' \
+      "$bindir" > "${stub}/stat"
+    chmod 0755 "${stub}/stat"
+    _fake_scion "$LH_BIN" "nightly-20261001"
+    _fake_scion "${LH_DIR}/new" "nightly-20261023"
+    local args=(adopt)
+    [[ "$cmd" == install ]] && args=(install nightly-20261023 "${LH_DIR}/new")
+    LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+      SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" "${args[@]}" 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "${cmd} with an unsafe bin dir must be refused"
+    assert_contains "$LAYOUT_OUT" "${bindir} is owned by mallory, not root" "the ${cmd} refusal must name the bin dir"
+    assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "${cmd}: nothing may change before the refusal"
+    assert_false "$([[ -L "$LH_BIN" ]] && echo true || echo false)" "${cmd}: the CLI binary must be left alone"
+    rm -rf "$LH_DIR"
+  done
 }
 
 # R2 + N2 + N3: every ancestor of <root> counts, a symlinked ancestor is
@@ -1824,12 +1831,27 @@ test_layout_fresh_create_checks_whole_ancestor_chain() {
   assert_eq "" "$(ls -A "${LH_DIR}/real-opt")" "nothing may be created through the symlinked parent"
   rm -rf "$LH_DIR"
 
-  # A sticky world-writable ancestor (like /tmp) is fine.
+  # A sticky world-writable directory (like /tmp) is fine ABOVE a strictly
+  # safe one: the existing parent is ours and 0755, the grandparent 1777.
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  chmod 0755 "$(dirname "$LH_ROOT")"
+  chmod 1777 "$LH_DIR"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_eq "0" "$LAYOUT_RC" "a sticky ancestor above a safe parent must be accepted (output: ${LAYOUT_OUT})"
+  chmod 0700 "$LH_DIR"
+  rm -rf "$LH_DIR"
+
+  # But nothing is created directly under a sticky directory: there, others
+  # can create and swap their own entries (R2b).
   _layout_new_host
   chmod 1777 "$LH_DIR"
   _fake_scion "${LH_DIR}/new" "nightly-20261023"
   _layout install nightly-20261023 "${LH_DIR}/new"
-  assert_eq "0" "$LAYOUT_RC" "a sticky world-writable ancestor must be accepted (output: ${LAYOUT_OUT})"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a missing parent directly under a sticky dir must be refused"
+  assert_contains "$LAYOUT_OUT" "${LH_DIR} is writable by group or others" "the refusal must name the sticky dir"
+  assert_false "$([[ -e "$(dirname "$LH_ROOT")" ]] && echo true || echo false)" "nothing may be created under the sticky dir"
   chmod 0700 "$LH_DIR"
   rm -rf "$LH_DIR"
 }
@@ -1849,4 +1871,118 @@ test_layout_deploy_plugin_installed_by_scion_user() {
     "the plugin must be copied in by the scion user"
   assert_not_contains "$log" "sudo chown scion:scion /home/scion/.scion/plugins" "root must not chown inside the plugins directory"
   assert_not_contains "$log" "sudo mv /tmp/scion-plugin" "root must not move a fixed /tmp name into the plugins directory"
+}
+
+# =====================================================================
+# F2/F3 review round 2
+# =====================================================================
+
+# R1: relative or non-canonical paths are refused at once (before, a
+# relative path made the ancestor walk loop forever).
+test_layout_refuses_non_canonical_paths() {
+  local bad var out rc
+  for var in SCION_INSTALL_ROOT SCION_BIN_LINK; do
+    for bad in "scion" "opt2/scion" "/opt/../scion" "/opt//scion" "/opt/./scion" "/opt/scion/"; do
+      out="$(env "$var=$bad" SCION_INSTALL_OWNER="" timeout 10 bash "$LAYOUT_SH" adopt 2>&1)"
+      rc=$?
+      assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+        "${var}='${bad}' must be refused promptly (rc ${rc}; 124 = timed out)"
+      assert_contains "$out" "${var} must be an absolute path" "${var}='${bad}': the refusal must say why"
+    done
+  done
+}
+
+# R2(a): a plain <bin-link> in a safe directory, but owned by another user
+# (who could swap it in a sticky or shared setup), is read by the owner
+# step, not copied by root. (stat stub: the bin link file is mallory's.)
+test_layout_adopt_bin_link_owned_by_other_user_is_read_by_owner() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log"
+  _layout_root_stubs "$stub" "$log"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nif [[ "${!#}" == "%s" ]]; then out="${out//$(/usr/bin/id -un)/mallory}"; fi\nprintf "%%s\\n" "$out"\n' \
+    "$LH_BIN" > "${stub}/stat"
+  chmod 0755 "${stub}/stat"
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" adopt 2>&1)"
+  assert_eq "0" "$?" "the adopt must succeed through the owner step (output: ${LAYOUT_OUT})"
+  assert_contains "$(cat "$log")" "__as-owner nightly-20261001 ${LH_BIN}" \
+    "a bin link owned by another user must be handed to the owner as the raw path"
+  assert_not_contains "$(cat "$log")" "scion-layout-input." "root must not copy it"
+  rm -rf "$LH_DIR"
+}
+
+# R2(b): missing components are created one at a time with plain mkdir, so
+# a symlink planted between two components is never followed. (mkdir
+# stub: right after the first missing component is created, a symlink to
+# another directory is planted where the next one goes.)
+test_layout_creates_missing_parents_without_following_symlinks() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" elsewhere="${LH_DIR}/elsewhere" first
+  mkdir -p "$stub" "$elsewhere"
+  LH_ROOT="${LH_DIR}/a/b/scion"
+  first="${LH_DIR}/a"
+  # shellcheck disable=SC2016 # script text written to a stub file
+  printf '#!/usr/bin/env bash\n/usr/bin/mkdir "$@" || exit $?\nif [[ "${!#}" == "%s" ]]; then ln -s "%s" "%s/b"; fi\n' \
+    "$first" "$elsewhere" "$first" > "${stub}/mkdir"
+  chmod 0755 "${stub}/mkdir"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ -L "${first}/b" ]] && echo true || echo false)" "sanity: the symlink must have been planted between components"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "creation through a planted symlink must be refused"
+  assert_eq "" "$(ls -A "$elsewhere")" "nothing may be created through the planted symlink"
+  rm -rf "$LH_DIR"
+
+  # Without interference, several missing components are created, 0755.
+  _layout_new_host
+  LH_ROOT="${LH_DIR}/a/b/scion"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_eq "0" "$LAYOUT_RC" "missing parents must be created (output: ${LAYOUT_OUT})"
+  assert_eq "755 755" "$(stat -c %a "${LH_DIR}/a" "${LH_DIR}/a/b" | tr '\n' ' ' | sed 's/ $//')" "created parents must be 0755"
+  rm -rf "$LH_DIR"
+}
+
+# FYI-1: a leftover <bin-link>.new that is a symlink to a directory must
+# not make root create the link inside that directory (ln -sfnT).
+test_layout_link_bin_ignores_planted_dot_new_dir_link() {
+  _layout_new_host
+  local elsewhere="${LH_DIR}/elsewhere"
+  mkdir -p "$elsewhere"
+  ln -s "$elsewhere" "${LH_BIN}.new"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_eq "0" "$LAYOUT_RC" "the install must succeed (output: ${LAYOUT_OUT})"
+  assert_eq "$LH_ROOT/current/scion" "$(readlink "$LH_BIN")" "the CLI link must be right"
+  assert_eq "" "$(ls -A "$elsewhere")" "no link may be created inside the planted directory"
+  rm -rf "$LH_DIR"
+}
+
+# The directory itself must be strictly safe: sticky is only accepted for
+# ancestors above it. A sticky (1777) bin dir, or a sticky existing parent
+# of <root>, is refused: others can create and swap their own entries in
+# it (R2).
+test_layout_sticky_dir_itself_is_not_safe() {
+  _layout_new_host
+  chmod 1777 "$(dirname "$LH_BIN")"
+  _fake_scion "$LH_BIN" "nightly-20261001"
+  _layout adopt
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a sticky bin dir must be refused"
+  assert_contains "$LAYOUT_OUT" "$(dirname "$LH_BIN") is writable by group or others" "the refusal must name the sticky bin dir"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may change"
+  chmod 0755 "$(dirname "$LH_BIN")"
+  rm -rf "$LH_DIR"
+
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  chmod 1777 "$(dirname "$LH_ROOT")"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  _layout install nightly-20261023 "${LH_DIR}/new"
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a sticky existing parent of <root> must be refused"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "<root> must not be created in a sticky parent"
+  chmod 0755 "$(dirname "$LH_ROOT")"
+  rm -rf "$LH_DIR"
 }
