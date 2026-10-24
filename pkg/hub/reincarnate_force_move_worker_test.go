@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,7 +44,7 @@ func prepareForceMoveWorker(t *testing.T, f *moveFixture) {
 }
 
 // startForceMove sends a real forced move as the agent itself and waits
-// for the worker.
+// for the worker, up to its last write (waitForMoveSettled).
 func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *store.Agent) {
 	t.Helper()
 	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "moving on", TargetBroker: f.dst.ID, ForceMove: true})
@@ -51,7 +52,7 @@ func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *s
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, MoveTransferModeRecreate, resp.TransferMode, "the 202 names the transfer mode")
-	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	r := waitForMoveSettled(t, f.s, f.agent.ID)
 	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
 	require.NoError(t, err)
 	return r, a
@@ -61,11 +62,14 @@ func startForceMove(t *testing.T, f *moveFixture) (*store.AgentReincarnation, *s
 // on the source exactly as before (broker, runtime, run, placement, applied
 // config, reservation), removed the target's files with the recreated-files
 // delete (run-scoped only with targetRun), and sent the source nothing
-// after the stop: no delete of any kind.
-func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun string) {
+// after the stop: no delete of any kind. The restored config carries the
+// recovery Task for a failure out of fromState (ptone/scion#5511): the new
+// handoff behind the recovery addendum, while the record's
+// PreviousAppliedConfig keeps the generation N Task, beforeTask (the
+// agent's Task before the move).
+func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarnation, a *store.Agent, targetRun, fromState, beforeTask string) {
 	t.Helper()
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "kubernetes", a.Runtime, "the source runtime is restored")
@@ -73,6 +77,13 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 	assert.Equal(t, 1, a.Generation)
 	require.NotNil(t, a.AppliedConfig)
 	assert.Equal(t, "old-image:v1", a.AppliedConfig.Image, "the previous applied config is restored")
+	require.NotEmpty(t, r.Handoff)
+	assert.Equal(t, reincarnationRecoveryTask(r.ToGeneration, r.Handoff, fromState), a.AppliedConfig.Task,
+		"the source agent's Task carries the recovery handoff")
+	assert.Contains(t, a.AppliedConfig.Task, fmt.Sprintf("You remain generation %d.", r.ToGeneration-1))
+	require.NotNil(t, r.PreviousAppliedConfig)
+	require.NotEmpty(t, beforeTask)
+	assert.Equal(t, beforeTask, r.PreviousAppliedConfig.Task, "the record's PreviousAppliedConfig is not changed")
 	assert.Equal(t, "run-src", a.RunID, "the source's run is restored")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
@@ -88,6 +99,23 @@ func assertForceRolledBack(t *testing.T, f *moveFixture, r *store.AgentReincarna
 	f.disp.mu.Unlock()
 }
 
+// seedGenerationOneTask gives the fixture agent a non-empty generation 1
+// Task and returns the agent as stored, so a rollback test can tell the
+// record's PreviousAppliedConfig Task from a blanked one.
+func seedGenerationOneTask(t *testing.T, f *moveFixture) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, a.AppliedConfig)
+	a.AppliedConfig.Task = "generation 1 task: keep the build green"
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	a, err = f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "generation 1 task: keep the build green", a.AppliedConfig.Task)
+	return a
+}
+
 // A completed forced move: the target is asked to confirm it has nothing
 // for the agent and provisions it fresh; the record and the 202 say
 // recreate; the new generation's first task carries the recreated-workspace
@@ -99,7 +127,6 @@ func TestReincarnateForceMove_CompletesOnTarget(t *testing.T) {
 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, store.SourceCleanupDone, r.SourceCleanup)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
@@ -148,12 +175,15 @@ func TestReincarnateForceMove_TargetHasFilesRefused(t *testing.T) {
 	f.disp.recreateFiles[f.dst.ID] = true
 	f.disp.mu.Unlock()
 
+	logs := &syncBuffer{}
+	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+
+	// startForceMove waits for the source cleanup outcome, which
+	// reconcileFailedMove records only after ensureBrokerReservationOn has
+	// put the source reservation back (a no-op when the rollback already
+	// did).
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	// reconcileFailedMove releases and re-asserts the source reservation
-	// after the agent row already reads failed, and records the source
-	// cleanup outcome last: wait for it before counting reservations.
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, sourceCleanupSkippedInterrupted, r.SourceCleanup)
 	assert.Contains(t, r.Error, "the agent already has files on this broker; refusing to recreate over them")
 	for _, leak := range []string{"/srv", "/export", "agents/"} {
@@ -169,7 +199,47 @@ func TestReincarnateForceMove_TargetHasFilesRefused(t *testing.T) {
 	f.disp.mu.Lock()
 	assert.True(t, f.disp.recreateFiles[f.dst.ID], "the pre-existing files on the target are left in place")
 	f.disp.mu.Unlock()
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
+	assertReservationOnSource(t, f, r.ID, logs)
+}
+
+// assertReservationOnSource checks that the agent's broker reservation is
+// back on the source after a failed move: one active reservation, scoped
+// to the source, and none on the target. On failure it reports the
+// reservation state together with the record's source cleanup outcome, the
+// agent's phase and run, and the quota and rollback lines of the hub's
+// lifecycle log (logs), so the message alone tells the causes apart: a
+// reservation left on the target (the rollback did not move it), a restore
+// that failed (a store error, logged as a failed re-assert), or a slot
+// released afterwards by another path (logged as an idle-slot release).
+func assertReservationOnSource(t *testing.T, f *moveFixture, reincarnationID string, logs *syncBuffer) {
+	t.Helper()
+	ctx := context.Background()
+	srcCount := brokerReservationCount(t, f.s, f.src.ID)
+	dstCount := brokerReservationCount(t, f.s, f.dst.ID)
+	if srcCount == 1 && dstCount == 0 {
+		return
+	}
+	held := "none"
+	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	if res, err := f.s.GetActiveReservation(ctx, def.ID, f.agent.ID); err == nil {
+		held = fmt.Sprintf("%s:%s", res.ScopeType, res.ScopeID)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		held = "read error: " + err.Error()
+	}
+	rec, err := f.s.GetAgentReincarnation(ctx, reincarnationID)
+	require.NoError(t, err)
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	var lines []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "quota") || strings.Contains(line, "rollback") || strings.Contains(line, "failed move") {
+			lines = append(lines, line)
+		}
+	}
+	t.Errorf("the reservation is not back on the source: source count %d, target count %d, active reservation %s (source %s, target %s); "+
+		"record sourceCleanup %q; agent broker %s, phase %q, run %q; log:\n%s",
+		srcCount, dstCount, held, f.src.ID, f.dst.ID, rec.SourceCleanup, a.RuntimeBrokerID, a.Phase, a.RunID, strings.Join(lines, "\n"))
 }
 
 // moveTargetUntouched recognises the refusals that leave the target
@@ -215,8 +285,10 @@ func TestReincarnateForceMove_ProvisionFailureRollsBackAndRetrySucceeds(t *testi
 	f.disp.moveProvisionErr = provisionSent(errors.New("broker returned 500: provision failed"))
 	f.disp.mu.Unlock()
 
+	before := seedGenerationOneTask(t, f)
+
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "")
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
 	assert.Contains(t, r.Error, "provision on the target broker failed")
 
 	f.disp.mu.Lock()
@@ -237,8 +309,10 @@ func TestReincarnateForceMove_DefinitiveStartFailureRollsBackAndRetrySucceeds(t 
 	f.disp.startErr = fmt.Errorf("clone failed on the target: %w", errStartRequestNotSent)
 	f.disp.mu.Unlock()
 
+	before := seedGenerationOneTask(t, f)
+
 	r, a := startForceMove(t, f)
-	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1")
+	assertForceRolledBack(t, f, r, a, "run-"+f.dst.ID+"-1", store.AgentReincarnationStateStarting, before.AppliedConfig.Task)
 	assert.Contains(t, r.Error, "start failed")
 
 	f.disp.mu.Lock()
@@ -262,10 +336,18 @@ func TestReincarnateForceMove_AmbiguousStartSkipsCleanupAndNeverDeletes(t *testi
 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-	r = waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, sourceCleanupSkippedAmbiguousStart, r.SourceCleanup)
 	assert.Equal(t, store.TransferModeRecreate, r.TransferMode)
 	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the agent stays assigned to the target, where a container may run")
+	// No rollback, so no recovery config (ptone/scion#5511): the row keeps
+	// the generation N+1 config, whose Task is the first task the target
+	// start was sent, with the recreated-workspace preamble.
+	require.NotNil(t, a.AppliedConfig)
+	assert.NotContains(t, a.AppliedConfig.Task, "[SCION RECOVERY HANDOFF]")
+	assert.Contains(t, a.AppliedConfig.Task, "with a recreated workspace")
+	f.disp.mu.Lock()
+	assert.Equal(t, f.disp.lastStartTask, a.AppliedConfig.Task, "the row still holds the dispatched generation N+1 task")
+	f.disp.mu.Unlock()
 	assert.Empty(t, f.disp.recreatedDeletes(), "no files delete on the target")
 	_, localDeletes, _ := f.disp.moveSnapshot()
 	assert.Empty(t, localDeletes, "no delete on the source")
@@ -349,6 +431,14 @@ func TestReincarnationWorker_TransferModeMismatchFailsBeforeAnySideEffect(t *tes
 			require.NoError(t, err)
 			assert.Equal(t, store.AgentReincarnationStateFailed, got.State)
 			assert.Contains(t, got.Error, "transfer mode changed")
+			// A pending-site failure restores the recovery config
+			// (ptone/scion#5511): the row's Task is the recovery Task and the
+			// row is still on the source broker.
+			after, err := f.s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			require.NotNil(t, after.AppliedConfig)
+			assert.Equal(t, reincarnationRecoveryTask(2, "h", store.AgentReincarnationStatePending), after.AppliedConfig.Task)
+			assert.Equal(t, f.src.ID, after.RuntimeBrokerID)
 			f.disp.mu.Lock()
 			assert.Zero(t, f.disp.stopCalls, "nothing is stopped")
 			f.disp.mu.Unlock()
@@ -574,7 +664,6 @@ func TestReincarnateForceMove_ProvisionNotSentSendsNoTargetDelete(t *testing.T) 
 	r, a := startForceMove(t, f)
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	assert.Contains(t, r.Error, "GCP service account not mapped on the target profile")
-	waitForMoveSourceCleanup(t, f.s, r.ID)
 	assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 	assert.Equal(t, "run-src", a.RunID)
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")
@@ -614,7 +703,6 @@ func TestReincarnateForceMove_RefusedBeforeF4RollbackDeleteIsSkipped(t *testing.
 
 			r, a := startForceMove(t, f)
 			require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-			r = waitForMoveSourceCleanup(t, f.s, r.ID)
 			assert.Equal(t, f.src.ID, a.RuntimeBrokerID, "the agent stays on the source")
 			assert.Equal(t, "run-src", a.RunID)
 			assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the reservation is back on the source")

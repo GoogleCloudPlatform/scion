@@ -300,7 +300,7 @@ describe('ChatStarsController', () => {
 
   it('fetches a live message instead of marking it while a refresh is due', async () => {
     const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
-    const fetchState = vi.fn(() => {
+    const fetchState = vi.fn((_ids: readonly string[]) => {
       const d = deferred<string[]>();
       gates.push(d);
       return d.promise;
@@ -330,7 +330,7 @@ describe('ChatStarsController', () => {
 
   it('does not mark live after an invalidation whose refresh failed', async () => {
     let fail = false;
-    const fetchState = vi.fn(() =>
+    const fetchState = vi.fn((_ids: readonly string[]) =>
       fail ? Promise.reject(new Error('offline')) : Promise.resolve([])
     );
     const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
@@ -355,7 +355,7 @@ describe('ChatStarsController', () => {
 
   it('refetches the IDs of a load that was in flight during an invalidation', async () => {
     const gates: Array<ReturnType<typeof deferred<string[]>>> = [];
-    const fetchState = vi.fn(() => {
+    const fetchState = vi.fn((_ids: readonly string[]) => {
       const d = deferred<string[]>();
       gates.push(d);
       return d.promise;

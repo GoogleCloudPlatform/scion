@@ -116,6 +116,11 @@ type ProjectRef struct {
 	ID string `json:"id" yaml:"id"`
 	// Slug is the project slug, for display.
 	Slug string `json:"slug,omitempty" yaml:"slug,omitempty"`
+	// Unverified is set when 'scion use' selected the project while its
+	// hub could not confirm it (no login, a refused login or no answer).
+	// Every selection writes a new ref, so the next confirmed one clears
+	// it.
+	Unverified bool `json:"unverified,omitempty" yaml:"unverified,omitempty"`
 }
 
 // KnownProject is one entry of the known-project list.

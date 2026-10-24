@@ -6,7 +6,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 | File | Purpose |
 | :--- | :--- |
 | [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates; non-root `runner` user (uid 1001, `HOME=/home/runner`) |
-| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then `exec ./run.sh --jitconfig` |
+| [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
 ## Build arguments
@@ -20,7 +20,15 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
-| `GOLANGCI_LINT_VERSION` / `GOLANGCI_LINT_SHA256` | golangci-lint, `golangci-lint-<v>-linux-amd64.tar.gz` | `golangci-lint-<v>-checksums.txt` on <https://github.com/golangci/golangci-lint/releases> (keep it in step with the version CI pins) |
+
+golangci-lint is not a download: the `golangci-lint` stage builds it with
+[`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
+(`golangci-lint/VERSIONS`: module checksums and the patch sha256) and go-tools#1839
+patch that CI's lint job uses, so the image's binary is the one CI runs
+(`golangci-lint version` reports `2.15.0-scion-gotools1839`). The stage builds with
+the image's Go and fetches source from the Go module proxy, so the image build
+needs network access to proxy.golang.org (Cloud Build has it). Bump it in
+`golangci-lint/` (its README), not here.
 
 Every download is checked with `sha256sum -c`, and a mismatch fails the build.
 To override a pin, pass the version **and** its checksum with `--build-arg`,
@@ -115,12 +123,24 @@ this, in order:
    | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
    | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
 
+   **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
+   `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a
+   directory on the in-memory root filesystem (`/tmp/cr-ci-build-cache`), made by
+   the same rules before `~/.cache` is linked to it. `~/.cache` still reads
+   `/scratch/.cache`, so the parity above holds and archive entries land in RAM.
+   The cache then counts against the memory limit
+   ([architecture](../docs/architecture.md#constraints)). Any other value than
+   `true` or `false` exits 2.
+
    It exports `GOCACHE`, `GOMODCACHE`, `GOPATH` and `GOLANGCI_LINT_CACHE` as
    on ubuntu-latest, leaves `XDG_CACHE_HOME` unset, and exports
    `RUNNER_WORKSPACE=$HOME/work` and `RUNNER_TEMP`/`TMPDIR=/scratch/_temp`.
    For job steps, the runner sets `RUNNER_WORKSPACE` and `RUNNER_TEMP` itself,
-   under its work folder. The runner's `_diag` directory is a symlink to
-   `/scratch/_diag`, so its logs land on the disk too. The image also keeps a
+   under its work folder. The runner's `_diag` directory (its own logs, and
+   the job's step logs under `_diag/pages`, which grow with the job's output:
+   about 1 MB for the P6 lint job) is deliberately **not** on `/scratch`: it stays on the root
+   filesystem, so a job that fills `/scratch` cannot crash the runner and lose the
+   job log with it (P6 PoC run 2). The image also keeps a
    `_work` symlink to `/scratch/_work` in the runner directory, for a JIT
    config that names the default `_work`.
 
@@ -164,23 +184,53 @@ this, in order:
    | metadata: any other status, or 200 without a JWT | exit 3 at once |
    | claim: anything else (other status, wrong content type, bad JSON) | exit 3 at once; the claim may already be spent |
 
-5. **Starts the runner.** It unsets `RUNNER_CLAIM_TOKEN` and runs
-   `exec ./run.sh --jitconfig <config>` in `/home/runner/actions-runner`, so
-   `run.sh` is PID 1. The image sets `RUNNER_MANUALLY_TRAP_SIG=1`, which makes
-   `run.sh` take its `runWithManualTrap` path:
-   - **Graceful cancel:** it traps TERM and INT and forwards SIGINT to the
-     runner's process group. When Cloud Run sends SIGTERM (CancelExecution or
-     task timeout), the listener cancels the job gracefully before the SIGKILL
-     at the end of the grace period.
-   - **Exit code:** it exits with the runner's exit code, so a failed runner
-     shows as a failed execution.
+5. **Runs the runner and reports its real exit code.** It unsets
+   `RUNNER_CLAIM_TOKEN` and starts `./run.sh --jitconfig <config>` in
+   `/home/runner/actions-runner` as a **child** (not `exec`), for two reasons:
+   - **Exit code.** In actions/runner (checked in v2.338.0), `run-helper.sh`
+     maps every Runner.Listener exit code it does not know, an abort's 134
+     included, to exit 0 after printing `Exiting with unknown error code: N`.
+     `run.sh` then exits 0 too: it passes on only 2 (restart, handled inside it)
+     and 7. So `run.sh`'s own exit code cannot show a crashed runner (P6 PoC run 2:
+     the runner aborted with ENOSPC and the execution showed as succeeded). The
+     entrypoint copies the runner's output to stdout unchanged and matches
+     exactly that line (anchored, digits only). It exits with `run.sh`'s exit code
+     when that is non-zero, otherwise with N, otherwise 0.
+   - **Signals.** Cloud Run sends SIGTERM (CancelExecution or task timeout) to
+     PID 1, the entrypoint, which forwards SIGTERM or SIGINT to `run.sh`. The image
+     sets `RUNNER_MANUALLY_TRAP_SIG=1`, so `run.sh` takes its `runWithManualTrap`
+     path and turns the signal into a graceful job cancel: SIGINT to the runner's
+     process group, before the SIGKILL at the end of the grace period. `run.sh` is
+     started under job control (`set -m`): a plain background job would inherit an
+     ignored SIGINT, and the graceful cancel would silently stop working (a test
+     checks the disposition). The traps are installed when the script starts.
+     A SIGTERM or SIGINT that arrives before `run.sh` runs (during the checks or the
+     claim) stops the script at the next checkpoint with 128+n (143 or 130), without
+     starting the runner; `/reconcile` reaps the unused registration.
+   - **Idle timeout.** If no `Running job:` line from the runner listener has appeared
+     within `RUNNER_IDLE_TIMEOUT_SECONDS` (default 600; `deploy-job.sh` sets it from
+     `RUNNER_IDLE_TIMEOUT`) of the container start, the entrypoint logs
+     `idle timeout: ...`, sends SIGTERM to `run.sh` (the same graceful path as a
+     cancel) and exits **0**, logging `idle_timeout: runner stopped ...`. GitHub may give
+     any queued job with the label to an idle runner, and that job only gets the rest
+     of the execution's task timeout; the idle timeout makes that at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`. A job whose `Running job:` line the
+     entrypoint has read before the deadline is never touched. **Remaining race:** the
+     check and the SIGTERM are not atomic, so a job that GitHub assigns in the moment
+     between them (or whose line is still in the pipe) is cancelled by the SIGTERM.
+     The entrypoint then sees both markers, logs `ERROR idle_timeout_raced_job` and
+     exits **4**, so the execution fails visibly instead of passing for an idle stop;
+     re-run the cancelled job. The timer is a `read -t` on a FIFO in a subshell, killed when
+     `run.sh` exits.
 
-   Without the variable, `run.sh` installs no handler. As PID 1 it would then
-   drop SIGTERM, and it would exit 0 whatever the runner returned. Exit code 2
-   from the runner helper means "restart" and loops inside `run.sh` in both
-   modes.
+   The output goes through FIFOs in a private temp dir under `/tmp`, small and
+   on the root filesystem, never on `/scratch`. A watcher process that does not
+   finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
+   the pipe cannot keep the execution alive.
 
-Exit codes before `run.sh` starts: **2** for a configuration error (env,
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
+**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
 in-memory claims are gone), the runner exits 3. `/reconcile` then deletes the
@@ -190,7 +240,7 @@ orphaned `cr-job-*` registration and relaunches the job if it is still queued.
 ever printed, logged or written to disk. Both request headers reach curl on
 stdin, as a curl config, not in its argv. `curl -q` ignores any `~/.curlrc`,
 so no config file can turn on verbose header output. Responses stay in shell
-memory, and the ID token is cleared before the exec. The script never
+memory, and the ID token is cleared before `run.sh` starts. The script never
 uses `set -x`; keep it that way. The JIT config does appear in `run.sh`'s argv,
 as the runner requires. That is acceptable because it is single use and dies
 with the execution.
@@ -217,12 +267,17 @@ server, the fake one answers 403 without `Metadata-Flavor: Google`; it also
 answers 400 on a wrong audience or a missing `format=full`. The harness
 covers:
 
+- **Exit code and signals.** A stub `run.sh` exiting 134 makes the
+  entrypoint exit 134. One that prints run-helper's `Exiting with unknown error
+  code: 134` and exits 0 also makes it exit 134; the same text inside another
+  line, with trailing text or without digits, is ignored. SIGTERM and SIGINT
+  sent to the entrypoint reach `run.sh`, and its exit code is returned.
 - **Success.** The metadata request carries the flavor header,
   `audience=MEDIATOR_URL` (with any trailing slash stripped) and
   `format=full`. The claim carries `Bearer <ID token>` and
   `X-Runner-Claim: <claim token>`. `run.sh` gets `--jitconfig <config>`, is
-  exec'd (same PID), runs in the runner dir, and sees the `/scratch` env but
-  no token. The claim token, the ID token and the config appear on neither
+  the entrypoint's child with SIGINT not ignored, runs in the runner dir, and
+  sees the `/scratch` env but no token. The claim token, the ID token and the config appear on neither
   stdout nor stderr. A RUNNER_NAME/GH_JOB_ID mismatch only warns.
 - **Identity.** A claim 401 exits 3 without retrying. Two metadata 5xx
   responses and then a token leads to a normal start on attempt 3. Five
@@ -261,5 +316,6 @@ covers:
   `CR_METADATA_URL`, or a missing `run.sh` exits 2 without contacting the
   mediator.
 
-Lint the script with `shellcheck -x runner/entrypoint.sh` and
-`bash -n runner/entrypoint.sh`.
+Lint the script with `bash -n runner/entrypoint.sh` and both shellcheck runs in
+[scripts/README.md, "Static checks"](../scripts/README.md#static-checks)
+(upstream CI's 0.9.0 invocation and 0.11.0 `--norc -x`).

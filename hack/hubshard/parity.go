@@ -50,11 +50,11 @@ var parityConfigs = []struct {
 
 // The two tag sets pkg/hub is vetted with. Before the shards, CI ran
 // go vet -tags no_sqlite ./... (make lint) and go vet -tags 'integration
-// volume_test tzcontract' ./... (make vet-integration) over pkg/hub; each
-// shard job now vets its shard with the same two sets (shard.sh vet).
+// tzcontract' ./... (make vet-integration) over pkg/hub; each shard job
+// now vets its shard with the same two sets (shard.sh vet).
 var (
 	vetNoSQLiteTags    = []string{"no_sqlite"}
-	vetIntegrationTags = []string{"integration", "volume_test", "tzcontract"}
+	vetIntegrationTags = []string{"integration", "tzcontract"}
 )
 
 // sharding holds the computed shards and the overlay contents.

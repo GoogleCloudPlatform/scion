@@ -23,6 +23,19 @@ nothing exists yet), and `#` lines are notes.
   covers everything). The design suggests `deploy-demo-test` / `us-central1`
   for the PoC. On a shared project, the deployer needs the least-privilege
   bundle in [matrix 2.1](permissions-matrix.md#21-deployer-roles-least-privilege-bundle).
+- **Region choice.** `REGION` is the only place a region is set; nothing in the
+  code or scripts assumes `us-central1`. Any region where Cloud Run Jobs and
+  Artifact Registry are available works: the job, the mediator, the image
+  repository and the staging bucket all go to `REGION`. Cost differs:
+  `us-central1` has Tier 1 Cloud Run pricing, while for example `us-west2` is
+  Tier 2 ([Cloud Run locations](https://docs.cloud.google.com/run/docs/locations));
+  Tier 2 costs more per vCPU-second and GiB-second (current rates:
+  [Cloud Run pricing](https://cloud.google.com/run/pricing)). The design's remark
+  that Cloud Run *Instances* are not available in some regions does not matter
+  here: cr-ci uses Jobs. Check that the region offers Cloud Run Jobs, and the
+  ephemeral-disk volumes they use, before choosing it. The ephemeral-disk quotas (section 9) are per
+  region, so a new region needs its own quota requests. Moving region means
+  redeploying everything (a new `MEDIATOR_URL`, so the App's webhook URL changes too).
 - **Tools:** bash >= 4, the gcloud CLI (version floor `CRCI_MIN_GCLOUD` in
   `scripts/lib.sh`; see [matrix U8](permissions-matrix.md#5-design-corrections-and-open-items)),
   authenticated as the deployer (`gcloud auth login`). docker only for
@@ -33,7 +46,7 @@ nothing exists yet), and `#` lines are notes.
   cd cr-ci
   cp config.example.env config.env      # gitignored; never commit it
   $EDITOR config.env                    # TARGET_REPOS, GITHUB_APP_ID (1 until the App exists),
-                                        # GITHUB_APP_INSTALLATION_SCOPE, GCP_PROJECT, REGION
+                                        # GCP_PROJECT, REGION (GITHUB_APP_INSTALLATION_SCOPE defaults to repo)
                                         # (optional: BUILD_STAGING_BUCKET if the default name is taken)
   scripts/check-config.sh               # validates like the mediator, prints resolved values
   ```
@@ -118,7 +131,7 @@ scripts/build-runner-image.sh --apply --local # or: local docker, pushed as BUIL
 ## 4. Runner job: `scripts/deploy-job.sh`
 
 ```bash
-scripts/deploy-job.sh --apply [--tag TAG]
+scripts/deploy-job.sh --apply [--tag TAG] [--warm-up]
 ```
 
 - Creates the Cloud Run Job `RUNNER_JOB_NAME`, or updates it in place, from
@@ -137,6 +150,20 @@ scripts/deploy-job.sh --apply [--tag TAG]
 - With `--apply` it refuses to run if the image tag does not exist.
 - Grants `MEDIATOR_SA_NAME` `roles/run.developer` on this job only (C10), then
   re-checks that `EXEC_SA_NAME` holds no project role.
+- `--warm-up` then runs one no-op execution and waits for it
+  (`gcloud run jobs execute --update-env-vars=RUNNER_WARMUP=1 --wait`). The
+  entrypoint runs its image, `/scratch` and HOME-link checks and exits 0 before
+  any claim. The first execution after an image change pays the image import (about
+  34 s for the 371 MiB image in the P6 PoC); the warm-up takes that hit instead
+  of the first real job, and it fails the deploy if the checks fail. A failed
+  warm-up leaves the job on the new image, so real jobs would fail the same
+  way: roll back with `scripts/deploy-job.sh --apply --tag <previous tag>`
+  (list tags with `gcloud artifacts docker tags list
+  REGION-docker.pkg.dev/GCP_PROJECT/ARTIFACT_REPO/RUNNER_IMAGE_NAME`), then fix
+  the image. The
+  mediator ignores the execution (it has no `RUNNER_NAME`); it counts toward
+  `MAX_CONCURRENT_RUNNERS` for the few seconds it runs. Executing with an env
+  override needs `run.jobs.runWithOverrides` (in `roles/run.developer`).
 
 ## 5. Mediator URL and the GitHub App
 
@@ -199,7 +226,7 @@ scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check
    `config.env` or stray file leaves the machine.
 3. Deploys `MEDIATOR_SERVICE_NAME` as `MEDIATOR_SA_NAME` (C12):
    - `--max-instances=1` (**required**: claims live in the mediator's memory)
-     and `--min-instances=0`; 1 vCPU, 512 MiB, request timeout 300 s;
+     and `--min-instances` from `MEDIATOR_MIN_INSTANCES` (default 0; 1 keeps it warm, see [operations](operations.md#mediator-single-instance)); 1 vCPU, 512 MiB, request timeout 300 s;
    - public ingress;
    - every config key as an env var (`--set-env-vars` with the `^;^`
      delimiter, because values contain commas and spaces). The secrets are
@@ -207,7 +234,8 @@ scripts/deploy-mediator.sh --apply [--tag TAG] [--local] [--no-invoker-iam-check
      own identity.
 4. Re-reads the service and stops if max-instances is not 1.
 5. Grants `SCHEDULER_SA_NAME` `roles/run.invoker` on the service only (C13).
-6. Prints the service URL. If `MEDIATOR_URL` is empty, it tells you to set it
+6. Prints the service URL. The GitHub App's webhook URL is that URL (or
+   `MEDIATOR_URL`) **plus `/webhook`**; the bare URL gets 404 on delivery. If `MEDIATOR_URL` is empty, it tells you to set it
    and run the script again; the service answers 503 on `/webhook` and
    `/reconcile` until then. If `MEDIATOR_URL` is not one of the service's URLs
    (`status.url` or the deterministic URL), it warns: update `MEDIATOR_URL`
@@ -244,20 +272,75 @@ the Cloud Scheduler docs). Newer projects have it by default.
 
 ## 9. Quotas
 
-Runner executions consume the regional Cloud Run ephemeral-disk quota as
-`RUNNER_DISK_GI` x running executions. The default quota of 100 GiB per region
-fits the defaults (5 x 10 GiB) with room for 10 runners. `RUNNER_DISK_GI` is
-at most 10: the Cloud Run server rejected larger ephemeral-disk totals per
-instance in the P6 deploy. To raise `MAX_CONCURRENT_RUNNERS`:
+Two Cloud Run ephemeral-disk quotas apply ([Cloud Run docs](https://docs.cloud.google.com/run/docs/configuring/jobs/ephemeral-disk)):
 
-1. In the console (IAM & Admin > Quotas), filter for Cloud Run Admin API
-   quotas in `REGION`: ephemeral disk, and the CPU and memory allocation
-   quotas if `MAX_CONCURRENT_RUNNERS` x `RUNNER_CPU` / `RUNNER_MEMORY` exceed
-   them. Request an increase to cover the new maximum (C15,
-   `roles/cloudquotas.admin`).
-2. After approval, raise `MAX_CONCURRENT_RUNNERS` in `config.env` and run
-   `scripts/deploy-mediator.sh --apply`. The mediator enforces the cap; the
-   job itself needs no change.
+| Quota (metric) | Default | Consumed as |
+| :--- | :--- | :--- |
+| Per instance: `run.googleapis.com/max_per_instance_ephemeral_disk` | 10 GiB | `RUNNER_DISK_GI` (one volume per execution) |
+| Per region: `run.googleapis.com/ephemeral_disk_allocation` | 100 GiB (granted on first use) | `RUNNER_DISK_GI` x running executions |
+
+`RUNNER_DISK_GI` accepts 1-100 and defaults to 10, which is the per-instance
+default. **10 GiB is too small for a warm golangci-lint**: the P6 PoC measured
+about 15-20 GiB on disk (the restored Go cache grows from 4.8 GB to about
+8-9.5 GB during the lint, plus a 1.1 GB workspace, about 1.3 GB of modules and
+up to 2 GB of Go temp dirs). Every lint run with 10 GiB ran out of space. Use
+**at least 20 GiB** (P6b peaked at 16.5 GB on 23 GiB), after raising the
+per-instance quota, or keep the build cache
+in RAM (`RUNNER_BUILD_CACHE_IN_RAM=true`, then `deploy-job.sh --apply`; it costs
+about 9.5 GB of the 32 GiB memory, see
+[architecture](architecture.md#constraints)). A job above the per-instance quota is rejected at `deploy-job.sh`
+("Total size of 'ephemeral-disk' volumes cannot exceed N GiB"), and nothing is
+created or changed.
+
+**The limit depends on the region and the grant.** It was 10 GiB in us-central1
+and 23 GiB in us-west2 after the quota grant (a request for more was granted as
+23), so `check-config.sh` cannot know it. `deploy-job.sh` notes when
+`RUNNER_DISK_GI` is above 10, and when the create or update fails it explains the
+error: N in the message is the limit in `REGION`. Set `RUNNER_DISK_GI` to at most
+N, or ask for more. us-west2 runs with `RUNNER_DISK_GI=23` and
+`MAX_CONCURRENT_RUNNERS=4` (92 GiB of the default 100 GiB regional allocation).
+
+**Reading the quotas needs `cloudquotas.quotas.get`** (`roles/cloudquotas.viewer`,
+project). A deployer without it (as in the us-west2 deployment) cannot run the
+`gcloud beta quotas info` command below; the job create is then the only check
+of the per-instance limit, and the regional allocation can only be assumed from
+the default. Ask a project admin for the values, or for the viewer role.
+
+To raise a quota (C15, `roles/cloudquotas.admin`; Google approves the request):
+
+1. Find the quota ID (the `gcloud quotas` commands are beta:
+   `gcloud components install beta`):
+
+   ```bash
+   gcloud beta quotas info list --service=run.googleapis.com --project=GCP_PROJECT \
+     --filter='metric:run.googleapis.com/max_per_instance_ephemeral_disk OR metric:run.googleapis.com/ephemeral_disk_allocation' \
+     --format='table(quotaId, metric, dimensions)'
+   ```
+
+2. Request the new value for `REGION`, for example 25 GiB per instance, and
+   enough regional allocation for `MAX_CONCURRENT_RUNNERS` x 25 GiB. With the
+   default regional 100 GiB, set `MAX_CONCURRENT_RUNNERS=4` at 25 GiB, or raise
+   the regional quota first: otherwise the 5th concurrent runner fails to start
+   (`launch_failed`, `RESOURCE_EXHAUSTED`) and its job waits for `/reconcile`.
+
+   ```bash
+   gcloud beta quotas preferences create --service=run.googleapis.com --project=GCP_PROJECT \
+     --quota-id=QUOTA_ID_FROM_STEP_1 --dimensions=region=REGION --preferred-value=25 \
+     --email=YOU@example.com --justification='cr-ci runners: warm golangci-lint needs ~20 GiB of scratch'
+   ```
+
+   The value is in the quota's unit as listed by step 1 (GiB for these two).
+   **UNVERIFIED:** the exact `quotaId` strings and the `region` dimension key;
+   read them from step 1's output. The console works too: IAM & Admin >
+   Quotas, filter for the metric, **Edit quotas**.
+3. After approval, set `RUNNER_DISK_GI` (and, within the regional allocation,
+   `MAX_CONCURRENT_RUNNERS`) in `config.env`, then run
+   `scripts/deploy-job.sh --apply` (disk) and `scripts/deploy-mediator.sh --apply`
+   (concurrency).
+
+The regional CPU and memory allocation quotas apply too if
+`MAX_CONCURRENT_RUNNERS` x `RUNNER_CPU` / `RUNNER_MEMORY` exceed them; request
+them the same way.
 
 ## 10. Teardown: `scripts/teardown.sh`
 
@@ -265,6 +348,7 @@ instance in the P6 deploy. To raise `MAX_CONCURRENT_RUNNERS`:
 scripts/teardown.sh                    # read the transcript
 scripts/teardown.sh --apply            # asks you to type GCP_PROJECT
 scripts/teardown.sh --apply --keep-secrets --keep-images
+scripts/teardown.sh --apply --regional-only   # one region's stack only
 ```
 
 It deletes, in reverse order, skipping what is already gone:
@@ -279,6 +363,14 @@ It deletes, in reverse order, skipping what is already gone:
    `MEDIATOR_SA_NAME`'s access);
 7. `BUILD_SA_NAME`'s project-level `logging.logWriter` binding;
 8. the four service accounts.
+
+`--regional-only` stops after step 4: it deletes only the scheduler job,
+mediator service, runner job and Artifact Registry repository in `REGION`
+(`--keep-images` keeps the repository), and keeps the service accounts, secrets,
+staging bucket and project binding that a stack in another region still uses.
+Use it to remove the old stack after a region move
+([operations](operations.md#two-stacks-region-move)); `--keep-secrets` is refused
+with it, since the secrets are always kept.
 
 APIs stay enabled, since the project may use them. Uninstall the GitHub App
 and clear the routing variable first

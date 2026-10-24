@@ -1600,6 +1600,13 @@ type V1ServerConfig struct {
 	// LogFormat is accepted so existing settings files still load, but nothing
 	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
 	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// KeyringFile is the path of the server keyring file
+	// (server.keyring_file, KeyringFileKey). See GlobalConfig.KeyringFile.
+	KeyringFile string `json:"keyring_file,omitempty" yaml:"keyring_file,omitempty" koanf:"keyring_file"`
+	// KeyringFileAllowWorldReadable is the operator override that admits a
+	// world-readable keyring file (server.keyring_file_allow_world_readable).
+	// See GlobalConfig.KeyringFileAllowWorldReadable.
+	KeyringFileAllowWorldReadable bool `json:"keyring_file_allow_world_readable,omitempty" yaml:"keyring_file_allow_world_readable,omitempty" koanf:"keyring_file_allow_world_readable"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -2019,6 +2026,8 @@ type V1ServerRelayConfig struct {
 	// PublicURL is the relay's own public URL, recorded as its
 	// relay_instances.public_endpoint.
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// Singleton asserts a non-HA singleton relay (required on Cloud Run).
+	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -3756,7 +3765,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		legacy.hubIDFromCamel = false
 		delete(res.sources, projectkeys.ConfigHubProjectIDKey)
 	}
-	if projectPath != "" && projectPath != globalDir {
+	// A hub-managed workspace root without a .scion entry has no project
+	// settings: its own settings file is workspace content.
+	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
+	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
@@ -3773,7 +3785,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// project is found via the current directory (resolveEffectiveProjectPath
 	// -> FindProjectRoot): step 3 above never runs in that case, so the
 	// precedence check must run here too, not only in step 3.
-	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath && !noProjectLayer {
 		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err
@@ -4315,6 +4327,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
+	if v1.KeyringFile != "" {
+		gc.KeyringFile = v1.KeyringFile
+	}
+	if v1.KeyringFileAllowWorldReadable {
+		gc.KeyringFileAllowWorldReadable = true
+	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -4473,7 +4491,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	}
 
 	if r := v1.Relay; r != nil {
-		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config
@@ -4772,8 +4790,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:     gc.Mode,
-		LogLevel: gc.LogLevel,
+		Mode:        gc.Mode,
+		LogLevel:    gc.LogLevel,
+		KeyringFile: gc.KeyringFile,
+
+		KeyringFileAllowWorldReadable: gc.KeyringFileAllowWorldReadable,
 	}
 
 	// Hub server config
@@ -4883,7 +4904,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	v1.Hub = v1Hub
 	if r := gc.Relay; !r.IsZero() {
-		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config

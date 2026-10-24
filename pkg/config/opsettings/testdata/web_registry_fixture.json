@@ -23,6 +23,7 @@
       "default_gcp_identity_mode",
       "default_gcp_identity_service_account_id"
     ],
+    "agent_delegation_policy": [],
     "agent_secrets": [
       "agent_secrets.user_scope_only"
     ],
@@ -99,6 +100,7 @@
       "telemetry.cloud.protocol",
       "telemetry.cloud.headers",
       "telemetry.cloud.provider",
+      "telemetry.cloud.gcp_project_id",
       "telemetry.cloud.tls",
       "telemetry.cloud.tls.enabled",
       "telemetry.cloud.tls.insecure_skip_verify",
@@ -131,6 +133,8 @@
     ]
   },
   "layer0_prefixes": [
+    "server.keyring_file",
+    "server.keyring_file_allow_world_readable",
     "server.database",
     "server.hub.port",
     "server.hub.host",

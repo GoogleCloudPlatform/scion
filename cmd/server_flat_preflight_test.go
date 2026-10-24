@@ -19,6 +19,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -431,4 +433,51 @@ func TestFlatOwnershipPreflight_ChildRecovery(t *testing.T) {
 		assert.True(t, rec.OwnsUID("uid-terminating"), "a terminating child stays recorded")
 		assert.False(t, rec.OwnsUID("uid-gone"), "a confirmed-gone child is marked absent")
 	})
+}
+
+// TestFlatOwnershipPreflight_RetiresAbandonedCreates: the start-up
+// preflight retires the record of a create that failed before its agent
+// existed (one provisioning run, no object) when the agent's files are
+// proven absent, and keeps it when its files exist or the instance's
+// runtime target cannot prove absence (ptone/scion#5768).
+func TestFlatOwnershipPreflight_RetiresAbandonedCreates(t *testing.T) {
+	const projectID = "5e0f7a52-1c3b-4d8e-9a6f-2b7c4d1e8f30"
+	for _, tc := range []struct {
+		target      string
+		wantRetired bool
+	}{{"docker", true}, {"kubernetes", false}} {
+		t.Run(tc.target, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			globalDir, err := config.GetGlobalDir()
+			require.NoError(t, err)
+			scionDir := filepath.Join(globalDir, "projects", "proj-a", config.DotScion)
+			require.NoError(t, os.MkdirAll(filepath.Join(scionDir, "agents", "kept"), 0o755))
+			require.NoError(t, config.WriteProjectID(scionDir, projectID))
+
+			dir, err := runtimebroker.DefaultStateDir("rb-a")
+			require.NoError(t, err)
+			store := runtimebroker.NewOwnershipStore(dir, "rb-a")
+			require.NoError(t, store.BeginRun(projectID, "agent-ghost", "ghost", "run-ghost"))
+			require.NoError(t, store.BeginRun(projectID, "agent-kept", "kept", "run-kept"))
+
+			c := preflightCandidate(func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil })
+			c.Instance.RuntimeTarget.Type = tc.target
+			require.NoError(t, flatOwnershipPreflight(context.Background(), c))
+
+			_, ghost, err := store.Get(projectID, "agent-ghost")
+			require.NoError(t, err)
+			holder, err := store.SlugHolder(projectID, "ghost")
+			require.NoError(t, err)
+			if tc.wantRetired {
+				assert.False(t, ghost, "the abandoned record is retired")
+				assert.Empty(t, holder, "its slug is released")
+			} else {
+				assert.True(t, ghost, "kept: absence cannot be proven on this runtime target")
+				assert.Equal(t, "agent-ghost", holder)
+			}
+			_, kept, err := store.Get(projectID, "agent-kept")
+			require.NoError(t, err)
+			assert.True(t, kept, "a record whose agent files exist is kept")
+		})
+	}
 }

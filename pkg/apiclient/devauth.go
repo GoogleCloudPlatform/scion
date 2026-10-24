@@ -117,6 +117,10 @@ func ResolveDevToken() string {
 	return token
 }
 
+// DevTokenSourceDefaultFile is the source ResolveDevTokenWithSource reports
+// for a token read from the default ~/.scion/dev-token file.
+const DevTokenSourceDefaultFile = "~/.scion/dev-token"
+
 // ResolveDevTokenWithSource finds a development token and returns both
 // the token and the source it was loaded from.
 // It checks in order:
@@ -149,7 +153,7 @@ func ResolveDevTokenWithSource() (string, string) {
 	if data, err := os.ReadFile(tokenFile); err == nil {
 		token := strings.TrimSpace(string(data))
 		if token != "" {
-			return token, "~/.scion/dev-token"
+			return token, DevTokenSourceDefaultFile
 		}
 	}
 

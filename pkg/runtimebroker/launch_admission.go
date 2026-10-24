@@ -231,6 +231,16 @@ func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx c
 	rec := newLaunchRecord(a.launchID, a.agentID, a.kind, s.resolveHubNameForLaunch(r), deadline, cancel)
 	rec.RunID = a.runID
 	rec.shutdown = func() { cancelCause(errBrokerShutdown) }
+	// A flat create's run is this launch's from the start, so that a
+	// failure before Manager.Start, and boot recovery from the first
+	// journal write on, finish that run (ptone/scion#5768). A start or
+	// restart launch records its run when it reaches Manager.Start, as
+	// before.
+	if a.kind == store.LaunchKindCreate && a.lc.owned != nil {
+		rec.ownedRunMu.Lock()
+		rec.ownedRun = ownedRunKey{projectID: a.lc.owned.projectID, agentID: a.lc.owned.agentID, runID: a.lc.owned.runID}
+		rec.ownedRunMu.Unlock()
+	}
 	// A drain that began after the handler's own check refuses here, before
 	// the launch is accepted; once tracked, the drain cancels it instead.
 	if !s.trackAsyncLaunch(rec) {

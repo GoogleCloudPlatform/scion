@@ -24,6 +24,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -423,6 +425,27 @@ type DispatchDoneEvent struct {
 // one place guarantees both backends publish identical subjects and payloads.
 type eventBuilder struct {
 	sink func(subject string, event interface{})
+	// heartbeatSink, when set, is the sink for agent status events
+	// published with an eventstreams.WithHeartbeatTrigger context: it
+	// delivers exactly like sink and counts the event as trigger=heartbeat.
+	heartbeatSink func(subject string, event interface{})
+	// published counts scion.hub.events.published; the embedding
+	// publisher calls it once per event it publishes.
+	published eventstreams.PublishCounter
+}
+
+// SetPublishMetrics wires the scion.hub.events.published counter
+// (ptone/scion#5228). Nil disables it.
+func (p *eventBuilder) SetPublishMetrics(rec ssemetrics.Recorder) {
+	p.published.SetMetrics(rec)
+}
+
+// statusSink returns the sink for an agent status event published with ctx.
+func (p *eventBuilder) statusSink(ctx context.Context) func(subject string, event interface{}) {
+	if p.heartbeatSink != nil && eventstreams.Trigger(ctx) == ssemetrics.TriggerHeartbeat {
+		return p.heartbeatSink
+	}
+	return p.sink
 }
 
 // ChannelEventPublisher is an in-process event publisher that fans out events
@@ -452,6 +475,9 @@ func NewChannelEventPublisher() *ChannelEventPublisher {
 		log:         logging.Subsystem("hub.events"),
 	}
 	p.sink = p.publish
+	p.heartbeatSink = func(subject string, event interface{}) {
+		p.publishTriggered(subject, event, ssemetrics.TriggerHeartbeat)
+	}
 	return p
 }
 
@@ -490,6 +516,12 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 // publish marshals the event to JSON and fans out to matching subscribers.
 // Sends are non-blocking: events are dropped if a subscriber's buffer is full.
 func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
+	p.publishTriggered(subject, event, ssemetrics.TriggerChange)
+}
+
+// publishTriggered is publish, counting the event on
+// scion.hub.events.published with the given trigger.
+func (p *ChannelEventPublisher) publishTriggered(subject string, event interface{}, trigger string) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		p.logger().Error("Failed to marshal event", "subject", subject, "error", err)
@@ -504,6 +536,7 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	if p.closed {
 		return
 	}
+	p.published.Count(subject, trigger)
 
 	matched := 0
 	for pattern, subs := range p.subscribers {
@@ -521,7 +554,23 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 		}
 	}
 
-	p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	if matched > 0 && !isAgentStatusSubject(subject) {
+		p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	}
+}
+
+// isAgentStatusSubject reports whether subject is an agent status subject
+// (agent.<id>.status or project.<id>.agent.status). These carry per-agent
+// status and heartbeat events, which are not logged per event.
+func isAgentStatusSubject(subject string) bool {
+	tokens := strings.Split(subject, ".")
+	switch len(tokens) {
+	case 3:
+		return tokens[0] == "agent" && tokens[2] == "status"
+	case 4:
+		return tokens[0] == "project" && tokens[2] == "agent" && tokens[3] == "status"
+	}
+	return false
 }
 
 // PublishRaw publishes an arbitrary event on the given subject.
@@ -555,7 +604,10 @@ func (p *ChannelEventPublisher) Close() {
 
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
-func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+//
+// An agent status event published with an eventstreams.WithHeartbeatTrigger
+// context counts as trigger=heartbeat on scion.hub.events.published.
+func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
 	now := time.Now()
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
@@ -590,9 +642,10 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	// Always set, even when every field is zero (for example before
 	// StartedAt during provisioning), so a cleared message is sent as "".
 	evt.Detail = &detail
-	p.sink("agent."+agent.ID+".status", evt)
+	sink := p.statusSink(ctx)
+	sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
-		p.sink("project."+agent.ProjectID+".agent.status", evt)
+		sink("project."+agent.ProjectID+".agent.status", evt)
 	}
 }
 

@@ -963,145 +963,59 @@ func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 	assert.Contains(t, err.Error(), "not in a scion project")
 }
 
-func TestDevAuthWarning(t *testing.T) {
-	// Save and restore original flags
-	origHubEndpoint := hubEndpoint
-	defer func() {
-		hubEndpoint = origHubEndpoint
-	}()
-
-	// Save and restore HOME
-	origHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", origHome) }()
-
-	// Create a temp directory for test settings
-	tmpDir := t.TempDir()
-	_ = os.Setenv("HOME", tmpDir)
-	scionDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		t.Fatalf("failed to create test .scion dir: %v", err)
-	}
-
-	// Create settings.yaml with hub enabled
-	settingsPath := filepath.Join(scionDir, "settings.yaml")
-	settingsContent := `
-hub:
-  enabled: true
-  endpoint: http://localhost:9810
-`
-	if err := os.WriteFile(settingsPath, []byte(settingsContent), 0644); err != nil {
-		t.Fatalf("failed to write test settings: %v", err)
-	}
-
+// printDevTokenNotSentNote: a dev token set explicitly (SCION_DEV_TOKEN or
+// SCION_DEV_TOKEN_FILE) that would be the credential for a hub that is not on
+// a loopback address is not sent, and one stderr note says so (with the hub
+// URL redacted). A loopback hub, another credential, no dev token, or a token
+// only in the ~/.scion/dev-token file gives no note. Nothing goes to stdout.
+func TestDevTokenNotSentNote(t *testing.T) {
 	tests := []struct {
-		name          string
-		hubEndpoint   string
-		devTokenEnv   string
-		devTokenFile  string
-		hubTokenEnv   string
-		expectWarning bool
+		name         string
+		hubEndpoint  string
+		devTokenEnv  string
+		devTokenFile string // written to ~/.scion/dev-token
+		devTokenPath string // written to a file named by SCION_DEV_TOKEN_FILE
+		hubTokenEnv  string
+		want         string
 	}{
-		{
-			name:          "No dev token, no warning",
-			expectWarning: false,
-		},
-		{
-			// The local workstation server on loopback is reached with its
-			// dev token by design: no banner.
-			name:          "Local workstation hub with dev token env var: no banner",
-			hubEndpoint:   "http://localhost:9810",
-			devTokenEnv:   "scion_dev_testtoken123",
-			expectWarning: false,
-		},
-		{
-			name:          "Hub endpoint via flag, no dev token",
-			hubEndpoint:   "http://localhost:9810",
-			devTokenEnv:   "",
-			expectWarning: false,
-		},
-		{
-			name:          "Remote hub with dev token env var warns",
-			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
-			devTokenEnv:   "scion_dev_testtoken123",
-			expectWarning: true,
-		},
-		{
-			name:          "Remote hub with dev token file does not warn",
-			hubEndpoint:   "https://hub.demo.scion-ai.dev/",
-			devTokenFile:  "scion_dev_testtoken123",
-			expectWarning: false,
-		},
-		{
-			name:          "Local workstation hub with dev token file: no banner",
-			hubEndpoint:   "http://localhost:9810",
-			devTokenFile:  "scion_dev_testtoken123",
-			expectWarning: false,
-		},
-		{
-			// Loopback, but reached with an explicit token (SCION_HUB_TOKEN,
-			// which settings read as hub.token): not the local workstation
-			// hub and not dev auth, so no banner either way.
-			name:          "Loopback hub with dev token and SCION_HUB_TOKEN: explicit auth, no banner",
-			hubEndpoint:   "http://localhost:9810",
-			devTokenEnv:   "scion_dev_testtoken123",
-			hubTokenEnv:   "bearer-test-token",
-			expectWarning: false,
-		},
-		{
-			// Any other hub keeps the banner when dev auth is in use.
-			name:          "Another remote hub with dev token env var still warns",
-			hubEndpoint:   "https://dev-hub.example.com:9810",
-			devTokenEnv:   "scion_dev_testtoken123",
-			expectWarning: true,
-		},
+		{name: "no hub, dev token: no note", devTokenEnv: "placeholder-dev-token"},
+		{name: "remote hub, no dev token: no note", hubEndpoint: "https://hub.example.com"},
+		{name: "remote hub, dev token env var: note", hubEndpoint: "https://hub.example.com/", devTokenEnv: "placeholder-dev-token",
+			want: "Note: the dev token is used only for a local hub; it is not sent to https://hub.example.com/.\n"},
+		{name: "remote hub, dev token in SCION_DEV_TOKEN_FILE: note", hubEndpoint: "https://hub.example.com", devTokenPath: "placeholder-dev-token",
+			want: "Note: the dev token is used only for a local hub; it is not sent to https://hub.example.com.\n"},
+		{name: "remote hub, dev token only in ~/.scion/dev-token: no note", hubEndpoint: "https://hub.example.com", devTokenFile: "placeholder-dev-token"},
+		{name: "remote hub with user info, dev token: note with the URL redacted", hubEndpoint: "https://user:placeholder@hub.example.com", devTokenEnv: "placeholder-dev-token",
+			want: "Note: the dev token is used only for a local hub; it is not sent to https://user:xxxxx@hub.example.com.\n"},
+		{name: "remote hub, dev token and SCION_HUB_TOKEN: no note", hubEndpoint: "https://hub.example.com", devTokenEnv: "placeholder-dev-token", hubTokenEnv: "placeholder-hub-token"},
+		{name: "loopback hub, dev token: no note", hubEndpoint: "http://localhost:9810", devTokenEnv: "placeholder-dev-token"},
+		{name: "loopback address hub, dev token file: no note", hubEndpoint: "http://127.0.0.1:9810", devTokenFile: "placeholder-dev-token"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set flags
+			setupContextTest(t)
 			hubEndpoint = tt.hubEndpoint
-
-			// Set environment
-			if tt.devTokenEnv != "" {
-				_ = os.Setenv("SCION_DEV_TOKEN", tt.devTokenEnv)
-				defer func() { _ = os.Unsetenv("SCION_DEV_TOKEN") }()
-			} else {
-				_ = os.Unsetenv("SCION_DEV_TOKEN")
-			}
-			_ = os.Unsetenv("SCION_DEV_TOKEN_FILE")
-			// Hermetic credentials: the local-workstation check reads the
-			// selected hub credential (SCION_HUB_TOKEN, SCION_AUTH_TOKEN), and
-			// the endpoint must come only from the flag or settings here.
+			t.Setenv("SCION_DEV_TOKEN", tt.devTokenEnv)
+			t.Setenv("SCION_DEV_TOKEN_FILE", "")
 			t.Setenv("SCION_HUB_TOKEN", tt.hubTokenEnv)
 			t.Setenv("SCION_AUTH_TOKEN", "")
 			t.Setenv("SCION_HUB_ENDPOINT", "")
 			t.Setenv("SCION_HUB_URL", "")
-
-			// Write dev token file if specified
-			devTokenPath := filepath.Join(scionDir, "dev-token")
+			if tt.devTokenPath != "" {
+				path := filepath.Join(t.TempDir(), "token")
+				require.NoError(t, os.WriteFile(path, []byte(tt.devTokenPath+"\n"), 0o600))
+				t.Setenv("SCION_DEV_TOKEN_FILE", path)
+			}
 			if tt.devTokenFile != "" {
-				_ = os.WriteFile(devTokenPath, []byte(tt.devTokenFile+"\n"), 0600)
-				defer func() { _ = os.Remove(devTokenPath) }()
-			} else {
-				_ = os.Remove(devTokenPath)
+				dir := filepath.Join(os.Getenv("HOME"), ".scion")
+				require.NoError(t, os.MkdirAll(dir, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "dev-token"), []byte(tt.devTokenFile+"\n"), 0o600))
 			}
 
-			// The warning goes to the writer it is given (the command's
-			// stderr), and never to stdout.
 			var buf bytes.Buffer
-			stdout := captureStdout(t, func() {
-				// Use empty project path as settings won't load in test env
-				printDevAuthWarningIfNeeded(&buf, "")
-			})
-			assert.Empty(t, stdout, "the dev auth warning must not go to stdout")
-			output := buf.String()
-
-			if tt.expectWarning {
-				assert.Contains(t, output, "WARNING")
-				assert.Contains(t, output, "Development authentication enabled")
-			} else {
-				assert.NotContains(t, output, "WARNING")
-			}
+			stdout := captureStdout(t, func() { printDevTokenNotSentNote(&buf, "") })
+			assert.Empty(t, stdout, "the note must not go to stdout")
+			assert.Equal(t, tt.want, buf.String())
 		})
 	}
 }

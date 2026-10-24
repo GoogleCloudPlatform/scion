@@ -264,7 +264,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 						}
 					}
 					worktreeStart := time.Now()
-					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
+					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, repoRoot, branchToDelete(removeBranch, branch)); err == nil {
 						if deleted {
 							branchDeleted = true
 						}
@@ -323,7 +323,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, removeBranch); err == nil {
+			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
@@ -360,7 +360,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
+				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
@@ -1775,6 +1775,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	var workspaceSource string
 	shouldCreateWorktree := false
 	explicitWorkspace := false
+	// projectRepoRoot is the repository root recorded for a git project
+	// (Case 2), "" otherwise.
+	var projectRepoRoot string
 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
@@ -1841,6 +1844,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
 			}
+			if err := refuseWorkspaceInAgentsDir(projectDir, absWorkspace); err != nil {
+				return "", "", nil, err
+			}
 			workspaceSource = absWorkspace
 			agentWorkspace = ""
 			explicitWorkspace = true
@@ -1852,6 +1858,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if err != nil {
 				return "", "", nil, err
 			}
+			if err := refuseWorkspaceInAgentsDir(projectDir, resolved); err != nil {
+				return "", "", nil, err
+			}
 			workspaceSource = resolved
 			agentWorkspace = ""
 			explicitWorkspace = true
@@ -1859,6 +1868,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// The repository root is identified without git
+		// (trustedProjectRepoRoot) and must match what git reports;
+		// provisioning stops otherwise. It is recorded below.
+		trustedRoot, rootErr := checkProvisionRepoRoot(projectDir)
+		if rootErr != nil {
+			return "", "", nil, rootErr
+		}
+		projectRepoRoot = trustedRoot
 		// A flat Runtime Broker instance serializes the repository's
 		// worktree and sharer changes with every instance of its host (the
 		// host's workspace lock), through the rest of provisioning.
@@ -1903,10 +1920,29 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if regErr := provision.RegisterSharer(repoRoot, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
+				// Record, broker-side, that this worktree is the agent's own
+				// checkout (see isAgentOwnWorkspace), but only for a linked
+				// worktree that is neither the main checkout nor holds the
+				// project: the main checkout (e.g. --branch naming the
+				// branch the user has checked out) holds the project
+				// configuration the broker reads, so the agent is attached
+				// without the record and gets that .scion read-only.
+				if validAttachedWorktree(projectDir, resolvedClean(existingPath)) {
+					if err := writeAgentOwnWorkspace(agentDir, existingPath); err != nil {
+						return "", "", nil, fmt.Errorf("record the attached worktree: %w", err)
+					}
+				} else {
+					removeAgentOwnWorkspace(agentDir)
+					slog.Warn("Attached to a worktree that is the main checkout or holds the project; its .scion is mounted read-only",
+						"agent", agentName, "worktree", existingPath)
+				}
 			}
 		}
 
 		if !usedExistingWorktree {
+			// No attached worktree: a record from an earlier attach no
+			// longer applies.
+			removeAgentOwnWorkspace(agentDir)
 			shouldCreateWorktree = true
 			// agentWorkspace remains set to agents/<name>/workspace
 		}
@@ -2428,7 +2464,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// gate, for the one case this function never runs at all: GetAgent
 	// skipping ProvisionAgent because the agent directory already exists.
 	// See persistProvisionedWorktreeRepoRootIfValid.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource, finalScionCfg.Volumes)
+
+	// Record the project's repository root for a git project (Case 2), so
+	// every later start reads it from this record instead of deriving it
+	// from the workspace. Written only when agentDir is outside every
+	// mount of the agent (writeRepoRootRecord).
+	if projectRepoRoot != "" && api.ProvisionedWorktreeRepoRootFromContext(ctx) == "" {
+		recordWorkspace := agentWorkspace
+		if recordWorkspace == "" {
+			recordWorkspace = workspaceSource
+		}
+		if err := writeRepoRootRecord(agentDir, projectRepoRoot, repoRootSourceProvision,
+			agentMountSources(recordWorkspace, projectRepoRoot, finalScionCfg.Volumes)); err != nil {
+			slog.Info("provision: repository root not recorded; the agent starts without a repository root mount",
+				"agent", agentName, "reason", err)
+		}
+	}
 
 	// scion-agent.json carries only the requester's own environment values
 	// (the inline image, kubernetes, resources and volumes) and the workspace
@@ -2855,7 +2907,7 @@ const (
 // SavedProfileOnDisk returns the saved profile of the agent agentName in
 // projectPath on this host, as the start path would see it, for the hub's
 // built-in profile reference count (ptone/scion#5113). It reads
-// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// agent-info.json via readSavedAgentInfo (GetResolvedProjectDir,
 // then GetAgentHomePath). When that file exists but cannot be used, the
 // start path's runtime selection would use the provisioned profile from the
 // image provenance record (ProvisionedProfile), so that is returned instead.
@@ -2884,7 +2936,7 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 }
 
 // readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
-// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// the one reader behind GetSavedPhase and SavedProfileOnDisk, so they always
 // look at the same file. info is non-nil only when state is
 // SavedProfileFound.
 func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
@@ -2892,11 +2944,13 @@ func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, S
 	if err != nil {
 		return nil, SavedProfileMissing
 	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err != nil {
+	// Read confined to the agent home (readHomeAgentInfo): a link, a
+	// non-regular file or a second hard link at agent-info.json is
+	// unreadable, never read through.
+	data, err := readHomeAgentInfo(config.GetAgentHomePath(projectDir, agentName))
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, SavedProfileMissing
 	}
-	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
 		return nil, SavedProfileUnreadable
 	}
@@ -2940,28 +2994,10 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
 
-func GetSavedProfile(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Profile
-	}
-	return ""
-}
-
-// GetSavedRuntime returns the runtime name agent-info.json records the
-// agent last ran on, or "" if none is recorded.
-func GetSavedRuntime(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.Runtime
-	}
-	return ""
-}
-
-func GetSavedHarnessConfig(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.HarnessConfig
-	}
-	return ""
-}
+// There is deliberately no getter for the profile, runtime or harness
+// config recorded in agent-info.json: the agent home is writable by the
+// agent, so those copies are display-only. The broker reads them from its
+// own records instead (ProvisionedProfile, PersistedHarnessConfig).
 
 func GetSavedPhase(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -2982,7 +3018,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	// This might happen if provisioning failed or hasn't finished.
 	// Checked before the lock too, so no lock file is left in a home
 	// that has no agent-info.json.
-	if _, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
+	if _, err := os.Lstat(agentInfoPath); os.IsNotExist(err) {
 		return nil
 	}
 
@@ -3014,23 +3050,14 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
-	// process cannot lose this update or have its own lost (#4681).
-	return agentinfolock.Update(agentInfoPath, agentinfolock.Options{}, func() error {
-		mode := os.FileMode(0o644)
-		if fi, err := os.Stat(agentInfoPath); os.IsNotExist(err) {
-			return nil
-		} else if err == nil {
-			mode = fi.Mode().Perm()
-		}
-
-		data, err := os.ReadFile(agentInfoPath)
-		if err != nil {
-			return err
-		}
-
+	// process cannot lose this update or have its own lost (#4681). They
+	// are confined to the agent home (updateHomeAgentInfo): a link at
+	// agent-info.json or at a directory component is refused, never read
+	// through or written through.
+	return updateHomeAgentInfo(agentHome, true, func(data []byte) ([]byte, error) {
 		var info api.AgentInfo
 		if err := json.Unmarshal(data, &info); err != nil {
-			return err
+			return nil, err
 		}
 
 		update(&info)
@@ -3041,12 +3068,7 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 			info.RunID = ""
 		}
 
-		newData, err := marshalAgentInfoKeepUnknown(data, &info)
-		if err != nil {
-			return err
-		}
-
-		return writeAgentInfoFile(agentInfoPath, newData, mode)
+		return marshalAgentInfoKeepUnknown(data, &info)
 	})
 }
 
@@ -3150,36 +3172,53 @@ const provisionedWorktreeStateFile = "provisioned-worktree.json"
 // provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
 type provisionedWorktreeState struct {
 	RepoRoot string `json:"repoRoot"`
+	// Source is how the record was made (repoRootSourceBroker,
+	// repoRootSourceProvision or repoRootSourceBackfill). Each is written
+	// only when agentDir is outside every mount of the agent. Source is used
+	// by writeRepoRootRecord's idempotence check and by readRepoRootRecord
+	// (write path); the start read path reconciles the record with the
+	// derived root regardless of source.
+	Source string `json:"source,omitempty"`
 }
 
-// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
-// broker-owned state file (atomic write via writeAgentInfoFile). A write
-// failure only means a later resume falls back to detectRepoRoot — a
-// functional regression, not a security issue — so callers may log and
-// continue rather than fail the whole dispatch.
-func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
-	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
+// agentOwnWorkspaceFile records, in agentDir, a workspace outside
+// <agentDir>/workspace that provisioning gave the agent as its own checkout
+// (an existing worktree of its branch it attached to). agentDir is
+// broker-owned state, never inside an agent's writable mounts.
+const agentOwnWorkspaceFile = "own-workspace.json"
+
+type agentOwnWorkspaceState struct {
+	Workspace string `json:"workspace"`
+}
+
+// writeAgentOwnWorkspace records workspace as the agent's own checkout.
+func writeAgentOwnWorkspace(agentDir, workspace string) error {
+	data, err := json.Marshal(agentOwnWorkspaceState{Workspace: workspace})
 	if err != nil {
 		return err
 	}
-	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+	return writeAgentInfoFile(filepath.Join(agentDir, agentOwnWorkspaceFile), data, 0o644)
 }
 
-// readProvisionedWorktreeRepoRoot reads the value written by
-// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
-// parse. Never returns an error: a missing or unreadable state file is
-// exactly equivalent to "no broker-provisioned worktree recorded", which is
-// the correct, common state for every agent that isn't one.
-func readProvisionedWorktreeRepoRoot(agentDir string) string {
-	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
+// removeAgentOwnWorkspace removes the record, if any.
+func removeAgentOwnWorkspace(agentDir string) {
+	if err := os.Remove(filepath.Join(agentDir, agentOwnWorkspaceFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("Could not remove the attached-worktree record", "agent_dir", agentDir, "error", err)
+	}
+}
+
+// readAgentOwnWorkspace returns the workspace writeAgentOwnWorkspace
+// recorded, or "" when there is none or it does not parse.
+func readAgentOwnWorkspace(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, agentOwnWorkspaceFile))
 	if err != nil {
 		return ""
 	}
-	var state provisionedWorktreeState
+	var state agentOwnWorkspaceState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return ""
 	}
-	return state.RepoRoot
+	return state.Workspace
 }
 
 // persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against
@@ -3211,17 +3250,15 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 //     skips it when the agent directory already exists on disk (e.g. a
 //     leftover from a deleted hub agent recreated under the same name).
 //
-// A write failure only means a later resume falls back to detectRepoRoot;
-// see writeProvisionedWorktreeRepoRoot.
-func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+// A write failure only means a later resume has no broker record;
+// see writeRepoRootRecord (the production writer, which also applies the
+// agentDir-unmounted check).
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string, volumes []api.VolumeMount) {
 	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return
 	}
-	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
-		return
-	}
-	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
-		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	if err := writeRepoRootRecord(agentDir, ctxRepoRoot, repoRootSourceBroker, agentMountSources(workspace, ctxRepoRoot, volumes)); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: not persisted for %s: %v", agentDir, err)
 	}
 }
 
@@ -3868,18 +3905,26 @@ var worktreeGitTimeout = 30 * time.Second
 func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false",
-		"-c", "core.excludesFile=" + os.DevNull,
-		"-C", wt.workTree,
-	}, args...)...)
+	// util.HostGitCommand adds no repository hooks, no file-system monitor
+	// and no repository-defined filter commands: the agent can write this
+	// worktree's git files.
+	cmd, err := util.HostGitCommand(ctx, wt.workTree, util.HostGitOptions{
+		Policy:              util.RepoPolicyLinked,
+		AllowedWorktreePath: wt.workTree,
+		Config: []string{
+			"core.untrackedCache=false",
+			"core.excludesFile=" + os.DevNull,
+		},
+		Env: append(worktreeGitEnv(),
+			"GIT_DIR="+wt.gitDir,
+			"GIT_COMMON_DIR="+wt.commonDir,
+			"GIT_WORK_TREE="+wt.workTree,
+		),
+	}, args...)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(worktreeGitEnv(),
-		"GIT_DIR="+wt.gitDir,
-		"GIT_COMMON_DIR="+wt.commonDir,
-		"GIT_WORK_TREE="+wt.workTree,
-	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -3982,6 +4027,17 @@ func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 	}
 }
 
+// branchToDelete returns branch when removeBranch is set and "" otherwise:
+// the branch util.RemoveWorktree is asked to delete. The branch always comes
+// from the caller (the sharer marker, or the agent's own branch name), never
+// from the worktree.
+func branchToDelete(removeBranch bool, branch string) string {
+	if !removeBranch {
+		return ""
+	}
+	return branch
+}
+
 // claimAgentHome is claimDir for ProvisionAgent's agent home; a variable
 // so a test can make the home claim fail.
 var claimAgentHome = claimDir
@@ -4023,7 +4079,7 @@ func dirHasEntries(path string) (bool, error) {
 // GetAgent reads it from) if it parses and names a template or
 // harness-config, or nil otherwise.
 func readStoredAgentRecord(agentHome string) *api.AgentInfo {
-	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+	data, err := readHomeAgentInfo(agentHome)
 	if err != nil {
 		return nil
 	}
@@ -4212,10 +4268,36 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 	}
 
-	// Try to load agent-info.json first to get the template
-	agentInfoPath := filepath.Join(agentHome, "agent-info.json")
+	// Load agent-info.json (read confined to the agent home; a link there is
+	// refused, never read through). Its template is used only as described
+	// below.
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
+	if infoData, err := readHomeAgentInfo(agentHome); err == nil {
+		if err := json.Unmarshal(infoData, &agentInfo); err != nil {
+			agentInfo = nil
+		}
+	}
+
+	// The template chain comes from the template recorded in the agent's
+	// broker-side image provenance (provisioning writes the same template
+	// there and in agent-info.json), never from agent-info.json in the agent
+	// home, which also replaces Info's template fields below. An agent
+	// provisioned before that record existed keeps agent-info.json's
+	// template. With a record that exists but cannot be used, no recorded
+	// template applies (the settings default chain); Start then fails on
+	// the same record.
+	provenance, provErr := readImageProvenance(agentDir)
+	if provErr != nil {
+		logImageProvenanceError(agentName, provErr)
+	}
+	var templateRecord *api.AgentInfo
+	switch {
+	case provenance != nil:
+		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
+	case provErr == nil:
+		templateRecord = agentInfo
+	}
 
 	// A template recorded as loaded from a content-addressed cache (a
 	// TemplateHash, or a content hash stored as the name by older versions)
@@ -4223,12 +4305,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// name: the agent loads from its persisted config alone, as it did when
 	// the stored name was the cache directory's hash.
 	hydratedTemplate := false
-	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
-		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
-			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
-			if agentInfo.Template != "" {
-				effectiveTemplate = agentInfo.Template
-			}
+	if templateRecord != nil {
+		hydratedTemplate = normalizeHydratedTemplateInfo(templateRecord, api.TemplateNameFromContext(ctx))
+		if templateRecord.Template != "" {
+			effectiveTemplate = templateRecord.Template
+		}
+	}
+	if agentInfo != nil && templateRecord != agentInfo {
+		if templateRecord != nil {
+			agentInfo.Template, agentInfo.TemplateHash = templateRecord.Template, templateRecord.TemplateHash
+		} else {
+			agentInfo.Template, agentInfo.TemplateHash = "", ""
 		}
 	}
 
@@ -4242,7 +4329,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	var chain []*config.Template
 	if hydratedTemplate {
-		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, agentInfo.TemplateHash))
+		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
 		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
 	}

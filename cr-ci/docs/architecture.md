@@ -112,9 +112,11 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
 3. **Runner start.** The entrypoint points the workspace, temp dirs and Go
    caches at `/scratch`, so they do not consume RAM. Cloud Run's root
    filesystem is in memory. The entrypoint exchanges the claim token for the
-   JIT config (contract below) and `exec`s `run.sh --jitconfig` as PID 1.
-   GitHub assigns exactly one job; the process exits; the execution ends and
-   billing stops.
+   JIT config (contract below) and starts `run.sh --jitconfig` as its child
+   (it forwards Cloud Run's SIGTERM and reports the runner's real exit code;
+   [runner README](../runner/README.md)). GitHub assigns exactly one job; the
+   process exits; the execution ends and billing stops. A runner that gets no
+   job within `RUNNER_IDLE_TIMEOUT` stops itself (step 4, inherited time budget).
 4. **Hijack guard (in progress or completed on a cr-ci runner).** For any
    `in_progress` or `completed` event whose `runner_name` is `cr-job-*`,
    whatever the job's labels, the mediator compares the job with the job the
@@ -133,6 +135,28 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      reassigned, and make sure the job that took it has a runner named for it
      (a no-op if it has one). That runner, idle, serves the displaced job.
      Runners and queued jobs stay one to one.
+
+   **Inherited time budget.** The job that takes a runner gets only what is left
+   of that execution's `TASK_TIMEOUT` (P6: a job taken by a 40-minute-old runner
+   was killed 5 minutes later). Two things bound this:
+   - **Idle timeout.** The entrypoint stops a runner that has not started a job
+     within `RUNNER_IDLE_TIMEOUT` (default 10m, at least 1m, at most half of
+     `TASK_TIMEOUT`) of the container start, gracefully (SIGTERM to `run.sh`), and
+     exits 0 with an `idle_timeout:` log line. (The check and the SIGTERM are not
+     atomic: a job assigned in between is cancelled, and the entrypoint then logs
+     `ERROR idle_timeout_raced_job` and exits 4, so that failure is visible.) So a
+     runner can only take a job
+     while it is young, and **every job gets at least
+     `TASK_TIMEOUT - RUNNER_IDLE_TIMEOUT`** (35 minutes with the defaults). The
+     offline registration is reaped by the next `/reconcile` (it is aged from its
+     launch, so with the default idle timeout it is already past the five-minute
+     reap age), which also re-serves the job it was launched for if that is still
+     queued.
+   - **Logging.** `runner_swap` carries `execution_age` and `inherited_budget`
+     (`TASK_TIMEOUT` minus the age, from the launch time in memory or, after a
+     restart, from the execution's creation time). Below 20 minutes a WARNING
+     `runner_swap_low_budget` follows. The taker is not moved: GitHub has already
+     started it there.
 
    `/reconcile` repeats this check for every `in_progress` job on a `cr-job-*`
    runner, which covers a missed webhook.
@@ -166,17 +190,26 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
      every repo in `TARGET_REPOS` and their jobs;
    - the hijack guard for jobs running on `cr-job-*` runners (step 4);
    - drops expired claims;
-   - deletes offline, idle `cr-job-*` registrations older than five minutes
-     (`runner_reaped`), aged from the launch when this process launched the
-     runner and otherwise from the first reconcile that saw it offline. A
-     runner whose claim is still pending (slow cold start) is kept;
+   - deletes offline, idle `cr-job-*` registrations of **this stack** older
+     than five minutes (`runner_reaped`), aged from the launch when this
+     process launched the runner and otherwise from the first reconcile that
+     saw it offline. A runner whose claim is still pending (slow cold start)
+     is kept. Every runner is registered with `RUNNER_LABEL` plus a stack
+     label, `crci-stack-<REGION>-<RUNNER_JOB_NAME>` (unique per project); a
+     registration with another stack's label is reaped only after
+     `TASK_TIMEOUT` plus five minutes offline (it cannot be live then), one with
+     no stack label (made before stack labels) like this stack's own. So two stacks serving the same repo, during a
+     region move, do not reap each other's cold-starting runners
+     ([operations](operations.md#two-stacks-region-move));
    - cancels executions older than `TASK_TIMEOUT` plus five minutes, a safety
      net behind Cloud Run's own task timeout (`execution_reaped`);
    - backfills queued, servable jobs of runs that pass the fork guard, oldest
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
 
-   It answers 200 with a JSON summary (500 if a step failed) and logs
+   It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
+   one repo, run or job only skips that item, `reconcile_skip`, unless every
+   repo was skipped, `reconcile_all_skipped`, which is a 500) and logs
    `reconcile`.
 
 ### Mediator-to-runner contract (claim contract v2)
@@ -300,13 +333,35 @@ so it is deferred.
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
   [matrix, X6](permissions-matrix.md#5-design-corrections-and-open-items)).
-- **Ephemeral-disk quota and size:** the regional default quota is 100 GiB,
-  which fits `MAX_CONCURRENT_RUNNERS` 5 (up to 10) with the default 10 GiB
-  disks. `RUNNER_DISK_GI` is at most 10: the Cloud Run server rejected larger
-  ephemeral-disk totals per instance in the P6 deploy, although the volume
-  API documents up to 100 GiB. The design's 20-25 GiB `/scratch` is not
-  available; 10 GiB covers the lint job's caches and checkout (design 1.2). Raise both
-  together after a quota increase.
+- **Ephemeral-disk size and quotas:** two quotas apply. Per instance, Cloud Run
+  allows 10 GiB of ephemeral disk by default
+  (`run.googleapis.com/max_per_instance_ephemeral_disk`, raisable on request;
+  `RUNNER_DISK_GI` accepts 1-100). Per region, the allocation is 100 GiB by
+  default (`run.googleapis.com/ephemeral_disk_allocation`), consumed as
+  `RUNNER_DISK_GI` x running executions. The default 10 GiB is **not** enough
+  for a warm golangci-lint: the P6 PoC measured about 15-20 GiB on disk
+  (restored Go cache 4.8 GB growing to ~8-9.5 GB, workspace 1.1 GB, modules
+  ~1.3 GB, Go temp dirs up to ~2 GB), and runs with 10 GiB ran out of space. An
+  on-disk build cache needs at least 20 GiB: P6b peaked at 16.5 GB on a 23 GiB
+  disk. Raise the per-instance quota first; the limit the server then enforces
+  depends on the region and the grant (us-west2 runs with `RUNNER_DISK_GI=23`, its
+  limit after the grant). Size the regional quota for
+  `MAX_CONCURRENT_RUNNERS` x `RUNNER_DISK_GI`: at 23-25 GiB the default 100 GiB
+  allows `MAX_CONCURRENT_RUNNERS=4`, and a 5th runner would fail as
+  `launch_failed` (`RESOURCE_EXHAUSTED`)
+  ([gcp-setup.md, "Quotas"](gcp-setup.md#9-quotas)).
+- **RAM build cache (`RUNNER_BUILD_CACHE_IN_RAM=true`):** the alternative for a
+  small `/scratch`. The entrypoint makes `/scratch/.cache` a link to a directory on
+  the in-memory root filesystem, so `~/.cache` (the Go build cache and
+  golangci-lint's analysis cache) lives in RAM while `~/.cache` still points to
+  `/scratch/.cache` (cache parity holds; tar follows links in parent components).
+  It counts against `RUNNER_MEMORY`: in P6 PoC run 4 the lint passed at 27.9 GB of
+  32 GiB (a ~21 GB compile plus the cache grown to ~9.5 GB), leaving about 4 GB.
+  It requires `RUNNER_MEMORY=32Gi` (the config loaders reject less), and the
+  disk quota is preferable when available: the margin
+  shrinks as the cache or pkg/hub grows. A Cloud Run in-memory volume
+  (`--add-volume type=in-memory,size-limit=…`) would be an alternative with a hard
+  size cap, untested.
 
 ## Failure modes
 

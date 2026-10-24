@@ -537,7 +537,7 @@ func (invalidCursorError) Error() string { return "invalid cursor" }
 
 // HTTPStatus implements httpStatusError: a 400 invalid_cursor.
 func (invalidCursorError) HTTPStatus() (int, string, string) {
-	return http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page"
+	return http.StatusBadRequest, ErrCodeInvalidCursor, invalidCursorMessage
 }
 
 // errListCursorSealerUnavailable is returned by Seal when called on a nil

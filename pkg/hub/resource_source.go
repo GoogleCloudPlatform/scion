@@ -340,7 +340,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 		return *result, err
 	}
 	rec.Files = uploaded
-	rec.ContentHash = computeContentHash(uploaded)
+	rec.ContentHash = rs.srv.computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
 	if err := p.Update(ctx, rec, dir); err != nil {
 		result.Failed++
@@ -370,7 +370,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	stor := srv.GetStorage()
 
 	if !opts.Force {
-		newHash := computeContentHash(toResourceFiles(files))
+		newHash := rs.srv.computeContentHash(toResourceFiles(files))
 		if newHash == existing.ContentHash {
 			if opts.RepairStorage && IsBuiltinManaged(existing.SourceURL) {
 				repaired, err := rs.repairStorageIfNeeded(ctx, existing, dir, files)
@@ -400,7 +400,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	}
 
 	existing.Files = uploaded
-	existing.ContentHash = computeContentHash(uploaded)
+	existing.ContentHash = rs.srv.computeContentHash(uploaded)
 	existing.SourceURL = meta.SourceURL
 	existing.Status = resourceStatusActive
 	if err := rs.commitUploaded(ctx, existing, dir); err != nil {
@@ -450,7 +450,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 	}
 
 	rec.Files = uploaded
-	rec.ContentHash = computeContentHash(uploaded)
+	rec.ContentHash = rs.srv.computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
 	if err := rs.commitUploaded(ctx, rec, dir); err != nil {
 		return false, fmt.Errorf("repair update: %w", err)

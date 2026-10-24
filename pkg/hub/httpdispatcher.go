@@ -167,7 +167,6 @@ type HTTPAgentDispatcher struct {
 	agentEndpoint     string               // Optional override of hubEndpoint for SCION_HUB_ENDPOINT only
 	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
-	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
 	transportAudience string               // OIDC audience for transport tokens
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
@@ -382,12 +381,6 @@ func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 // SetHubID sets the hub instance ID for hub-scoped queries.
 func (d *HTTPAgentDispatcher) SetHubID(id string) {
 	d.hubID = id
-}
-
-// SetDevAuthToken sets the dev auth token to inject into agent containers.
-// When set, agents receive SCION_DEV_TOKEN as a fallback authentication method.
-func (d *HTTPAgentDispatcher) SetDevAuthToken(token string) {
-	d.devAuthToken = token
 }
 
 // SetAuthzService sets the authorization service for progeny secret verification.
@@ -830,6 +823,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
 		WorkspaceMode: projectInfo.workspaceMode,
+		// A resume after a re-link reaches the broker as a create: the
+		// earlier agent row went with the earlier project (ptone/scion#4476).
+		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 	}
 	// The single setter of the expected runtime target on create-shaped
 	// requests: any non-NULL pin. A stale pin sends the old target, which the
@@ -1289,15 +1285,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		)
 	}
 
-	// In dev-auth mode, inject the dev token so agents can use it as fallback auth
-	if d.devAuthToken != "" {
-		if req.ResolvedEnv == nil {
-			req.ResolvedEnv = make(map[string]string)
-		}
-		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
-		classifyEnv(&req.EnvClassifications, "SCION_DEV_TOKEN", api.EnvKindSecretInjected)
-	}
-
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
 	if d.transportMinter != nil && d.transportAudience != "" {
 		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
@@ -1388,6 +1375,10 @@ type projectDispatchInfo struct {
 	// telemetryPolicy is the project's projectSettingTelemetryEnabled policy
 	// (projectTelemetryPolicy); nil when unset or unparsable.
 	telemetryPolicy *bool
+	// projectID and gitRemote are the project's ID and stored (normalized)
+	// git remote, for previousProjectIDs.
+	projectID string
+	gitRemote string
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1422,6 +1413,8 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.workspaceMode = dispatchWorkspaceMode(project)
 	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
 	info.telemetryPolicy = projectTelemetryPolicy(project)
+	info.projectID = project.ID
+	info.gitRemote = project.GitRemote
 
 	// First check if the broker has a registered local path for this project.
 	localPath := ""
@@ -1449,6 +1442,17 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// reads agent-info.json from (ptone/scion#5113).
 	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
+}
+
+// dispatchProfile is the profile a start or restart sends: the agent's
+// recorded AppliedConfig.Profile, or "" when it has none. It is never nil,
+// so the broker always receives the hub's value.
+func dispatchProfile(agent *store.Agent) *string {
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return &profile
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -3718,8 +3722,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
@@ -3992,8 +3998,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ProjectSlug:          projectInfo.projectSlug,
 		SharedDirs:           projectInfo.sharedDirs,
 		ResolvedSecrets:      startEnv.secrets,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	extras.Profile = dispatchProfile(agent)
 	if agent.AppliedConfig != nil {
 		extras.HarnessConfig = agent.AppliedConfig.HarnessConfig
 		extras.HarnessConfigID = agent.AppliedConfig.HarnessConfigID

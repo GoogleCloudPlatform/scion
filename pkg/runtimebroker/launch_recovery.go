@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -239,10 +238,14 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 		// recorded resources, as the live clean-up did.
 		return s.cleanupLaunchResources(mgr, rec)
 	}
-	return errors.Join(
+	err := errors.Join(
 		s.cleanupLaunchResources(mgr, rec),
 		s.recoveryNameCleanup(ctx, mgr, jr, rec),
 	)
+	// A flat create whose recovered cleanup ended its run and proved its
+	// files removed releases its slug (ptone/scion#5768).
+	s.retireCleanedCreateLaunch(rec, err, nil)
+	return err
 }
 
 // recoveryManager resolves the manager of the exact runtime a launch ran on,
@@ -275,7 +278,7 @@ func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
 	if jr.Profile == "" {
 		return nil
 	}
-	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	res, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient)
 	mgr := res.Manager
 	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
 		return nil

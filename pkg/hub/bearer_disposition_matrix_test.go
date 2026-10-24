@@ -817,8 +817,8 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
 	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/keys"}: {
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
-	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
-		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	// GET of the bare .../proxy pattern is not listed: past authorization
+	// it gets the 308 to .../proxy/ (ptone/scion#5566), not a 5xx.
 	{"agent.portaccess", http.MethodPost, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
 		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
 	{"agent.portaccess", http.MethodPut, "/api/v1/agents/{id}/ports/{port}/proxy"}: {

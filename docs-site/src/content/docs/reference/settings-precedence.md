@@ -1012,10 +1012,13 @@ digest), the registry rewrite, the pull policy or the profile override:
   the Kubernetes `assign` mapping, the hub endpoint and extra hosts) and for the runtime the agent
   runs on (which decides whether a bare image is first looked up locally, and so whether the
   `image_registry` prefix is applied). If the two ever disagree, the start or restart is refused
-  with `409 Conflict`. Other uses of the saved profile are unchanged.
+  with `409 Conflict`. The start's own profile (below) is this profile too.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
   template path (every start or restart), the harness-config
-  directories searched for the file tier come from this template.
+  directories searched for the file tier, the template chain whose job keys `GetAgent` merges under
+  `scion-agent.json`, cleared-field inheritance (`clearedFieldsInheritance`), and the template
+  reported in the agent's `Info` come from this template (falling back to `agent-info.json` only
+  for agents provisioned before `image-provenance.json` existed).
 - `templateImage` / `templateImagePullPolicy`: read-only legacy fields. New agents record none,
   because a template no longer sets an image. For an agent provisioned before this release they
   hold the template chain's **own** values, with nothing else folded in, and `Start` replays them
@@ -1025,7 +1028,10 @@ digest), the registry rewrite, the pull policy or the profile override:
   the template's value.
 
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
-`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
+`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for status inside the container only. `List`
+and the early harness-config policy check read the profile and template from `image-provenance.json`
+and the harness config from `scion-agent.json` in the broker-side agent directory, never from
+`agent-info.json`.
 
 If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, the
 start or restart fails with an error asking you to re-provision the agent (`scion reincarnate`, or
@@ -1052,17 +1058,31 @@ old marker: in shared-workspace mode that dispatch is refused with `409 Conflict
 remove or correct the workspace's `.scion/project-id` (or the `.scion` marker file) so it names the
 agent's Hub project, or re-link the project.
 
-An agent provisioned before image provenance was recorded falls back to its previous behaviour,
-including reading those `agent-info.json` fields: its create-time inline image ranks at the top
-tier, its saved or requested profile drives the override lookup, and the merged
-`scion-agent.json` value stands in for an unresolvable template.
+An agent provisioned before image provenance was recorded falls back to its previous behaviour
+for the image fields and the template: its create-time inline image (`agent-info.json`'s
+`explicitImage` / `explicitImagePullPolicy`) ranks at the top tier, its template comes from
+`agent-info.json`, its Hub-sent or requested profile drives the override lookup, and the merged
+`scion-agent.json` value stands in for an unresolvable template. Its profile, harness config and
+runtime are not taken from `agent-info.json` for a start, a restart or the other uses listed
+below.
 
-On every start and restart, the Runtime Broker sets the start's profile to the one saved in
-`agent-info.json` (`agent.GetSavedProfile`; a flat broker has no profiles and skips this), so the
+On every start and restart, the Runtime Broker sets the start's profile to the profile recorded
+in the agent's image provenance (a flat broker has no profiles and skips this), so the
 Hub-settings tier resolves against the profile the agent was created with, never against whatever
-profile happens to be active on the broker at restart time. For the image and pull-policy tiers of an agent with
-broker-side image provenance, the recorded provisioned profile is used instead, as described
-above.
+profile happens to be active on the broker at restart time. The Hub sends the agent's profile
+(`profile`) with every start and restart; the broker uses it only for an agent provisioned before
+image provenance was recorded. If such an agent is started or restarted by a Hub that sends no
+profile, the broker refuses with `409 Conflict`: "agent "<name>" has no broker-side record of its
+settings profile (it was provisioned by an older version) and the hub sent no profile:
+re-provision the agent (scion reincarnate, or delete and re-create it)". An agent that is not
+provisioned on this broker yet (a start that will provision it) also takes the Hub-sent profile,
+under the same strict rule as any existing agent: a profile this broker cannot resolve gets the
+`503` rather than the broker's default runtime. A legacy agent whose Hub record has no profile
+runs with the profile active on the broker; re-provision it to record one. The profile, harness
+config and runtime copies in `agent-info.json` are never used for a start, a restart, the early
+harness-config policy check, or the runtime that operations on an existing agent use. A profile
+that no longer resolves is refused with the usual `503`; there is no fallback to the broker's
+default runtime based on the runtime `agent-info.json` records.
 
 The top tier carries **only the user's explicit image**. The Hub sends it as
 `Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and

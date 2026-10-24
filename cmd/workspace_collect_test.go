@@ -152,6 +152,14 @@ var workspaceCollectAllowedHubclient = map[string]bool{
 	"syncHarnessConfigToHub":    true,
 }
 
+// Skills publish collects a skill directory, not a workspace. It uses a
+// transfer.ManifestBuilder for its skipped-entry warning; new uses must
+// be added here deliberately. Only transfer.NewManifestBuilder is allowed,
+// and only in the listed functions.
+var workspaceCollectAllowedTransfer = map[string]bool{
+	"collectPublishFiles": true,
+}
+
 const (
 	transferImportPath  = "github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	hubclientImportPath = "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -159,7 +167,7 @@ const (
 
 // workspaceCollectBanned lists, per import path, the collect entry points
 // that only collectWorkspaceFiles (transfer) or the allow-listed resource
-// uploads (hubclient.CollectFiles) may use.
+// collects (hubclient.CollectFiles, transfer.NewManifestBuilder) may use.
 var workspaceCollectBanned = map[string]map[string]bool{
 	transferImportPath:  {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
 	hubclientImportPath: {"CollectFiles": true, "NewManifestBuilder": true, "ManifestBuilder": true},
@@ -225,6 +233,7 @@ func checkWorkspaceCollectSource(fset *token.FileSet, filename string, src any, 
 			switch {
 			case path == transferImportPath && fn == helper:
 			case path == hubclientImportPath && sel.Sel.Name == "CollectFiles" && workspaceCollectAllowedHubclient[fn]:
+			case path == transferImportPath && sel.Sel.Name == "NewManifestBuilder" && workspaceCollectAllowedTransfer[fn]:
 			default:
 				problems = append(problems, fmt.Sprintf("%s: %s.%s (%s) used in %q; collect workspace files with %s",
 					fset.Position(sel.Pos()), pkg.Name, sel.Sel.Name, path, fn, helper))
@@ -245,10 +254,11 @@ func checkWorkspaceCollectSource(fset *token.FileSet, filename string, src any, 
 // TestWorkspaceCollectSitesUseHelper is a source guard: every workspace
 // collect in package cmd goes through collectWorkspaceFiles. It fails if a
 // non-test file uses transfer.CollectFiles or a transfer ManifestBuilder
-// anywhere else (under any import name), if a hubclient collect appears
-// outside the listed template/harness-config uploads, if either package is
-// dot- or blank-imported, or if a known workspace transfer site stops calling
-// the helper.
+// anywhere else (under any import name; transfer.NewManifestBuilder is
+// allowed only in the functions listed in workspaceCollectAllowedTransfer),
+// if a hubclient collect appears outside the listed template/harness-config
+// uploads, if either package is dot- or blank-imported, or if a known
+// workspace transfer site stops calling the helper.
 func TestWorkspaceCollectSitesUseHelper(t *testing.T) {
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
@@ -306,6 +316,22 @@ func newSite(p string) { hc.CollectFiles(p, nil) }
 		"hubclient dot import": `package cmd
 import . "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 `,
+		"manifest builder outside the transfer allow-list": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func newSite(p string) { transfer.NewManifestBuilder(p) }
+`,
+		"transfer collect in a transfer allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func collectPublishFiles(p string) { transfer.CollectFiles(p, nil) }
+`,
+		"manifest builder type in a transfer allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/transfer"
+func collectPublishFiles(p string) { var b *transfer.ManifestBuilder; _ = b }
+`,
+		"hubclient manifest builder in a transfer allow-listed function": `package cmd
+import "github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+func collectPublishFiles(p string) { hubclient.NewManifestBuilder(p) }
+`,
 	}
 	for name, src := range bypass {
 		t.Run(name, func(t *testing.T) {
@@ -330,6 +356,7 @@ func (transferLike) CollectFiles() {}
 func collectWorkspaceFiles(p string, extra []string) ([]xfer.FileInfo, error) { return xfer.CollectFiles(p, extra) }
 func syncToViaHub(p string) { collectWorkspaceFiles(p, nil); _ = xfer.BuildManifest(nil) }
 func syncTemplateToHub(p string) { hubclient.CollectFiles(p, nil) }
+func collectPublishFiles(p string) { _ = xfer.NewManifestBuilder(p) }
 func other() { var transfer transferLike; transfer.CollectFiles() }
 `
 		callsHelper := map[string]bool{}

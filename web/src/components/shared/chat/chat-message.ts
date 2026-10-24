@@ -47,11 +47,11 @@ import {
   isMarkdownFileName,
   formatFileSize,
   GCS_URI_PATTERN,
-  buildGcsLinkHtml,
+  buildGcsLinkElement,
   parseGcsUri,
   resolveGcsMatch,
   ARTIFACT_REF_PATTERN,
-  buildArtifactLinkHtml,
+  buildArtifactLinkElement,
 } from '../../../utils/chat-file-links.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
@@ -204,15 +204,99 @@ const CODE_BLOCK_LANGUAGE_MAP: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Entity link detection (#1059) — configurable patterns for deep-linking
-// entity references in agent messages to their detail pages.
+// Links in rendered markdown: scion://artifact/ references, @mentions,
+// entity references (#1059) and GitHub shortform refs.
+//
+// Each pass walks the text nodes of the sanitized markup and replaces a
+// match with nodes built through the DOM. Tags and attribute values are
+// never scanned as text, the patterns see the text itself rather than its
+// HTML-escaped form, and no link markup is assembled as a string.
 // ---------------------------------------------------------------------------
+
+/** What replaces one match: text runs and elements, in order. */
+type LinkPiece = string | Element;
+
+/** An `<a>` with the given attributes (set in this order) and text. */
+function linkElement(attrs: Record<string, string>, text: string): HTMLAnchorElement {
+  const a = document.createElement('a');
+  for (const [name, value] of Object.entries(attrs)) a.setAttribute(name, value);
+  a.textContent = text;
+  return a;
+}
+
+/**
+ * Replace each match of `pattern` in `text` with what `build` returns for
+ * it. Returns null when nothing matched, so the text node is left alone.
+ */
+function replaceMatches(
+  text: string,
+  pattern: RegExp,
+  build: (match: RegExpExecArray) => LinkPiece[]
+): LinkPiece[] | null {
+  // Built per call so the running `lastIndex` is never shared.
+  const re = new RegExp(
+    pattern.source,
+    pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g'
+  );
+  const pieces: LinkPiece[] = [];
+  let cursor = 0;
+  let matched = false;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
+      continue;
+    }
+    matched = true;
+    pieces.push(text.slice(cursor, m.index), ...build(m));
+    cursor = m.index + m[0].length;
+  }
+  if (!matched) return null;
+  pieces.push(text.slice(cursor));
+  return pieces;
+}
+
+/**
+ * Run one link pass over the text nodes under `root`. An element `skip`
+ * matches is stepped over together with everything inside it. `linkify`
+ * returns the pieces that replace a text node's text, or null to leave it.
+ * Returns whether anything changed.
+ */
+function linkifyTextNodes(
+  root: DocumentFragment,
+  skip: (el: Element) => boolean,
+  linkify: (text: string) => LinkPiece[] | null
+): boolean {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      if (node.nodeType !== Node.ELEMENT_NODE) return NodeFilter.FILTER_ACCEPT;
+      return skip(node as Element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  // Collect first: replacing a node while walking would move the walker.
+  const texts: Text[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
+  let changed = false;
+  for (const node of texts) {
+    const pieces = linkify(node.data);
+    if (!pieces) continue;
+    node.replaceWith(...pieces.filter((p) => p !== ''));
+    changed = true;
+  }
+  return changed;
+}
+
+/** A skip test for elements with any of these (lowercase) local names. */
+function elementsNamed(...names: string[]): (el: Element) => boolean {
+  const set = new Set(names);
+  return (el) => set.has(el.localName.toLowerCase());
+}
 
 interface EntityPattern {
   /** A global regex that matches one entity reference. */
   regex: RegExp;
-  /** Build the `<a>` tag for a match. Return the full `<a>…</a>` string. */
-  linkBuilder: (match: RegExpExecArray) => string;
+  /** What replaces a match: the link, with any matched text around it. */
+  linkBuilder: (match: RegExpExecArray) => LinkPiece[];
 }
 
 /**
@@ -225,7 +309,16 @@ const ENTITY_PATTERNS: EntityPattern[] = [
     regex: /\bsess_([0-9a-fA-F-]{4,36})\b/g,
     linkBuilder: (m) => {
       const id = m[0]; // full match including prefix
-      return `<a class="entity-link" href="/sessions/${encodeURIComponent(id)}" title="Open session ${id}">${id}</a>`;
+      return [
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/sessions/${encodeURIComponent(id)}`,
+            title: `Open session ${id}`,
+          },
+          id
+        ),
+      ];
     },
   },
   // Bare UUIDs preceded by "session" (case-insensitive)
@@ -234,7 +327,17 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
       const uuid = m[1];
-      return `session <a class="entity-link" href="/sessions/${encodeURIComponent(uuid)}" title="Open session ${uuid}">${uuid}</a>`;
+      return [
+        'session ',
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/sessions/${encodeURIComponent(uuid)}`,
+            title: `Open session ${uuid}`,
+          },
+          uuid
+        ),
+      ];
     },
   },
   // Commit SHAs: "commit" followed by 7-40 hex chars
@@ -242,7 +345,17 @@ const ENTITY_PATTERNS: EntityPattern[] = [
     regex: /\bcommit\s+([0-9a-fA-F]{7,40})\b/gi,
     linkBuilder: (m) => {
       const sha = m[1];
-      return `commit <a class="entity-link" href="/commits/${encodeURIComponent(sha)}" title="View commit ${sha}">${sha}</a>`;
+      return [
+        'commit ',
+        linkElement(
+          {
+            class: 'entity-link',
+            href: `/commits/${encodeURIComponent(sha)}`,
+            title: `View commit ${sha}`,
+          },
+          sha
+        ),
+      ];
     },
   },
   // File paths: /workspace/... and /scion-volumes/... container paths.
@@ -254,9 +367,19 @@ const ENTITY_PATTERNS: EntityPattern[] = [
     linkBuilder: (m) => {
       const path = m[0];
       if (!isRecognizedFilePath(path)) {
-        return path;
+        return [path];
       }
-      return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
+      return [
+        linkElement(
+          {
+            class: 'entity-link path-link',
+            'data-file-path': path,
+            href: 'javascript:void(0)',
+            title: `Open ${path}`,
+          },
+          path
+        ),
+      ];
     },
   },
 ];
@@ -280,46 +403,35 @@ const GCS_ENTITY_PATTERN: EntityPattern = {
     // No valid object at this occurrence (a directory-like trailing '/', or
     // the fragment/query/param continuation rule) — leave the raw matched
     // text unchanged rather than linking a truncated name.
-    if (!resolved) return m[0];
-    return boundary + buildGcsLinkHtml(bucket, resolved.object) + resolved.suffix;
+    if (!resolved) return [m[0]];
+    return [boundary, buildGcsLinkElement(bucket, resolved.object), resolved.suffix];
   },
 };
 
 /**
- * scion://artifact/ reference pattern, appended only while the hub.artifacts
- * experiment is on (otherwise there is nothing to open). The link opens the
- * artifact preview in place; what the viewer sees is decided by the hub's
- * read check when the preview loads.
+ * Turn scion://artifact/ references in one text node into links. Only run
+ * while the hub.artifacts experiment is on (otherwise there is nothing to
+ * open). The link opens the artifact preview in place; what the viewer sees
+ * is decided by the hub's read check when the preview loads. Each link
+ * built is added to `built`, so the @mention pass that follows steps over
+ * it and a version suffix (`@2`) stays part of the reference.
  */
-const ARTIFACT_SKIP_REGION =
-  '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<a\\b[^>]*>[\\s\\S]*?</a>|<[^>]+>';
-
-/**
- * Turn scion://artifact/ references into links. Runs before @mention
- * styling, so a version suffix (`@2`) stays part of the reference, and
- * skips code, existing links and tags.
- */
-function styleArtifactLinks(htmlStr: string): string {
-  const linkify = (text: string): string =>
-    text.replace(new RegExp(ARTIFACT_REF_PATTERN.source, 'g'), (whole, id: string, seq?: string) =>
-      buildArtifactLinkHtml(whole, { id: id.toLowerCase(), seq: seq ? Number(seq) : 0 })
-    );
-  const skip = new RegExp(ARTIFACT_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += linkify(htmlStr.slice(cursor, match.index)) + match[0];
-    cursor = match.index + match[0].length;
-  }
-  return out + linkify(htmlStr.slice(cursor));
+function styleArtifactLinksInText(text: string, built: WeakSet<Element>): LinkPiece[] | null {
+  return replaceMatches(text, ARTIFACT_REF_PATTERN, (m) => {
+    const link = buildArtifactLinkElement(m[0], {
+      id: m[1].toLowerCase(),
+      seq: m[2] ? Number(m[2]) : 0,
+    });
+    built.add(link);
+    return [link];
+  });
 }
 
 /**
- * Apply entity link patterns to a text segment (outside code/HTML regions).
- * Each match is replaced by the pattern's linkBuilder output. Patterns are
- * tried left-to-right through the string; the first match at each position
- * wins. This is intentionally simple: it scans linearly and does not try to
+ * Apply entity link patterns to the text of one text node. Each match is
+ * replaced by the pattern's linkBuilder output. Patterns are tried
+ * left-to-right through the string; the first match at each position wins.
+ * This is intentionally simple: it scans linearly and does not try to
  * handle overlapping matches from different patterns.
  *
  * `includeGcs` appends {@link GCS_ENTITY_PATTERN} for this call only — the
@@ -327,9 +439,9 @@ function styleArtifactLinks(htmlStr: string): string {
  * evaluated once per render by the caller, not baked into a shared, mutable
  * pattern list.
  */
-function styleEntityLinksInText(text: string, includeGcs: boolean): string {
+function styleEntityLinksInText(text: string, includeGcs: boolean): LinkPiece[] | null {
   // Collect all matches from all patterns, then sort by position.
-  const replacements: { start: number; end: number; replacement: string }[] = [];
+  const replacements: { start: number; end: number; pieces: LinkPiece[] }[] = [];
 
   const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_PATTERN] : ENTITY_PATTERNS;
   for (const pattern of patterns) {
@@ -346,7 +458,7 @@ function styleEntityLinksInText(text: string, includeGcs: boolean): string {
       replacements.push({
         start: m.index,
         end: m.index + m[0].length,
-        replacement: pattern.linkBuilder(m),
+        pieces: pattern.linkBuilder(m),
       });
       // Safety: if lastIndex did not advance (e.g. zero-length match or
       // missing global flag), break to avoid an infinite loop.
@@ -355,37 +467,19 @@ function styleEntityLinksInText(text: string, includeGcs: boolean): string {
     }
   }
 
-  if (replacements.length === 0) return text;
+  if (replacements.length === 0) return null;
 
   // Sort by start position, pick non-overlapping winners (first match wins).
   replacements.sort((a, b) => a.start - b.start);
-  let out = '';
+  const out: LinkPiece[] = [];
   let cursor = 0;
   for (const rep of replacements) {
     if (rep.start < cursor) continue; // overlaps with a prior replacement
-    out += text.slice(cursor, rep.start) + rep.replacement;
+    out.push(text.slice(cursor, rep.start), ...rep.pieces);
     cursor = rep.end;
   }
-  return out + text.slice(cursor);
-}
-
-/**
- * Post-process rendered markdown to turn entity references into clickable
- * deep links, leaving code blocks and inline code untouched — an entity ID
- * inside a fence is literal text, not a navigation target.
- *
- * Follows the exact same skip-region approach as `styleMentions()`.
- */
-function styleEntityLinks(htmlStr: string, includeGcs: boolean): string {
-  const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index), includeGcs) + match[0];
-    cursor = match.index + match[0].length;
-  }
-  return out + styleEntityLinksInText(htmlStr.slice(cursor), includeGcs);
+  out.push(text.slice(cursor));
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,48 +530,80 @@ function styleEntityLinks(htmlStr: string, includeGcs: boolean): string {
 const GITHUB_REF_REGEX =
   /(^|[^\p{L}\p{N}_/.-])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
 
-/** Apply the GitHub-ref pattern to a text segment (outside code/HTML regions). */
-function styleGithubRefsInText(text: string): string {
-  return text.replace(
-    GITHUB_REF_REGEX,
-    (_full, boundary: string, owner: string, repo: string, number: string) => {
-      const ref = `${owner}/${repo}#${number}`;
-      const url = `https://github.com/${owner}/${repo}/issues/${number}`;
-      return `${boundary}<a class="entity-link gh-ref-link" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${ref} on GitHub">${ref}</a>`;
-    }
-  );
+/** Apply the GitHub-ref pattern to the text of one text node. */
+function styleGithubRefsInText(text: string): LinkPiece[] | null {
+  return replaceMatches(text, GITHUB_REF_REGEX, (m) => {
+    const [, boundary, owner, repo, number] = m;
+    const ref = `${owner}/${repo}#${number}`;
+    return [
+      boundary,
+      linkElement(
+        {
+          class: 'entity-link gh-ref-link',
+          href: `https://github.com/${owner}/${repo}/issues/${number}`,
+          target: '_blank',
+          rel: 'noopener noreferrer',
+          title: `Open ${ref} on GitHub`,
+        },
+        ref
+      ),
+    ];
+  });
 }
 
 /**
- * Skip regions for GitHub-ref processing. Unlike ENTITY_SKIP_REGION, this
- * also skips inline `<code>` spans in full — a shortform reference inside
- * backticks is literal text, not a link. `<pre>` fences and existing `<a>`
- * elements are also skipped in full, so a ref inside a fenced code block, an
- * existing markdown link, or an already-autolinked URL is never re-linked.
- *
- * This intentionally does not reuse ENTITY_SKIP_REGION: that region skips
- * `<pre>` but deliberately leaves inline `<code>` open, because a file path
- * inside backticks is still meant to link (see its own doc comment) — the
- * opposite of what this feature needs — so the two skip lists must diverge.
+ * Wrap @mentions in one text node in styled, clickable spans. The slug is
+ * limited to `[\w.-]`, with an optional `@project` part.
  */
-const GITHUB_REF_SKIP_REGION =
-  '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+function styleMentionsInText(text: string): LinkPiece[] | null {
+  return replaceMatches(text, /@([\w.-]+(?:@[\w.-]+)?)/g, (m) => {
+    const span = document.createElement('span');
+    span.setAttribute('class', 'mention clickable');
+    span.setAttribute('data-mention', m[1]);
+    span.textContent = `@${m[1]}`;
+    return [span];
+  });
+}
 
 /**
- * Post-process rendered markdown to turn `owner/repo#123` shortform
- * references into links to the GitHub issue page, leaving code blocks,
- * inline code, and existing links untouched.
+ * Turn references in rendered, sanitized markdown into links, in this
+ * order: artifact references (when `artifacts`), @mentions, entity
+ * references (gs:// objects too when `gcs`), then GitHub shortform refs.
+ * What each pass steps over:
+ *
+ * - Artifact references: code (`<pre>`, `<code>`) and existing links.
+ * - @mentions: code, and the artifact links just built. Existing links are
+ *   not stepped over, so an `@name` in a link's text is still styled.
+ * - Entity references: `<pre>` fences and existing links. Inline `<code>`
+ *   is not stepped over, so a file path inside backticks still links.
+ * - GitHub refs: code and existing links; a ref inside backticks is
+ *   literal text.
+ *
+ * Returns the input unchanged when nothing was linked.
  */
-function styleGithubRefs(htmlStr: string): string {
-  const skip = new RegExp(GITHUB_REF_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleGithubRefsInText(htmlStr.slice(cursor, match.index)) + match[0];
-    cursor = match.index + match[0].length;
+function linkifyRenderedHtml(htmlStr: string, opts: { artifacts: boolean; gcs: boolean }): string {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = htmlStr;
+  const root = tpl.content;
+  const isCode = elementsNamed('pre', 'code');
+  let changed = false;
+  const artifactLinks = new WeakSet<Element>();
+  if (opts.artifacts) {
+    changed =
+      linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
+        styleArtifactLinksInText(text, artifactLinks)
+      ) || changed;
   }
-  return out + styleGithubRefsInText(htmlStr.slice(cursor));
+  changed =
+    linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText) ||
+    changed;
+  changed =
+    linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+      styleEntityLinksInText(text, opts.gcs)
+    ) || changed;
+  changed =
+    linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText) || changed;
+  return changed ? tpl.innerHTML : htmlStr;
 }
 
 /** True when the file is a Markdown document. */
@@ -554,59 +680,6 @@ async function fetchAttachmentText(id: string): Promise<string> {
 /** Download/preview URL for an attachment. */
 function attachmentURL(id: string): string {
   return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
-}
-
-/**
- * Spans of rendered markdown that @mention styling must step over: code
- * regions, whose text is literal, and HTML tags, whose attributes must not be
- * mangled. `<pre>` is listed before `<code>` so a `<pre><code>` fence is
- * consumed as one region. Whatever falls *between* matches is text content.
- *
- * Tags are matched as `<[^>]+>` — safe because the input is DOMPurify output,
- * which escapes any `>` appearing inside an attribute value.
- */
-const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
-
-/**
- * Skip regions for entity-link processing. Like MENTION_SKIP_REGION but
- * does NOT skip inline <code> spans, so file paths inside backticks
- * are still auto-linked. Fenced code blocks (<pre>) are still skipped.
- * Anchor elements (`<a>…</a>`) are skipped in full, including their text
- * content, so a path already inside a link is never re-wrapped in a nested
- * `<a>` — the `<a>` pattern must come before the generic `<[^>]+>` pattern
- * so the full anchor element is consumed first.
- */
-const ENTITY_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<[^>]+>';
-
-/**
- * Wrap @mentions in styled, clickable spans.
- *
- * The captured slug is limited to `[\w.-]` so it can never break out of the
- * `data-mention` attribute it is interpolated into.
- */
-function styleMentionsInText(text: string): string {
-  return text.replace(
-    /@([\w.-]+(?:@[\w.-]+)?)/g,
-    '<span class="mention clickable" data-mention="$1">@$1</span>'
-  );
-}
-
-/**
- * Post-process rendered markdown to make @mentions clickable, leaving code
- * blocks and inline code untouched — an `@name` inside a fence is literal
- * text, not a reference to anyone.
- */
-function styleMentions(htmlStr: string): string {
-  // Built per call so the running `lastIndex` is never shared between renders.
-  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
-  let out = '';
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleMentionsInText(htmlStr.slice(cursor, match.index)) + match[0];
-    cursor = match.index + match[0].length;
-  }
-  return out + styleMentionsInText(htmlStr.slice(cursor));
 }
 
 @customElement('scion-chat-message')
@@ -2101,18 +2174,13 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      let rendered = renderer.render(this.body);
-      if (isFeatureEnabled(ARTIFACTS_FLAG)) rendered = styleArtifactLinks(rendered);
-      rendered = styleMentions(rendered);
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
       // the body happens to be spelled.
-      rendered = styleEntityLinks(
-        rendered,
-        this.senderIsAgent && isFeatureEnabled('web.gcs_links')
-      );
-      rendered = styleGithubRefs(rendered);
-      this.renderedHtml = rendered;
+      this.renderedHtml = linkifyRenderedHtml(renderer.render(this.body), {
+        artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
+        gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
+      });
     } catch {
       if (taskId !== this.renderTaskId) return;
       this.renderedHtml = '';

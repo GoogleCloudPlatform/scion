@@ -271,7 +271,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.history.topic",
 		Domain:      "chat",
-		Description: "Read the messages of a chat thread. Needs project:read on the thread's project",
+		Description: "Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "topic"},
 		},
@@ -312,7 +312,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.send.topic",
 		Domain:      "chat",
-		Description: "Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message",
+		Description: "Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "POST", Variant: "topic"},
 		},
@@ -340,6 +340,7 @@ var chatOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatSendTopic_RequiresChatPost"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -1079,7 +1080,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.promote",
 		Domain:      "chat",
-		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule",
+		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/promote", Method: "POST"},
 		},

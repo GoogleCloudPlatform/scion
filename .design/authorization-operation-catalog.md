@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 354
+**Operations:** 355
 
 ## Table of Contents
 
@@ -18,6 +18,7 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
 - [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
@@ -107,8 +108,8 @@
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
-- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: sync status, cache status, archive and file reads
-- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
+- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
+- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
@@ -153,9 +154,9 @@
 - [chat.topic.read](#chattopicread) — Read a chat thread. Needs project:read on the thread's project
 - [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
 - [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
-- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project
+- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 - [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
-- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 - [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
 - [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
 - [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
@@ -191,15 +192,15 @@
 - [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
 - [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
-- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
 - [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
 - [role.binding.delete](#rolebindingdelete) — Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
 - [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
-- [group.member.remove](#groupmemberremove) — Remove a member from a group
-- [group.delete](#groupdelete) — Delete a group
+- [group.member.remove](#groupmemberremove) — Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
+- [group.delete](#groupdelete) — Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
@@ -815,6 +816,39 @@
 
 ---
 
+## agent.update.pendingconfig.delete
+
+**Domain:** agent
+
+**Description:** Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/agents/{id}/pending-config` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentPendingConfig_DiscardClearsAndAudits`
+
+---
+
 ## agent.status.update
 
 **Domain:** agent
@@ -1066,9 +1100,9 @@
 | http_route | POST | `/api/v1/agents/{id}/message` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1114,9 +1148,9 @@
 |------|--------|---------|
 | websocket | GET | `/api/v1/agents/{id}/pty` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -2496,9 +2530,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
@@ -4349,15 +4383,13 @@
 
 **Domain:** project
 
-**Description:** Read a project's workspace: sync status, cache status, archive and file reads
+**Description:** Read a project's workspace: archive and file reads
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{id}/sync/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
-| http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
 
@@ -4385,14 +4417,12 @@
 
 **Domain:** project
 
-**Description:** Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
+**Description:** Change a project's workspace: file upload, write and delete, and git pull
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/files` |
 | http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
@@ -5920,7 +5950,7 @@
 
 **Domain:** chat
 
-**Description:** Read the messages of a chat thread. Needs project:read on the thread's project
+**Description:** Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 
 ### Entry Points
 
@@ -5985,7 +6015,7 @@
 
 **Domain:** chat
 
-**Description:** Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+**Description:** Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 
 ### Entry Points
 
@@ -6026,6 +6056,7 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatSendTopic_RequiresChatPost`
 
 ---
 
@@ -7182,7 +7213,7 @@
 
 **Domain:** chat
 
-**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 
 ### Entry Points
 
@@ -7475,7 +7506,7 @@
 
 **Domain:** group
 
-**Description:** Remove a member from a group
+**Description:** Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7513,6 +7544,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_MemberRemoveSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
@@ -7520,7 +7553,7 @@
 
 **Domain:** group
 
-**Description:** Delete a group
+**Description:** Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7553,6 +7586,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_DeleteSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 

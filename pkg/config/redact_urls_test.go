@@ -218,8 +218,10 @@ func TestRedactURLsIn_QueryCredentials(t *testing.T) {
 	}
 }
 
-// pkg/apiclient keeps a copy of the query and fragment rules (it imports
-// no scion package). The two copies must stay identical.
+// pkg/apiclient keeps a copy of the query, fragment and path parameter
+// rules (it imports no scion package but pkg/util/urlredact). The two
+// copies must stay identical. This is the one duplicated region left; the
+// user info rule itself lives once, in pkg/util/urlredact.
 func TestURLRedactRules_ApiclientCopyIdentical(t *testing.T) {
 	const marker = "// urlCredentialParamNames are query"
 	cfg, err := os.ReadFile("url_redact.go")
@@ -246,12 +248,12 @@ func TestURLRedactRules_ApiclientCopyIdentical(t *testing.T) {
 		t.Errorf("pkg/apiclient/redact.go's copy of the URL redaction rules differs from pkg/config/url_redact.go")
 	}
 
-	// The copied rules include undelimitedUserInfo and maskWholeURL; both
-	// entry points must start with them, so neither returns a URL whose
-	// user info cannot be delimited.
-	for _, c := range []struct{ file, fn, rule string }{
-		{"cli_context_hubs.go", "func RedactURL(", "userInfoRe"},
-		{filepath.Join("..", "apiclient", "redact.go"), "func redactURLCredentials(", "urlUserInfoRe"},
+	// The user info rule is shared (pkg/util/urlredact), not copied; both
+	// entry points must start with its guard, so neither returns a URL
+	// whose user info cannot be delimited.
+	for _, c := range []struct{ file, fn string }{
+		{"cli_context_hubs.go", "func RedactURL("},
+		{filepath.Join("..", "apiclient", "redact.go"), "func redactURLCredentials("},
 	} {
 		src, err := os.ReadFile(c.file)
 		if err != nil {
@@ -261,7 +263,7 @@ func TestURLRedactRules_ApiclientCopyIdentical(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: %s not found", c.file, c.fn)
 		}
-		guard := " {\n\tif undelimitedUserInfo(raw, " + c.rule + ") {\n\t\treturn maskWholeURL(raw)\n\t}\n"
+		guard := " {\n\tif urlredact.Undelimited(raw) {\n\t\treturn urlredact.MaskWhole(raw, urlredact.Mask)\n\t}\n"
 		if !strings.Contains(body, guard) || strings.Index(body, guard) != strings.Index(body, " {\n") {
 			t.Errorf("%s: %s does not start with the guard %q", c.file, c.fn, guard)
 		}

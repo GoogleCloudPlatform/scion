@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,7 +40,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/httpcompress"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
@@ -47,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/webassets"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
+	"github.com/gorilla/securecookie"
 	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
 	//nolint:staticcheck // h2c is kept for local cleartext HTTP/2 support.
@@ -174,7 +179,16 @@ type WebServerConfig struct {
 	// When set, static files are served from this path instead of the embedded FS.
 	AssetsDir string
 	// SessionSecret is the HMAC key for signing session cookies.
+	// Ignored when SigningRing is set.
 	SessionSecret string
+	// SigningRing, when set, supplies the session cookie keys (a keyring
+	// file, ptone/scion#1530): the active generation encodes, every
+	// generation decodes, each within its deadlines. Nil uses the legacy
+	// adapter over SessionSecret, whose derived keys are unchanged.
+	SigningRing *keyring.SigningRing
+	// Now is the clock for keyring deadlines (nil: time.Now). A seam for
+	// tests; production leaves it nil.
+	Now func() time.Time
 	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
@@ -256,6 +270,7 @@ type WebServer struct {
 	store          store.Store
 	userTokenSvc   *UserTokenService
 	events         EventPublisher              // nil when no publisher configured
+	streams        eventstreams.Registry       // open /events streams (ptone/scion#5227)
 	hubHandler     http.Handler                // mounted Hub API handler, or nil
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
@@ -266,6 +281,13 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// sessionCodecs are sessionStore's codecs, active generation first.
+	sessionCodecs []securecookie.Codec
+	// signingRing is the ring sessionCodecs came from.
+	signingRing *keyring.SigningRing
+	// now is the keyring deadline clock (WebServerConfig.Now).
+	now func() time.Time
 
 	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
 	testLoginLimiter *testLoginLimiter
@@ -627,6 +649,33 @@ func (ws *WebServer) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// baseURLIsHTTPS reports whether baseURL's scheme is https, compared
+// case-insensitively at the point of use, so a direct caller of
+// WebServerConfig or NewWebServer cannot get a non-Secure session cookie
+// from an upper-case "HTTPS://" base URL. It does not rely on the server's
+// resolver, which also lower-cases the scheme.
+//
+// A base URL that does not parse falls back to the scheme text before the
+// first ":", compared case-insensitively with "https" (not an "https://"
+// prefix test, which "https:/%zz" would fail), so the decision fails
+// closed. The fail-safe default for Secure is true: a Secure cookie on an
+// http URL breaks login visibly, while a non-Secure cookie on an https URL
+// leaks silently. This fallback is a second line of defence: the server
+// refuses a base URL that does not parse at startup (checkWebBaseURLListener
+// in cmd), and this function must not be read as making that validation
+// optional. Nor is the fallback dead code: NewWebServer is exported, so a
+// direct caller bypasses the startup preflight, and on that path the
+// fallback is the only cover. "The preflight already validates" is not a
+// reason to delete it.
+func baseURLIsHTTPS(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		scheme, _, _ := strings.Cut(baseURL, ":")
+		return strings.EqualFold(scheme, "https")
+	}
+	return strings.EqualFold(u.Scheme, "https")
+}
+
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
 // ::1, or "localhost"). It returns false for non-loopback IPs (including
 // "0.0.0.0" and "::") and for unresolvable hostnames. It is
@@ -668,15 +717,23 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 
 	// Initialize session store
-	sessionKey := cfg.SessionSecret
-	if sessionKey == "" {
-		// Generate a random key for development/testing
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			ws.logger().Error("Failed to generate session secret", "error", err)
+	ring := cfg.SigningRing
+	if ring == nil {
+		sessionKey := cfg.SessionSecret
+		if sessionKey == "" {
+			// Generate a random key for development/testing
+			b := make([]byte, 32)
+			if _, err := rand.Read(b); err != nil {
+				ws.logger().Error("Failed to generate session secret", "error", err)
+			}
+			sessionKey = hex.EncodeToString(b)
+			ws.logger().Warn("No session secret configured, using random key (sessions will not persist across restarts)")
 		}
-		sessionKey = hex.EncodeToString(b)
-		ws.logger().Warn("No session secret configured, using random key (sessions will not persist across restarts)")
+		ring = keyring.Legacy(sessionKey).Signing()
+	}
+	ws.now = cfg.Now
+	if ws.now == nil {
+		ws.now = time.Now
 	}
 
 	// Use an encrypted, signed cookie session store so that NO session state
@@ -696,26 +753,38 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	// "JWT tokens exceed 4096 bytes" concern that motivated the disk store no
 	// longer applies to the current compact HS256 tokens.
 	//
-	// Keys are derived deterministically from the shared SESSION_SECRET so all
-	// replicas agree: a 32-byte HMAC authentication key and a 32-byte AES-256
-	// encryption key, with domain separation so the two keys differ.
-	cookieStore := sessions.NewCookieStore(
-		deriveSessionKey(sessionKey, "scion-session-hash"),
-		deriveSessionKey(sessionKey, "scion-session-block"),
-	)
+	// Keys are derived deterministically from the shared signing secret of
+	// each keyring generation so all replicas agree: a 32-byte HMAC
+	// authentication key and a 32-byte AES-256 encryption key, with domain
+	// separation so the two keys differ (deriveSessionKey; the legacy
+	// adapter derives exactly the pre-keyring keys from SESSION_SECRET).
+	// With a keyring file every generation gets a codec, active first: the
+	// active one encodes, and each decodes until its verify_until, so a
+	// cookie minted by any replica's active generation is readable here
+	// (ptone/scion#1530 §3, Cookies).
+	codecs, err := keyring.CookieCodecs(ring, webSessionHashPurpose, webSessionBlockPurpose, webSessionMaxAge, ws.now)
+	if err != nil {
+		// Unreachable with a validated keyring (cmd refuses startup first);
+		// fail closed: with no codecs every session save and read fails.
+		ws.logger().Error("Session cookie keyring has no usable active generation; sessions are disabled", "error", err)
+	}
+	cookieStore := &sessions.CookieStore{Codecs: codecs}
+	ws.sessionCodecs = cookieStore.Codecs
+	ws.signingRing = ring
 	cookieStore.Options = &sessions.Options{
 		Path:     "/",
-		MaxAge:   86400, // 24 hours
+		MaxAge:   webSessionMaxAge, // 24 hours
 		HttpOnly: true,
-		Secure:   strings.HasPrefix(cfg.BaseURL, "https://"),
+		Secure:   baseURLIsHTTPS(cfg.BaseURL),
 		SameSite: http.SameSiteLaxMode,
 	}
-	// Keep securecookie's timestamp window in sync with the cookie MaxAge. We
-	// intentionally leave the default 4096-byte securecookie length limit in
-	// force (unlike the disk store, which disabled it): if a session ever grew
-	// past the browser cookie cap, Save() would return an error we can log
-	// rather than silently emitting an oversized cookie the browser drops.
-	cookieStore.MaxAge(cookieStore.Options.MaxAge)
+	// securecookie's timestamp window matches the cookie MaxAge: CookieCodecs
+	// set it on every codec (CookieStore.MaxAge cannot reach the wrapped
+	// codecs). We intentionally leave the default 4096-byte securecookie
+	// length limit in force (unlike the disk store, which disabled it): if a
+	// session ever grew past the browser cookie cap, Save() would return an
+	// error we can log rather than silently emitting an oversized cookie the
+	// browser drops.
 	ws.sessionStore = cookieStore
 
 	// Resolve asset source
@@ -761,8 +830,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	return ws
 }
 
-// deriveSessionKey deterministically derives a 32-byte key from the shared
-// session secret and a label. The label provides domain separation so the
+// deriveSessionKey deterministically derives a 32-byte key from a
+// generation's signing secret (the shared session secret in legacy mode)
+// and a label; it is the derivation of the web session cookie keys
+// (webSessionHashPurpose, webSessionBlockPurpose). The label provides domain separation so the
 // HMAC authentication key and the AES encryption key differ even though both
 // originate from the same SESSION_SECRET. Every replica configured with the
 // same secret derives identical keys, which is what lets a session cookie
@@ -770,6 +841,72 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 func deriveSessionKey(secret, label string) []byte {
 	sum := sha256.Sum256([]byte(label + ":" + secret))
 	return sum[:]
+}
+
+// webSessionMaxAge is the session cookie (and securecookie timestamp)
+// lifetime in seconds: 24 hours.
+const webSessionMaxAge = 86400
+
+// The keyring purposes of the session cookie keys: deriveSessionKey with
+// the same labels, so every generation (and the legacy adapter) derives
+// keys exactly as before.
+var (
+	webSessionHashPurpose  = sessionKeyPurpose("scion-session-hash")
+	webSessionBlockPurpose = sessionKeyPurpose("scion-session-block")
+)
+
+func sessionKeyPurpose(label string) keyring.Purpose {
+	return keyring.NewPurpose(label, func(secret []byte) []byte { return deriveSessionKey(string(secret), label) })
+}
+
+// resaveUnderActiveGeneration re-saves session when its cookie decoded
+// only under a non-active keyring generation, so the browser gets it back
+// under the active one (ptone/scion#1530 §3, Cookies). Values are saved
+// unchanged: no hub token expiry is extended. It does nothing when:
+//   - the response already sets the session cookie (another save on this
+//     request, e.g. dev or proxy auth, already wrote it under the active
+//     generation);
+//   - the active generation's issuance is closed (sign_until reached;
+//     /readyz reports that state, so no per-request warning).
+//
+// Any other save failure is logged and the request continues with the
+// session as read.
+func (ws *WebServer) resaveUnderActiveGeneration(w http.ResponseWriter, r *http.Request, session *sessions.Session) {
+	if session == nil || session.IsNew || len(ws.sessionCodecs) < 2 {
+		return
+	}
+	c, err := r.Cookie(webSessionName)
+	if err != nil || keyring.DecodesWithActive(webSessionName, c.Value, ws.sessionCodecs) {
+		return
+	}
+	for _, sc := range w.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(sc, webSessionName+"=") {
+			return
+		}
+	}
+	if _, err := ws.signingRing.Active(webSessionHashPurpose, ws.now()); err != nil {
+		return
+	}
+	if err := session.Save(r, w); err != nil {
+		ws.logger().Warn("Failed to re-save session under the active signing generation", "error", err)
+	}
+}
+
+// keyringResaveMiddleware re-saves, under the active keyring generation, a
+// session cookie an authenticated page request carried under another
+// generation (resaveUnderActiveGeneration). Public routes (which include
+// the API, see isPublicRoute) and requests without a session user pass
+// through untouched. It is the innermost middleware, so the admin-mode and
+// suspended-user checks run first.
+func (ws *WebServer) keyringResaveMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(ws.sessionCodecs) > 1 && !isPublicRoute(r.URL.Path) && getWebSessionUser(r.Context()) != nil {
+			if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+				ws.resaveUnderActiveGeneration(w, r, session)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // SetMaintenanceState sets the shared runtime maintenance state.
@@ -810,6 +947,18 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
 func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
+}
+
+// EventStreams returns the registry of the events streams open on this
+// web server (ptone/scion#5227).
+func (ws *WebServer) EventStreams() *eventstreams.Registry {
+	return &ws.streams
+}
+
+// SetEventStreamMetrics wires the scion.hub.sse.* recorder into the events
+// stream registry (ptone/scion#5228). Nil disables it.
+func (ws *WebServer) SetEventStreamMetrics(rec ssemetrics.Recorder) {
+	ws.streams.SetMetrics(rec)
 }
 
 // adminEmails returns the live admin email list from the access settings
@@ -1097,6 +1246,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			tokenValid = true
 		}
 
+		saved := false
 		// If token is invalid (expired or bad signature), try to refresh.
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
@@ -1108,6 +1258,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 					session.Values[sessKeyHubAccessToken] = newAccess
 					session.Values[sessKeyHubRefreshToken] = newRefresh
 					session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+					saved = true
 					if err := session.Save(r, w); err != nil {
 						ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 					}
@@ -1157,12 +1308,29 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 						session.Values[sessKeyHubAccessToken] = newAccess
 						session.Values[sessKeyHubRefreshToken] = newRefresh
 						session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+						saved = true
 						if err := session.Save(r, w); err != nil {
 							ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 						}
 					}
 				}
 			}
+		}
+
+		// API requests skip sessionAuthMiddleware (isPublicRoute), so this
+		// is their re-save point: a session read under a non-active keyring
+		// generation goes back under the active one (once; a refresh above
+		// already saved it under the active generation).
+		//
+		// Pilot behaviour (ptone/scion#1530 Phase 1): this runs before the
+		// hub authorizes the request, so a request the hub then refuses
+		// (for example a suspended user) still gets its session re-saved.
+		// The re-save writes identical contents under the active pair,
+		// extends no token expiry and confers nothing; gating it on the
+		// response status would need a ResponseWriter wrapper that risks
+		// the streaming, Flush and Hijack paths of the API mux.
+		if !saved {
+			ws.resaveUnderActiveGeneration(w, r, session)
 		}
 
 		// Clone the request and inject the Authorization header.
@@ -1632,6 +1800,10 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		// signed-in user, who can read the same value from GET
 		// /api/v1/profiling. Otherwise it is omitted.
 		ReadinessMarks bool `json:"readinessMarks,omitempty"`
+		// Experiments is the "experiments" map of GET /api/v1/experiments,
+		// as that endpoint answered the session user in-process. Omitted for
+		// an anonymous shell or when the endpoint did not answer 200.
+		Experiments map[string]bool `json:"experiments,omitempty"`
 	}
 
 	envelope := pageDataEnvelope{
@@ -1660,45 +1832,37 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		}
 	}
 
-	// Prefetch API data if Hub is mounted and the route maps to an API path.
-	apiPath := resolveAPIPath(r.URL.Path)
-	if apiPath != "" && ws.hubHandler != nil {
-		// Read access token from session for the synthetic request.
-		var accessToken string
-		session, err := ws.sessionStore.Get(r, webSessionName)
-		if err == nil {
+	// Read access token from session for the synthetic requests below.
+	var accessToken string
+	if ws.hubHandler != nil {
+		if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
 			accessToken, _ = session.Values[sessKeyHubAccessToken].(string)
 		}
+	}
 
-		// Create a synthetic request with a 2-second deadline.
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		apiReq, err := http.NewRequestWithContext(ctx, "GET", apiPath, nil)
-		if err == nil {
-			if accessToken != "" {
-				apiReq.Header.Set("Authorization", "Bearer "+accessToken)
+	// Prefetch API data if Hub is mounted and the route maps to an API path.
+	if apiPath := resolveAPIPath(r.URL.Path); apiPath != "" && ws.hubHandler != nil {
+		if body, ok := ws.prefetchHubGET(r.Context(), apiPath, accessToken); ok {
+			var apiData interface{}
+			if err := json.Unmarshal(body, &apiData); err == nil {
+				envelope.Data = apiData
 			}
-			rec := httptest.NewRecorder()
-			// The shell head is already sent when this runs (spaHandler),
-			// so a panic here must not cut the document short: it degrades
-			// to no page data, like a timeout or an error status.
-			panicked := func() (panicked bool) {
-				defer func() {
-					if p := recover(); p != nil {
-						panicked = true
-						ws.logger().Error("SPA shell page data prefetch panicked; rendering the shell without page data", "panic", p)
-					}
-				}()
-				ws.hubHandler.ServeHTTP(rec, apiReq)
-				return false
-			}()
+		}
+	}
 
-			if !panicked && rec.Code == http.StatusOK {
-				var apiData interface{}
-				if err := json.Unmarshal(rec.Body.Bytes(), &apiData); err == nil {
-					envelope.Data = apiData
-				}
+	// Embed the resolved experiment map (ptone/scion#2489), so the client
+	// can skip its boot request for GET /api/v1/experiments. Only for a
+	// signed-in shell with a session hub token, and only through that
+	// endpoint itself, called in-process as the session user: the hub's own
+	// route authorization decides, exactly as for the client's request. An
+	// anonymous shell (login, invite, a visitor without a session) never
+	// carries it; any non-200 answer leaves it out and the client falls
+	// back to its own request.
+	if envelope.User != nil && accessToken != "" && ws.hubHandler != nil {
+		if body, ok := ws.prefetchHubGET(r.Context(), "/api/v1/experiments", accessToken); ok {
+			var exp experimentsResponse
+			if err := json.Unmarshal(body, &exp); err == nil && exp.Experiments != nil {
+				envelope.Experiments = exp.Experiments
 			}
 		}
 	}
@@ -1710,6 +1874,42 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 	}
 
 	return template.JS(safeJSONForHTML(string(raw)))
+}
+
+// prefetchHubGET serves a synthetic GET for apiPath through the mounted Hub
+// API in-process, with accessToken (if any) as the bearer token, and
+// returns the body of a 200 answer. It has a 2-second deadline. The shell
+// head is already sent when this runs (spaHandler), so a panic here must
+// not cut the document short: it degrades to no data, like a timeout or an
+// error status. parent is used for cancellation only: the request's
+// identity comes from the Authorization header alone (the web session user
+// lives under a context key the hub does not read), so the token decides.
+func (ws *WebServer) prefetchHubGET(parent context.Context, apiPath, accessToken string) ([]byte, bool) {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+
+	apiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, false
+	}
+	if accessToken != "" {
+		apiReq.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	rec := httptest.NewRecorder()
+	panicked := func() (panicked bool) {
+		defer func() {
+			if p := recover(); p != nil {
+				panicked = true
+				ws.logger().Error("SPA shell page data prefetch panicked; rendering the shell without it", "path", apiPath, "panic", p)
+			}
+		}()
+		ws.hubHandler.ServeHTTP(rec, apiReq)
+		return false
+	}()
+	if panicked || rec.Code != http.StatusOK {
+		return nil, false
+	}
+	return rec.Body.Bytes(), true
 }
 
 // hasWebAssets reports whether the server has web assets available to serve.
@@ -1981,6 +2181,13 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch, unsubscribe := ws.events.Subscribe(subjects...)
 	defer unsubscribe()
 
+	// Register the stream (ptone/scion#5227) and close it on every exit
+	// path below, with the reason set where the loop returns. A panic is
+	// reported as a client close.
+	stream := ws.streams.Register(eventStreamKeyFromRequest(r), len(subjects))
+	closeReason := eventstreams.CloseClient
+	defer func() { stream.Close(closeReason, ws.logger()) }()
+
 	// The stream also ends when the server begins shutting down, so it
 	// does not hold the HTTP drain (ptone/scion#5054).
 	streamCtx, endStream := ws.shutdownMark.streamContext(r)
@@ -2026,6 +2233,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case evt, ok := <-ch:
 			if !ok {
 				// Publisher closed
+				closeReason = eventstreams.ClosePublisher
 				return
 			}
 			if !viewer.visible(evt) {
@@ -2041,31 +2249,42 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			//   data: {"subject":"project.xxx.agent.created","data":{...}}
 			// The client's SSEClient listens for event type "update" and
 			// the StateManager parses the subject to route the event.
-			_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
+			n, _ := fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
 				eventID, evt.Subject, evt.Data)
 			flusher.Flush()
+			stream.RecordEvent(n)
 			if trace != nil {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
 		case <-heartbeat.C:
 			if tiSession && !ws.sseTestIdentitySessionStillValid(r) {
+				closeReason = eventstreams.CloseSessionEnded
 				return
 			}
 			// A named event rather than an SSE comment: browsers never pass
 			// comments to page code, so the client could not observe them.
 			// No id line, so Last-Event-ID and update ids are unaffected.
-			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
+			n, _ := fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
+			stream.RecordBytes(n)
 		case <-tiDeadline:
+			closeReason = eventstreams.CloseSessionEnded
 			return
 		case <-reconnectTimer.C:
 			// Send a reconnect hint so clients can distinguish a
 			// server-initiated close from an error, then return to
 			// close the connection cleanly.
-			_, _ = fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
+			n, _ := fmt.Fprintf(w, "event: reconnect\ndata: {}\n\n")
 			flusher.Flush()
+			stream.RecordBytes(n)
+			closeReason = eventstreams.CloseMaxAge
 			return
 		case <-streamCtx.Done():
+			// The request context ending first is the client going away;
+			// otherwise the server began shutting down.
+			if r.Context().Err() == nil {
+				closeReason = eventstreams.CloseShutdown
+			}
 			return
 		}
 	}
@@ -2373,6 +2592,10 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 	return expanded
 }
 
+// sseProjectWildcardPageSize is the ListProjects page size of
+// expandProjectWildcard: the store's maximum page.
+const sseProjectWildcardPageSize = 1000
+
 // expandProjectWildcard expands a project wildcard (project.> or project.*)
 // into concrete project-scoped subjects for all projects the caller can read.
 // Returns an empty slice if no accessible projects exist (fail-closed).
@@ -2393,22 +2616,6 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 		sessionUser.Role,
 		"web",
 	)
-
-	// List all projects and filter by ActionRead.
-	allProjects, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
-		return nil // fail-closed
-	}
-	if allProjects == nil || len(allProjects.Items) == 0 {
-		return nil
-	}
-
-	resources := make([]Resource, len(allProjects.Items))
-	for i := range allProjects.Items {
-		resources[i] = projectResource(&allProjects.Items[i])
-	}
-	caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
 
 	// Build the suffix to append after the concrete project ID.
 	//
@@ -2431,15 +2638,42 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 	}
 	suffix := strings.Join(suffixParts, ".")
 
+	// List every project, a page at a time, and keep those the caller can
+	// read. Every page is drained (ptone/scion#1741): a single page would
+	// silently drop the projects beyond the store's page cap. Any list
+	// error fails closed for the whole expansion.
 	var result []string
-	for i, p := range allProjects.Items {
-		if capabilityAllows(caps[i], ActionRead) {
-			if suffix == "" {
-				result = append(result, "project."+p.ID)
-			} else {
-				result = append(result, "project."+p.ID+"."+suffix)
+	opts := store.ListOptions{Limit: sseProjectWildcardPageSize, SkipTotalCount: true}
+	for {
+		page, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, opts)
+		if err != nil {
+			ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
+			return nil // fail-closed
+		}
+		if page == nil {
+			break
+		}
+		if len(page.Items) > 0 {
+			resources := make([]Resource, len(page.Items))
+			for i := range page.Items {
+				resources[i] = projectResource(&page.Items[i])
+			}
+			caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
+			for i, p := range page.Items {
+				if capabilityAllows(caps[i], ActionRead) {
+					if suffix == "" {
+						result = append(result, "project."+p.ID)
+					} else {
+						result = append(result, "project."+p.ID+"."+suffix)
+					}
+				}
 			}
 		}
+		// A cursor that does not advance would loop forever; stop on it.
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
 	}
 	return result
 }
@@ -2767,13 +3001,14 @@ func isCompressBypassPath(path string) bool {
 			return true
 		case "agents":
 			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
-			// project-scoped form) stay uncompressed.
+			// project-scoped form) stay uncompressed, as does the agent
+			// returned by DELETE /api/v1/agents/{id}/pending-config.
 			if i+2 == len(segs) {
 				return true
 			}
 			if i+2 < len(segs) {
 				switch segs[i+2] {
-				case "pty", "ports", "workspace":
+				case "pty", "ports", "workspace", "pending-config":
 					return true
 				}
 			}
@@ -4095,7 +4330,14 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 func (ws *WebServer) buildHandler() http.Handler {
 	var handler http.Handler = ws.mux
 
-	// Admin mode middleware (innermost — runs after session user is loaded).
+	// Keyring re-save (innermost): an authenticated page or SSR request
+	// whose session was read under a non-active keyring generation gets it
+	// back under the active one, only after the admin-mode and
+	// suspended-user checks let it through (a successfully used session,
+	// ptone/scion#1530 §3). API requests re-save in sessionToBearerMiddleware.
+	handler = ws.keyringResaveMiddleware(handler)
+
+	// Admin mode middleware (runs after session user is loaded).
 	// Always applied — checks runtime MaintenanceState on each request.
 	handler = ws.adminModeWebMiddleware(handler)
 

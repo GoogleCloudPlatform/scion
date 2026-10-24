@@ -34,6 +34,12 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrInvalidCursor is returned for every pagination cursor a list call
+	// cannot use: malformed, bound to another list, or naming no row. It
+	// wraps ErrInvalidInput, so checks for that still match; the hub maps it
+	// to 400 invalid_cursor (ptone/scion#3062).
+	ErrInvalidCursor = fmt.Errorf("%w: invalid cursor", ErrInvalidInput)
+
 	// ErrActiveReservationExists is returned by CreateUsageReservation when
 	// the resource already holds an active (released_at IS NULL)
 	// reservation for the same limit definition: the unique active
@@ -425,6 +431,9 @@ type Store interface {
 	// Secret operations
 	SecretStore
 
+	// Secret encryption policy and migration records
+	SecretEncryptionStore
+
 	// Group operations (Hub Permissions System)
 	GroupStore
 
@@ -577,6 +586,17 @@ type AgentStore interface {
 	// Returns ErrVersionConflict if the version doesn't match.
 	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
 	UpdateAgent(ctx context.Context, agent *Agent) error
+
+	// UpdateAgentConfig writes only the agent's applied config (and its
+	// harness_config shadow) and pending config, compare-and-set on
+	// expectedVersion, and bumps state_version. A nil pending clears the
+	// pending config. It leaves every status, phase and lifecycle column as
+	// it is, so a start path that has moved the row on (the starting phase,
+	// a start claim) can persist a config change from its own copy of the
+	// agent without writing that copy's stale status back. Returns the new
+	// state version; ErrNotFound if the agent doesn't exist or is
+	// soft-deleted; ErrVersionConflict if the version doesn't match.
+	UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *AgentAppliedConfig, pending *AgentPendingConfig) (int64, error)
 
 	// SetAgentSoftDeleteOpID sets the agent's soft_delete_op_id to opID, or
 	// clears it to NULL when opID is empty. It is the only writer of that
@@ -1868,6 +1888,12 @@ type BrokerDispatchStore interface {
 	// have not been dispatched within the expected window.
 	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
 
+	// ListStuckPendingMessageIDs returns the IDs of up to limit messages that
+	// CountStuckPendingMessages counts, oldest first, so the sweep can name
+	// them in its log line (ptone/scion#4827). A non-positive limit returns
+	// no IDs.
+	ListStuckPendingMessageIDs(ctx context.Context, before time.Time, limit int) ([]string, error)
+
 	// ExpireStuckPendingMessages transitions messages stuck in pending state
 	// past the given cutoff to failed, recording the reason. Returns the
 	// number of messages expired.
@@ -2444,6 +2470,64 @@ type SecretStore interface {
 	// whose createdBy is in the given set of ancestor IDs.
 	// Note: EncryptedValue is NOT populated in the returned secrets.
 	ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]Secret, error)
+
+	// ScanSecretPayloads is the privileged, paginated payload scan of the
+	// encryption migration and the startup audit (ptone/scion#1530 §6).
+	// It returns up to limit rows (1..MaxSecretPayloadScan, otherwise
+	// ErrInvalidInput) of every scope and scope ID with ID > afterID, in
+	// ascending ID order; afterID "" starts at the beginning. Rows carry
+	// EncryptedValue: callers must never log or return it.
+	ScanSecretPayloads(ctx context.Context, afterID string, limit int) ([]SecretPayload, error)
+
+	// ReplaceSecretCiphertext replaces only the EncryptedValue of the row
+	// with this ID, and only while its Version equals expectedVersion and
+	// its EncryptedValue equals expectedCiphertext byte for byte. Version,
+	// timestamps, ID, SecretRef and all other metadata are preserved, so a
+	// re-encryption is never seen as a credential change. It returns
+	// applied=false (no error) when the row is gone or either check fails.
+	// The replacement passes the encryption policy fence like every other
+	// payload write.
+	ReplaceSecretCiphertext(ctx context.Context, id string, expectedVersion int, expectedCiphertext, replacement string) (applied bool, err error)
+}
+
+// MaxSecretPayloadScan is the largest ScanSecretPayloads page.
+const MaxSecretPayloadScan = 500
+
+// SecretEncryptionStore holds the database encryption policy and the
+// encryption migration records (ptone/scion#1530 §6). Neither table holds
+// key material.
+//
+// Policy fence: once the policy row exists (in any state), every
+// payload-changing secret write (CreateSecret, UpdateSecret, UpsertSecret,
+// UpdateSecretValueIfVersion, ReplaceSecretCiphertext) accepts only an
+// enc:v2: value under one of AllowedWriteKIDs, or an empty value with a
+// non-empty SecretRef, and otherwise returns ErrEncryptionPolicyMismatch
+// without writing. Metadata-only writes and deletes are not fenced.
+type SecretEncryptionStore interface {
+	// GetEncryptionPolicy returns the policy, or ErrNotFound when no
+	// policy exists (the fence is off).
+	GetEncryptionPolicy(ctx context.Context) (*EncryptionPolicy, error)
+
+	// UpdateEncryptionPolicy stores next only while the current
+	// generation equals expectedGeneration (0: no policy yet, which
+	// creates it). next.Generation must be expectedGeneration+1 and next
+	// must be valid, otherwise ErrInvalidInput. It returns applied=false
+	// (no error) when the generation has moved on. The transition holds
+	// an exclusive lock on the policy row where the database supports it.
+	UpdateEncryptionPolicy(ctx context.Context, expectedGeneration int64, next EncryptionPolicy) (applied bool, err error)
+
+	// CreateEncryptionMigration stores a new migration record; ErrAlreadyExists
+	// if its ID is taken.
+	CreateEncryptionMigration(ctx context.Context, m *EncryptionMigration) error
+
+	// GetEncryptionMigration returns the migration record, or ErrNotFound.
+	GetEncryptionMigration(ctx context.Context, id string) (*EncryptionMigration, error)
+
+	// UpdateEncryptionMigration replaces the mutable fields of the record
+	// (state, cursor, counts, plaintext admission) only while its state is
+	// expectedState; applied=false otherwise. A verified record never
+	// keeps plaintext admission.
+	UpdateEncryptionMigration(ctx context.Context, m *EncryptionMigration, expectedState EncryptionMigrationState) (applied bool, err error)
 }
 
 // SecretFilter defines criteria for filtering secrets.
@@ -2809,7 +2893,12 @@ type NotificationStore interface {
 	// pending or in flight and the notification is not delivered again.
 	// reverted reports whether the row was released; (false, nil) means it
 	// has an outcome or does not exist.
-	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
+	//
+	// notBefore sets NextAttemptAt, the earliest time the sweep may claim
+	// the row again (retry backoff after a failed delivery). A zero
+	// notBefore clears it, so the row is eligible at once. The
+	// broker-connect drain ignores NextAttemptAt.
+	UnmarkNotificationDispatched(ctx context.Context, id string, notBefore time.Time) (reverted bool, err error)
 
 	// RecordNotificationDispatchAttempt atomically increments a
 	// notification's DispatchAttempts by one. Callers record an attempt just
@@ -2828,20 +2917,41 @@ type NotificationStore interface {
 	// subscriber), and a failed write applies only while no outcome is
 	// recorded. applied reports whether this call recorded it; (false, nil)
 	// means the write was refused and the recorded outcome is kept.
-	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	//
+	// reason (a NotificationReason* value) is stored as DispatchReason with
+	// a failed outcome and may be empty. A delivered outcome takes no
+	// reason and clears any recorded one.
+	// Returns ErrInvalidInput for any other outcome, for an unknown reason,
+	// or for a reason given with delivered, and ErrNotFound if the
 	// notification doesn't exist.
-	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string, reason string) (applied bool, err error)
+
+	// ExpireStaleAgentNotifications records outcome failed with reason
+	// NotificationReasonExpired (and dispatched=true) on every
+	// agent-targeted notification created before cutoff that is still
+	// pending: dispatched=false and no recorded outcome. A claimed (in
+	// flight) row or a row with an outcome is left alone. It applies
+	// whatever the subscriber's state, so a notification whose subscriber
+	// stays suspended or has no runtime broker does not stay pending
+	// forever. Returns how many rows it expired.
+	ExpireStaleAgentNotifications(ctx context.Context, cutoff time.Time) (int, error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
 	//
+	// Notifications whose subscriber agent is suspended are never
+	// returned: they stay pending (parked) and become eligible again when
+	// the agent leaves the suspended phase.
+	//
 	// If brokerID is empty (sweep mode), a 60s grace period is applied so
-	// the sweep does not race with an in-flight primary dispatch. All
-	// undispatched agent notifications older than 60s are returned.
+	// the sweep does not race with an in-flight primary dispatch, only
+	// notifications whose subscriber agent has a RuntimeBrokerID are
+	// returned, and a notification whose NextAttemptAt is in the future
+	// (retry backoff) is left out.
 	//
 	// If brokerID is non-empty (broker-connect fast-path), no grace period
-	// is applied and only notifications whose subscriber agent currently
-	// has RuntimeBrokerID == brokerID are returned.
+	// or backoff is applied and only notifications whose subscriber agent
+	// currently has RuntimeBrokerID == brokerID are returned.
 	//
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
@@ -2891,6 +3001,14 @@ type ScheduledEventStore interface {
 	// CancelScheduledEvent marks an event as cancelled.
 	// Returns ErrNotFound if the event doesn't exist or is not pending.
 	CancelScheduledEvent(ctx context.Context, id string) error
+
+	// CancelScheduledEventWithReason marks a pending event as cancelled and,
+	// when reason is not empty, records it as the event's error. Like
+	// CancelScheduledEvent, it changes the event only while it is still
+	// pending, and returns ErrNotFound if the event doesn't exist or is no
+	// longer pending (for example, fired or claimed), leaving that event's
+	// status as it was.
+	CancelScheduledEventWithReason(ctx context.Context, id string, reason string) error
 
 	// ListScheduledEvents returns events matching the filter criteria.
 	ListScheduledEvents(ctx context.Context, filter ScheduledEventFilter, opts ListOptions) (*ListResult[ScheduledEvent], error)
@@ -3398,6 +3516,35 @@ type SkillInjectionStore interface {
 	ListProgenySkillInjections(ctx context.Context, ancestorIDs []string) ([]SkillInjection, error)
 }
 
+// HubSettingsRevisionSection is the reserved hub_settings row that holds
+// the operational-settings revision: a counter in its revision column,
+// with the value {}. Every write (upsert or delete) of an operational
+// section (a section registered in opsettings) bumps it in the same
+// transaction, so it only grows, and ListHubSettings returns it with the
+// section rows in one read: a reader gets values and the revision that
+// matches them. Rows of other sections (migration markers, caches) do not
+// bump it. The row is created by the first bump; without it the revision
+// is 0. Callers cannot write or delete it.
+//
+// The hub uses the revision to order settings applies (a snapshot older
+// than the last one applied is skipped). It is the shared mechanism for a
+// revision-checked save precondition as well; such a precondition must
+// compare against this stored row inside the write transaction (for
+// example after locking it), not against a cached copy.
+const HubSettingsRevisionSection = "_settings_revision"
+
+// HubSettingRevisionDeleter is an optional HubSettingStore method: a
+// delete that also returns the operational-settings revision its own
+// transaction bumped to (0 when the section is not operational), as
+// UpsertHubSetting does in HubSetting.SettingsRevision. It is a separate
+// interface so that DeleteHubSetting keeps its signature for its many
+// callers. The Ent-backed store (and the composite store the hub server
+// runs on) implements it; a store without it makes the hub re-read the
+// settings after a delete instead.
+type HubSettingRevisionDeleter interface {
+	DeleteHubSettingRevision(ctx context.Context, section string) (int64, error)
+}
+
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.
 type HubSettingStore interface {
@@ -3405,7 +3552,8 @@ type HubSettingStore interface {
 	// Returns ErrNotFound if the section doesn't exist.
 	GetHubSetting(ctx context.Context, section string) (*HubSetting, error)
 
-	// ListHubSettings returns all hub settings.
+	// ListHubSettings returns all hub settings, the
+	// HubSettingsRevisionSection row included when it exists, in one read.
 	ListHubSettings(ctx context.Context) ([]HubSetting, error)
 
 	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
@@ -3413,11 +3561,16 @@ type HubSettingStore interface {
 	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
 	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
 	// origin must be "seeded" or "managed" — seed-writes pass "seeded", admin-PUT writes pass "managed".
+	// A write of an operational section bumps the HubSettingsRevisionSection
+	// revision in the same transaction and returns it in SettingsRevision.
+	// Writing HubSettingsRevisionSection itself is refused.
 	UpsertHubSetting(ctx context.Context, section string, value json.RawMessage,
 		updatedBy string, expectedRevision int64, origin string) (*HubSetting, error)
 
 	// DeleteHubSetting removes a hub setting by section name.
-	// Returns ErrNotFound if the section doesn't exist.
+	// Returns ErrNotFound if the section doesn't exist. Deleting an
+	// operational section bumps the HubSettingsRevisionSection revision in
+	// the same transaction; deleting HubSettingsRevisionSection is refused.
 	DeleteHubSetting(ctx context.Context, section string) error
 
 	// BackfillOrigin sets the origin column for existing rows that predate

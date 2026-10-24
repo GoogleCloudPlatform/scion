@@ -32,12 +32,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -539,7 +536,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -690,30 +687,6 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 			}
 		}
 	}
-}
-
-// syncToGCSForWorkspaceUpload is gcp.SyncToGCS by default; a test replaces
-// it with a recording stub so the upload-guard wiring below can be verified
-// without a real GCS bucket or network access, and so a test can tell "the
-// guard refused this and the upload never ran" apart from "the upload itself
-// failed" -- the two are indistinguishable from the HTTP response alone,
-// since both are logged as warnings rather than surfaced as request errors.
-var syncToGCSForWorkspaceUpload = gcp.SyncToGCS
-
-// resolveHubManagedWorkspaceForUpload validates workspace -- normally
-// agent.AppliedConfig.Workspace, which starts as the caller-supplied
-// req.Workspace (buildAppliedConfig) and is only ever replaced by the
-// resolved hub-managed project path when the caller left it empty -- against
-// projectSlug's own managed path before it is used as a GCS upload source. A
-// non-empty, caller-supplied workspace otherwise reaches the upload
-// unresolved and unvalidated. Returns the resolved, symlink-free path to
-// upload, or an error naming why workspace was refused.
-func (s *Server) resolveHubManagedWorkspaceForUpload(workspace, projectSlug string) (string, error) {
-	workspaceRoot, err := s.hubManagedProjectPath(projectSlug)
-	if err != nil {
-		return "", err
-	}
-	return runtime.ValidateWorkspaceSource(workspace, workspaceRoot)
 }
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
@@ -2545,130 +2518,23 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Hub-native/shared-workspace project remote broker support: if the project has
-	// a managed workspace and the workspace path is set, upload it to GCS so
-	// a remote broker can download it. Empty-per-agent projects have no
-	// project workspace to ship: each agent's directory is broker-local.
-	if syncsHubProjectWorkspace(project) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
-		// The local-path read, the upload and the swap write run detached
-		// from the client (ptone/scion#1961) under their own budget: a
-		// client that gives up here must not make a broker with a local
-		// path read as one without, or leave the launch below to go ahead
-		// with the unswapped hub-local workspace.
-		uctx, ucancel := context.WithTimeout(detachLaunchFromClient(ctx), hubWorkspaceUploadTimeout)
-		hasLocalPath := false
-		if runtimeBrokerID != "" {
-			provider, err := s.store.GetProjectProvider(uctx, project.ID, runtimeBrokerID)
-			if err == nil && provider.LocalPath != "" {
-				hasLocalPath = true
-			}
+	// Hub-managed and shared-workspace projects: agents mount the project
+	// workspace the hub serves, which lives on the hub's workspace storage.
+	// A remote broker can reach it only through the same shared storage.
+	// A remote broker without it is refused with 409 before dispatch;
+	// clone-per-agent and empty-per-agent are unaffected.
+	if mountsHubProjectWorkspace(project) && runtimeBrokerID != "" && !s.isEmbeddedBroker(runtimeBrokerID) {
+		if msg, refused := s.remoteBrokerWorkspaceRefusal(ctx, project, runtimeBrokerID); refused {
+			s.agentLifecycleLog.Warn("Remote runtime broker cannot reach the project workspace; failing agent create",
+				"agent_id", agent.ID, "project_id", project.ID, "broker_id", runtimeBrokerID)
+			// The agent row and quotas exist, nothing has been dispatched
+			// (nil DeleteRuntime) and no credential has been minted (no
+			// revoke), as for the other pre-dispatch failures.
+			failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
+				writeError(w, http.StatusConflict, ErrCodeConflict, msg, nil)
+			})
+			return
 		}
-
-		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
-			if stor := s.GetStorage(); stor != nil {
-				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
-				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
-					// Workspace storage did not respond. Dispatching without
-					// the upload would leave the remote broker resolving the
-					// workspace against its own stale or empty project copy,
-					// so the create fails here and answers 503 without the
-					// path. As with the workspace-bootstrap failures above,
-					// the agent row and quotas exist, nothing has been
-					// dispatched (nil DeleteRuntime) and no credential has
-					// been minted (no revoke). A failed compensation answers
-					// 500 with its correlation ID instead (writeCreateFailure).
-					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
-						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
-					ucancel()
-					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr}, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
-					return
-				} else if workspaceErr != nil {
-					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
-						"agent_id", agent.ID,
-						"project_id", project.ID, "error", workspaceErr)
-				} else if stor.Provider() != storage.ProviderGCS && project.GitRemote != "" {
-					// The upload below is always a GCS sync (gcp.SyncToGCS),
-					// so a hub on any other storage provider cannot run it
-					// (ptone/scion#3765). A shared-workspace project with a
-					// git remote needs no upload: the broker builds the
-					// shared workspace from the remote, so dispatch it with
-					// the hub-managed workspace and skip only the sync.
-				} else if stor.Provider() != storage.ProviderGCS {
-					// A project without a git remote: the remote broker has
-					// no other way to get the workspace, and this hub cannot
-					// upload it (ptone/scion#3765). Fail the create before
-					// dispatch: the agent row and quotas exist, nothing has
-					// been dispatched and no credential has been minted.
-					msg := remoteBrokerNeedsGCSMessage(stor.Provider())
-					s.agentLifecycleLog.Warn("Hub storage cannot carry the workspace upload to a remote broker; failing agent create",
-						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
-						"project_id", project.ID, "broker_id", runtimeBrokerID)
-					ucancel()
-					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
-						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
-					})
-					return
-				} else {
-					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-					// The upload can run for up to its own budget, and
-					// its failure is answered after it: extend this
-					// request's write deadline to cover it
-					// (ptone/scion#3890). A dispatch below moves it again.
-					extendWriteDeadline(uctx, w, s.config.WriteTimeout, hubWorkspaceUploadWriteBudget())
-					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
-						if errors.Is(err, context.DeadlineExceeded) && uctx.Err() != nil {
-							// The upload ran past our own budget: fail the
-							// create rather than launch with the hub-local
-							// workspace. Nothing was dispatched and no
-							// credential minted yet.
-							ucancel()
-							failCreate(createRollback{Stage: createStageWorkspaceUpload, Cause: err}, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
-							return
-						}
-						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
-							"agent_id", agent.ID,
-							"project_id", project.ID, "error", err)
-					} else {
-						// Swap workspace to storage path for remote broker
-						agent.AppliedConfig.Workspace = ""
-						agent.AppliedConfig.WorkspaceStoragePath = storagePath
-						// The upload above is a GCS sync (gcp.SyncToGCS), and
-						// the provider check before it means stor is GCS, so
-						// stor.Bucket() names the bucket uploaded to.
-						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
-						// The swap must be on the row before anything is
-						// dispatched: later dispatches (restart, env
-						// finalize, provision then start) are built from
-						// the stored row, and the remote broker cannot use
-						// the hub-local path (ptone/scion#3730). A failed
-						// write fails the create. Nothing was dispatched
-						// and no credential minted yet, so the rollback has
-						// no DeleteRuntime and no revoke. The row is removed
-						// only if no delete holds it (DeleteWon); a delete
-						// that holds or removed it answers 409.
-						if err := s.recordHubWorkspaceStorage(detachLaunchFromClient(ctx), agent); err != nil {
-							s.agentLifecycleLog.Warn("Failed to record workspace storage path; failing agent create",
-								"agent_id", agent.ID, "project_id", project.ID, "error", err)
-							ucancel()
-							deleteWon := false
-							corrID := cleanup(createRollback{Stage: createStageWorkspaceRecord, Cause: err, DeleteWon: &deleteWon})
-							if deleteWon {
-								writeDeletedDuringCreate(w, agent.ID, nil)
-								return
-							}
-							// A failed hub store write, not a broker fault: 500
-							// internal_error, as the managed-record rollback
-							// answers (writeManagedCreateUnrecorded).
-							writeCreateFailure(w, corrID, func() {
-								writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to record workspace storage path", nil)
-							})
-							return
-						}
-					}
-				}
-			}
-		}
-		ucancel()
 	}
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
@@ -3257,10 +3123,7 @@ func (s *Server) updateManagedAgentAfterCreate(ctx context.Context, agent *store
 // than the create's assumed running and is kept, as mergeDispatchedAgent
 // does; the Runtime and annotations are still written, so a later stop or
 // delete can find the interaction, and the create then stops the
-// interaction itself, since that writer's stop could not find it. The
-// hub-managed workspace swap (copyHubWorkspaceStorage) is copied as well,
-// so a retry cannot drop a storage path the create recorded
-// (ptone/scion#3730).
+// interaction itself, since that writer's stop could not find it.
 func mergeManagedCreate(dst, src *store.Agent) {
 	dst.Runtime = src.Runtime
 	for _, key := range []string{annotationCloudProvider, annotationInteractionID, annotationEnvironmentID} {
@@ -3273,67 +3136,11 @@ func mergeManagedCreate(dst, src *store.Agent) {
 		}
 		dst.Annotations[key] = v
 	}
-	copyHubWorkspaceStorage(dst, src)
 	if isTerminalAgentPhase(dst.Phase) {
 		return
 	}
 	dst.Phase = src.Phase
 	dst.Activity = src.Activity
-}
-
-// recordHubWorkspaceStorage writes agent, which carries the hub-managed
-// workspace swap (Workspace cleared, WorkspaceStoragePath and
-// WorkspaceStorageBucket set), to the committed row (ptone/scion#3730).
-//
-// A version conflict gets one re-read and one retry, as
-// updateManagedAgentAfterCreate does: a delete that claimed the row and
-// then failed, or whose lease lapsed, bumps state_version but leaves the
-// agent live. The retry writes the re-read row with only the three
-// workspace fields re-applied, so the concurrent writer's fields are kept.
-// The retry is skipped, and the first conflict returned, when the re-read
-// cannot be used or shows that a delete won (deleteWonOnRead): the caller's
-// rollback then decides the answer. Any other first error, or any error of
-// the retry, is returned as is. There is no loop.
-//
-// On success after a retry, agent keeps its older StateVersion, so the
-// create's next write conflicts and goes through its own re-read and merge,
-// which carry the workspace fields (mergeDispatchedAgent,
-// mergeDispatchedConfig, mergeManagedCreate) and keep a terminal phase a
-// concurrent writer set.
-func (s *Server) recordHubWorkspaceStorage(ctx context.Context, agent *store.Agent) error {
-	err := s.store.UpdateAgent(ctx, agent)
-	if err == nil || !errors.Is(err, store.ErrVersionConflict) {
-		return err
-	}
-
-	fresh, getErr := s.store.GetAgent(ctx, agent.ID)
-	if deleteWonOnRead(fresh, getErr) {
-		return err
-	}
-	if getErr != nil {
-		s.agentLifecycleLog.Warn("failed to re-read agent after a conflicting workspace storage write",
-			"agent_id", agent.ID, "error", getErr)
-		return err
-	}
-
-	copyHubWorkspaceStorage(fresh, agent)
-	return s.store.UpdateAgent(ctx, fresh)
-}
-
-// copyHubWorkspaceStorage copies the hub-managed workspace swap from src
-// onto dst when src has one (a non-empty WorkspaceStoragePath): Workspace
-// (cleared by the swap), WorkspaceStoragePath and WorkspaceStorageBucket.
-// Other applied config on dst is kept.
-func copyHubWorkspaceStorage(dst, src *store.Agent) {
-	if src.AppliedConfig == nil || src.AppliedConfig.WorkspaceStoragePath == "" {
-		return
-	}
-	if dst.AppliedConfig == nil {
-		dst.AppliedConfig = &store.AgentAppliedConfig{}
-	}
-	dst.AppliedConfig.Workspace = src.AppliedConfig.Workspace
-	dst.AppliedConfig.WorkspaceStoragePath = src.AppliedConfig.WorkspaceStoragePath
-	dst.AppliedConfig.WorkspaceStorageBucket = src.AppliedConfig.WorkspaceStorageBucket
 }
 
 func isTerminalAgentPhase(phase string) bool {
@@ -3992,6 +3799,9 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRouteHoldLift:
 		s.handleAgentHoldLift(w, r, id)
 
+	case AgentRoutePendingConfig:
+		s.handleAgentPendingConfig(w, r, id)
+
 	case AgentRouteDelegations:
 		s.handleAgentDelegations(w, r, id)
 	case AgentRouteDelegationExchange:
@@ -4064,6 +3874,13 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// An agent delegated credential is served only on the route routeGuard
+	// admitted for agent.read, for the agent in its path
+	// (.design/agent-delegation.md §11.1).
+	if !admitDelegatedHandler(w, r, opAgentRead, agentResource(agent)) {
 		return
 	}
 
@@ -4173,9 +3990,32 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 			resp.Messageability = s.ComputeMessageability(ctx, identity, agent)
 		}
 	}
-	resp.Editability = buildAgentEditability(agent, s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	access := s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap)
+	access.HeldEdits = s.heldEditsEnabled()
+	resp.Editability = buildAgentEditability(agent, access)
 
-	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	// The resolved container TZ, as on the PATCH response, for a caller who
+	// may view the agent's env: the zone can come from a user, project, hub
+	// or broker TZ env var (ptone/scion#2767). Others get neither field.
+	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
+		tz := s.agentTZ(ctx, agent)
+		resp.ResolvedTimezone = &tz.TZ
+		resp.TimezoneSource = &tz.Source
+	}
+
+	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	if r.URL.Query().Get("view") == agentViewEdit {
+		// The applied config with every pending key applied, as the
+		// edit form shows it; the same env gate as the applied config.
+		next := s.effectiveNextRun(ctx, agent)
+		if next == agent.AppliedConfig {
+			next = cloneAppliedConfig(next)
+			if next != nil {
+				next.CreateInputs = nil
+			}
+		}
+		resp.EffectiveNextRun = redactAppliedConfigEnvForResponse(next, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -4286,6 +4126,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// agent's container timezone. Absent leaves the pin unchanged. It
 		// is accepted in any phase and applies at the next start.
 		ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
+		// AgentRole is refused with held edits on (the role changes
+		// through reincarnate; held role edits are not stored yet).
+		// Without them it is ignored, as before.
+		AgentRole *string `json:"agentRole,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -4343,6 +4187,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	heldEdits := s.heldEditsEnabled()
+	if heldEdits && updates.AgentRole != nil {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "The role cannot be edited here; change it by reincarnating the agent",
+			map[string]interface{}{"fields": map[string]string{"agentRole": "Change the role by reincarnating the agent."}})
+		return
+	}
+
 	// Refuse, before anything is written, a request that names a key the
 	// mutability table locks for this agent (agent_config_mutability.go):
 	// the same rule GET editability reports.
@@ -4351,7 +4202,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		resolvedHarness, _ := s.resolveAgentHarnessCapabilities(ctx, agent)
 		appliedFixed = appliedFixedValues(agent, resolvedHarness)
 	}
-	if ref := lockedPatchKeys(agent, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
+	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
@@ -4409,162 +4260,44 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.TaskSummary = updates.TaskSummary
 	}
 
-	// Apply config updates. Allowed for a non-deleted agent with no
-	// container: created, stopped, error or suspended. Every start of such
-	// an agent -- a first start, a fresh start of a stopped or failed
-	// agent, and a resume of a suspended one -- creates a new container
-	// from AppliedConfig, so the edit is dispatched with it. Agents with a
-	// live container, or one being created or removed, are refused until
-	// held edits exist (see agent_config_mutability.go).
+	// Apply config updates. Without held edits (hub.agent_edit_held off)
+	// they are allowed for a non-deleted agent with no container: created,
+	// stopped, error or suspended. Every start of such an agent -- a first
+	// start, a fresh start of a stopped or failed agent, and a resume of a
+	// suspended one -- creates a new container from AppliedConfig, so the
+	// edit is dispatched with it. Agents with a live container, or one
+	// being created or removed, are refused. With held edits on,
+	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
+	// config instead (agent_pending_config.go).
+	var configHeld, pendingSaved, pendingFolded, pendingSuperseded, pendingUnappliable []string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
 			return
 		}
-		if !configPatchPhase(agent.Phase) {
-			Conflict(w, configPatchPhaseMessage)
-			return
-		}
-		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
-		if issues := validateConfigAgainstHarnessCapabilities(updates.Config, harnessCaps); len(issues) > 0 {
-			ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
-				"harness": resolvedHarness,
-				"fields":  issues,
-			})
-			return
-		}
-		if agent.AppliedConfig == nil {
-			agent.AppliedConfig = &store.AgentAppliedConfig{}
-		}
-		cfg := updates.Config
-		if cfg.ThinkingLevel != nil {
-			if tl := *cfg.ThinkingLevel; tl < 0 || tl > 100 {
-				BadRequest(w, "thinking_level must be between 0 and 100")
+		if heldEdits {
+			out, ok := s.applyAgentConfigUpdateHeld(ctx, w, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys})
+			if !ok {
 				return
 			}
-		}
-		var modelSize string
-		if cfg.Model != "" {
-			// Resolved here, ahead of both recordExplicitEdits and the live
-			// write below, so both compare/store the same resolved value
-			// the requester's alias (if any) maps to -- not the raw alias
-			// they typed. This also ensures InlineConfig (set later)
-			// carries the resolved value.
-			// The size alias, if any, is taken first: it replaces the
-			// recorded size with the model below, so an explicit ID
-			// clears it. Declined limitation (#5502 review M2):
-			// CreateInputs records the resolved model, not the alias, so
-			// a reincarnation after this PATCH re-derives no size. The
-			// badge is display-only, and keeping the alias would change
-			// the reincarnate explicit-input contract.
-			modelSize = config.ModelSizeAlias(cfg.Model)
-			cfg.Model = s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
-		}
-
-		// old is a snapshot of the live config exactly as it stood before
-		// any of the writes below, for recordExplicitEdits' diff (Option C,
-		// ptone/scion#2493, invariant E). Taken after thinking-level
-		// validation and model-alias resolution (pure reads) but before the
-		// first assignment into agent.AppliedConfig itself.
-		old := *agent.AppliedConfig
-
-		// config.env never sets the agent timezone; explicitTimezone does.
-		// The strip runs here, between the `old` snapshot above and the
-		// recordExplicitEdits call below -- never after it. See
-		// recordExplicitEdits' doc comment for why. An empty value is a
-		// marker the configure page may round-trip, so it is dropped
-		// silently.
-		if v, ok := cfg.Env[agentTZEnvKey]; ok {
-			delete(cfg.Env, agentTZEnvKey)
-			if v != "" {
-				warnings = append(warnings, configEnvTZIgnoredWarning)
+			warnings = append(warnings, out.warnings...)
+			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
+			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
+		} else {
+			if !configPatchPhase(agent.Phase) {
+				Conflict(w, configPatchPhaseMessage)
+				return
 			}
-		}
-		// canViewAgentEnv is the same attach-equivalent-access gate the GET
-		// response's Env redaction uses (ResponseView). A caller who fails
-		// it never saw the live Env to begin with, so their request's env
-		// map cannot be trusted to list every key that still exists live --
-		// see recordExplicitEdits' env-removal gate. It also gates the env
-		// removals below (removedConfigEntries, nextClearedFields).
-		canAttachEnv := canViewAgentEnv(ctx, s, agent)
-		if agent.AppliedConfig.CreateInputs != nil {
-			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
-		}
-
-		if cfg.Image != "" {
-			agent.AppliedConfig.Image = cfg.Image
-		}
-		if cfg.Model != "" {
-			agent.AppliedConfig.Model = cfg.Model
-			agent.AppliedConfig.ModelSize = modelSize
-		}
-		// Thinking level is applied only when the request names it; an
-		// explicit null unsets it, an absent key leaves it alone.
-		if presentConfigKeys["thinking_level"] {
-			agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
-		}
-		if cfg.Task != "" {
-			agent.AppliedConfig.Task = cfg.Task
-		}
-		if cfg.AuthSelectedType != "" {
-			agent.AppliedConfig.HarnessAuth = cfg.AuthSelectedType
-		}
-		if cfg.Env != nil {
-			// AppliedConfig.Env is a copy, so the auto-expose resolution
-			// below never leaks a derived value into InlineConfig.Env.
-			agent.AppliedConfig.Env = maps.Clone(cfg.Env)
-			project, err := s.store.GetProject(ctx, agent.ProjectID)
-			if err != nil {
-				slog.WarnContext(ctx, "applyAgentUpdate: project lookup failed; auto-expose project tier not re-derived",
-					"agent", agent.ID, "project", agent.ProjectID, "error", err)
-				project = nil
+			if !s.validateAgentConfigPatch(ctx, w, agent, updates.Config) {
+				return
 			}
-			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
+			res := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent))
+			warnings = append(warnings, res.warnings...)
+			configApplied, configHeldForReincarnate = res.applied, res.heldForReincarnate
+			// A pending value stored while held edits were on must not be
+			// applied later over the value written now.
+			pendingSuperseded = dropPendingKeysNamed(agent, presentConfigKeys)
 		}
-		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
-		// Start from the live InlineConfig and overlay only the keys the
-		// request names (ptone/scion#3901). The configure page does not
-		// render volumes, skills, MCP servers, services, command args or
-		// kubernetes, and sends telemetry and env only when touched, so a
-		// wholesale replace would wipe them on every Save and Start.
-		// The harness cannot change here: harness and harness_config are
-		// fixed keys, refused above when they would change. So the check
-		// against the agent's harness above covers every key the request
-		// sends, and kept keys are left as they were.
-		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
-		agent.AppliedConfig.InlineConfig = merged
-		// provision, cleared and removed are computed once and drive both
-		// the reincarnation warnings and the disposition, so a key warned
-		// as taking effect at the next reincarnation is the key reported
-		// held for it.
-		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
-		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canAttachEnv)
-		// The broker's start-time merge keeps a previous value the inline
-		// config leaves empty; the cleared paths it sends with each start
-		// let the broker remove them (ptone/scion#3906).
-		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
-		// The provision-rendered keys changed since creation, which a
-		// broker with changedFields re-renders at start; for such a broker
-		// they take effect at the next start, not at the next
-		// reincarnation (ptone/scion#3982).
-		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
-		// A resources edit that drops a stored sub-field keeps that
-		// sub-field at start (the merge applies only non-empty values) and
-		// records no clear, so it waits for the next reincarnation
-		// (ptone/scion#5676). Added after the clears are recorded:
-		// recording it would revert the whole resources value.
-		cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, presentConfigKeys)
-		// A broker with clearedFields applies the clears recorded above at
-		// the next start (ptone/scion#4890), so only the rest are held.
-		// What is reported applied follows what was recorded above.
-		sup := s.agentBrokerStartSupport(ctx, agent)
-		provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-		cleared = sup.heldClearEdits(cleared, rawFields, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, presentConfigKeys))
-		removed = sup.heldRemovals(removed, merged.ClearedFields)
-		warnings = append(warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
-		warnings = append(warnings, removedEntriesWarnings(removed)...)
-		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4775,13 +4508,28 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	if len(pendingFolded) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, pendingFolded, pendingFoldTriggerUpdate)
+	}
+	if len(pendingSaved) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
+	}
+	s.auditUnappliablePendingKeys(ctx, agent.ID, pendingUnappliable)
+	if len(pendingSuperseded) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
+	}
+
 	tz := s.agentTZ(ctx, agent)
+	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
+	if len(configHeld) > 0 {
+		disposition.Held = configHeld
+	}
 	writeJSON(w, http.StatusOK, agentUpdateResponse{
 		Agent:            redactedAgentCopy(ctx, s, agent),
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil),
+		Disposition:      disposition,
 	})
 }
 
@@ -5207,8 +4955,23 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 		if !eventTargetsAgent(evt, agent) {
 			continue
 		}
-		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID,
-			store.ScheduledEventCancelled, nil, "target agent deleted"); err != nil {
+		// The cancel only changes an event that is still pending. An event
+		// that fired or was claimed after the list above keeps its status.
+		if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID,
+			"target agent deleted"); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// No longer pending: it fired or was claimed between
+				// the list and this cancel. That is a normal outcome,
+				// so keep its status and leave its timer alone. If this
+				// replica is firing it, the timer stays registered until
+				// fireEvent returns, and StopEventTimer would cancel the
+				// context of the running handler and of its final
+				// status write. If another replica claimed it, this
+				// replica's timer loses the claim and skips by itself.
+				s.agentLifecycleLog.Debug("Scheduled event no longer pending; not cancelled",
+					"event_id", evt.ID, "agent_id", agent.ID)
+				continue
+			}
 			s.agentLifecycleLog.Warn("Failed to cancel scheduled event",
 				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
 			continue
@@ -5312,6 +5075,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 				return
 			}
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, targetAgent) {
 			return
 		}
 
