@@ -212,13 +212,17 @@ printing the JSON result.
 
 When the template, Hub and broker do not supply a variable the agent needs, the Hub asks the CLI
 for it, and the CLI looks for it in its local environment. In an interactive terminal, `scion start`
-lists the keys it found and asks `Send N environment variable(s) to use in provisioning this agent?`
+lists the keys it found and asks `Send N environment value(s) to use in provisioning this agent?`
 before sending them. On an interactive terminal, `--yes` is an explicit answer: it confirms the
 send without showing the prompt, and `--send-env` is not needed. When no prompt can be shown (stdin
 is not a terminal, `--non-interactive`, `cli.interactive_disabled`, or agent mode), the CLI sends local
 environment values only with `--send-env`. Without it, the command fails without sending anything,
-names the keys (never their values) and the flag, and removes the agent the Hub provisioned. To avoid
-sending local values at all, store them on the Hub with `scion hub secret set` or `scion hub env set`.
+names the keys (never their values) and the flag, and removes the agent the Hub provisioned. Whenever
+the keys are sent without the text-mode prompt and its list (with `--yes`, with `--format json`, or
+with `--send-env` when no prompt can be shown), the CLI names them, never their values, in one line
+on stderr: `Sending N environment value(s) to the Hub: KEY_A, KEY_B`. With `--format json`, stdout
+carries only the JSON result. To avoid sending local values at all, store them on the Hub with
+`scion hub secret set` or `scion hub env set`.
 
 #### Long tasks and task files
 
