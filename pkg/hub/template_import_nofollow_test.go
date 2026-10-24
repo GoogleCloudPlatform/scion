@@ -85,7 +85,7 @@ func TestImportTemplatesFromRemote_StoresNoLinkTargets(t *testing.T) {
 	// A chain of relative links whose every target is lexically inside the
 	// extracted tree, kept outside the imported sub-path: "deep" is a real
 	// directory chain 30 levels down, and deep/.../b points back up to
-	// deep's parent. "chain-file" (in the template) and "chain-dir" (at the
+	// deep itself. "chain-file" (in the template) and "chain-dir" (at the
 	// repository root) step through b, so their lexical targets stay inside
 	// the tree while the resolved targets are the outside file and
 	// directory. "chain-dir/extra.txt" is a regular entry below chain-dir.
@@ -239,7 +239,7 @@ func TestImportTemplatesFromRemote_RefusesLinkedFetchResult(t *testing.T) {
 // symbolic links, the file links pointing at $SCION_FAKE_SECRET and the
 // directory link (outside the imported sub-path) at $SCION_FAKE_OUTSIDE.
 // chain-file is a chained relative link: deep/d0/.../d29/b points back up to
-// deep's parent, and chain-file steps through b and then up to the secret.
+// deep itself, and chain-file steps through b and then up to the secret.
 // Every other subcommand succeeds without doing anything.
 func installLinkingFakeGit(t *testing.T, secretPath, outside string) {
 	t.Helper()
