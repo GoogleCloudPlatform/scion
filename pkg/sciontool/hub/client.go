@@ -2027,6 +2027,15 @@ func SetTokenHome(dir string) func() {
 	}
 }
 
+// TokenHomeIsolated reports whether the token home is safe to write under
+// `go test`: outside tests always, and in a test only after SetTokenHome.
+// Code that creates files next to the token file (for example the
+// delegation socket) checks it, so a test never touches a live agent's
+// ~/.scion.
+func TokenHomeIsolated() bool {
+	return !testing.Testing() || tokenHomeOverridden
+}
+
 // TokenFilePath returns the path to the canonical token file.
 // In agent containers it always resolves to the scion user's home
 // directory so that root (sciontool init) and scion (child processes)

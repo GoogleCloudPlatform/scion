@@ -163,3 +163,12 @@ func TestDelegatedCredential_FormattingOmitsToken(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenHomeIsolated_OnlyAfterSetTokenHomeUnderTest(t *testing.T) {
+	before := TokenHomeIsolated()
+	assert.Equal(t, tokenHomeOverridden, before, "under go test, isolated means SetTokenHome is in effect")
+	restore := SetTokenHome(t.TempDir())
+	assert.True(t, TokenHomeIsolated())
+	restore()
+	assert.Equal(t, before, TokenHomeIsolated())
+}

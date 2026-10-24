@@ -33,6 +33,12 @@ func delegationSocketPath() string {
 // (uid <= 0 leaves it to init's own user). It returns nil, after logging,
 // when the socket cannot be served; the agent runs on without it.
 func startDelegationHelper(client *hub.Client, uid, gid int) *delegation.Helper {
+	if !hub.TokenHomeIsolated() {
+		// Under go test without SetTokenHome the socket path would be the
+		// real agent home's; never create or replace a socket there.
+		log.Debug("Delegation helper not started: token home not isolated in this test")
+		return nil
+	}
 	h := delegation.New(delegation.Config{
 		Client:     client,
 		SocketPath: delegationSocketPath(),
