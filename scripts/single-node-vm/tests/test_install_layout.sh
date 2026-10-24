@@ -1986,3 +1986,44 @@ test_layout_sticky_dir_itself_is_not_safe() {
   chmod 0755 "$(dirname "$LH_ROOT")"
   rm -rf "$LH_DIR"
 }
+
+# The resume path finishes a handover only if <root> itself is strictly
+# safe too: a root-owned <root> that is group-writable (so others may have
+# planted entries) is refused and left untouched, not chmod-ed first; a
+# symlinked <root> is refused as well. (stat stub: <root> and its parent
+# report root as the owner.)
+test_layout_resume_requires_strictly_safe_root() {
+  local kind
+  for kind in writable symlink; do
+    _layout_new_host
+    mkdir -p "$(dirname "$LH_ROOT")"
+    local real="${LH_DIR}/real-root"
+    if [[ "$kind" == writable ]]; then
+      mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases"
+      chmod 0775 "$LH_ROOT"
+    else
+      mkdir -m 0755 "$real"
+      ln -s "$real" "$LH_ROOT"
+    fi
+    local stub="${LH_DIR}/stub"
+    mkdir -p "$stub"
+    # shellcheck disable=SC2016 # script text written to a stub file
+    printf '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit $?\nme="$(/usr/bin/id -un)"\nif [[ "${!#}" == "%s" || "${!#}" == "%s" ]]; then out="${out//$me/root}"; fi\nprintf "%%s\\n" "$out"\n' \
+      "$LH_ROOT" "$(dirname "$LH_ROOT")" > "${stub}/stat"
+    chmod 0755 "${stub}/stat"
+    _fake_scion "${LH_DIR}/new" "nightly-20261023"
+    LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+      bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a ${kind} root-owned <root> must not be resumed"
+    assert_not_contains "$LAYOUT_OUT" "resumed the handover" "${kind}: no resume may be reported"
+    if [[ "$kind" == writable ]]; then
+      assert_contains "$LAYOUT_OUT" "is writable by group or others" "the refusal must say why"
+      assert_eq "775" "$(stat -c %a "$LH_ROOT")" "<root> must be left as found, not chmod-ed"
+      assert_false "$([[ -e "$LH_ROOT/snapshots" ]] && echo true || echo false)" "nothing may be created inside it"
+    else
+      assert_eq "" "$(ls -A "$real")" "nothing may be created through the symlinked <root>"
+    fi
+    rm -rf "$LH_DIR"
+  done
+}

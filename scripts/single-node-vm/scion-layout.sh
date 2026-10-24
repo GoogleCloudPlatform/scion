@@ -168,15 +168,19 @@ ensure_root() {
     return 0
   fi
   # Resume a handover that failed partway (e.g. the owner user did not
-  # exist yet): <root> is still a real directory owned by root in a
-  # root-owned parent, so the owner cannot have touched its entries and
-  # root may safely finish the job.
+  # exist yet): <root> is still a directory owned by root. Root finishes
+  # the job only if nobody else can have changed <root>'s entries: its
+  # parent chain is safe (dir_chain_is_safe) AND <root> itself is strictly
+  # safe -- a real directory (not a symlink), owned by root, with no group
+  # or other write (dir_is_safe). Otherwise it refuses rather than chmod or
+  # chown anything inside.
   if [[ "$(owner_user)" != "root" \
         && "$(stat -c '%F|%U' -- "$INSTALL_ROOT")" == "directory|root" ]]; then
     if [[ "$(stat -c '%U' -- "$parent")" != "root" ]] || ! dir_chain_is_safe "$parent"; then
       [[ "$(stat -c '%U' -- "$parent")" == "root" ]] || UNSAFE_REASON="$parent is owned by $(stat -c '%U' -- "$parent"), not root"
       unsafe_parent_die
     fi
+    dir_is_safe "$INSTALL_ROOT" || die "$UNSAFE_REASON; refusing to resume the handover of $INSTALL_ROOT. Fix it by hand (a root-owned directory with mode 0755) and re-run."
     build_and_hand_over "resumed the handover of"
     return 0
   fi
