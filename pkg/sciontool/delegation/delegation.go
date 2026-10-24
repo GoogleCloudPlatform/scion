@@ -165,8 +165,10 @@ type grant struct {
 	// notBefore paces exchanges after a failure.
 	notBefore time.Time
 	retry     backoff.Backoff
-	// lastUsed is when a request last asked for the grant's credential.
-	lastUsed time.Time
+	// lastUsed is when a request last asked for the grant's credential
+	// (Unix nanoseconds). Atomic, so lookup can find idle grants without
+	// taking the grant's lock.
+	lastUsed atomic.Int64
 	// timer re-exchanges the grant: before cred expires, or when a
 	// backoff ends. timerSeq identifies the armed timer, so a timer that
 	// fires after it was replaced or stopped does nothing.
@@ -297,7 +299,11 @@ func (h *Helper) snapshot() map[string]*grant {
 func (h *Helper) reexchangeAfterCredentialChange(id string, g *grant, gen uint64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.inUseLocked() || h.ctx.Err() != nil {
+	if !g.inUseLocked() || h.ctx.Err() != nil || !h.trackedLocked(id, g) {
+		return
+	}
+	if h.idle(g, h.clk.Now()) {
+		h.dropLocked(id, g)
 		return
 	}
 	if g.cred != nil && g.credGen >= gen {
@@ -337,9 +343,20 @@ func (h *Helper) lookup(id string) (*grant, error) {
 		return g, nil
 	}
 	if len(h.grants) >= maxGrants {
+		// Make room by forgetting idle grants (their timers find
+		// themselves untracked and stop).
+		now := h.clk.Now()
+		for gid, old := range h.grants {
+			if h.idle(old, now) {
+				delete(h.grants, gid)
+			}
+		}
+	}
+	if len(h.grants) >= maxGrants {
 		return nil, errTooManyGrants
 	}
 	g := &grant{retry: backoff.Backoff{Base: retryBaseDelay, Max: retryMaxDelay, Jitter: backoff.DefaultJitter}}
+	g.lastUsed.Store(h.clk.Now().UnixNano())
 	h.grants[id] = g
 	return g, nil
 }
@@ -363,7 +380,7 @@ func (h *Helper) credential(ctx context.Context, id string) (string, error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.lastUsed = h.clk.Now()
+	g.lastUsed.Store(h.clk.Now().UnixNano())
 	if tok, ok := h.usableLocked(g); ok {
 		return tok, nil
 	}
@@ -442,12 +459,13 @@ func (h *Helper) exchangeLocked(ctx context.Context, id string, g *grant) (*hub.
 	}
 	cred, err := h.client.ExchangeDelegation(ctx, id, aud)
 	if err == nil {
+		prev := g.cred
 		g.cred = cred
 		g.credGen = gen
 		g.waiting = false
 		g.notBefore = time.Time{}
 		g.retry.Reset()
-		h.scheduleLocked(id, g)
+		h.scheduleLocked(id, g, prev)
 		log.Info("Delegation helper: exchanged grant %s for credential %s (expires %s)",
 			id, cred.CredentialID, cred.ExpiresAt.UTC().Format(time.RFC3339))
 		return cred, nil
@@ -500,9 +518,32 @@ func (h *Helper) failedLocked(id string, g *grant, now time.Time, err error) {
 	delay := g.retry.Failure()
 	g.notBefore = now.Add(delay)
 	log.Error("Delegation helper: exchange of grant %s failed, retrying in %s: %v", id, delay.Round(time.Second), err)
-	if now.Sub(g.lastUsed) < idleAfter {
-		h.armLocked(id, g, delay)
+	if h.idle(g, now) {
+		h.dropLocked(id, g)
+		return
 	}
+	h.armLocked(id, g, delay)
+}
+
+// idle reports whether no request has asked for g's credential for
+// idleAfter or longer.
+func (h *Helper) idle(g *grant, now time.Time) bool {
+	return now.Sub(time.Unix(0, g.lastUsed.Load())) >= idleAfter
+}
+
+// dropLocked drops g's credential and timer and stops tracking grant id; a
+// later request exchanges the grant afresh.
+func (h *Helper) dropLocked(id string, g *grant) {
+	g.cred = nil
+	g.stopTimerLocked()
+	h.forget(id, g)
+}
+
+// trackedLocked reports whether g is still the tracked state for grant id.
+func (h *Helper) trackedLocked(id string, g *grant) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.grants[id] == g
 }
 
 // refreshMargin is how long before expiry a credential with lifetime ttl
@@ -512,11 +553,28 @@ func refreshMargin(ttl time.Duration) time.Duration {
 }
 
 // scheduleLocked arms the re-exchange of g's new credential before it
-// expires.
-func (h *Helper) scheduleLocked(id string, g *grant) {
+// expires, unless a re-exchange could not usefully extend it. The hub caps a
+// credential's lifetime at the grant's expiry and the agent credential's
+// (§8.2 step 14), so near either the lifetime stops growing: no timer is
+// armed when the delay would be under minRefreshMargin, or when the new
+// credential does not outlive prev (the one it replaces) by more than
+// minRefreshMargin. The credential then lapses, and the next request
+// exchanges on demand. An idle grant is not re-exchanged.
+func (h *Helper) scheduleLocked(id string, g *grant, prev *hub.DelegatedCredential) {
 	now := h.clk.Now()
+	if h.idle(g, now) {
+		return
+	}
+	if prev != nil && !g.cred.ExpiresAt.After(prev.ExpiresAt.Add(minRefreshMargin)) {
+		log.Info("Delegation helper: credential for grant %s cannot be extended further; not re-exchanging before it expires", id)
+		return
+	}
 	ttl := g.cred.ExpiresAt.Sub(now)
-	h.armLocked(id, g, max(ttl-refreshMargin(ttl), 0))
+	d := ttl - refreshMargin(ttl)
+	if d < minRefreshMargin {
+		return
+	}
+	h.armLocked(id, g, d)
 }
 
 // armLocked replaces g's timer with one that re-exchanges grant id after d.
@@ -535,6 +593,14 @@ func (h *Helper) timerFired(id string, g *grant, seq uint64) {
 		return
 	}
 	g.timer = nil
+	if !h.trackedLocked(id, g) {
+		g.cred = nil
+		return
+	}
+	if h.idle(g, h.clk.Now()) {
+		h.dropLocked(id, g)
+		return
+	}
 	ctx, cancel := context.WithTimeout(h.ctx, exchangeTimeout)
 	defer cancel()
 	_, _ = h.exchangeLocked(ctx, id, g)

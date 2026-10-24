@@ -59,8 +59,12 @@ type fakeHub struct {
 	// instead of issuing a credential.
 	nextStatus []scriptedAnswer
 	ttl        time.Duration
-	hubID      string
-	healthzRaw string // overrides the /healthz body when set
+	// grantExpires, when set, is the grant's expiry: exchange caps the
+	// credential lifetime at it and refuses once it has passed (§8.2 steps
+	// 8 and 14).
+	grantExpires time.Time
+	hubID        string
+	healthzRaw   string // overrides the /healthz body when set
 
 	creds     []*fakeCred
 	exchanges []exchangeRecord
@@ -210,7 +214,17 @@ func (f *fakeHub) serveExchange(w http.ResponseWriter, r *http.Request, grantID 
 	}
 
 	now := f.clk.Now()
-	cred := &fakeCred{token: randomToken(), grantID: grantID, jwt: jwt, expiresAt: now.Add(f.ttl)}
+	expires := now.Add(f.ttl)
+	if !f.grantExpires.IsZero() {
+		if !now.Before(f.grantExpires) {
+			writeHubError(w, http.StatusForbidden, "grant_inactive")
+			return
+		}
+		if f.grantExpires.Before(expires) {
+			expires = f.grantExpires
+		}
+	}
+	cred := &fakeCred{token: randomToken(), grantID: grantID, jwt: jwt, expiresAt: expires}
 	f.creds = append(f.creds, cred)
 	f.supersedeLocked(grantID, now)
 	rec.token = cred.token
@@ -337,4 +351,15 @@ func (f *fakeHub) set(fn func(f *fakeHub)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	fn(f)
+}
+
+func (f *fakeHub) credExpiry(token string) time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.creds {
+		if c.token == token {
+			return c.expiresAt
+		}
+	}
+	return time.Time{}
 }

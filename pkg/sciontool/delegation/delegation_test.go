@@ -202,6 +202,10 @@ func TestProxy_RefusesRequestsItDoesNotForward(t *testing.T) {
 		{"other API version", http.MethodGet, "/api/v2/agents", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
 		{"dot segment", http.MethodGet, "/api/v1/../healthz", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
 		{"encoded dot segment", http.MethodGet, "/api/v1/%2e%2e/healthz", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
+		{"mixed encoded dot segment", http.MethodGet, "/api/v1/.%2e/healthz", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
+		{"mixed encoded dot segment reversed", http.MethodGet, "/api/v1/%2e./x", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
+		{"encoded single dot", http.MethodGet, "/api/v1/%2e/x", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
+		{"upper-case encoded dots", http.MethodGet, "/api/v1/%2E%2E/healthz", "grant-1", "", http.StatusBadRequest, codePathNotAllowed},
 		{"body too large", http.MethodPost, "/api/v1/agents/agent-2/messages", "grant-1", strings.Repeat("x", maxRequestBody+1), http.StatusRequestEntityTooLarge, codeRequestTooLarge},
 	}
 	for _, tc := range cases {
@@ -494,6 +498,113 @@ func TestProxy_RefusedTwiceIsReturnedToCaller(t *testing.T) {
 	// One re-exchange and one retry, not a loop.
 	assert.Len(t, hs.hub.exchangeLog(), 2)
 	assert.Len(t, hs.hub.useLog(), 3)
+	// A credential with no lifetime left gets no background re-exchange
+	// (a zero-delay timer would re-exchange back to back on the real clock).
+	assert.Zero(t, hs.clk.Pending())
+}
+
+func (hs *harness) tracked(id string) bool {
+	hs.helper.mu.Lock()
+	defer hs.helper.mu.Unlock()
+	_, ok := hs.helper.grants[id]
+	return ok
+}
+
+// TestReexchange_StopsWhenGrantExpiryCapsTheLifetime: near the grant's
+// expiry the hub caps each credential at it, so a re-exchange can no longer
+// extend the credential. The helper stops re-exchanging in the background
+// instead of exchanging back to back as the lifetime shrinks.
+func TestReexchange_StopsWhenGrantExpiryCapsTheLifetime(t *testing.T) {
+	grantEnd := testStart.Add(20 * time.Minute)
+	hs := newHarness(t, func(f *fakeHub, _ *Config) { f.grantExpires = grantEnd })
+	require.Equal(t, http.StatusOK, hs.get(t, "grant-1").status)
+
+	// 15-minute credential, re-exchanged at 13 min: the hub caps the new one
+	// at the grant expiry (7 min left), which still extends it.
+	require.True(t, hs.clk.WaitForTimer(5*time.Second, testStart.Add(13*time.Minute)))
+	hs.clk.Advance(13 * time.Minute)
+	ex := hs.waitExchanges(t, 2)
+	assert.True(t, hs.hub.credExpiry(ex[1].token).Equal(grantEnd))
+
+	// Its re-exchange (7 min less a fifth of it) returns the same expiry, so
+	// nothing further is scheduled.
+	next := testStart.Add(13*time.Minute + 7*time.Minute - 84*time.Second)
+	require.True(t, hs.clk.WaitForTimer(5*time.Second, next))
+	hs.clk.Advance(next.Sub(hs.clk.Now()))
+	hs.waitExchanges(t, 3)
+	eventually(t, func() bool { return hs.clk.Pending() == 0 }, "no re-exchange armed once the expiry cannot move")
+
+	hs.clk.Advance(30 * time.Minute)
+	assert.Len(t, hs.hub.exchangeLog(), 3, "no background exchange past the cap")
+	// After the grant expires, a request gets the hub's denial.
+	res := hs.get(t, "grant-1")
+	assert.Equal(t, http.StatusForbidden, res.status)
+	assert.Equal(t, "grant_inactive", res.code)
+}
+
+func TestIdleGrant_IsForgottenAndNotReexchanged(t *testing.T) {
+	hs := newHarness(t)
+	require.Equal(t, http.StatusOK, hs.get(t, "grant-1").status)
+
+	// Re-exchanged every 13 minutes while used within the last hour; the
+	// first timer after an hour without a request forgets the grant.
+	for i := 0; i < 10 && hs.tracked("grant-1"); i++ {
+		require.True(t, hs.clk.WaitFor(5*time.Second, func(n int) bool { return n >= 1 }))
+		n := len(hs.hub.exchangeLog())
+		hs.clk.Advance(13 * time.Minute)
+		eventually(t, func() bool { return len(hs.hub.exchangeLog()) > n || !hs.tracked("grant-1") }, "re-exchange or forget")
+	}
+	require.False(t, hs.tracked("grant-1"))
+	assert.Len(t, hs.hub.exchangeLog(), 5, "exchanges at 0, 13, 26, 39 and 52 minutes")
+	assert.Zero(t, hs.clk.Pending())
+
+	// An agent credential change no longer re-exchanges it.
+	var jwt2 string
+	hs.hub.set(func(f *fakeHub) { jwt2 = f.mintJWTLocked(); f.current = jwt2 })
+	hs.client.SetToken(jwt2)
+	require.Never(t, func() bool { return len(hs.hub.exchangeLog()) > 5 }, 200*time.Millisecond, 10*time.Millisecond)
+
+	// A new request exchanges it again.
+	require.Equal(t, http.StatusOK, hs.get(t, "grant-1").status)
+	assert.Len(t, hs.hub.exchangeLog(), 6)
+}
+
+func TestIdleGrant_FailingGrantIsForgotten(t *testing.T) {
+	hs := newHarness(t, func(f *fakeHub, _ *Config) {
+		for i := 0; i < 100; i++ {
+			f.nextStatus = append(f.nextStatus, scriptedAnswer{http.StatusServiceUnavailable, "unavailable"})
+		}
+	})
+	require.Equal(t, codeUnavailable, hs.get(t, "grant-1").code)
+
+	// Background retries back off to 5 minutes and stop once the grant has
+	// been idle for an hour.
+	for i := 0; i < 40 && hs.tracked("grant-1"); i++ {
+		require.True(t, hs.clk.WaitFor(5*time.Second, func(n int) bool { return n >= 1 }))
+		n := len(hs.hub.exchangeLog())
+		hs.clk.Advance(retryMaxDelay)
+		eventually(t, func() bool { return len(hs.hub.exchangeLog()) > n || !hs.tracked("grant-1") }, "retry or forget")
+	}
+	require.False(t, hs.tracked("grant-1"))
+	assert.Zero(t, hs.clk.Pending())
+	assert.False(t, hs.clk.Now().Before(testStart.Add(idleAfter)), "kept until an hour without requests")
+}
+
+func TestGrantTable_IdleGrantsMakeRoom(t *testing.T) {
+	hs := newHarness(t)
+	for i := 0; i < maxGrants; i++ {
+		_, err := hs.helper.lookup(fmt.Sprintf("grant-%d", i))
+		require.NoError(t, err)
+	}
+	res := hs.get(t, "grant-new")
+	assert.Equal(t, http.StatusServiceUnavailable, res.status)
+	assert.Equal(t, codeTooManyGrants, res.code)
+	assert.Empty(t, hs.hub.exchangeLog())
+
+	hs.clk.Advance(idleAfter)
+	require.Equal(t, http.StatusOK, hs.get(t, "grant-new").status)
+	assert.True(t, hs.tracked("grant-new"))
+	assert.False(t, hs.tracked("grant-0"), "idle grants were forgotten to make room")
 }
 
 func TestExchange_DenialIsPassedThroughAndGrantForgotten(t *testing.T) {

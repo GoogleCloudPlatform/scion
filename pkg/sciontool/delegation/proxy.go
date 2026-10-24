@@ -79,7 +79,7 @@ func (h *Helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.EscapedPath()
-	if !allowedPath(path) {
+	if !allowedPath(path, r.URL.Path) {
 		writeError(w, http.StatusBadRequest, codePathNotAllowed, "only hub API paths under "+apiPathPrefix+" are forwarded")
 		return
 	}
@@ -116,13 +116,16 @@ func (h *Helper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// allowedPath reports whether path is a hub API path the proxy forwards.
-func allowedPath(path string) bool {
-	if !strings.HasPrefix(path, apiPathPrefix) {
+// allowedPath reports whether a request path is a hub API path the proxy
+// forwards. Both the path as sent (escaped) and its decoded form must be
+// under apiPathPrefix, and no decoded segment may be "." or "..", however
+// it was encoded ("%2e", ".%2e", "%2e%2e", ...).
+func allowedPath(escaped, decoded string) bool {
+	if !strings.HasPrefix(escaped, apiPathPrefix) || !strings.HasPrefix(decoded, apiPathPrefix) {
 		return false
 	}
-	for _, seg := range strings.Split(path, "/") {
-		if seg == "." || seg == ".." || strings.Contains(strings.ToLower(seg), "%2e%2e") {
+	for _, seg := range strings.Split(decoded, "/") {
+		if seg == "." || seg == ".." {
 			return false
 		}
 	}
