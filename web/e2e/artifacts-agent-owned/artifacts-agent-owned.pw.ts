@@ -138,9 +138,15 @@ const OWNER_CHECK_TIMEOUT = parseTimeoutMs(
   'E2E_OWNER_CHECK_TIMEOUT_MS'
 );
 const OWNER_CHECK_POLL_MS = 15_000;
-/** How long the shell gets to show each command's marker. */
+/**
+ * How long the shell gets: the bash prompt after the agent runs, then each
+ * command's marker. Each command is one short line (printf, mkdir, whoami,
+ * one small-file publish) whose marker shows within seconds; 60 s is a wide
+ * margin and keeps the suite's worst case inside the lane's single-attempt
+ * budget (lane run sheet, step 6 floor).
+ */
 const SHELL_READY_TIMEOUT = 180_000;
-const SHELL_COMMAND_TIMEOUT = 120_000;
+const SHELL_COMMAND_TIMEOUT = 60_000;
 
 const journey = createJourney<IdentityKey>({
   keys: IDENTITY_KEYS,
