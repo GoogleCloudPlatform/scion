@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -71,7 +72,10 @@ func pgDropWebchatTables(t *testing.T, db *sql.DB) {
 // database, as the hub does in production.
 func newEntWebChatStore(t *testing.T) (*sqliteWebChatStore, store.Store, *sql.DB) {
 	t.Helper()
-	s := createTestStore(t)
+	s, err := hubtestutil.OpenMigratedTestStore(t)
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
 	t.Cleanup(func() { _ = s.Close() })
 	dbp, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "test store must expose DB()")
