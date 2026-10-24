@@ -138,12 +138,23 @@ async function threadScrollTop(page: Page): Promise<number> {
   return list.evaluate((el) => el.scrollTop);
 }
 
+/** First line of an error message, without colour codes or quotes, at most 160 characters. */
+function shortError(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e);
+  const plain = text.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '');
+  return (plain.split('\n').find((l) => l.trim() !== '') ?? '').replace(/"/g, "'").slice(0, 160);
+}
+
 /**
  * Opens the message menu and clicks `label`. If the row is not visible within a second (for
- * example a desktop popup dismissed by a late scroll), it right-clicks again, up to 15 s.
- * Every attempt after the first is recorded as a "menu-retry" annotation and printed, with the
- * page state at that moment (time since `loadedAt`, URL, two scrollTop samples 100 ms apart,
- * and whether a menu was open), so a run shows whether the race happened and why.
+ * example a desktop popup dismissed by a late scroll), it tries again, up to 15 s; a row that
+ * never shows still fails at that cap. Each attempt first checks the page: if the row is already
+ * visible it opens nothing; if a popup or sheet is open without the row it presses Escape (the
+ * thread closes its message menu on Escape) before the right-click. Every attempt after the
+ * first is recorded as a "menu-retry" annotation and printed: the attempt number, the time since
+ * `loadedAt` and the previous attempt's error are recorded first, then the page state (URL, two
+ * scrollTop samples 100 ms apart, open popup rows and sheets), so a run shows whether the race
+ * happened and why.
  */
 async function openMenuItem(
   page: Page,
@@ -152,26 +163,47 @@ async function openMenuItem(
   loadedAt: number
 ): Promise<void> {
   const item = menuItem(page, label);
+  const popupRows = page.locator('.context-menu-item');
+  const openSheets = page.locator('scion-chat-thread scion-action-sheet[open]');
   let attempt = 0;
+  let previousError = '';
   await expect(async () => {
     attempt++;
-    if (attempt > 1) {
-      const elapsedMs = Date.now() - loadedAt;
-      const popupRows = await page.locator('.context-menu-item').count();
-      const openSheets = await page.locator('scion-chat-thread scion-action-sheet[open]').count();
-      const scrollA = await threadScrollTop(page);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const scrollB = await threadScrollTop(page);
-      const info = test.info();
-      const description =
-        `attempt=${attempt} label="${label}" test="${info.title}" project=${info.project.name} ` +
-        `elapsed_ms=${elapsedMs} url=${page.url()} scrollTop=${scrollA},${scrollB} ` +
-        `popup_rows=${popupRows} open_sheets=${openSheets}`;
-      info.annotations.push({ type: 'menu-retry', description });
-      console.info(`[menu-retry] ${description}`);
+    try {
+      if (attempt > 1) {
+        const info = test.info();
+        const base =
+          `attempt=${attempt} label="${label}" test="${info.title}" project=${info.project.name} ` +
+          `elapsed_ms=${Date.now() - loadedAt} previous_error="${previousError}"`;
+        // Recorded before any sampling, so a failing sample cannot lose the retry.
+        const annotation = { type: 'menu-retry', description: base };
+        info.annotations.push(annotation);
+        let state = '';
+        try {
+          const rows = await popupRows.count();
+          const sheets = await openSheets.count();
+          const scrollA = await threadScrollTop(page);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const scrollB = await threadScrollTop(page);
+          state =
+            ` url=${page.url()} scrollTop=${scrollA},${scrollB}` +
+            ` popup_rows=${rows} open_sheets=${sheets}`;
+        } catch (e) {
+          state = ` state_error="${shortError(e)}"`;
+        }
+        annotation.description = base + state;
+        console.info(`[menu-retry] ${annotation.description}`);
+      }
+      if (await item.isVisible()) return;
+      if ((await popupRows.count()) + (await openSheets.count()) > 0) {
+        await page.keyboard.press('Escape');
+      }
+      await msgLocator(page, id).click({ button: 'right', timeout: 2_000 });
+      await expect(item).toBeVisible({ timeout: 1_000 });
+    } catch (e) {
+      previousError = shortError(e);
+      throw e;
     }
-    await msgLocator(page, id).click({ button: 'right', timeout: 2_000 });
-    await expect(item).toBeVisible({ timeout: 1_000 });
   }).toPass({ timeout: 15_000 });
   await item.click();
 }
@@ -280,7 +312,9 @@ test.describe('Starred messages (phase 1)', () => {
     await expect(page).toHaveURL(new RegExp(`/chat/(?!space/)[^/]+/${topicId}(?:[?#].*)?$`), {
       timeout: 20_000,
     });
-    await expect(msgLocator(page, targetId)).toBeInViewport({ timeout: 20_000 });
+    // ratio 1: the target is one short line of text (TARGET_TEXT), far shorter than both viewports
+    // (desktop 1440x900, mobile 390x844), so it can always be wholly in view once the jump is done.
+    await expect(msgLocator(page, targetId)).toBeInViewport({ ratio: 1, timeout: 20_000 });
     await threadScrollIdle(page);
     await openMenuItem(page, targetId, 'Star message', loadedAt);
     await expect(indicator(page, targetId)).toBeVisible();
