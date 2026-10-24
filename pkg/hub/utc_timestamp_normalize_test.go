@@ -150,7 +150,7 @@ func runNormalize(t *testing.T, db *sql.DB, opts entadapter.TimestampNormalizeOp
 // canonical form, tables that were unreadable become readable, and a second
 // run changes nothing.
 func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-families")
 
@@ -218,7 +218,7 @@ func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
 // ptone/scion#2473 shape: a fire_at stored from a time with a nameless
 // FixedZone makes ListScheduledEvents fail until the operation runs.
 func TestUTCTimestampNormalize_ScheduledEventFixedZone(t *testing.T) {
-	_, s, db := newEntWebChatStore(t)
+	_, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-sched")
 
@@ -248,7 +248,7 @@ func TestUTCTimestampNormalize_ScheduledEventFixedZone(t *testing.T) {
 // same day (including sub-second neighbours) page, search, threshold and
 // list in instant order with no repeats or gaps.
 func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-order")
 
@@ -399,7 +399,7 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 // value no layout parses is reported by table, column and rowid only, and is
 // not changed.
 func TestUTCTimestampNormalize_UnparseableLeftAloneAndNotLogged(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-bad")
 
@@ -428,7 +428,7 @@ func TestUTCTimestampNormalize_UnparseableLeftAloneAndNotLogged(t *testing.T) {
 // result as one uninterrupted run.
 func TestUTCTimestampNormalize_ResumesAfterInterruption(t *testing.T) {
 	seed := func(t *testing.T) *sql.DB {
-		wcs, s, db := newEntWebChatStore(t)
+		wcs, s, db := hubNewEntWebChatStore(t)
 		ctx := context.Background()
 		proj := normProject(t, s, "norm-resume")
 		for i, c := range legacyEntCases() {
@@ -564,7 +564,7 @@ func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {
 // only non-canonical values left are unparseable, the check points at the
 // run log and starts no run.
 func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
-	_, s, db := newEntWebChatStore(t)
+	_, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	srv := &Server{store: s}
 	proj := normProject(t, s, "norm-startup-bad")
@@ -626,7 +626,7 @@ func TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads(t *testing.T) {
 		"2026-10-01 04:00:00 +0000 UTC",
 	} {
 		t.Run(text, func(t *testing.T) {
-			_, s, db := newEntWebChatStore(t)
+			_, s, db := hubNewEntWebChatStore(t)
 			ctx := context.Background()
 			proj := normProject(t, s, "norm-unreadable")
 			id := tid("norm-unreadable-msg")
