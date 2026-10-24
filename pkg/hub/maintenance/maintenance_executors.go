@@ -1405,8 +1405,10 @@ const DefaultMaxExtractBytes int64 = 512 << 20
 //   - a second root-level scion entry, a scion entry in a subdirectory, or a
 //     root-level scion that is not a regular file is an error;
 //   - other entries are skipped, never written to disk;
+//   - a sparse scion entry is an error (its holes are not read from input);
 //   - reading stops with an error once more than DefaultMaxExtractBytes have
-//     been decompressed.
+//     been decompressed, a scion entry declaring more than that is refused
+//     before writing, and the written binary is bounded to it as well.
 func ExtractScionBinary(tarballPath, destDir string, logger io.Writer) (string, error) {
 	return extractScionBinary(tarballPath, destDir, logger, DefaultMaxExtractBytes)
 }
@@ -1477,8 +1479,17 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 			if header.Typeflag != tar.TypeReg {
 				return "", fmt.Errorf("release archive entry %q is not a regular file", header.Name)
 			}
+			// A sparse entry's holes are synthesized as zeros without
+			// reading input, so the stream cap does not bound it. Release
+			// binaries are never sparse.
+			if isSparseEntry(header) {
+				return "", fmt.Errorf("release archive entry %q is a sparse file; refusing it", header.Name)
+			}
+			if header.Size > maxBytes {
+				return "", fmt.Errorf("%w: entry %q declares %d bytes (limit %d)", errExtractTooLarge, header.Name, header.Size, maxBytes)
+			}
 			found = true
-			if err := writeExtracted(binPath, tr); err != nil {
+			if err := writeExtracted(binPath, tr, maxBytes); err != nil {
 				if errors.Is(err, errExtractTooLarge) {
 					return "", fmt.Errorf("%w (%d bytes)", errExtractTooLarge, maxBytes)
 				}
@@ -1499,15 +1510,38 @@ func extractScionBinary(tarballPath, destDir string, logger io.Writer, maxBytes 
 	return binPath, nil
 }
 
-// writeExtracted writes r to dst with mode 0755.
-func writeExtracted(dst string, r io.Reader) error {
+// isSparseEntry reports whether hdr describes a GNU sparse file, in either
+// the old GNU format or the PAX GNU.sparse.* encoding (which archive/tar
+// presents as a regular file).
+func isSparseEntry(hdr *tar.Header) bool {
+	if hdr.Typeflag == tar.TypeGNUSparse {
+		return true
+	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
+}
+
+// writeExtracted writes r to dst with mode 0755, at most maxBytes: the
+// output is bounded on its own, independently of the input-side cap.
+func writeExtracted(dst string, r io.Reader, maxBytes int64) error {
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}
-	if _, err := io.Copy(out, r); err != nil {
+	n, err := io.CopyN(out, r, maxBytes+1)
+	if err != nil && err != io.EOF {
 		_ = out.Close()
+		_ = os.Remove(dst)
 		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	if n > maxBytes {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("%w: %s exceeds %d bytes", errExtractTooLarge, dst, maxBytes)
 	}
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", dst, err)

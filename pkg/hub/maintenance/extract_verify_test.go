@@ -20,6 +20,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,5 +385,165 @@ func TestExtractScionBinary_SizeCap(t *testing.T) {
 
 	if DefaultMaxExtractBytes != DefaultMaxDownloadBytes {
 		t.Fatalf("DefaultMaxExtractBytes = %d, documented to match the 512 MiB download cap", DefaultMaxExtractBytes)
+	}
+}
+
+// rawTarBlock is a hand-built ustar header block. archive/tar's writer drops
+// GNU.sparse.* PAX records, so sparse fixtures are assembled by hand.
+func rawTarBlock(name string, typeflag byte, size int64) []byte {
+	b := make([]byte, 512)
+	copy(b[0:100], name)
+	copy(b[100:108], "0000755\x00")
+	copy(b[108:116], "0000000\x00")
+	copy(b[116:124], "0000000\x00")
+	copy(b[124:136], fmt.Sprintf("%011o\x00", size))
+	copy(b[136:148], "00000000000\x00")
+	b[156] = typeflag
+	copy(b[257:263], "ustar\x00")
+	copy(b[263:265], "00")
+	for i := 148; i < 156; i++ {
+		b[i] = ' '
+	}
+	sum := 0
+	for _, c := range b {
+		sum += int(c)
+	}
+	copy(b[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	return b
+}
+
+func padTarBlock(b []byte) []byte {
+	if r := len(b) % 512; r != 0 {
+		b = append(b, make([]byte, 512-r)...)
+	}
+	return b
+}
+
+func paxRecord(k, v string) string {
+	rec := " " + k + "=" + v + "\n"
+	n := len(rec)
+	for {
+		s := fmt.Sprintf("%d%s", n, rec)
+		if len(s) == n {
+			return s
+		}
+		n = len(s)
+	}
+}
+
+// sparseScionTarball returns a gzipped tar whose only entry is a PAX
+// GNU-sparse 1.0 file named "scion" with the given real size: 4 bytes of
+// data, the rest holes that archive/tar synthesizes as zeros without
+// reading any input.
+func sparseScionTarball(t *testing.T, realsize int64) []byte {
+	t.Helper()
+	var recs string
+	for _, kv := range [][2]string{
+		{"GNU.sparse.major", "1"}, {"GNU.sparse.minor", "0"},
+		{"GNU.sparse.name", "scion"}, {"GNU.sparse.realsize", fmt.Sprint(realsize)},
+	} {
+		recs += paxRecord(kv[0], kv[1])
+	}
+	data := append(padTarBlock([]byte("1\n0\n4\n")), "ABCD"...)
+	var raw []byte
+	raw = append(raw, rawTarBlock("PaxHeaders/scion", 'x', int64(len(recs)))...)
+	raw = append(raw, padTarBlock([]byte(recs))...)
+	raw = append(raw, rawTarBlock("GNUSparseFile.0/scion", '0', int64(len(data)))...)
+	raw = append(raw, padTarBlock(data)...)
+	raw = append(raw, make([]byte, 1024)...)
+
+	// The fixture really is sparse: archive/tar reports the real size and
+	// produces it from a ~2 KiB stream.
+	hdr, err := tar.NewReader(bytes.NewReader(raw)).Next()
+	if err != nil || hdr.Name != "scion" || hdr.Size != realsize {
+		t.Fatalf("sparse fixture not parsed as sparse: hdr=%+v err=%v", hdr, err)
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractScionBinary_SparseAndDeclaredSize(t *testing.T) {
+	const testCap = 1 << 20
+
+	t.Run("sparse scion entry is refused", func(t *testing.T) {
+		// Real size under the cap: refused for being sparse, not for size.
+		_, err := extractTarball(t, sparseScionTarball(t, 64<<10), testCap)
+		if err == nil || !strings.Contains(err.Error(), "sparse") {
+			t.Fatalf("err = %v, want sparse-entry refusal", err)
+		}
+	})
+
+	t.Run("sparse scion entry beyond the cap writes nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "release.tar.gz")
+		if err := os.WriteFile(p, sparseScionTarball(t, 8*testCap), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := extractScionBinary(p, dir, &bytes.Buffer{}, testCap); err == nil {
+			t.Fatal("sparse entry beyond the cap accepted")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "extracted", "scion")); !os.IsNotExist(err) {
+			t.Fatalf("scion left behind for a refused sparse entry: %v", err)
+		}
+	})
+
+	t.Run("declared size over the cap is refused before writing", func(t *testing.T) {
+		// A header claiming more than the cap; the stream itself is small
+		// (the body is truncated), so only the header check can catch it
+		// before any write.
+		var raw []byte
+		raw = append(raw, rawTarBlock("scion", '0', testCap+1)...)
+		raw = append(raw, make([]byte, 512)...)
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		_, _ = gw.Write(raw)
+		_ = gw.Close()
+
+		dir := t.TempDir()
+		p := filepath.Join(dir, "release.tar.gz")
+		if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := extractScionBinary(p, dir, &bytes.Buffer{}, testCap)
+		if !errors.Is(err, errExtractTooLarge) {
+			t.Fatalf("err = %v, want size-limit error", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "extracted", "scion")); !os.IsNotExist(err) {
+			t.Fatalf("scion was written despite the declared size: %v", err)
+		}
+	})
+
+	t.Run("declared size exactly at the cap is accepted", func(t *testing.T) {
+		// The stream cap also counts headers, so give it room; the entry
+		// itself is exactly maxBytes.
+		body := make([]byte, 4096)
+		if _, err := extractTarball(t, orderedTarball(t, tarEntry{name: "scion", body: body}), int64(len(body))+4096); err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+	})
+}
+
+func TestWriteExtracted_OutputBound(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "scion")
+	if err := writeExtracted(dst, bytes.NewReader(make([]byte, 101)), 100); !errors.Is(err, errExtractTooLarge) {
+		t.Fatalf("101 bytes with a 100-byte bound: err = %v", err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("oversize output left behind: %v", err)
+	}
+	if err := writeExtracted(dst, bytes.NewReader(make([]byte, 100)), 100); err != nil {
+		t.Fatalf("exactly at the bound: %v", err)
+	}
+	if fi, _ := os.Stat(dst); fi.Size() != 100 || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("size=%d mode=%v", fi.Size(), fi.Mode().Perm())
 	}
 }
