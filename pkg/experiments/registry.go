@@ -238,6 +238,21 @@ const SSEHiddenTabClose = "web.sse_hidden_tab_close"
 // "server.secret-rotation"; NamePattern allows no hyphen.
 const SecretRotation = "server.secret_rotation"
 
+// ContentHashV2 gates the content hash the hub records for template and
+// harness-config commits (ptone/scion#5658): while it is on, commits record
+// transfer.ComputeContentHashV2 (paths, normalised modes and file hashes);
+// while it is off, transfer.ComputeContentHashV1 (file hashes only). The hub
+// checks it at every commit, so toggling needs no restart. Rows keep the
+// version they were last committed with, and the commit compare-and-swap is
+// a strict equality on the stored value, so mixed rows are safe in both
+// directions. Skill hashes are v1 regardless. Brokers and CLIs do not read
+// it: their cache keys and sync checks do not depend on the hash version.
+// While it is off, a rename-only or chmod-only re-upload is not visible to
+// the expected-hash check (the behaviour before ptone/scion#5658). Enable it
+// once every CLI and agent image is at or after the release that added it;
+// ptone/scion#5995 makes it the default and removes the gate.
+const ContentHashV2 = "hub.content_hash_v2"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -442,6 +457,18 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#1530",
 		Owner:       "secret-rotation",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ContentHashV2,
+		Title:       "Content hash v2 (paths and modes)",
+		Description: "While on, template and harness-config commits record a content hash that covers each file's path and executable bit as well as its content, so a rename-only or chmod-only commit changes the hash and a client that diffed against the earlier version gets 409 instead of overwriting it. While off (the default), commits record the earlier hash, which covers file contents only: a rename-only or chmod-only re-upload is not visible to the hub's expected-hash check, as before. Turn it on only when every CLI and agent image that talks to this hub is at or after the release that added it; an older CLI compares its own earlier hash with the hub's and, without a terminal, fails scion start, resume and create with -t for a template it also has locally. Skill hashes do not change either way.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5658",
+		Owner:       "templates",
+		// ptone/scion#5995 makes it the default and removes the gate.
+		ReviewBy: "2027-01-21",
 	},
 }
 

@@ -781,7 +781,7 @@ func (r *GitHubSkillResolver) fetchOne(ctx context.Context, ghRef *GitHubSkillRe
 			ghRef.SkillName, ghRef.Owner, ghRef.Repo)
 	}
 
-	bundleHash := transfer.ComputeContentHash(fileInfos)
+	bundleHash := transfer.ComputeContentHashV1(fileInfos)
 
 	return ResolvedSkill{
 		Name:     ghRef.SkillName,

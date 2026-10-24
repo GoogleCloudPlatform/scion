@@ -73,7 +73,7 @@ func (b *ManifestBuilder) Build() (*Manifest, error) {
 
 	return &Manifest{
 		Version:     "1.0",
-		ContentHash: ComputeContentHash(files),
+		ContentHash: ComputeContentHashV2(files),
 		Files:       files,
 	}, nil
 }
@@ -196,7 +196,7 @@ func CollectFiles(basePath string, excludePatterns []string) ([]FileInfo, error)
 func BuildManifest(files []FileInfo) *Manifest {
 	return &Manifest{
 		Version:     "1.0",
-		ContentHash: ComputeContentHash(files),
+		ContentHash: ComputeContentHashV2(files),
 		Files:       files,
 	}
 }
