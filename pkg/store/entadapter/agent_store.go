@@ -2137,30 +2137,46 @@ func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, pl
 	return nil
 }
 
-// UpdateAgentConfig implements store.AgentStore.UpdateAgentConfig.
+// UpdateAgentConfig implements store.AgentStore.UpdateAgentConfig. With a
+// lifecycle observer installed, the write is observed in its own
+// transaction (or the caller's), like UpdateAgent: a change to a snapshot
+// field (applied_config) gives metadata_changed, never configured (the
+// write carries no config-resolution mark), and a pending_config-only
+// change gives no event (it is not a snapshot field). A compare-and-set
+// that matches no row writes nothing and observes nothing.
 func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return 0, err
 	}
 	newVersion := expectedVersion + 1
-	update := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
-		SetStateVersion(newVersion).
-		SetUpdated(time.Now()).
-		// Always set, never NULL: see buildAgentUpdate.
-		SetHarnessConfig(harnessConfigOf(applied))
-	if cfg := marshalAppliedConfig(applied); cfg != "" {
-		update.SetAppliedConfig(cfg)
+	write := func(ac *ent.AgentClient) (int, error) {
+		update := ac.Update().
+			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
+			SetStateVersion(newVersion).
+			SetUpdated(time.Now()).
+			// Always set, never NULL: see buildAgentUpdate.
+			SetHarnessConfig(harnessConfigOf(applied))
+		if cfg := marshalAppliedConfig(applied); cfg != "" {
+			update.SetAppliedConfig(cfg)
+		} else {
+			update.ClearAppliedConfig()
+		}
+		if err := setPendingConfig(update.Mutation(), pending); err != nil {
+			return 0, err
+		}
+		n, err := update.Save(ctx)
+		return n, mapError(err)
+	}
+	var affected int
+	if obs := s.lifecycle.load(); obs != nil {
+		affected, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteUpdate, store.AgentWriteHints{},
+			func(c *ent.Client) (int, error) { return write(c.Agent) })
 	} else {
-		update.ClearAppliedConfig()
+		affected, err = write(s.client.Agent)
 	}
-	if err := setPendingConfig(update.Mutation(), pending); err != nil {
-		return 0, err
-	}
-	affected, err := update.Save(ctx)
 	if err != nil {
-		return 0, mapError(err)
+		return 0, err
 	}
 	if affected == 0 {
 		row, err := s.client.Agent.Get(ctx, uid)

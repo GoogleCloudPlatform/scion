@@ -44,7 +44,8 @@ const (
 	// is nil.
 	AgentWritePurge AgentWriteOp = "purge"
 
-	// AgentWriteUpdate: UpdateAgent (a whole-row CAS write).
+	// AgentWriteUpdate: UpdateAgent (a whole-row CAS write), or
+	// UpdateAgentConfig (a CAS write of the configuration columns).
 	AgentWriteUpdate AgentWriteOp = "update"
 	// AgentWriteStatus: UpdateAgentStatus, every branch.
 	AgentWriteStatus AgentWriteOp = "status"
