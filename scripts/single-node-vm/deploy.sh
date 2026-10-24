@@ -3050,8 +3050,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   # not /home/scion — the deployer identity running this over `gcloud
   # compute ssh` is never a member of the `scion` group, and /home/scion
   # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
-  # step uses `sudo`; the deployer only needs to traverse /opt and
-  # write /tmp.
+  # step uses `sudo`; the deployer only needs to traverse /opt and write
+  # its own ~/.scion-image-build status directory (see
+  # IMAGE_BUILD_STATUS_DIR), not anything under /tmp.
   #
   # Idempotency: a successful build writes a version marker
   # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
