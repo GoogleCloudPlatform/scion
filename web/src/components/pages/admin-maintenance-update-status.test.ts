@@ -645,6 +645,163 @@ describe('Reconnect after an update restart', () => {
     expect(waitForHubRestart).not.toHaveBeenCalled();
   });
 
+  const failed = (runId: string): Json =>
+    updateStatus({
+      lastUpdate: {
+        runId,
+        from: 'nightly-20261022',
+        to: 'nightly-20261023',
+        status: 'failed',
+        at: '2026-10-24T00:01:00Z',
+      },
+    });
+
+  /** Mounts with an update run already in progress (started elsewhere). */
+  async function mountInProgress(): Promise<{
+    setOps(o: Json[] | 'down'): void;
+    setStatus(s: Json | number): void;
+  }> {
+    let ops: Json[] | 'down' = withRun('running');
+    let status: Json | number = updateStatus();
+    el = await mount({ operations: () => ops, status: () => status });
+    return { setOps: (o) => (ops = o), setStatus: (s) => (status = s) };
+  }
+
+  it('follows a run already running at page load through restarting', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    const hub = await mountInProgress();
+    hub.setStatus(updateStatus({ pendingUpdate: PENDING }));
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(waitArgs()?.expectVersion).toBe('nightly-20261023');
+  });
+
+  it('follows a run already running at page load through failed polls to its result', async () => {
+    let hub: Awaited<ReturnType<typeof mountInProgress>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      hub!.setOps(withRun('completed'));
+      hub!.setStatus(verified('run-1'));
+      return Promise.resolve({
+        ok: true,
+        observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+      });
+    });
+    hub = await mountInProgress();
+    hub.setOps('down');
+    await el!.loadData(true);
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+      'nightly-20261023'
+    );
+    expect(showToast).toHaveBeenCalledWith(
+      'Hub updated to nightly-20261023 (verified).',
+      'success'
+    );
+  });
+
+  it('keeps polling a restarting run it does not wait for', async () => {
+    el = await mount({ operations: () => withRun('restarting') });
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+    expect((el as unknown as { pollTimer: unknown }).pollTimer).not.toBeNull();
+  });
+
+  it('reports the recorded failure when the hub answers on another version', async () => {
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      // Boot reconciliation found the old version running and failed the run.
+      hub!.setOps(withRun('failed'));
+      hub!.setStatus(failed('run-1'));
+      return Promise.resolve({
+        ok: false,
+        observed: { version: 'nightly-20261022', uptime: '5s', uptimeSeconds: 5 },
+      });
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
+    expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();
+    expect(
+      versionSection(el!).querySelector('.last-update .status-badge')?.textContent?.trim()
+    ).toBe('failed');
+  });
+
+  it('goes back to polling when the wait ends with the run still running', async () => {
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      // Two polls failed as a blip; the download is still going.
+      hub!.setOps(withRun('running'));
+      return Promise.resolve({
+        ok: false,
+        observed: { version: 'nightly-20261022', uptime: '2h0m0s', uptimeSeconds: 7200 },
+      });
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps('down');
+    await el!.loadData(true);
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();
+    expect(versionSection(el!).querySelector('.update-reconnecting')).toBeNull();
+    expect((el as unknown as { pollTimer: unknown }).pollTimer).not.toBeNull();
+  });
+
+  it('keeps the update wait when Restart Hub is used during it', async () => {
+    let finishUpdateWait: (() => void) | null = null;
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation((opts) => {
+      if (opts?.expectVersion === 'nightly-20261023') {
+        return new Promise((resolve) => {
+          finishUpdateWait = (): void => {
+            hub!.setOps(withRun('completed'));
+            hub!.setStatus(verified('run-1'));
+            resolve({
+              ok: true,
+              observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+            });
+          };
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        observed: { version: 'nightly-20261022', uptime: '2s', uptimeSeconds: 2 },
+      });
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+    const updateSignal = waitArgs()?.signal;
+
+    findButton(root(el!), 'Restart')!.click();
+    await settle(el!);
+    root(el!)
+      .querySelector<HTMLElement>('sl-dialog[label="Restart Hub"] sl-button[variant="warning"]')!
+      .click();
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(2);
+    expect(updateSignal?.aborted).toBe(false);
+    expect(showToast).toHaveBeenCalledWith('Server restarted successfully.', 'success');
+
+    finishUpdateWait!();
+    await settle(el!);
+    expect(versionSection(el!).querySelector('.update-reconnecting')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      'Hub updated to nightly-20261023 (verified).',
+      'success'
+    );
+  });
+
   it('aborts the wait when the page is left', async () => {
     vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
     const hub = await startUpdate('nightly-20261023');

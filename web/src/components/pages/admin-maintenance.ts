@@ -516,8 +516,17 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private trackedUpdate: TrackedUpdate | null = null;
 
-  /** Stops a hub restart wait when the page is left. */
+  /** Stops the update restart wait when the page is left. */
+  private updateWaitAbort: AbortController | null = null;
+
+  /** Stops the Restart Hub wait when the page is left. */
   private restartWaitAbort: AbortController | null = null;
+
+  /**
+   * Id of the restarting run whose pendingUpdate was already checked, so a
+   * run that is not followed is peeked once, not on every poll.
+   */
+  private peekedRestartingRunId: string | null = null;
 
   /** Consecutive failed list polls while the tracked update is in progress. */
   private failedPollsWhileUpdating = 0;
@@ -1139,15 +1148,10 @@ export class ScionPageAdminMaintenance extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = null;
     this.restartWaitAbort?.abort();
     this.restartWaitAbort = null;
-  }
-
-  /** A fresh abort signal for a hub restart wait, aborted on disconnect. */
-  private newRestartWaitSignal(): AbortSignal {
-    this.restartWaitAbort?.abort();
-    this.restartWaitAbort = new AbortController();
-    return this.restartWaitAbort.signal;
   }
 
   private async fetchMaintenanceState(): Promise<void> {
@@ -1213,7 +1217,6 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
       this.updateStatus = data;
       this.updateStatusError = null;
-      this.adoptPendingUpdate();
     } catch (err) {
       this.updateStatus = null;
       this.updateStatusError = err instanceof Error ? err.message : 'Failed to load update status';
@@ -1315,16 +1318,16 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   /**
-   * Follows a restarting update-binary run the page did not start, only
-   * when the hub's pendingUpdate names it. A restarting run without one
+   * Follows a run that is already restarting when the page first sees it,
+   * only when a fresh pendingUpdate names it. A restarting run without one
    * (for example one boot reconciliation did not settle) is shown as in
-   * progress but not waited for.
+   * progress and polled, but not waited for. Checked once per run.
    */
-  private adoptPendingUpdate(): void {
-    if (this.trackedUpdate) return;
-    const pending = this.updateStatus?.pendingUpdate;
-    const run = this.updateBinaryRun();
-    if (!pending?.runId || run?.status !== 'restarting' || run.id !== pending.runId) return;
+  private async adoptRestartingRun(run: MaintenanceRun): Promise<void> {
+    if (this.peekedRestartingRunId === run.id) return;
+    this.peekedRestartingRunId = run.id;
+    const pending = await this.peekPendingUpdate();
+    if (this.trackedUpdate || !pending?.runId || pending.runId !== run.id) return;
     this.trackedUpdate = {
       runId: run.id,
       target: pending.to,
@@ -1339,16 +1342,25 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   /**
-   * Called after each successful list load: follows the tracked run's
-   * status. restarting switches to the hub restart wait; a finished run
-   * (the restart came and went between polls, or the run failed before
-   * it) reports its result.
+   * Called after each successful list load: follows the update-binary run.
+   * A run seen running is followed whoever started it (another tab, a
+   * reload during the download); restarting switches to the hub restart
+   * wait; a finished run (the restart came and went between polls, or the
+   * run failed before it) reports its result.
    */
   private trackUpdateRun(): void {
-    const tracked = this.trackedUpdate;
     const run = this.updateBinaryRun();
+    if (!this.trackedUpdate && run?.status === 'running') {
+      this.trackedUpdate = {
+        runId: run.id,
+        target: '',
+        expectVersion: null,
+        lastStatus: 'running',
+      };
+    }
+    const tracked = this.trackedUpdate;
     if (!tracked) {
-      this.adoptPendingUpdate();
+      if (run?.status === 'restarting') void this.adoptRestartingRun(run);
       return;
     }
     if (!run || (tracked.runId && run.id !== tracked.runId)) return;
@@ -1390,7 +1402,9 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
-    const signal = this.newRestartWaitSignal();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = new AbortController();
+    const signal = this.updateWaitAbort.signal;
     try {
       if (!tracked.expectVersion) {
         // latest:<channel>: the hub writes the concrete tag to pendingUpdate
@@ -1404,18 +1418,42 @@ export class ScionPageAdminMaintenance extends LitElement {
       const result = await waitForHubRestart({ expectVersion, signal });
       if (!result.ok && result.aborted) return;
       this.trackedUpdate = null;
-      if (!result.ok) {
-        this.updateReconnectError =
-          `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
-          'Check journalctl -u scion-hub';
+      if (!result.ok && !result.observed) {
+        this.updateReconnectError = this.notBackMessage(expectVersion);
         return;
       }
+      // The hub answers (on the target, or on another version after the
+      // wait ran out): show what it recorded.
       await this.fetchUpdateStatus();
       await this.loadData(true);
-      this.reportUpdateResult(tracked, 'restarted');
+      if (result.ok) {
+        this.reportUpdateResult(tracked, 'restarted');
+        return;
+      }
+      const run = this.updateBinaryRun();
+      const runIsTracked = !!run && run.id === tracked.runId;
+      if (runIsTracked && run.status === 'running') {
+        // A blip, not a restart: the run is still going; keep polling it.
+        this.trackedUpdate = { ...tracked, lastStatus: 'running' };
+        this.startPolling();
+        return;
+      }
+      const recorded = this.updateStatus?.lastUpdate?.runId === tracked.runId;
+      if (recorded || (runIsTracked && run.status === 'failed')) {
+        this.reportUpdateResult(tracked, run?.status ?? '');
+        return;
+      }
+      this.updateReconnectError = this.notBackMessage(expectVersion);
     } finally {
-      if (!signal.aborted) this.updateReconnecting = false;
+      this.updateReconnecting = false;
     }
+  }
+
+  private notBackMessage(expectVersion: string | undefined): string {
+    return (
+      `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
+      'Check journalctl -u scion-hub'
+    );
   }
 
   /**
@@ -1435,7 +1473,8 @@ export class ScionPageAdminMaintenance extends LitElement {
         );
       }
     } else if (runStatus === 'failed') {
-      showToast(`Update to ${tracked.target} failed. See the run log.`, 'warning');
+      const target = tracked.target || 'the new version';
+      showToast(`Update to ${target} failed. See the run log.`, 'warning');
     } else {
       showToast('Hub restarted; the update result is not recorded yet.', 'warning');
     }
@@ -1495,7 +1534,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       // Start polling if any migration or operation run is active.
       const hasRunning =
         this.migrations.some((m) => m.status === 'running') ||
-        this.operations.some((op) => op.lastRun?.status === 'running');
+        this.operations.some((op) => isRunInProgress(op.lastRun?.status));
       if (hasRunning) {
         this.startPolling();
       } else {
@@ -2353,6 +2392,13 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
   }
 
+  /** A fresh signal for the Restart Hub wait, aborted on disconnect. */
+  private newRestartHubSignal(): AbortSignal {
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = new AbortController();
+    return this.restartWaitAbort.signal;
+  }
+
   private async handleRestartHub(): Promise<void> {
     this.restartLoading = true;
     this.restartDialogOpen = false;
@@ -2371,9 +2417,12 @@ export class ScionPageAdminMaintenance extends LitElement {
     // process actually restarted.
     const result = await waitForHubRestart({
       timeoutMs: RESTART_HUB_TIMEOUT_MS,
-      signal: this.newRestartWaitSignal(),
+      signal: this.newRestartHubSignal(),
     });
-    if (!result.ok && result.aborted) return;
+    if (!result.ok && result.aborted) {
+      this.restartLoading = false;
+      return;
+    }
     if (result.ok) {
       showToast('Server restarted successfully.', 'success');
     } else if (result.observed) {
