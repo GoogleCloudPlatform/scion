@@ -228,7 +228,7 @@ Uploads are accepted or refused **per file**, and the response reports both outc
 {
   "attachments": [{ "id": "…", "name": "compose.yaml", "mime": "text/plain", "size": 34, "url": "/api/v1/chat/attachments/…" }],
   "failures": [
-    { "name": "setup.sh", "error": "dangerous file extension: .sh" },
+    { "name": "setup.sh", "error": "files with a .sh extension are not accepted" },
     { "name": "notes.html", "error": "files with a .html extension are not accepted" }
   ]
 }
