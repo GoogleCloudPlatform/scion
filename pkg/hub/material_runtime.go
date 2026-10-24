@@ -252,7 +252,20 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 // Progeny only; every user item carries Grant = GrantProgeny. No
 // Decide(project.secret_read) of any shape is made here, and there is no
 // owner shortcut.
-func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFacts, key string) ItemResult {
+//
+// After the metadata and AllowProgeny checks, the item is authorized by
+// the agent's delegation chain (userSecretChainVerdict, for the request's
+// agent identity ident):
+//   - a chain with recorded provenance is authorized by
+//     Decide(secret.use, ActionUse) on the item with ident, whose step 10
+//     applies the user-scope secret parent ceiling;
+//   - a chain without recorded provenance (no active edge, more than one,
+//     the migration sentinel, an unrecorded or unreadable hop, an edge whose
+//     principal does not type-check) is authorized by the progeny
+//     relationship check alone (CheckProgenyAccess).
+//
+// Source liveness then applies to both.
+func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdentity, facts *TargetFacts, key string) ItemResult {
 	cand := Candidate{
 		Kind:    MaterialKindSecret,
 		Key:     key,
@@ -282,10 +295,10 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 	// source-inactive outcomes.
 	cand.SharingSource = &SourceRef{ID: meta.CreatedBy}
 
-	// Checks 8b (AllowProgeny) and 8c (CheckProgenyAccess) run before source
-	// liveness is resolved: an unshared row or a row outside the agent's
-	// lineage denies without the extra store lookups that resolving the
-	// source would cost.
+	// Checks 8b (AllowProgeny) and 8c (the chain and the progeny grant) run
+	// before source liveness is resolved: an unshared row or a row outside
+	// the agent's lineage denies without the extra store lookups that
+	// resolving the source would cost.
 	if !meta.AllowProgeny {
 		return ItemResult{Candidate: cand, Reason: ReasonSharingDisabled}
 	}
@@ -293,14 +306,36 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, facts *TargetFact
 	if s.authzService == nil {
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	}
-	grant := s.authzService.relationshipResolver.CheckProgenyAccess(
-		ctx,
-		&storedAgentIdentity{agent: facts.Agent},
-		Resource{Type: "secret", ID: meta.ID, OwnerID: meta.ScopeID, ParentType: "user", ParentID: meta.ScopeID},
-		ActionRead,
-	)
-	if !grant.Allowed {
-		return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
+	resource := userSecretResource(meta.ID, meta.ScopeID)
+	chain := s.authzService.userSecretChainVerdict(ctx, ident, nil)
+	switch {
+	case chain.decision.DenyCause == DenyCauseCeilingError:
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+	case !chain.decision.Allowed && chain.unrecorded:
+		grant := s.authzService.relationshipResolver.CheckProgenyAccess(
+			ctx,
+			&storedAgentIdentity{agent: facts.Agent},
+			resource,
+			ActionRead,
+		)
+		if !grant.Allowed {
+			return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
+		}
+	default:
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(ident),
+			Credential: credentialContextForIdentity(ident),
+			Resource:   resource,
+			Action:     ActionUse,
+			Permission: secretUsePermission,
+		})
+		if !decision.Allowed {
+			switch decision.DenyCause {
+			case DenyCauseCeilingError, DenyCauseResolutionError:
+				return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+			}
+			return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
+		}
 	}
 
 	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)

@@ -151,7 +151,7 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 		}
 		item, detail = s.authorizeRuntimeProjectItem(ctx, key, facts, decision)
 	case store.ScopeUser:
-		item = s.authorizeRuntimeUserItem(ctx, facts, key)
+		item = s.authorizeRuntimeUserItem(ctx, ident, facts, key)
 	default:
 		return ItemResult{}, nil, "", ""
 	}

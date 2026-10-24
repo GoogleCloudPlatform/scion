@@ -325,17 +325,6 @@ func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
 	assertBackendErrorAudited(t, auditor)
 }
 
-// TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
-// (partial coverage): user-scoped reads have no delegation-ceiling step at
-// all yet. Check 8 still calls the relationship resolver directly rather
-// than routing through a permission decision, so closing this gap needs two
-// further changes neither of which has landed: a shared, exact-permission
-// progeny decision path that accepts a non-read-only action, and a
-// user-material delegation ceiling to evaluate once that path exists.
-func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
-	t.Skip("pending the shared exact-permission progeny decision path and the user-material delegation ceiling")
-}
-
 // TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies pins that
 // progenyEligibleSecretIDs returns an empty, non-nil set with no error for a
 // nil rec, rather than panicking when building the storedAgentIdentity.
