@@ -309,8 +309,8 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/runtime-brokers/connect", Kind: ExemptionInternalOnly, Reason: "Runtime broker WebSocket connect, broker-HMAC auth", Owner: "route_metadata.go"},
 
 	// Agent token endpoints — agent JWT authentication
-	// /api/v1/agent/gcp-token: cataloged as gcp.identity.mint (agent-JWT entry point).
-	{Pattern: "/api/v1/agent/gcp-identity-token", Kind: ExemptionInternalOnly, Reason: "Agent GCP identity token, agent-JWT auth", Owner: "route_metadata.go", Response: ResponseCredential},
+	// /api/v1/agent/gcp-token and /api/v1/agent/gcp-identity-token: cataloged
+	// as gcp.identity.mint (agent-JWT entry points).
 	{Pattern: "POST /api/v1/agent/identity-token", Kind: ExemptionInternalOnly, Reason: "Agent OIDC identity token, agent-JWT auth", Owner: "route_metadata.go", Response: ResponseCredential},
 	{Pattern: "POST /api/v1/agent/secrets", Kind: ExemptionInternalOnly, Reason: "Agent secret fetch, agent-JWT auth", Owner: "route_metadata.go", Response: ResponseCredential},
 	{Pattern: "/api/v1/conduit", Kind: ExemptionInternalOnly, Reason: "Conduit session, agent-JWT auth (own agent row only) or runtime broker HMAC auth (shared connect verifier; carries broker RPCs), experiment-gated", Owner: "route_metadata.go"},
