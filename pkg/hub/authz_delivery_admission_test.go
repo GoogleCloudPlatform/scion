@@ -506,7 +506,6 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			name: "dev_local_wrong_delegator",
 			setup: func(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
 				f.authz.setDevLocalAuthorityEnabled(true)
-				t.Cleanup(func() { f.authz.setDevLocalAuthorityEnabled(false) })
 				return single("dev-wrong", "", func(e *store.DelegationEdge) {
 					e.SourceCredentialKind = store.SourceCredentialDevLocal
 				})(t, f)
