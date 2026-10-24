@@ -65,7 +65,7 @@ var ErrAgentProjectUnresolved = errors.New("the agent's project directory does n
 // DeleteAgentFilesForHubProject (or DeleteHubAgentFiles), so delete resolves
 // the agent's state directory with the same Hub project ID lookup uses.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
-	return deleteAgentFiles(agentName, "", projectPath, "", removeBranch)
+	return deleteAgentFiles(agentName, "", projectPath, "", removeBranch, false)
 }
 
 // DeleteAgentFilesForHubProject is DeleteAgentFiles for an agent started
@@ -76,7 +76,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 // ones DeleteAgentFiles already removes. An empty hubProjectID is exactly
 // DeleteAgentFiles.
 func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
-	return deleteAgentFiles(agentName, "", projectPath, hubProjectID, removeBranch)
+	return deleteAgentFiles(agentName, "", projectPath, hubProjectID, removeBranch, false)
 }
 
 // Seams for tests that force a failure of the last sharer's worktree
@@ -106,10 +106,76 @@ var (
 // either removal leaves the registry entry in place and a retry finds the
 // same state.
 func DeleteHubAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
-	return deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID, removeBranch)
+	return deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID, removeBranch, false)
 }
 
-func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, removeBranch bool) (bool, error) {
+// DeleteStartFailureFiles is DeleteHubAgentFiles for the cleanup after a
+// failed start: it removes only what that start's provisioning added.
+//   - No branch is deleted, by the worktree removal or by name: the start
+//     may have checked out a branch that already existed, with commits of
+//     its own.
+//   - For the last sharer, the worktree is removed only when the registry
+//     records it at the key's own path for the project's layout
+//     (startFailureOwnWorktreePaths), the only place provisioning creates
+//     a worktree for that key in that layout. A worktree the start joined
+//     (named by the registry or found in git's worktree list) is left in
+//     place, and the key is only unregistered from it.
+//
+// Two consequences are accepted:
+//   - a branch the failed start created is left behind (it holds no
+//     commits of its own);
+//   - a worktree at the agent's own path that an earlier agent with the
+//     same identity left behind is removed like one this start created,
+//     its branch kept. The identity is the start's key or, when only the
+//     agent name is registered, the name: the own path is then
+//     <sharedBase>/worktrees/<name> or agents/<name>/workspace. The same
+//     holds for an unregistered worktree at either of those paths, which
+//     the removals after the registry lookup reach. The run-owner checks
+//     before this cleanup skip files of another run.
+func DeleteStartFailureFiles(agentName, sharerKey, projectPath, hubProjectID string) error {
+	_, err := deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID, false, true)
+	return err
+}
+
+// startFailureOwnWorktreePaths returns the paths where provisioning creates
+// the worktree of the agent registered under key:
+//   - <sharedBase>/worktrees/<key> (provision.WorktreePath), only when the
+//     project has a worktree-per-agent shared base (ProvisionShared);
+//   - <projectDir>/agents/<name>/workspace, only for an agent registered
+//     by its name (ProvisionAgent: a linked checkout or local mode).
+//
+// A linked checkout has no shared base, so a worktree elsewhere in it,
+// under its own worktrees directory for example, is never one of these.
+// The result is never nil; it is empty when no path applies.
+func startFailureOwnWorktreePaths(layout agentProjectLayout, projectDir, key, agentName string) []string {
+	own := []string{}
+	if layout.sharedBaseIsRepo {
+		own = append(own, provision.WorktreePath(layout.sharedBase, key))
+	}
+	if key == agentName && projectDir != "" {
+		own = append(own, filepath.Join(projectDir, "agents", agentName, "workspace"))
+	}
+	return own
+}
+
+// isOwnWorktreePath reports whether wtPath is one of own, compared as
+// written (cleaned), and resolves: a path that does not resolve (missing,
+// or a resolution error) is never reported as own, so the caller leaves
+// it in place.
+func isOwnWorktreePath(wtPath string, own []string) bool {
+	for _, o := range own {
+		if filepath.Clean(wtPath) != filepath.Clean(o) {
+			continue
+		}
+		_, err := filepath.EvalSymlinks(wtPath)
+		return err == nil
+	}
+	return false
+}
+
+// deleteAgentFiles implements DeleteHubAgentFiles and, with startFailure,
+// DeleteStartFailureFiles (which passes removeBranch false).
+func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, removeBranch, startFailure bool) (bool, error) {
 	if sharerKey == "" {
 		sharerKey = agentName
 	}
@@ -279,7 +345,14 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 			}
 		}
 		if found {
-			handled, err := teardownSharer(repoRoot, resolvedProjectDir, branch, registeredKey, removeBranch, guard)
+			// The start-failure cleanup removes only a worktree at the
+			// key's own path (DeleteStartFailureFiles); nil means no
+			// such restriction.
+			var ownOnly []string
+			if startFailure {
+				ownOnly = startFailureOwnWorktreePaths(layout, resolvedProjectDir, registeredKey, agentName)
+			}
+			handled, err := teardownSharer(repoRoot, resolvedProjectDir, branch, registeredKey, removeBranch, ownOnly, guard)
 			if handled.branchDeleted {
 				branchDeleted = true
 			}
@@ -536,7 +609,12 @@ type sharerTeardown struct {
 // when the removal was refused (util.ErrPathNotContained); a successful
 // removal that kept the branch (the worktree was off it, or already gone)
 // keeps it.
-func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool, guard *agentFilesGuard) (sharerTeardown, error) {
+//
+// A non-nil ownOnly (the start-failure cleanup) restricts the last
+// sharer's removal to a worktree recorded at one of those paths
+// (isOwnWorktreePath); any other worktree is left in place and key is
+// only unregistered. A nil ownOnly changes nothing.
+func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool, ownOnly []string, guard *agentFilesGuard) (sharerTeardown, error) {
 	var out sharerTeardown
 	sharers, wtPath, err := provision.ListSharers(repoRoot, projectDir, branch)
 	if err != nil {
@@ -589,6 +667,20 @@ func teardownSharer(repoRoot, projectDir, branch, key string, removeBranch bool,
 		// to remove — do not guess one.
 		slog.Warn("delete: no valid worktree path for last sharer; skipping worktree removal",
 			"agent_id", key, "branch", branch)
+		if others == 0 {
+			if _, err := unregister(); err != nil {
+				return out, err
+			}
+		}
+		return out, nil
+	}
+
+	// The start-failure cleanup (ownOnly non-nil) removes a worktree only
+	// at the key's own path; any other worktree, one the start joined, is
+	// left in place and the key only unregistered (DeleteStartFailureFiles).
+	if ownOnly != nil && !isOwnWorktreePath(wtPath, ownOnly) {
+		slog.Info("delete: start-failure cleanup keeps a worktree it did not create; unregistering only",
+			"agent_id", key, "branch", branch, "path", wtPath)
 		if others == 0 {
 			if _, err := unregister(); err != nil {
 				return out, err

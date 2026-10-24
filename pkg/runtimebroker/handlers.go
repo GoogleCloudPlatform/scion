@@ -785,7 +785,7 @@ func isSingleCleanPathElement(name string) bool {
 }
 
 // startSharerKey is the sharer key a failed start's file cleanup passes to
-// agent.DeleteHubAgentFiles: the hub agent ID the start provisioned the
+// agent.DeleteStartFailureFiles: the hub agent ID the start provisioned the
 // agent's worktree under, or "" (the agent name) when the ID is not a
 // valid path element, which no worktree was provisioned under.
 func startSharerKey(agentID string) string {
@@ -1918,7 +1918,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
-				} else if _, cleanupErr := agent.DeleteHubAgentFiles(opts.Name, startSharerKey(req.ID), opts.ProjectPath, opts.HubProjectID, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+				} else if cleanupErr := agent.DeleteStartFailureFiles(opts.Name, startSharerKey(req.ID), opts.ProjectPath, opts.HubProjectID); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 				} else {
