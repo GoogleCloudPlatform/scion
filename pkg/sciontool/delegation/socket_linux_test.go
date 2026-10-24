@@ -98,7 +98,7 @@ func TestSocket_RefusesPeerOfAnotherUser(t *testing.T) {
 	assert.Len(t, allowedPeers(-1), 1)
 }
 
-func TestSocket_ReplacesStaleSocketAndRemovesItOnClose(t *testing.T) {
+func TestSocket_ReplacesStaleAndRemovesOnClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s", SocketName)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	stale, err := net.Listen("unix", path)
