@@ -358,6 +358,10 @@ Persistence settings for the Hub.
 | :--- | :--- | :--- | :--- |
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
+| `max_open_conns` | integer | sqlite: `1`; postgres: `5` | Maximum number of open connections. For `sqlite` this is always `1`, whatever is configured, to serialize writes. For `postgres` a value of `1` or less takes the default. Settings file only: no environment variable sets it. |
+| `max_idle_conns` | integer | sqlite: `1`; postgres: `2` | Maximum number of idle connections in the pool. For `postgres` a value of `1` or less takes the default; for `sqlite`, a value of `0` or less. Settings file only: no environment variable sets it. |
+| `conn_max_lifetime` | duration | sqlite: unlimited; postgres: `"30m"` | Maximum time a connection may be reused (Go duration, for example `"30m"`). Empty takes the default; `"0"` means unlimited. Settings file only: no environment variable sets it. |
+| `conn_max_idle_time` | duration | sqlite: no limit; postgres: `"5m"` | Maximum time a connection may sit idle in the pool before it is closed (Go duration). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the default; `"0"` means no idle limit. Settings file only: no environment variable sets it. |
 | `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start, and the maintenance commands that migrate its database run, when the schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
 
 #### PostgreSQL `search_path` check
