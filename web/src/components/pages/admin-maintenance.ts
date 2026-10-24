@@ -2478,7 +2478,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     // connection before a response arrives, so we expect a network error or
     // 502 from the reverse proxy. Either outcome means the restart was
     // initiated — not that it failed. Only the hub's own error envelope
-    // (for example 409 operation_in_progress while an update runs) means
+    // (for example 409 conflict while an update runs) means
     // it refused, and then there is nothing to wait for.
     try {
       const res = await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });

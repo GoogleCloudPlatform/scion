@@ -1030,7 +1030,7 @@ describe('Restart Hub', () => {
         status: 409,
         body: {
           error: {
-            code: 'operation_in_progress',
+            code: 'conflict',
             message,
             details: { runId: 'run-1', operationKey: 'update-binary', status: 'running' },
           },
