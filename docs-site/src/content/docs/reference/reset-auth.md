@@ -24,9 +24,9 @@ itself, for example after a Hub signing-key rotation. A stopped agent gets a fre
 start. The token carries the same scopes a refresh would.
 
 After writing the token, the Runtime Broker signals the agent's init process to reload it. If that
-signal cannot be delivered, the token is still in place, but the reset fails with
+signal cannot be delivered, the token is still in place, and the reset fails with
 `reload_unconfirmed` (HTTP 502) and the message "credential issued and written; the running agent
-did not confirm the reload". The CLI exits non-zero. If the agent keeps failing to authenticate,
+did not confirm the reload". The CLI exits non-zero. Even when the signal does not arrive, `sciontool init` checks its credential file every 5 seconds, verifies a newly written credential against the Hub, and adopts it once the Hub confirms it; run `sciontool doctor` inside the container to inspect `sciontool init`'s credential state (see [Diagnostics](/scion/local/agent-credentials/#diagnostics)). If the agent keeps failing to authenticate,
 restart it.
 
 ### All running agents
@@ -44,7 +44,7 @@ and `failed_by_code`, the count of failures per code. A failure that carries no 
 | `agent_not_in_standing` | The agent is not in good standing, for example it is held. | Resolve its standing, then reset auth again. |
 | `runtime_unavailable` | The agent's broker does not have its runtime available. | Retry later. |
 | `internal_error` | The new token could not be recorded. | Retry. |
-| `reload_unconfirmed` | The new token was written, but the running agent did not confirm the reload. | If the agent keeps failing to authenticate, restart it. |
+| `reload_unconfirmed` | The new token was written, but the running agent did not confirm the reload within the request window (`sciontool init` still polls the credential file every few seconds and adopts it once the Hub confirms it). | Check `sciontool doctor`, or restart the agent if it keeps failing to authenticate. |
 
 For the `delegation_*` codes the entry also holds `cause`, the deny cause. For these codes,
 `agent_not_in_standing`, `internal_error` and `reload_unconfirmed`, `error` is a fixed plain

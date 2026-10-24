@@ -33,9 +33,12 @@ import (
 // must not grow through the API), the proxy driver principals and driver
 // token audience (phase WS2, which decide who may carry test identity web
 // sessions behind the proxy), the relay-peer secret (design §3.9:
-// never stored in the database or returned by the API), and the hub's GCP
+// never stored in the database or returned by the API), the hub's GCP
 // project, which selects the service-account minting project
-// (ptone/scion#4942). A key matches itself and every key nested under it.
+// (ptone/scion#4942), and the server keyring file path (ptone/scion#1530:
+// the keyring is a deploy-time secret input read once at startup) and its
+// operator-only world-readable override. A key matches itself and every key
+// nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.HubGCPProjectIDKey,
@@ -43,6 +46,40 @@ var neverAPIWritableSettingsKeys = []string{
 	config.ProxyDriverPrincipalsKey,
 	config.ProxyDriverTokenAudienceKey,
 	config.ConduitPeerSecretKey,
+	config.KeyringFileKey,
+	config.KeyringFileAllowWorldReadableKey,
+}
+
+// withoutNeverAPIWritableKeys returns keys without every never-API-writable
+// settings key and any key nested under one, so a server-config GET does
+// not reveal which of them are set (for example in its env_overrides list).
+func withoutNeverAPIWritableKeys(keys []string) []string {
+	// Nil in, nil out (keys[:0:0] semantics).
+	if len(keys) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		hidden := false
+		for _, nw := range neverAPIWritableSettingsKeys {
+			if k == nw || strings.HasPrefix(k, nw+".") {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// emptyDroppedSettingsKeys are the never-writable string keys whose empty
+// (or null) value in a settings write body means "absent" rather than a
+// refused write (dropEmptySecretSettings).
+var emptyDroppedSettingsKeys = []string{
+	config.ConduitPeerSecretKey,
+	config.KeyringFileKey,
 }
 
 // hideNeverAPIWritableProxyKeys blanks the WS2 proxy driver settings in a
@@ -137,24 +174,37 @@ func matchedSettingsKeys(paths [][]string, keys []string) []string {
 	return out
 }
 
-// dropEmptyPeerSecret returns rawBody without its
-// server.hub.conduit.peer_secret members whose value is "" or null, and
-// without the objects that removal leaves empty: an empty relay-peer secret
-// is treated as absent (ignored, nothing written), while any other value is
-// refused by rejectGateProtectedSettingsKeys. The body is returned unchanged
-// when it holds no such member or does not parse (the typed decode reports
-// that). Numbers keep their spelling. The body has already passed
+// dropEmptySecretSettings returns rawBody without its
+// emptyDroppedSettingsKeys members (server.hub.conduit.peer_secret,
+// server.keyring_file) whose value is "" or null, and without the objects
+// that removal leaves empty: an empty value is treated as absent (ignored,
+// nothing written), while any other value is refused by
+// rejectGateProtectedSettingsKeys. The body is returned unchanged when it
+// holds no such member or does not parse (the typed decode reports that).
+// Numbers keep their spelling. The body has already passed
 // rejectRepeatedJSONMembers.
-func dropEmptyPeerSecret(rawBody []byte) []byte {
+func dropEmptySecretSettings(rawBody []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	dec.UseNumber()
 	var root any
 	if err := dec.Decode(&root); err != nil {
 		return rawBody
 	}
-	var want []string
-	for _, seg := range strings.Split(config.ConduitPeerSecretKey, ".") {
-		want = append(want, foldJSONMemberName(seg))
+	var wants [][]string
+	for _, key := range emptyDroppedSettingsKeys {
+		var want []string
+		for _, seg := range strings.Split(key, ".") {
+			want = append(want, foldJSONMemberName(seg))
+		}
+		wants = append(wants, want)
+	}
+	isWanted := func(path []string) bool {
+		for _, want := range wants {
+			if slices.Equal(path, want) {
+				return true
+			}
+		}
+		return false
 	}
 	var walk func(prefix []string, obj map[string]any) bool
 	walk = func(prefix []string, obj map[string]any) (dropped bool) {
@@ -163,7 +213,7 @@ func dropEmptyPeerSecret(rawBody []byte) []byte {
 			for _, seg := range strings.Split(name, ".") {
 				path = append(path, foldJSONMemberName(seg))
 			}
-			if slices.Equal(path, want) {
+			if isWanted(path) {
 				if s, isString := child.(string); child == nil || (isString && s == "") {
 					delete(obj, name)
 					dropped = true

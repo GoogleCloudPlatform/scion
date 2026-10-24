@@ -55,6 +55,17 @@ type usageIncrement struct {
 	// increment, which dedupes on the log record itself (see
 	// UsageDeriver.fingerprint) instead.
 	dedupeKey string
+
+	// Metric-sourced increments only: the source interval and temporality
+	// (analytics interval_start/interval_end; see usage_analytics.go). For
+	// a delta converted from a cumulative stream, intervalStartNanos is the
+	// cumulative stream's start -- a superset of the delta's true interval.
+	intervalStartNanos, intervalEndNanos uint64
+	temporality                          string
+	// rawTokens are a metric rule's raw per-type deltas before
+	// canonicalization (copilot: inclusive input), for the analytics event,
+	// which derives input only when every subtracted field was reported.
+	rawTokens map[string]int64
 }
 
 // usageRule matches one per-request native event to a usageIncrement. Rules
@@ -621,10 +632,27 @@ type UsageDeriver struct {
 	derived, duplicate, malformed atomic.Int64
 	malformedWarnOnce             sync.Once
 
+	// WP3 population counters (wp3-design.md section 1.1): raw log
+	// records seen and matched by a log rule; metric batches walked, those
+	// with a malformed point, and the increments derived from them; and
+	// recognized observations that carried no call and no tokens.
+	logReceived, logRecognized, logMalformed atomic.Int64
+	metricBatches, metricMalformed, metricIn atomic.Int64
+	ignored                                  atomic.Int64
+	// lastHarnessVersion is the harness version on the most recent
+	// recognized native record that carried one (string).
+	lastHarnessVersion atomic.Value
+
 	// sessionUsage, if set, also receives each recorded increment for the
 	// session metrics aggregator (see SessionUsageSink). Set by the
 	// Pipeline before the deriver is published.
 	sessionUsage func(SessionUsage)
+
+	// analytics, if set, receives one agent.usage event per accepted
+	// increment, appended to the outbox BEFORE the counters are updated
+	// (WP2 design section 2). Set by the Pipeline before the deriver is
+	// published, only when the GCP exporter is active.
+	analytics *UsageAnalytics
 }
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
@@ -633,11 +661,36 @@ type UsageDeriver struct {
 // populated only by a rule that tracks them (usageRuleDiagnostics; today
 // only copilotUsageRule, for its cumulative-to-delta conversion) and stay 0
 // for every other harness.
+//
+// Populations (WP3 design section 1.1): LogRecordsReceived counts every raw
+// log record offered to a log rule, mostly non-usage frames;
+// LogRecordsRecognized those a rule matched. MetricBatchesReceived counts
+// ResourceMetrics batches walked by a metric rule, MetricIncrements the
+// increments derived from them. An observation is a recognized log record
+// or a metric increment, and observations = Ignored + Duplicate + Derived.
+// Malformed counts malformed log records plus malformed metric batches, so
+// its units are mixed; LogRecordsMalformed and MetricBatchesMalformed are
+// the per-unit counters. Each field is loaded separately, so a snapshot is
+// not atomic across fields: invariants hold between updates only. The
+// counters live on the deriver, which Pipeline.Start creates anew, so they
+// are per pipeline run (they restart at 0 after an in-process Stop/Start).
+// For copilot (metric-only) LogRecordsReceived counts log records offered to
+// its log rule, which never matches.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
 	ClampedInput                  int64
 	StaleBackwards                int64
 	BaselinedAfterCap             int64
+
+	LogRecordsReceived, LogRecordsRecognized int64
+	LogRecordsMalformed                      int64
+	MetricBatchesReceived                    int64
+	MetricBatchesMalformed                   int64
+	MetricIncrements                         int64
+	Ignored                                  int64
+	// HarnessVersion is the last harness version seen on a recognized
+	// record, "" if none.
+	HarnessVersion string
 }
 
 // usageRuleDiagnostics is implemented by a rule that tracks additional,
@@ -738,11 +791,12 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 				continue
 			}
 			scopeName := sl.GetScope().GetName()
+			resourceAttrs := rl.GetResource().GetAttributes()
 			for _, record := range sl.LogRecords {
 				if record == nil {
 					continue
 				}
-				if d.observe(ctx, scopeName, record) {
+				if d.observeRecord(ctx, scopeName, resourceAttrs, record) {
 					recorded = true
 				}
 			}
@@ -831,25 +885,37 @@ func (d *UsageDeriver) ProcessResourceMetrics(ctx context.Context, resourceMetri
 // on scope.
 func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchDeriver, rm *metricpb.ResourceMetrics, matched map[string]bool) bool {
 	increments, names, err := rule.DeriveBatch(rm)
+	d.metricBatches.Add(1)
 	for name := range names {
 		matched[name] = true
 	}
 	if err != nil {
 		d.malformed.Add(1)
+		d.metricMalformed.Add(1)
 		d.malformedWarnOnce.Do(func() {
 			slog.Warn("usage deriver observed a malformed native usage metric; the affected data points were dropped")
 		})
 	}
 	recorded := false
 	for _, increment := range increments {
+		d.metricIn.Add(1)
 		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			d.ignored.Add(1)
 			continue
 		}
 		fingerprint := d.metricFingerprint("", increment.dedupeKey)
+		var obs UsageObservation
+		if d.analytics != nil {
+			obs = metricObservation(increment, fingerprint)
+		}
 		if d.seen.SeenBefore(fingerprint) {
 			d.duplicate.Add(1)
+			// The event path still sees the repeat; the outbox's persisted
+			// index reports it as an ambiguous occurrence (design section 4).
+			d.recordAnalytics(obs)
 			continue
 		}
+		d.recordAnalytics(obs)
 		d.record(ctx, increment)
 		d.derived.Add(1)
 		recorded = true
@@ -878,6 +944,13 @@ func (d *UsageDeriver) metricFingerprint(scopeName, dedupeKey string) string {
 // attribute read: a native SDK may carry the event name in LogRecord's own
 // EventName field instead, and this must recognize either.
 func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *logspb.LogRecord) bool {
+	return d.observeRecord(ctx, scopeName, nil, record)
+}
+
+// observeRecord is observe with the record's resource attributes, which
+// the analytics event reads the harness version from.
+func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, resourceAttrs []*commonpb.KeyValue, record *logspb.LogRecord) bool {
+	d.logReceived.Add(1)
 	eventName, err := normalizedLogEventName(record, scopeName)
 	if err != nil || eventName == "" {
 		return false
@@ -887,8 +960,13 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 		if !matched {
 			continue
 		}
+		d.logRecognized.Add(1)
+		if v := harnessVersionFromAttrs(record.GetAttributes(), resourceAttrs); v != "" {
+			d.lastHarnessVersion.Store(v)
+		}
 		if err != nil {
 			d.malformed.Add(1)
+			d.logMalformed.Add(1)
 			// Warn, not Error: this is a data-quality degradation (tokens
 			// dropped, the call is still counted), not a failure of
 			// sciontool itself — matching pipeline.go's own slog.Warn calls
@@ -907,13 +985,23 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 		// A rule that recognizes the event but derives nothing usable from it
 		// (no call, no tokens) has nothing to record or dedupe.
 		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			d.ignored.Add(1)
 			return false
 		}
 		fingerprint := d.fingerprint(scopeName, eventName, record)
+		var obs UsageObservation
+		if d.analytics != nil {
+			obs = logObservation(rule.Harness(), scopeName, eventName, record, resourceAttrs, increment)
+		}
 		if d.seen.SeenBefore(fingerprint) {
 			d.duplicate.Add(1)
+			// See observeMetricBatch: the outbox decides whether a repeat is
+			// a certain duplicate (verified request ID) or ambiguous.
+			d.recordAnalytics(obs)
 			return false
 		}
+		// Outbox first, then counters (design section 2).
+		d.recordAnalytics(obs)
 		d.record(ctx, increment)
 		d.derived.Add(1)
 		return true
@@ -930,18 +1018,41 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 	h.Write([]byte{0})
 	h.Write([]byte(scopeName))
 	h.Write([]byte{0})
+	// time_unix_nano, else observed_time_unix_nano: a source that sets only
+	// the observed time (codex) would otherwise key on 0 and merge distinct
+	// same-millisecond calls with identical attributes. A retransmitted
+	// record keeps both times, so replays still dedupe.
+	recordTime := record.GetTimeUnixNano()
+	if recordTime == 0 {
+		recordTime = record.GetObservedTimeUnixNano()
+	}
 	var timeBuf [8]byte
-	binary.BigEndian.PutUint64(timeBuf[:], record.GetTimeUnixNano())
+	binary.BigEndian.PutUint64(timeBuf[:], recordTime)
 	h.Write(timeBuf[:])
 	h.Write([]byte{0})
 	h.Write([]byte(eventName))
 	h.Write([]byte{0})
-	if requestID := logAttrString(record.Attributes, "request_id"); requestID != "" {
+	// Only a request ID that passes the source's shape check identifies a
+	// request; a placeholder or redacted value would merge distinct calls,
+	// so those fall back to the canonical attributes (which include it).
+	if requestID := trustedRequestID(scopeName, record.Attributes); requestID != "" {
 		h.Write([]byte("request_id\x00" + requestID))
 	} else if key, err := canonicalAttrs(record.Attributes); err == nil {
 		h.Write([]byte(key))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// recordAnalytics appends obs to the analytics outbox when analytics is
+// enabled. A failure is counted by the outbox and never blocks the
+// counters (design section 2: monitoring keeps working).
+func (d *UsageDeriver) recordAnalytics(obs UsageObservation) {
+	if d.analytics == nil {
+		return
+	}
+	if _, err := d.analytics.Record(obs); err != nil {
+		log.Debug("Usage analytics event not recorded: %v", err)
+	}
 }
 
 // record emits the canonical increments. Point labels are exactly the
@@ -993,6 +1104,17 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 		Derived:   d.derived.Load(),
 		Duplicate: d.duplicate.Load(),
 		Malformed: d.malformed.Load(),
+
+		LogRecordsReceived:     d.logReceived.Load(),
+		LogRecordsRecognized:   d.logRecognized.Load(),
+		LogRecordsMalformed:    d.logMalformed.Load(),
+		MetricBatchesReceived:  d.metricBatches.Load(),
+		MetricBatchesMalformed: d.metricMalformed.Load(),
+		MetricIncrements:       d.metricIn.Load(),
+		Ignored:                d.ignored.Load(),
+	}
+	if v, ok := d.lastHarnessVersion.Load().(string); ok {
+		diag.HarnessVersion = v
 	}
 	for _, rule := range d.rules {
 		if rd, ok := rule.(usageRuleDiagnostics); ok {

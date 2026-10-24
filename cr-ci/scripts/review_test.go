@@ -95,7 +95,7 @@ func TestGcloudIgnoreAllowlist(t *testing.T) {
 	gitRun := func(args ...string) string {
 		cmd := exec.Command(git, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		cmd.Env = minimalGitEnv(dir)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)

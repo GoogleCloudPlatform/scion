@@ -92,7 +92,8 @@ type HubServerConfig struct {
 	// Defaults to sha256(hostname)[:12] if not set.
 	HubID string `json:"hubId" yaml:"hubId" koanf:"hubId"`
 
-	// HubName is a human-readable display name for this hub in HA deployments.
+	// HubName names this hub in HA deployments: a lowercase DNS label
+	// (HubNamePattern) used in log labels, telemetry and secret labels.
 	// All nodes in a cluster should share the same hub_name.
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
@@ -177,6 +178,11 @@ type HubServerConfig struct {
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
+	// CSPReportRawSamples adds each browser policy report's sample to its
+	// csp_violation log record. Off by default (a sample can hold page
+	// content); for diagnosis; read at startup.
+	CSPReportRawSamples bool `json:"cspReportRawSamples" yaml:"cspReportRawSamples" koanf:"cspReportRawSamples"`
 
 	// MembershipSweepReportOnly puts the membership-standing sweep in
 	// report-only mode: it logs and audits the agents it would hold and
@@ -1136,6 +1142,24 @@ type GlobalConfig struct {
 
 	// Logging settings
 	LogLevel string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
+
+	// KeyringFile is the path of the server keyring file
+	// (server.keyring_file; --keyring-file; SCION_SERVER_KEYRING_FILE): a
+	// version-1 JSON keyring (pkg/keyring) read once at startup by the server
+	// process, never by the relay role. Only the path lives in settings; the
+	// file holds key material and is mounted through the operator's secret
+	// delivery. Requires the server.secret_rotation experiment. Never
+	// returned or accepted by the server-config API (ptone/scion#1530).
+	KeyringFile string `json:"keyringFile,omitempty" yaml:"keyringFile,omitempty" koanf:"keyringFile"`
+
+	// KeyringFileAllowWorldReadable admits a keyring file whose world-read
+	// bit is set, with a WARN (server.keyring_file_allow_world_readable;
+	// --keyring-file-allow-world-readable;
+	// SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE). Default false: a
+	// world-readable keyring file refuses startup. World write or execute is
+	// always refused. Operator-controlled only: never returned or accepted by
+	// the settings API.
+	KeyringFileAllowWorldReadable bool `json:"keyringFileAllowWorldReadable,omitempty" yaml:"keyringFileAllowWorldReadable,omitempty" koanf:"keyringFileAllowWorldReadable"`
 
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
@@ -2448,7 +2472,7 @@ func LoadServerMode() string {
 	}
 
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return ""
 	}
 
@@ -2543,7 +2567,7 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 		return nil, false
 	}
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return nil, false
 	}
 	return raw, true
@@ -2703,3 +2727,12 @@ func hasServerYAML(dir string) bool {
 	}
 	return false
 }
+
+// KeyringFileKey is the settings key of the server keyring file path
+// (GlobalConfig.KeyringFile). No settings API reads or writes it.
+const KeyringFileKey = "server.keyring_file"
+
+// KeyringFileAllowWorldReadableKey is the settings key of the world-readable
+// keyring file override (GlobalConfig.KeyringFileAllowWorldReadable). No
+// settings API reads or writes it.
+const KeyringFileAllowWorldReadableKey = "server.keyring_file_allow_world_readable"

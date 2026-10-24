@@ -217,6 +217,7 @@ func TestConstraintAuditHistory_InvalidTokensFailBeforeHistoryQuery(t *testing.T
 			resp := doRequest(t, srv, http.MethodGet,
 				"/api/v1/admin/access-constraints/"+constraint.ID+"/audit?pageToken="+tc.token, nil)
 			assert.Equal(t, http.StatusBadRequest, resp.Code, "body: %s", resp.Body.String())
+			assertInvalidCursorBody(t, resp)
 			assert.Zero(t, spy.listCalls, "invalid cursor must fail before ListConstraintHistory")
 		})
 	}

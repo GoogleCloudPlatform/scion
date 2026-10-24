@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 )
 
 // Agent delegation grant management (.design/agent-delegation.md §7): grant
@@ -438,54 +437,15 @@ func (s *Server) handleRevokeAgentDelegation(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	now := time.Now().UTC()
-	auditID := uuid.New().String()
 	reason := c.revokeReason()
-	revoked := false
+	var revoked *store.AgentDelegationGrant
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		locked, err := tx.LockAgentDelegationGrant(ctx, grant.ID)
-		if err != nil {
-			return fmt.Errorf("lock grant: %w", err)
-		}
-		if locked.RevokedAt != nil {
-			return nil
-		}
-		// Every unrevoked credential, expired or not, is revoked with the
-		// grant; the audit row names them.
-		creds, err := tx.ListActiveAgentDelegatedCredentials(ctx, []string{grant.ID}, time.Time{})
-		if err != nil {
-			return fmt.Errorf("list credentials: %w", err)
-		}
-		credIDs := make([]string, 0, len(creds))
-		for _, cred := range creds {
-			credIDs = append(credIDs, cred.ID)
-		}
-		if revoked, err = tx.RevokeAgentDelegationGrant(ctx, grant.ID, c.revokedBy(), reason, auditID, now); err != nil {
-			return fmt.Errorf("revoke grant: %w", err)
-		}
-		if !revoked {
-			return nil
-		}
-		before, _ := json.Marshal(map[string]interface{}{
-			"grant_id":               grant.ID,
-			"revoke_reason":          reason,
-			"revoked_credential_ids": credIDs,
-		})
-		record := &store.MutationAuditRecord{
-			ID:            auditID,
-			Timestamp:     now,
-			MutationType:  mutationAgentDelegationGrantRevoke,
-			TargetType:    auditTargetAgentDelegationGrant,
-			TargetID:      grant.ID,
-			BeforeSummary: string(before),
-			AfterSummary:  "revoked",
-		}
-		agentDelegationAuditBlock(record, grant, c)
-		auditActorFromContext(ctx).ApplyActor(record)
-		if err := tx.CreateMutationAudit(ctx, record); err != nil {
-			return fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
-		}
-		return nil
+		var err error
+		revoked, err = revokeAgentDelegationGrantTx(ctx, tx, grant.ID, c.revokedBy(), reason, auditActorFromContext(ctx), time.Now().UTC(),
+			func(record *store.MutationAuditRecord, g *store.AgentDelegationGrant) {
+				agentDelegationAuditBlock(record, g, c)
+			})
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, errAgentDelegationAuditFailed) {
@@ -497,7 +457,7 @@ func (s *Server) handleRevokeAgentDelegation(w http.ResponseWriter, r *http.Requ
 		InternalError(w)
 		return
 	}
-	if revoked {
+	if revoked != nil {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{AgentID: grant.AgentID})
 	}
 	w.WriteHeader(http.StatusNoContent)

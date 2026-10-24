@@ -28,7 +28,7 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver lists the skill directory with one GitHub git trees API call and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB. For what a resolved `gh://` skill contains (subdirectories, executable files, symlinks and submodules), see [GitHub skill URIs](/scion/local/skills/#github-skill-uris-gh).
 
 #### Authentication & reliability
 

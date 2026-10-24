@@ -72,6 +72,9 @@ const (
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
+	// ActionChatPost covers posting messages into a project's chat
+	// threads (project.chat_post).
+	ActionChatPost Action = "chat_post"
 	// ActionAdmin covers access constraint administration
 	// (access_constraint.admin).
 	ActionAdmin Action = "admin"
@@ -1292,7 +1295,17 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			// already run with both memo keys masked) and any future caller
 			// get the same guarantee without relying on this call site.
 			var hopNote unrecordedHopNote
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause, &hopNote)
+			// For a hub_delivery principal with Explain, the admission
+			// walk's per-hop and provenance-root steps are recorded in
+			// ExplainTrace (ptone/scion#2228 part 2b). Every other
+			// principal is unchanged: no explain steps are collected.
+			var ceilingExplain *[]DecisionStep
+			var ceilingTrace []DecisionStep
+			if _, hd := principal.Identity.(*hubDeliveryIdentity); hd && request.Explain {
+				ceilingExplain = &ceilingTrace
+			}
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), ceilingExplain, &ceilingCause, &hopNote)
+			decision.ExplainTrace = append(decision.ExplainTrace, ceilingTrace...)
 			if ceilingErr != nil {
 				decision.Allowed = false
 				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()

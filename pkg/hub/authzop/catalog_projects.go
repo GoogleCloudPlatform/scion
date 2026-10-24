@@ -643,8 +643,8 @@ var projectOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "project.read",
 		Effects:          []SecurityEffect{EffectReadOne},
@@ -1891,11 +1891,9 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.workspace.read",
 		Domain:      "project",
-		Description: "Read a project's workspace: sync status, cache status, archive and file reads",
+		Description: "Read a project's workspace: archive and file reads",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/sync/status", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/archive", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/status", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files/{path}", Method: "GET"},
 		},
@@ -1913,10 +1911,8 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.workspace.write",
 		Domain:      "project",
-		Description: "Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull",
+		Description: "Change a project's workspace: file upload, write and delete, and git pull",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/notify", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/cache/refresh", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files/{path}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/workspace/files/{path}", Method: "DELETE"},

@@ -1316,3 +1316,50 @@ func TestRemoveAgentDirAndWorktreeEntry_LinkTargetModeUnchanged(t *testing.T) {
 		t.Fatalf("link target mode = %v, want 0600", got)
 	}
 }
+
+// The worktree checks run no hooks from the repository's default hooks
+// directory: core.hooksPath=/dev/null keeps them off. (A repository-scope
+// core.hooksPath, core.fsmonitor or filter driver would instead be refused
+// outright by the deny-by-default policy, which pkg/util covers.)
+func TestHandleAgentDirWithoutConfig_WorktreeChecksRunNoRepositoryCommands(t *testing.T) {
+	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "committed work")
+	markers := t.TempDir()
+	hooks := filepath.Join(repo, ".git", "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []string{"post-index-change", "reference-transaction", "post-checkout"} {
+		script := "#!/bin/sh\ntouch '" + filepath.Join(markers, "hook-"+hook) + "'\n"
+		if err := os.WriteFile(filepath.Join(hooks, hook), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Make every tracked file look modified, so status refreshes the index.
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			if err := os.Chtimes(filepath.Join(ws, e.Name()), future, future); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if err := handleAgentDirWithoutConfigGuarded(testAgentDirGuard("a", agentDir), "a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+	got, err := os.ReadDir(markers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range got {
+		t.Errorf("repository hook ran: %s", e.Name())
+	}
+}

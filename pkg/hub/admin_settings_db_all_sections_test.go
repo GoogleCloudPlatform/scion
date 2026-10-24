@@ -67,6 +67,7 @@ var layer1RoundTripSamples = map[string]string{
 	"telemetry.cloud.protocol":                 `"grpc"`,
 	"telemetry.cloud.headers":                  `{"x-api-key":"k1"}`,
 	"telemetry.cloud.provider":                 `"gcp"`,
+	"telemetry.cloud.gcp_project_id":           `"telemetry-project"`,
 	"telemetry.cloud.tls":                      `{"ca_file":"/etc/ca.pem"}`,
 	"telemetry.cloud.tls.enabled":              `true`,
 	"telemetry.cloud.tls.insecure_skip_verify": `false`,

@@ -17,7 +17,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// fakeSkillTransport serves the GitHub contents and raw endpoints in
+// fakeSkillTransport serves the GitHub git trees and raw endpoints in
 // process, without any network. Each skill's directory listing takes
 // delay(name) to answer, and the transport records how many listings are
 // in flight at once and the order in which they complete. A skill named
@@ -49,7 +48,7 @@ type fakeSkillTransport struct {
 
 func (f *fakeSkillTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	path := req.URL.Path
-	const listPrefix = "/repos/owner/repo/contents/skills/"
+	const listPrefix = "/repos/owner/repo/git/trees/" + testCommitSHA + ":skills/"
 	switch {
 	case strings.HasPrefix(path, listPrefix):
 		name := strings.TrimPrefix(path, listPrefix)
@@ -84,7 +83,7 @@ func (f *fakeSkillTransport) RoundTrip(req *http.Request) (*http.Response, error
 			return fakeResponse(req, http.StatusNotFound, []byte(`{"message":"Not Found"}`)), nil
 		}
 		content := "# " + name
-		body, _ := json.Marshal([]githubContentEntry{{
+		body, _ := testTreeJSON([]fakeTreeFile{{
 			Name: "SKILL.md", Path: "skills/" + name + "/SKILL.md", Type: "file", Size: len(content),
 		}})
 		return fakeResponse(req, http.StatusOK, body), nil
@@ -428,7 +427,7 @@ func TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes(t *testing.T) 
 type panicSkillTransport struct{ fakeSkillTransport }
 
 func (p *panicSkillTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.HasSuffix(req.URL.Path, "/contents/skills/boom") {
+	if strings.HasSuffix(req.URL.Path, ":skills/boom") {
 		panic("credential-value-must-not-leak")
 	}
 	return p.fakeSkillTransport.RoundTrip(req)

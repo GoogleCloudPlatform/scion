@@ -278,7 +278,15 @@ jobs:
           # binaries) with a single checksums file so deploy tooling can
           # verify a download before extracting/installing it. Sort for a
           # stable, reviewable diff between releases.
-          sha256sum -- * | sort -k2 > SHA256SUMS
+          #
+          # Write the sums outside this directory, then move them in: with
+          # `> SHA256SUMS` the shell can create the empty file before the `*`
+          # glob expands, so the file would list itself (ptone/scion#6005).
+          # pipefail makes a sha256sum failure stop the job.
+          set -o pipefail
+          sums="${RUNNER_TEMP:?}/SHA256SUMS"
+          sha256sum -- * | sort -k2 > "$sums"
+          mv -- "$sums" SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2

@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -130,12 +131,8 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		// Isolation and read access are both enforced by
 		// handleProjectSharedDirRoutes before this leaf is ever reached; this
 		// case has no check of its own left to duplicate that gate.
-		dirs := project.SharedDirs
-		if dirs == nil {
-			dirs = []api.SharedDir{}
-		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"sharedDirs": dirs,
+			"sharedDirs": sharedDirListEntries(project.SharedDirs),
 		})
 
 	case http.MethodPost:
@@ -192,6 +189,26 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// sharedDirListEntry is one shared dir in the GET /shared-dirs response: the
+// declaration plus Target, the container path agents mount it at, computed by
+// the layout authority (projectfs.SharedDirMount; ptone/scion#5827), so
+// clients (terminal drag-drop) never build that path themselves. Target is
+// response-only: it is never stored and never read from a request.
+type sharedDirListEntry struct {
+	api.SharedDir
+	Target string `json:"target"`
+}
+
+// sharedDirListEntries returns the GET /shared-dirs entries of dirs, never
+// nil.
+func sharedDirListEntries(dirs []api.SharedDir) []sharedDirListEntry {
+	out := make([]sharedDirListEntry, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, sharedDirListEntry{SharedDir: d, Target: projectfs.SharedDirMount(d, "").Target})
+	}
+	return out
+}
+
 // handleProjectSharedDirByName handles DELETE on /api/v1/projects/{projectId}/shared-dirs/{name}.
 // The project has already been loaded and authorized by
 // handleProjectSharedDirRoutes; the check below is additional to that gate,
@@ -238,10 +255,12 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	}
 
 	found := false
+	var removed api.SharedDir
 	updated := make([]api.SharedDir, 0, len(project.SharedDirs))
 	for _, d := range project.SharedDirs {
 		if d.Name == name {
 			found = true
+			removed = d
 			continue
 		}
 		updated = append(updated, d)
@@ -264,7 +283,7 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	// the directory directly. If the path cannot be resolved (e.g. no
 	// co-located broker), we log and continue — the DB record is already
 	// removed.
-	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, name)
+	resolution, resolveErr := s.resolveSharedDirMount(ctx, project, projectfs.SharedDirMount(removed, ""))
 	switch {
 	case resolveErr != nil:
 		slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
@@ -275,14 +294,28 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	case resolution.Path == "" || resolution.Path == "/":
 		slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
 			"project_id", projectID, "name", name, "path", resolution.Path)
-	case resolution.Backend == "nfs":
-		// NFS: remove the leaf via DeleteSharedDir, an fd-based walk
+	case resolution.onSharedBackend() && resolution.Source == sharedDirLayoutFromWorkspaceStorage:
+		// The shared dir is on the workspace export (the tree every agent
+		// mounts) only because server.workspace_storage is nfs. Removing a
+		// declaration does not delete that agent data in phase 1: the
+		// lifecycle phase (ptone/scion#5835) owns deletion of this leaf.
+		slog.InfoContext(ctx, "shared directory declaration removed; leaving its data on the workspace export",
+			"project_id", projectID, "name", name)
+	case resolution.onSharedBackend():
+		// NFS (server.shared_dir_storage): remove the leaf via
+		// DeleteSharedDir, an fd-based walk
 		// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
 		// symlinked structural component and touches only this one
 		// named leaf.
-		if removeErr := shareddirs.DeleteSharedDir(resolution.NFSHostBase, resolution.NFSSubPathRoot, project.ID, name); removeErr != nil {
+		hostBase, baseErr := resolution.Resolved.ResolvedHostBase()
+		if baseErr != nil {
+			slog.WarnContext(ctx, "failed to resolve NFS shared directory host base",
+				"project_id", projectID, "name", name, "error", baseErr)
+			break
+		}
+		if removeErr := shareddirs.DeleteSharedDir(hostBase, resolution.Resolved.SubPathRoot, project.ID, name); removeErr != nil {
 			slog.WarnContext(ctx, "failed to remove NFS shared directory",
-				"project_id", projectID, "name", name, "host_base", resolution.NFSHostBase, "error", removeErr)
+				"project_id", projectID, "name", name, "host_base", hostBase, "error", removeErr)
 		}
 	default:
 		if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {

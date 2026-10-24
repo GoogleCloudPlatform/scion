@@ -99,6 +99,10 @@ var serverEnvCanonicalOverrides = []serverEnvCanonicalOverride{
 	// settings section name (SCION_SERVER_BROKER_PORT,
 	// SCION_SERVER_BROKER_BROKER_ID) are aliases.
 	{Path: "server.broker", Env: "RUNTIMEBROKER", Subtree: true},
+	// server.keyring_file is named SCION_SERVER_KEYRING_FILE by its design
+	// (ptone/scion#1530 §2), not the derived SCION_SERVER_KEYRINGFILE.
+	{Path: KeyringFileKey, Env: "KEYRING_FILE"},
+	{Path: KeyringFileAllowWorldReadableKey, Env: "KEYRING_FILE_ALLOW_WORLD_READABLE"},
 }
 
 // serverEnvTopLevelKeys lists the top-level (outside server) settings, or

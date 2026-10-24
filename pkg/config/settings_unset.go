@@ -235,7 +235,7 @@ func unsetYAMLSettingLocked(lock *SettingsLock, dir, settingsPath string, data [
 		return false, fmt.Errorf("failed to read %s: %w", settingsPath, err)
 	}
 	var m map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &m); err != nil {
+	if err := unmarshalSettingsYAML(data, &m); err != nil {
 		return false, fmt.Errorf("failed to parse YAML settings at %s: %w", settingsPath, err)
 	}
 	if !deleteMapPath(m, path) {

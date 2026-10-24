@@ -87,7 +87,7 @@ server:
     default_user_role: viewer   # member (default) | viewer
 ```
 
-To pre-register a person before their first sign-in (for example, under `invite_only`), use **Invite User** on **Admin > Users**, `scion hub users provision <email>`, or `POST /api/v1/users`. All three create an `invited` record and require the `user.invite` permission, which hub admins hold. The CLI and API, and the dialog when a display name is given, require an interactive sign-in and are not available while the Hub runs with dev auth (see [Development Authentication](#development-authentication-dev-auth)). An optional display name is stored with the record; at first sign-in, a name supplied by the sign-in provider replaces it. The role is assigned at first sign-in as described above. See the [API reference](/scion/reference/api/) and the [CLI reference](/scion/reference/cli/).
+To pre-register a person before their first sign-in (for example, under `invite_only`), use **Invite User** on **Admin > Users**, `scion hub users invite` (`POST /api/v1/admin/users/invite/bulk`, which can invite multiple users and optionally grant them project roles), `scion hub users provision <email>`, or `POST /api/v1/users`. All of them create `invited` records and require the `user.invite` permission, which hub admins hold. The CLI and API, and the dialog when a display name is given, require an interactive sign-in and are not available while the Hub runs with dev auth (see [Development Authentication](#development-authentication-dev-auth)). An optional display name is stored with `provision`; at first sign-in, a name supplied by the sign-in provider replaces it. The hub role is assigned at first sign-in as described above. You can also add an `invited` user to groups and grant them role bindings ahead of time; those bindings grant authority only once the user signs in and their account becomes `active`. See the [API reference](/scion/reference/api/) and the [CLI reference](/scion/reference/cli/).
 
 You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer`. Changing it does not affect existing users; change an individual user's role on **Admin > Users**. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) for what each role allows and how demotion from `admin_emails` works, and the [server configuration reference](/scion/reference/server-config/#authentication-serverauth) for the setting.
 
@@ -144,9 +144,9 @@ When registering Scion as a client in your identity provider, set the **redirect
 <hub-base-url>/auth/callback/oidc
 ```
 
-Replace `<hub-base-url>` with the Hub base URL, including the scheme, for example `https://hub.example.com`. The Hub base URL is set by the `--base-url` flag or, when the flag is not set, by `SCION_SERVER_BASE_URL`; without either, it defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
+Replace `<hub-base-url>` with the web server's base URL, including the scheme, for example `https://hub.example.com`. The web base URL is resolved once at startup from operator inputs only (in order: `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, `server.hub.public_url` in the global `settings.yaml`, or a URL derived from a Cloud Run IAP audience; never from the database; see [Web Base URL](/scion/reference/server-config/#web-base-url)), and defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
 
-The Hub builds the redirect URI from its base URL, so a Hub served over plain HTTP uses an `http://` redirect URI. The Hub does not require HTTPS for OIDC login, and it marks the session cookie `Secure` only when the base URL starts with `https://`. Whether an `http://` redirect URI is accepted is up to your identity provider; many require HTTPS for production clients. The `issuer_url` is different: it must use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
+The Hub builds the redirect URI from its web base URL, and marks the session cookie `Secure` when the base URL starts with `https://`. On any non-loopback listener, the server requires an `https://` web base URL and refuses to start with `http://`; plain `http://` is accepted only on a loopback listener (`localhost`, `127.0.0.0/8`, or `::1`). Whether an `http://` loopback redirect URI is accepted is up to your identity provider. The `issuer_url` must also use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
 
 #### Configuration
 
@@ -166,7 +166,7 @@ server:
 Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the Hub base URL, set by `--base-url` or `SCION_SERVER_BASE_URL`, plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the web base URL (resolved from `--base-url`, `SCION_SERVER_BASE_URL`, `SCION_SERVER_HUB_ENDPOINT`, `server.hub.public_url` in the global `settings.yaml`, or the Cloud Run IAP audience), plus `/auth/callback/oidc`.
 :::
 
 ### Verified Email Requirement
@@ -415,10 +415,11 @@ export SCION_SERVER_AUTH_DEVMODE=true
 
 ### Using the Developer Token
 When the Hub starts with `devMode: true`, it writes the token to `~/.scion/dev-token`.
-- **CLI**: The `scion` CLI automatically looks for this file.
+- **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and, when no other credential applies, print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
 - **Web**: The Web Dashboard automatically uses this token for the "Development User" login when `SCION_DEV_AUTH_ENABLED=true` is set.
+- **Agent containers**: Hub-dispatched agents authenticate with the token the Hub issues for their run (`~/.scion/scion-token` or `SCION_AUTH_TOKEN`). The Runtime Broker never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment. When a Hub and Runtime Broker run co-located with dev auth enabled, the Runtime Broker offers its dev token only to an agent that has no Hub-issued token, whose dispatch comes from the co-located Hub on a loopback endpoint, and whose Hub endpoint comes from the server's own configuration rather than from project settings or the agent's environment.
 
-Alternatively, you can set the token in your environment:
+Alternatively, you can set the token in your environment for a loopback Hub:
 ```bash
 export SCION_DEV_TOKEN=scion_dev_...
 ```

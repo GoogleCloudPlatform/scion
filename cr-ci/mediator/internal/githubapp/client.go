@@ -304,10 +304,16 @@ type Job struct {
 
 // Runner is a registered self-hosted runner.
 type Runner struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"` // "online" or "offline"
-	Busy   bool   `json:"busy"`
+	ID     int64         `json:"id"`
+	Name   string        `json:"name"`
+	Status string        `json:"status"` // "online" or "offline"
+	Busy   bool          `json:"busy"`
+	Labels []RunnerLabel `json:"labels"`
+}
+
+// RunnerLabel is one label of a registered runner.
+type RunnerLabel struct {
+	Name string `json:"name"`
 }
 
 func repoPath(r Repo) string {

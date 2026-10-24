@@ -348,7 +348,7 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
-When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`, set in `settings.yaml` or with `SCION_SERVER_HUB_GCPPROJECTID` and read at startup), the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`, set in `settings.yaml` or with `SCION_SERVER_HUB_GCPPROJECTID` and read at startup), the Hub also exports its database pool, dispatch, notification, launch reaper and events stream metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
 ### GCP Token Metrics
 
@@ -443,6 +443,8 @@ Harness hook events are automatically converted to OTLP spans:
 | `prompt-submit` | `agent.user.prompt` | prompt |
 | `model-start` | `gen_ai.api.request` | model (only when the hook payload names one) |
 | `model-end` | `gen_ai.api.response` | success, model (only when the hook payload names one) |
+
+Each hook event in the table, and the turn, notification, response-complete and container lifecycle (`agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`) events, is also emitted as a correlated OpenTelemetry log record whose `event.name` is the span name. When the GCP exporter is configured, `sciontool` also writes normalized `agent.usage` events, delivered durably and deduplicated, and periodic `telemetry.health` snapshots of its usage-source selection and delivery diagnostics to the dedicated `scion-analytics` Cloud Logging log.
 
 ### Session Metrics (Gemini)
 

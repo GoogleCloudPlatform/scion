@@ -58,6 +58,7 @@ var requestPathSites = []requestPathSite{
 	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
 	{"auditlog.go", "routeTemplate", "URL.EscapedPath", 1, "classification only: maps the path to a constant route template for the artifact decision log; no path segment is logged"},
 	{"read.go", "serveFileTTL", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
+	{"handlers_projects_core.go", "Server.provisionSharedWorkspace", "URL(bare)", 1, "not a request URL: the project's git clone URL, checked before the clone on the hub host"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_maintenance.go", "Server.handleAdminMaintenanceMigrations", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -65,7 +66,7 @@ var requestPathSites = []requestPathSite{
 	{"admin_mode.go", "WebServer.adminModeWebMiddleware", "URL.Path", 1, "comparison: matches admin-mode exempt paths"},
 	{"admin_settings.go", "Server.handleAdminServerConfigSectionReset", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"agent_routes.go", "resolveAgentSubRouteForRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route from the escaped path"},
-	{"agent_delegation_routes.go", "Server.admitDelegatedRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route for the delegated-credential admission table"},
+	{"agent_delegation_routes.go", "Server.admitDelegatedRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route or the project resource route for the delegated-credential admission table"},
 	{"agent_run_scope.go", "runScopeRequestFrom", "URL.Path", 1, "classification only: classPath picks the run-scope route class and is never logged (the logged path is logging.RequestPath)"},
 	{"attachment_delivery.go", "Server.handleAttachmentDelivery", "URL.Path", 1, "routing: extracts the delivery capability token from the path; a refusal never logs it"},
 	{"attachment_delivery.go", "attachmentDelivery.Issue", "URL(bare)", 1, "not a request URL: the capability path a wire attachment carries to the broker"},
@@ -96,7 +97,8 @@ var requestPathSites = []requestPathSite{
 	{"handlers_access_constraints.go", "Server.handleAdminAccessConstraintPreviews", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_auth.go", "Server.handleTokenByID", "URL.Path", 1, "routing: extracts the token id"},
 	{"handlers_brokers.go", "Server.handleBrokerByIDRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
-	{"handlers_chat_send.go", "Server.authorizeChatSend", "URL(bare)", 1, "not the served request: a synthetic request carrying a chat-send label path"},
+	{"handlers_chat_send.go", "Server.authorizeChatConversation", "URL(bare)", 2, "not the served request: a synthetic request carrying a chat-send label path"},
+	{"handlers_chat_stars.go", "Server.handleChatStarRoutes", "URL.Path", 1, "routing: extracts the message id and the state sub-route"},
 	{"handlers_chat_v2.go", "Server.handleChatAttachmentByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatConversationRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_chat_v2.go", "Server.handleChatSpaceRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -150,6 +152,7 @@ var requestPathSites = []requestPathSite{
 	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.RawPath", 1, "comparison: refuses an escaped path for the workload delegation route check (not logged)"},
 	{"web.go", "WebServer.handleOAuthCallback", "URL.Path", 1, "routing: extracts the OAuth provider"},
 	{"web.go", "WebServer.handleOAuthLogin", "URL.Path", 1, "routing: extracts the OAuth provider"},
+	{"web.go", "WebServer.keyringResaveMiddleware", "URL.Path", 1, "comparison: isPublicRoute check before the keyring session re-save (not logged)"},
 	{"web.go", "WebServer.MountHubAPI", "URL.Path", 1, "comparison: keeps non-GET create-collection requests out of the compression wrapper (not logged)"},
 	{"web.go", "WebServer.prefetchPageData", "URL.Path", 2, "routing: maps an SPA page path to its API prefetch"},
 	{"web.go", "WebServer.proxyAuthMiddleware", "URL.Path", 1, "comparison: skips auth for public web paths"},
@@ -546,7 +549,7 @@ func goFiles(t *testing.T, dirs ...string) []string {
 // is classified, and no log call receives a request path except through
 // RequestPath.
 func TestRequestPathSites(t *testing.T) {
-	files := goFiles(t, ".", "../../hub", "../../artifacts")
+	files := goFiles(t, ".", "../../hub", "../../hub/maintenance", "../../artifacts")
 	if len(files) < 50 {
 		t.Fatalf("scanned only %d files; is the hub package where this test expects it?", len(files))
 	}

@@ -19,6 +19,9 @@
 // depends on sciontool, and a rename on one side fails the contract test
 // on the other (see ptone/scion#2053, design §3.6 "Contract pinning").
 //
+// It also holds the shared structured analytics event envelope (envelope.go)
+// that agent.lifecycle, agent.usage and telemetry.health events embed.
+//
 // Design references in this package (section N, Dn) are to
 // .design/hosted/usage-telemetry.md.
 package telemetrycontract

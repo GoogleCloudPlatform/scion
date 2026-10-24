@@ -81,6 +81,7 @@ func newServer(cfg *Config, ep endpoints, logger *slog.Logger) *server.Server {
 		TargetRepos:   repos,
 		OrgScope:      scope == githubapp.ScopeOrg,
 		RunnerLabel:   cfg.RunnerLabel,
+		StackLabel:    server.StackLabel(cfg.Region, cfg.RunnerJobName),
 		MaxConcurrent: cfg.MaxConcurrentRunners,
 		RunnerGroupID: cfg.RunnerGroupID,
 		MediatorURL:   cfg.MediatorURL,

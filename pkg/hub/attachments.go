@@ -57,6 +57,12 @@ type AttachmentRef struct {
 	// artifact by newArtifactAttachmentRef, for delivery into an agent's
 	// home. Never serialized.
 	sha256 string
+	// projectedPath and projectedMount are the container path and shared
+	// dir of an artifact attachment's projection into the project's
+	// scratchpad (ptone/scion#5827), set by stageChatAttachments on
+	// the send path and carried into AttachmentDelivery. Never serialized.
+	projectedPath  string
+	projectedMount string
 }
 
 // AttachmentStore abstracts file storage for chat attachments.
@@ -222,7 +228,7 @@ func SanitizeFilename(name string) (string, error) {
 	// type; #1098 tracks re-admitting it safely.
 	switch ext := attachmentExt(name); {
 	case DangerousExtensions[ext]:
-		return "", fmt.Errorf("dangerous file extension: %s", ext)
+		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	case refusedMarkupExtensions[ext]:
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
@@ -311,20 +317,53 @@ func (s *LocalDiskAttachmentStore) Save(_ context.Context, projectID, filename s
 	}, nil
 }
 
-// Get opens the file for reading and returns its metadata.
+// storeRelDir returns the directory of attachment id of projectID relative
+// to the store's base: <projectID>/<id>, or <id> for an upload with no
+// project (a DM). Both must be single path components.
+func storeRelDir(projectID, id string) (string, error) {
+	if err := validStagingComponent(id); err != nil {
+		return "", fmt.Errorf("attachment id: %w", err)
+	}
+	if projectID == "" {
+		return id, nil
+	}
+	if err := validStagingComponent(projectID); err != nil {
+		return "", fmt.Errorf("attachment project: %w", err)
+	}
+	return filepath.Join(projectID, id), nil
+}
+
+// Get opens the file for reading and returns its metadata. The file is
+// opened through an os.Root anchored on the store's base, and must be a
+// regular file, not a symlink (downloads serve from the
+// hub-private canonical store only).
 func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) (io.ReadCloser, AttachmentMeta, error) {
-	dir := filepath.Join(s.baseDir, projectID, id)
-	entries, err := os.ReadDir(dir)
+	rel, err := storeRelDir(projectID, id)
+	if err != nil {
+		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
+	}
+	root, err := os.OpenRoot(s.baseDir)
+	if err != nil {
+		return nil, AttachmentMeta{}, fmt.Errorf("attachment store: open base: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	dir, err := root.Open(rel)
+	if err != nil {
+		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
 	if err != nil || len(entries) == 0 {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
 	}
 
 	filename := entries[0].Name()
-	filePath := filepath.Join(dir, filename)
+	filePath := filepath.Join(rel, filename)
 
 	// Use Lstat (not Stat) to detect symlinks — refuse to open anything
-	// that is not a regular file, preventing symlink-based path traversal.
-	info, err := os.Lstat(filePath)
+	// that is not a regular file.
+	info, err := root.Lstat(filePath)
 	if err != nil {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment stat: %w", err)
 	}
@@ -332,9 +371,15 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) 
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
 	}
 
-	f, err := os.Open(filePath)
+	f, err := root.Open(filePath)
 	if err != nil {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment open: %w", err)
+	}
+	// The open itself is checked again: the name could have been replaced
+	// between the Lstat and the open.
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, info) {
+		_ = f.Close()
+		return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
 	}
 
 	meta := AttachmentMeta{
@@ -357,6 +402,69 @@ func (s *LocalDiskAttachmentStore) Delete(_ context.Context, projectID, id strin
 		return nil // Already deleted — idempotent.
 	}
 	return os.RemoveAll(dir)
+}
+
+// sweep removes attachment directories older than cutoff (by their
+// modification time, set when the file was saved) for which
+// sweepable(projectID, id) answers true, and returns how many it removed.
+// Candidates are taken structurally from the store layout, never from what a
+// directory contains: <base>/<projectID>/<id> (depth 2) is a candidate for
+// (projectID, id), and <base>/<id> (depth 1, an upload with no project) for
+// ("", id). sweepable must confirm the candidate against the attachment's
+// own record (sweepLegacyAttachmentBlobs requires the recorded project to
+// equal projectID), so a project directory is never taken for an
+// attachment. Every operation goes through an os.Root on the base, so
+// nothing outside the store is touched.
+func (s *LocalDiskAttachmentStore) sweep(cutoff time.Time, sweepable func(projectID, id string) bool) (int, error) {
+	root, err := os.OpenRoot(s.baseDir)
+	if err != nil {
+		return 0, fmt.Errorf("attachment store: open base: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	removed := 0
+	var firstErr error
+	consider := func(rel, projectID, id string) bool {
+		info, err := root.Lstat(rel)
+		if err != nil || !info.IsDir() || !info.ModTime().Before(cutoff) || !sweepable(projectID, id) {
+			return false
+		}
+		if err := root.RemoveAll(rel); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return false
+		}
+		removed++
+		return true
+	}
+	top, err := readRootDir(root, ".")
+	if err != nil {
+		return 0, fmt.Errorf("attachment store: list base: %w", err)
+	}
+	for _, e := range top {
+		if !e.IsDir() {
+			continue
+		}
+		// Depth 1: <base>/<id>, an upload with no project.
+		if consider(e.Name(), "", e.Name()) {
+			continue
+		}
+		// Depth 2: <base>/<projectID>/<id>.
+		children, err := readRootDir(root, e.Name())
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for _, c := range children {
+			if c.IsDir() {
+				consider(filepath.Join(e.Name(), c.Name()), e.Name(), c.Name())
+			}
+		}
+	}
+	return removed, firstErr
 }
 
 // FilePath returns the on-disk path for an attachment file, used when
