@@ -4564,16 +4564,24 @@ export class ScionChatThread extends LitElement {
         this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
           this._unreadAnchorInitialRaf = null;
           if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
-          this._unreadAnchorPending = false;
-          this.applyUnreadAnchor();
-          this.observeUnreadAnchorLayout(openToken);
+          // This callback runs in its own task, outside the promise chain, so
+          // the .catch below never sees its throws. Stand the anchor down here
+          // too, then rethrow so the error still reaches the console.
+          try {
+            this._unreadAnchorPending = false;
+            this.applyUnreadAnchor();
+            this.observeUnreadAnchorLayout(openToken);
+          } catch (err) {
+            if (this.fetchId === openToken) this.deactivateUnreadAnchor();
+            throw err;
+          }
         });
       })
       .catch(() => {
-        // A render that throws rejects updateComplete, and a throw inside the
-        // .then body (for example from requestAnimationFrame) lands here too.
-        // Either way the first write never comes: stand the anchor down rather
-        // than leave the bottom pins off.
+        // A render that throws rejects updateComplete, and a synchronous throw
+        // from requestAnimationFrame itself lands here too. Either way the
+        // first write never comes: stand the anchor down rather than leave the
+        // bottom pins off.
         if (this.fetchId === openToken) this.deactivateUnreadAnchor();
       });
   }

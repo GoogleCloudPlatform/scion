@@ -3935,6 +3935,46 @@ describe('scion-chat-thread unread-divider open anchor', () => {
     }
   });
 
+  it('stands the anchor down when its first write throws inside the frame callback', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+    );
+
+    type Internal = {
+      _unreadAnchorActive: boolean;
+      _unreadAnchorPending: boolean;
+      scrollToUnreadDivider(): void;
+      applyUnreadAnchor(): void;
+    };
+    const internal = el as unknown as Internal;
+    const { callbacks, restore } = installRafStub();
+    const applySpy = vi.spyOn(internal, 'applyUnreadAnchor').mockImplementation(() => {
+      throw new Error('layout read failed');
+    });
+    try {
+      internal.scrollToUnreadDivider();
+      await vi.waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
+      expect(internal._unreadAnchorActive).toBe(true);
+
+      // The frame callback runs outside the updateComplete promise chain, so
+      // its throw escapes to the caller instead of reaching the .catch.
+      for (const [handle, cb] of [...callbacks]) {
+        callbacks.delete(handle);
+        expect(() => cb(0)).toThrow('layout read failed');
+      }
+
+      expect(internal._unreadAnchorActive).toBe(false);
+      expect(internal._unreadAnchorPending).toBe(false);
+    } finally {
+      applySpy.mockRestore();
+      restore();
+    }
+  });
+
   it("a failed render of a superseded open leaves the next open's anchor alone", async () => {
     mockEndpoints('m1');
     globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
