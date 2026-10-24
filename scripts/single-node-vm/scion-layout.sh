@@ -115,7 +115,9 @@ owner_user() {
 #     (verify_owned_dir), and refuses on any mismatch instead of fixing it;
 #   - all changes inside <root> (staging a release, current/previous,
 #     missing subdirs) run as the owner (run_as_owner -> __as-owner);
-#   - root itself only writes <bin-link>, outside the tree.
+#   - root itself only writes outside the tree: <bin-link>, and readable
+#     copies of the input binaries in a root-owned temp dir (stage_inputs),
+#     so the owner step can always read its input.
 
 # verify_owned_dir PATH -- PATH must be a real directory (not a symlink),
 # owned by the owner, mode 0755. Inspected with stat, which does not follow
@@ -138,18 +140,22 @@ verify_owned_dir() {
 #     owner could have swapped). A missing subdir is created later, as the
 #     owner, by __as-owner.
 ensure_root() {
-  local d
+  local d parent
+  parent="$(dirname "$INSTALL_ROOT")"
   if [[ ! -e "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]]; then
-    mkdir -p "$(dirname "$INSTALL_ROOT")"
+    mkdir -p "$parent"
     mkdir -m 0755 "$INSTALL_ROOT"
-    chmod 0755 "$INSTALL_ROOT"
-    for d in releases snapshots; do
-      mkdir -m 0755 "$INSTALL_ROOT/$d"
-      chmod 0755 "$INSTALL_ROOT/$d"
-      own "$INSTALL_ROOT/$d"
-    done
-    own "$INSTALL_ROOT"
-    log "created $INSTALL_ROOT"
+    build_and_hand_over "created"
+    return 0
+  fi
+  # Resume a handover that failed partway (e.g. the owner user did not
+  # exist yet): <root> is still a real directory owned by root in a
+  # root-owned parent, so the owner cannot have touched its entries and
+  # root may safely finish the job.
+  if [[ "$(owner_user)" != "root" \
+        && "$(stat -c '%F|%U' -- "$INSTALL_ROOT")" == "directory|root" \
+        && "$(stat -c '%U' -- "$parent")" == "root" ]]; then
+    build_and_hand_over "resumed the handover of"
     return 0
   fi
   verify_owned_dir "$INSTALL_ROOT"
@@ -157,6 +163,53 @@ ensure_root() {
     if [[ -e "$INSTALL_ROOT/$d" || -L "$INSTALL_ROOT/$d" ]]; then
       verify_owned_dir "$INSTALL_ROOT/$d"
     fi
+  done
+}
+
+# build_and_hand_over VERB -- with <root> a real directory only root can
+# write to: set it to 0755, create or fix releases/ and snapshots/ (real
+# directories only), hand them to the owner, and hand over <root> last.
+build_and_hand_over() {
+  local d
+  chmod 0755 "$INSTALL_ROOT"
+  for d in releases snapshots; do
+    if [[ ! -e "$INSTALL_ROOT/$d" && ! -L "$INSTALL_ROOT/$d" ]]; then
+      mkdir -m 0755 "$INSTALL_ROOT/$d"
+    fi
+    [[ "$(stat -c '%F' -- "$INSTALL_ROOT/$d")" == "directory" ]] || die "$INSTALL_ROOT/$d is not a directory; refusing to use it"
+    chmod 0755 "$INSTALL_ROOT/$d"
+    own "$INSTALL_ROOT/$d"
+  done
+  own "$INSTALL_ROOT"
+  log "$1 $INSTALL_ROOT"
+}
+
+# INPUT_DIRS -- root-owned temp dirs holding readable copies of the input
+# binaries (stage_inputs), removed on exit.
+INPUT_DIRS=()
+cleanup_input_dirs() {
+  if [[ ${#INPUT_DIRS[@]} -gt 0 ]]; then
+    rm -rf "${INPUT_DIRS[@]}"
+  fi
+}
+trap cleanup_input_dirs EXIT
+
+# stage_inputs TAG BINARY [TAG BINARY...] -- copy each BINARY (which root
+# can read, but the owner may not: a 0750 file under umask 027, a relative
+# path, a 0700 hand-installed binary) to a 0755 file in a fresh root-owned
+# 0711 directory outside <root>, and set STAGED_PAIRS to the same pairs
+# with those absolute paths. Root writes nothing inside <root> here.
+stage_inputs() {
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/scion-layout-input.XXXXXX")"
+  INPUT_DIRS+=("$dir")
+  chmod 0711 "$dir"
+  STAGED_PAIRS=()
+  while [[ $# -gt 0 ]]; do
+    install -m 0755 -- "$2" "$dir/$1"
+    cmp -s "$2" "$dir/$1" || die "copy of $2 to $dir is incomplete (disk full?); nothing was changed"
+    STAGED_PAIRS+=("$1" "$dir/$1")
+    shift 2
   done
 }
 
@@ -200,16 +253,22 @@ stage_release() {
   fi
   rm -rf "$partial"
   mkdir -m 0755 "$partial"
-  if ! cp "$bin" "$partial/scion" || ! cmp -s "$bin" "$partial/scion"; then
+  if ! cp "$bin" "$partial/scion"; then
     rm -rf "$partial"
-    die "copy of $bin is incomplete (disk full?); nothing was changed"
+    die "could not copy $bin into releases/ (input unreadable by $(id -un), or disk full); nothing was changed"
+  fi
+  if ! cmp -s "$bin" "$partial/scion"; then
+    rm -rf "$partial"
+    die "copy of $bin into releases/ is incomplete (disk full?); nothing was changed"
   fi
   chmod 0755 "$partial" "$partial/scion"
   if [[ -e "$dest" || -L "$dest" ]]; then
-    rm -rf "$INSTALL_ROOT/releases/$tag.old"
-    mv -T "$dest" "$INSTALL_ROOT/releases/$tag.old"
+    # The aside name ends in .partial, so the hub's release listing
+    # ignores it if this step dies between the two renames.
+    rm -rf "$INSTALL_ROOT/releases/$tag.old.partial"
+    mv -T "$dest" "$INSTALL_ROOT/releases/$tag.old.partial"
     mv -T "$partial" "$dest"
-    rm -rf "$INSTALL_ROOT/releases/$tag.old"
+    rm -rf "$INSTALL_ROOT/releases/$tag.old.partial"
   else
     mv -T "$partial" "$dest"
   fi
@@ -240,6 +299,7 @@ activate() {
 # missing subdir, then stage and activate each TAG/BINARY pair in order
 # (an adopted old binary first, then the new release).
 cmd_as_owner() {
+  [[ "$(id -u)" != "0" || -z "$OWNER" ]] || die "__as-owner is an internal step and must not run as root with an owner configured; use install or adopt"
   [[ $# -ge 2 && $(( $# % 2 )) -eq 0 ]] || die "usage: __as-owner TAG BINARY [TAG BINARY...]"
   local d
   for d in releases snapshots; do
@@ -340,7 +400,8 @@ cmd_install() {
     fi
   fi
   pairs+=("$tag" "$bin")
-  run_as_owner "${pairs[@]}"
+  stage_inputs "${pairs[@]}"
+  run_as_owner "${STAGED_PAIRS[@]}"
   link_bin
 }
 
@@ -360,7 +421,8 @@ cmd_adopt() {
   fi
   log "adopting $src as releases/$tag"
   ensure_root
-  run_as_owner "$tag" "$src"
+  stage_inputs "$tag" "$src"
+  run_as_owner "${STAGED_PAIRS[@]}"
   link_bin
 }
 

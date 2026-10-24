@@ -266,7 +266,9 @@ If something goes wrong, the command stops at that step:
   and nothing changes. Fix the ownership or mode by hand
   (`sudo chown scion:scion …`, `sudo chmod 0755 …`; replace a symlink with
   a real directory) and re-run. `deploy.sh --version` refuses in the same
-  way.
+  way. The exception is an `/opt/scion` that is still owned by root because
+  an earlier first run stopped partway. The next run finishes setting it up
+  and hands it to `scion`.
 - **The settings edit is refused.** This happens if the file has a shape the
   script cannot edit safely (for example a flow-style `maintenance: {...}`),
   or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this

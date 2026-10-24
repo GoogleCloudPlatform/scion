@@ -989,7 +989,7 @@ _layout_assert_untouched() {
   assert_true "$(cmp -s "$1" "$LH_BIN" && echo true || echo false)" "$2: the original binary must be intact"
   assert_false "$([[ -e "$LH_ROOT/current" || -L "$LH_ROOT/current" ]] && echo true || echo false)" "$2: no current link may exist"
   assert_eq "" "$(ls -A "$LH_ROOT/releases" 2>/dev/null)" "$2: no release may be left in releases/"
-  assert_eq "" "$(find "$(dirname "$LH_ROOT")" -maxdepth 1 -name '.scion-stage.*' 2>/dev/null)" "$2: no staging dir may be left behind"
+  assert_eq "" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'scion-layout-input.*' 2>/dev/null)" "$2: no input copy dir may be left behind"
 }
 
 test_layout_adopt_failed_copy_keeps_original_binary() {
@@ -1038,7 +1038,7 @@ test_layout_install_leaves_no_staging_dir() {
   assert_eq "0" "$LAYOUT_RC" "re-installing a tag with different bytes must succeed (output: ${LAYOUT_OUT})"
   assert_true "$(cmp -s "${LH_DIR}/a2" "$LH_ROOT/releases/nightly-20261022/scion" && echo true || echo false)" \
     "the release must hold the new bytes"
-  assert_eq "" "$(find "$(dirname "$LH_ROOT")" -maxdepth 1 -name '.scion-stage.*')" "no staging dir may be left behind"
+  assert_eq "" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'scion-layout-input.*')" "no input copy dir may be left behind"
   assert_eq "nightly-20261022" "$(ls "$LH_ROOT/releases")" "no .partial/.old leftovers in releases/"
   rm -rf "$LH_DIR"
 }
@@ -1053,6 +1053,8 @@ test_layout_refuses_symlinked_dirs() {
     [[ "$sub" == releases ]] && mkdir -m 0755 "$LH_ROOT/snapshots"
     [[ "$sub" == snapshots ]] && mkdir -m 0755 "$LH_ROOT/releases"
     ln -s "$victim" "$LH_ROOT/$sub"
+    assert_true "$([[ -L "$LH_ROOT/$sub" && -d "$LH_ROOT/$([[ $sub == releases ]] && echo snapshots || echo releases)" ]] && echo true || echo false)" \
+      "setup: the ${sub} symlink must be planted in an existing tree"
     _fake_scion "${LH_DIR}/new" "nightly-20261023"
     _layout install nightly-20261023 "${LH_DIR}/new"
     assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "a symlinked ${sub}/ must be refused"
@@ -1066,9 +1068,11 @@ test_layout_refuses_symlinked_dirs() {
   # (the link itself is moved aside and removed), never written through.
   _layout_new_host
   victim="${LH_DIR}/victim"
-  mkdir -p "$victim"
+  mkdir -p "$victim" "$(dirname "$LH_ROOT")"
   mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases"
   ln -s "$victim" "$LH_ROOT/releases/nightly-20261023"
+  assert_true "$([[ -L "$LH_ROOT/releases/nightly-20261023" ]] && echo true || echo false)" \
+    "setup: the releases/<tag> symlink must be planted before the install"
   _fake_scion "${LH_DIR}/new" "nightly-20261023"
   _layout install nightly-20261023 "${LH_DIR}/new"
   assert_eq "0" "$LAYOUT_RC" "a planted release symlink must be replaced (output: ${LAYOUT_OUT})"
@@ -1173,7 +1177,7 @@ STUB
     LAYOUT_RC=$?
     assert_eq "0" "$LAYOUT_RC" "the root side must complete (output: ${LAYOUT_OUT})"
     assert_true "$([[ -L "$LH_ROOT/$sub" ]] && echo true || echo false)" "sanity: the ${sub} plant must have happened after the check"
-    assert_contains "$(cat "$log" 2>/dev/null)" "__as-owner nightly-20261023 ${LH_DIR}/b" \
+    assert_contains "$(cat "$log" 2>/dev/null)" "__as-owner nightly-20261023 ${TMPDIR:-/tmp}/scion-layout-input." \
       "the release must be handed to the owner step"
     assert_eq "" "$(ls -A "$victim")" "root must not write through ${sub} planted after its check"
     assert_eq "700" "$(stat -c %a "$victim")" "root must not chmod through ${sub} planted after its check"
@@ -1497,5 +1501,154 @@ STUB
   assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "current must move to the new release"
   assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/previous")" "previous must be set by the owner step"
   assert_eq "$LH_ROOT/current/scion" "$(readlink "$LH_BIN")" "root must link the CLI path"
+  rm -rf "$LH_DIR"
+}
+
+# =====================================================================
+# G1 review round 1
+# =====================================================================
+
+# _layout_root_stubs DIR LOG -- stub id (uid 0 until dropped) and a
+# runuser that logs its args plus the mode/owner of every existing file
+# argument and of its directory, then runs the command as the current user.
+_layout_root_stubs() {
+  mkdir -p "$1"
+  cat > "$1/id" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" && $# -eq 1 && -z "${LAYOUT_STUB_DROPPED:-}" ]]; then echo 0; exit 0; fi
+exec /usr/bin/id "$@"
+STUB
+  cat > "$1/runuser" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == "-u" && "\$3" == "--" ]] || { echo "runuser stub: unexpected args: \$*" >&2; exit 2; }
+echo "runuser \$*" >> "$2"
+for a in "\$@"; do
+  if [[ "\$a" == /* && -f "\$a" ]]; then
+    echo "input \$a file=\$(stat -c %a "\$a") dir=\$(stat -c %a "\$(dirname "\$a")")" >> "$2"
+  fi
+done
+shift 3
+LAYOUT_STUB_DROPPED=1 exec "\$@"
+STUB
+  chmod 0755 "$1/id" "$1/runuser"
+}
+
+# Under a restrictive umask the input binary is 0700 and given by a
+# relative path: root must hand the owner step an absolute 0755 copy in a
+# 0711 directory outside <root>, and clean it up afterwards.
+test_layout_owner_step_gets_readable_input_copy() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log" calls
+  _layout_root_stubs "$stub" "$log"
+  (umask 077 && _fake_scion "${LH_DIR}/new" "nightly-20261023" && chmod 0700 "${LH_DIR}/new")
+  assert_eq "700" "$(stat -c %a "${LH_DIR}/new")" "setup: the input binary must be 0700"
+  LAYOUT_OUT="$(cd "$LH_DIR" && umask 077 && PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" install nightly-20261023 new 2>&1)"
+  LAYOUT_RC=$?
+  calls="$(cat "$log" 2>/dev/null)"
+  assert_eq "0" "$LAYOUT_RC" "install with a 0700 relative input must succeed (output: ${LAYOUT_OUT})"
+  assert_contains "$calls" "__as-owner nightly-20261023 ${TMPDIR:-/tmp}/scion-layout-input." \
+    "the owner step must get an absolute path to a copy outside <root>"
+  assert_contains "$calls" "/nightly-20261023 file=755 dir=711" "the copy must be 0755 in a 0711 directory"
+  assert_not_contains "$calls" "__as-owner nightly-20261023 new" "the original relative path must not be handed over"
+  assert_true "$(cmp -s "${LH_DIR}/new" "$LH_ROOT/releases/nightly-20261023/scion" && echo true || echo false)" \
+    "the installed release must be the input binary"
+  assert_eq "" "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'scion-layout-input.*')" "the input copy dir must be removed"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_unreadable_input_has_clear_error() {
+  _layout_new_host
+  mkdir -p "$(dirname "$LH_ROOT")"
+  mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases" "$LH_ROOT/snapshots"
+  LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" __as-owner nightly-20261023 "${LH_DIR}/does-not-exist" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "an unreadable input must fail"
+  assert_contains "$LAYOUT_OUT" "could not copy" "a read failure must be reported as such"
+  assert_not_contains "$LAYOUT_OUT" "incomplete" "a read failure must not be reported as an incomplete copy"
+  assert_eq "" "$(ls -A "$LH_ROOT/releases")" "nothing may be left in releases/"
+  rm -rf "$LH_DIR"
+}
+
+# A fresh handover that failed partway (<root> still root's, snapshots/
+# missing) is finished on the next run instead of refused -- but only when
+# <root>'s parent is root's too. (stat stub reports root as the owner.)
+test_layout_resumes_partial_fresh_handover() {
+  local parent_owner
+  for parent_owner in root mallory; do
+    _layout_new_host
+    mkdir -p "$(dirname "$LH_ROOT")"
+    mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases"
+    local stub="${LH_DIR}/stub"
+    mkdir -p "$stub"
+    cat > "${stub}/stat" <<EOF
+#!/usr/bin/env bash
+out="\$(/usr/bin/stat "\$@")" || exit \$?
+path="\${!#}"
+me="\$(/usr/bin/id -un)"
+if [[ "\$path" == "$LH_ROOT" ]]; then out="\${out//\$me/root}"; fi
+if [[ "\$path" == "$(dirname "$LH_ROOT")" ]]; then out="\${out//\$me/$parent_owner}"; fi
+printf '%s\n' "\$out"
+EOF
+    chmod 0755 "${stub}/stat"
+    _fake_scion "${LH_DIR}/new" "nightly-20261023"
+    LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+      bash "$LAYOUT_SH" install nightly-20261023 "${LH_DIR}/new" 2>&1)"
+    LAYOUT_RC=$?
+    if [[ "$parent_owner" == root ]]; then
+      assert_eq "0" "$LAYOUT_RC" "a root-owned <root> in a root-owned parent must be resumed (output: ${LAYOUT_OUT})"
+      assert_contains "$LAYOUT_OUT" "resumed the handover of" "the resume must be reported"
+      assert_true "$([[ -d "$LH_ROOT/snapshots" ]] && echo true || echo false)" "the missing snapshots/ must be created"
+      assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "the install must complete"
+    else
+      assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" \
+        "a root-owned <root> whose parent is not root's must be refused, not resumed"
+      assert_contains "$LAYOUT_OUT" "found: directory, root, 755" "the refusal must say what was found"
+    fi
+    rm -rf "$LH_DIR"
+  done
+}
+
+# If the owner step dies between moving the old release aside and moving
+# the new one in, the leftover ends in .partial, which the hub's release
+# listing ignores. (mv stub fails the second rename.)
+test_layout_replaced_release_aside_name_is_partial() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  local stub="${LH_DIR}/stub"
+  mkdir -p "$stub"
+  cat > "${stub}/mv" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"releases/nightly-20261022.partial $LH_ROOT/releases/nightly-20261022" ]]; then
+  echo "mv stub: simulated failure" >&2; exit 1
+fi
+exec /usr/bin/mv "\$@"
+EOF
+  chmod 0755 "${stub}/mv"
+  _fake_scion "${LH_DIR}/b" "nightly-20261022-rebuilt"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+    bash "$LAYOUT_SH" install nightly-20261022 "${LH_DIR}/b" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "sanity: the simulated rename failure must stop the run"
+  assert_true "$([[ -d "$LH_ROOT/releases/nightly-20261022.old.partial" ]] && echo true || echo false)" \
+    "the old release moved aside must be named <tag>.old.partial"
+  assert_eq "" "$(find "$LH_ROOT/releases" -mindepth 1 -maxdepth 1 ! -name '*.partial')" \
+    "every leftover in releases/ must end in .partial (ignored by the hub)"
+  rm -rf "$LH_DIR"
+}
+
+test_layout_as_owner_step_refuses_direct_root_use() {
+  _layout_new_host
+  local stub="${LH_DIR}/stub" log="${LH_DIR}/calls.log"
+  _layout_root_stubs "$stub" "$log"
+  _fake_scion "${LH_DIR}/new" "nightly-20261023"
+  LAYOUT_OUT="$(PATH="${stub}:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" \
+    SCION_INSTALL_OWNER="$(id -un):$(id -gn)" bash "$LAYOUT_SH" __as-owner nightly-20261023 "${LH_DIR}/new" 2>&1)"
+  LAYOUT_RC=$?
+  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "__as-owner run directly as root must be refused"
+  assert_contains "$LAYOUT_OUT" "internal step" "the refusal must say why"
+  assert_false "$([[ -e "$LH_ROOT" ]] && echo true || echo false)" "nothing may be created"
   rm -rf "$LH_DIR"
 }
