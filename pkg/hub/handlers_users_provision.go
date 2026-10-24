@@ -422,7 +422,7 @@ func (s *Server) handleProvisionUser(w http.ResponseWriter, r *http.Request) {
 	// Row 4a: dev auth is single-user local mode and does not mix with
 	// other user authentication setups. Provisioning is therefore refused
 	// for every caller while the hub runs with dev auth enabled, which
-	// covers the dev credential and the session the web dev auto-login
+	// covers the dev credential and the session a web dev sign-in link
 	// mints for the dev user. The dev-user check also refuses a session for
 	// the seeded dev user on a hub that has since turned dev auth off. The
 	// credential-kind check is belt-and-braces: redundant with the mode

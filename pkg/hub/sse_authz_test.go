@@ -598,7 +598,7 @@ func TestSSEHandler_SubjectAuthzDenied(t *testing.T) {
 	// to another user's subject should be denied.
 	req := httptest.NewRequest("GET", "/events?sub=user.other-user.chat.dm", nil)
 	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
+	devSignedIn(t, ws).ServeHTTP(rec, req)
 
 	resp := rec.Result()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -612,7 +612,7 @@ func TestSSEHandler_SubjectAuthzAllowed(t *testing.T) {
 	t.Cleanup(pub.Close)
 
 	// DevUserID is admin; subscribing to own user subject should succeed.
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/events?sub=user." + DevUserID + ".chat.dm")
