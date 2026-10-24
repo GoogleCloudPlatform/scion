@@ -87,7 +87,7 @@ Any subpath or query parameters appended to the proxy path are forwarded faithfu
 `https://hub.scion.local/api/v1/agents/agent-abc-123/ports/8000/proxy/api/v1/metrics?raw=true`
 will forward a local request to `http://127.0.0.1:8000/api/v1/metrics?raw=true`.
 
-Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without it (`.../ports/8000/proxy`) is redirected with `308 Permanent Redirect` to `.../ports/8000/proxy/`, query string included, so that the page's relative links resolve under the proxy path. Other methods on the URL without the slash are forwarded as before. WebSocket upgrades to the URL without the slash are not redirected. When the Scion Web UI itself is served under a configured base path (`PROXY_BASE_PATH`), full-page navigations such as login redirects, OAuth callbacks, and post-logout redirects include the configured base path.
+Open the base URL with its trailing slash. A `GET` or `HEAD` of the URL without it (`.../ports/8000/proxy`) is redirected with `308 Permanent Redirect` to `.../ports/8000/proxy/`, query string included, so that the page's relative links resolve under the proxy path. Other methods on the URL without the slash are forwarded as before. WebSocket upgrades to the URL without the slash are not redirected.
 
 ---
 

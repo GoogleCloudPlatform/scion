@@ -216,8 +216,8 @@ and `scion resume` list the keys they found and ask `Send N environment variable
 before sending them. On an interactive terminal, `--yes` is an explicit answer: it confirms the
 send without showing the prompt, and `--send-env` is not needed. When no prompt can be shown (stdin
 is not a terminal, `--non-interactive`, `cli.interactive_disabled`, or agent mode), the CLI sends local
-environment values only with `--send-env`. Without it, `scion start` or `scion resume` fails without sending anything,
-names the keys (never their values) and the flag, and on `scion start` removes the agent the Hub provisioned. To avoid
+environment values only with `--send-env`. Without it, the command fails without sending anything,
+names the keys (never their values) and the flag, and removes the agent the Hub provisioned for the request. To avoid
 sending local values at all, store them on the Hub with `scion hub secret set` or `scion hub env set`.
 
 #### Long tasks and task files

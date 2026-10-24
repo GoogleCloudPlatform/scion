@@ -442,7 +442,7 @@ Harness hook events are automatically converted to OTLP spans:
 | `model-start` | `gen_ai.api.request` | model (only when the hook payload names one) |
 | `model-end` | `gen_ai.api.response` | success, model (only when the hook payload names one) |
 
-In addition to spans, `sciontool` emits OpenTelemetry usage analytics log events for those hook events (`agent.session.start`, `agent.session.end`, `agent.user.prompt`, `agent.tool.call`, `agent.tool.result`, `gen_ai.api.request`, `gen_ai.api.response`) and for container lifecycle phases (`agent.lifecycle.init`, `agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`). Exported spans, metrics and logs carry the `harness`, `project.id`, `template`, `workspace_mode` and `runtime` attributes (sourced from `SCION_HARNESS`, `SCION_PROJECT_ID`, `SCION_TEMPLATE_NAME`, `SCION_WORKSPACE_MODE` and `SCION_RUNTIME`).
+Each hook event in the table, and the turn, notification, response-complete and container lifecycle (`agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`) events, is also emitted as a correlated OpenTelemetry log record whose `event.name` is the span name. When the GCP exporter is configured, `sciontool` also writes normalized `agent.usage` events, delivered durably and deduplicated, and periodic `telemetry.health` snapshots of its usage-source selection and delivery diagnostics to the dedicated `scion-analytics` Cloud Logging log.
 
 ### Session Metrics (Gemini)
 

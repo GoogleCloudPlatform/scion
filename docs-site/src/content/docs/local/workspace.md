@@ -110,7 +110,7 @@ When a Scion Hub is enabled, workspace strategy changes depending on the project
 ### Hub-Managed Projects (no git repository)
 Hub-Managed projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
 - The Hub automatically initializes a seeded `.scion` structure (`projects/<uuid>/.scion` on shared workspace storage).
-- Workspace files live in `projects/<uuid>/workspace` on shared workspace storage (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on local storage, and are reached by Runtime Brokers through shared storage (`nfs`) or a co-located Runtime Broker.
+- Workspace files live in `projects/<uuid>/workspace` on shared workspace storage (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on local storage, and are reached by Runtime Brokers through the same shared workspace storage backend or a co-located Runtime Broker.
 - You can directly download individual workspace files or generate ZIP archives of entire projects using the Hub API or Web Dashboard, making it easy to export your data.
 
 ### Git Projects (clone-based, Hub-managed)
@@ -249,9 +249,9 @@ the next section) until you re-link it to a new hub project. Running `scion hub 
    new project is registered with the `worktree-per-agent` mode; check with
    `scion hub projects info <name> --format json` (the text output does not show labels). When a
    git checkout that already has a local project directory (`~/.scion/project-configs/<slug>__<short-id>`)
-   is linked to a new Hub project, `scion list`, `start`, `stop`, `resume` and `delete` resolve the
-   Hub project from the link (`settings.yaml` `project_id`) rather than the earlier local project ID
-   in `.scion/project-id`.
+   is linked to a new Hub project, agent commands such as `scion list`, `start`, `stop`, `resume` and
+   `delete` resolve the Hub project from the link (`hub.project_id` in the project's `settings.yaml`)
+   rather than the earlier local project ID in `.scion/project-id`.
 
 #### On a remote Hub: a clone per agent
 
@@ -280,7 +280,7 @@ the Hub and cannot be changed later.
 
 #### Git that Scion runs on the host
 
-The broker and the Hub run git on the host during provisioning clones and in repositories that
+The Runtime Broker and the Hub run git on the host during provisioning clones and in repositories that
 agent containers can also write: your linked checkout (when it creates or removes an agent's
 worktree), the shared clone of a `worktree-per-agent` project, and the clone of a shared-workspace
 project (including shared-workspace pulls). Before each of these commands in an existing repository,
@@ -340,8 +340,7 @@ the agent start or workspace pull rather than being ignored.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 
-Your own git commands in your checkout are not affected. In-container git stays fully flexible: each
-worktree agent gets its own private copy of `.git/config`.
+Your own git commands in your checkout are not affected, and git commands that agents run inside their containers are not checked.
 
 ---
 
