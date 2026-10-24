@@ -18,12 +18,9 @@ package hub
 
 import (
 	"database/sql"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,15 +32,6 @@ func sqliteIndexExists(db *sql.DB, indexName string) bool {
 		indexName,
 	).Scan(&count)
 	return err == nil && count > 0
-}
-
-func requirePostgresDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set SCION_TEST_POSTGRES_DSN to run Postgres webchat store tests")
-	}
-	return dsn
 }
 
 // pgIndexExists checks whether a named index exists in the current schema
@@ -91,17 +79,4 @@ func newEntWebChatStore(t *testing.T) (*sqliteWebChatStore, store.Store, *sql.DB
 	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
 	require.NoError(t, wcs.Init())
 	return wcs, s, db
-}
-
-func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
-	t.Helper()
-	var s string
-	require.NoError(t, db.QueryRow(query, args...).Scan(&s))
-	return s
-}
-
-func requireUTCInstant(t *testing.T, got, want time.Time) {
-	t.Helper()
-	assert.True(t, got.Equal(want), "got %v, want %v", got, want)
-	assert.Equal(t, time.UTC, got.Location(), "got %v", got)
 }
